@@ -2,14 +2,17 @@
 """Aside audio processing toolkit.
 
 Subcommands:
-    transcribe  Transcribe stereo WAV into Hyprnote transcript.json format.
-    diarize     Diarize + transcribe mono/mixed audio (in-person, phone, voice memo).
+    transcribe  Transcribe audio (auto-detects stereo/mono, optional diarization).
     align       Align memo + transcript into timeline markdown.
 
 Usage:
-    python3 aside.py transcribe <wav_path> [--output <path>] [--keep-backchannels] [--model <path>]
-    python3 aside.py diarize <audio_file> [--output <path>] [--num-speakers N] [--chunk-secs N] [--keep-backchannels] [--model <path>]
+    python3 aside.py transcribe <audio> [--output <path>] [--num-speakers N] [--keep-backchannels]
     python3 aside.py align --memo <path> --transcripts <path>... --meta <path> --output <path>
+
+Transcribe modes (auto-detected):
+    Stereo input           → splits channels, transcribes each (aside recorder output)
+    Mono, --num-speakers 1 → plain transcription, single channel (lecture, voice memo)
+    Mono, --num-speakers N → diarize + transcribe (conversation, interview)
 
 Stdout protocol (machine-parseable lines):
     SPLITTING_CHANNELS          splitting stereo into mono
@@ -17,7 +20,7 @@ Stdout protocol (machine-parseable lines):
     CONVERTING                  converting to 16kHz mono WAV
     DIARIZING:chunk=N,offset=M  diarizing chunk N
     DIARIZE:segments=N,speakers=M  diarization complete
-    TRANSCRIBING                whisper transcription (full file)
+    TRANSCRIBING                fluidaudio transcription (full file)
     MERGE:words=N,filtered=M   merge results
     CLEANUP:raw_words=N         raw word count before cleanup
     CLEANUP:final_entries=N     entry count after cleanup
@@ -38,7 +41,11 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 
-DEFAULT_MODEL = "ggml-large-v3-turbo.bin"
+FLUIDAUDIO_CLI = "fluidaudiocli"
+
+# Maximum word duration in ms — words spanning longer are likely artifacts
+# from the CTC/TDT decoder stretching across silence gaps.
+MAX_WORD_DURATION_MS = 5000
 
 # ---------------------------------------------------------------------------
 # Backchannel / filler constants
@@ -184,82 +191,51 @@ def split_stereo(path: str) -> tuple[str, str]:
     return ch0, ch1
 
 
-def _resolve_model_path(model: str) -> str:
-    """Resolve a whisper-cli model path.
-
-    If model is an absolute path, use it directly. Otherwise look in the
-    conventional ~/.local/share/whisper-cpp/ directory.
-    """
-    if os.path.isabs(model) and os.path.isfile(model):
-        return model
-
-    conventional = os.path.expanduser(f"~/.local/share/whisper-cpp/{model}")
-    if os.path.isfile(conventional):
-        return conventional
-
-    print(
-        f"ERROR:Model not found: {model}\n"
-        f"Download with: hf download ggerganov/whisper.cpp {model} "
-        f"--local-dir ~/.local/share/whisper-cpp/",
-        file=sys.stdout,
-    )
-    sys.exit(1)
-
-
-def _run_whisper(wav_path: str, model_path: str,
-                 offset_ms: int = 0) -> list[dict]:
-    """Run whisper-cli on a WAV and return parsed tokens.
+def _run_fluidaudio(wav_path: str, offset_ms: int = 0) -> list[dict]:
+    """Run fluidaudiocli on a WAV and return parsed word tokens.
 
     Each token dict has start_ms, end_ms, text (with offset applied).
+    Uses Parakeet TDT v3 via CoreML on the Neural Engine.
     """
-    out_prefix = tempfile.mktemp(suffix="_whisper")
+    out_json = tempfile.mktemp(suffix="_fluidaudio.json")
 
     try:
         subprocess.run(
             [
-                "whisper-cli",
-                "-m", model_path,
-                "-f", wav_path,
-                "-l", "en",
-                "-ojf",
-                "-of", out_prefix,
-                "--max-context", "0",
-                "--flash-attn",
+                FLUIDAUDIO_CLI,
+                "transcribe", wav_path,
+                "--output-json", out_json,
             ],
             check=True, capture_output=True, text=True,
         )
 
-        json_path = out_prefix + ".json"
-        with open(json_path) as f:
+        with open(out_json) as f:
             data = json.load(f)
     finally:
-        for suffix in (".json", ""):
-            try:
-                os.unlink(out_prefix + suffix)
-            except OSError:
-                pass
+        try:
+            os.unlink(out_json)
+        except OSError:
+            pass
 
     words = []
-    for segment in data.get("transcription", []):
-        for tok in segment.get("tokens", []):
-            if tok.get("id", 0) >= 50000:
-                continue
-            text = tok.get("text", "")
-            if text.startswith("["):
-                continue
-            offsets = tok.get("offsets", {})
-            words.append({
-                "start_ms": offsets.get("from", 0) + offset_ms,
-                "end_ms": offsets.get("to", 0) + offset_ms,
-                "text": text,
-            })
+    for w in data.get("wordTimings", []):
+        start_ms = int(w["startTime"] * 1000) + offset_ms
+        end_ms = int(w["endTime"] * 1000) + offset_ms
+        duration_ms = end_ms - start_ms
+        # Skip words stretched across silence gaps (CTC/TDT artifact)
+        if duration_ms > MAX_WORD_DURATION_MS:
+            continue
+        words.append({
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "text": " " + w["word"],
+        })
     return words
 
 
-def transcribe_channel(audio_path: str, channel: int, model: str) -> list[dict]:
-    """Transcribe a mono WAV via whisper-cli and return word dicts."""
-    model_path = _resolve_model_path(model)
-    words = _run_whisper(audio_path, model_path)
+def transcribe_channel(audio_path: str, channel: int) -> list[dict]:
+    """Transcribe a mono WAV via fluidaudiocli and return word dicts."""
+    words = _run_fluidaudio(audio_path)
     for w in words:
         w["channel"] = channel
         w["id"] = str(uuid.uuid4())
@@ -427,13 +403,11 @@ def _cleanup_chunks(chunks: list[tuple[str, float]], owns_chunks: bool):
                 pass
 
 
-def transcribe_full(wav_path: str, model: str,
-                    chunk_secs: int = 1800) -> list[dict]:
-    """Transcribe an audio file via whisper-cli, chunking if needed.
+def transcribe_full(wav_path: str, chunk_secs: int = 1800) -> list[dict]:
+    """Transcribe an audio file via fluidaudiocli, chunking if needed.
 
-    Returns raw whisper JSON tokens as dicts with start_ms, end_ms, text.
+    Returns word dicts with start_ms, end_ms, text.
     """
-    model_path = _resolve_model_path(model)
     chunks = chunk_audio(wav_path, chunk_secs)
     owns_chunks = len(chunks) > 1
 
@@ -442,7 +416,7 @@ def transcribe_full(wav_path: str, model: str,
         for i, (chunk_path, offset) in enumerate(chunks):
             print(f"TRANSCRIBING:chunk={i},offset={offset:.0f}", flush=True)
             offset_ms = int(offset * 1000)
-            words = _run_whisper(chunk_path, model_path, offset_ms)
+            words = _run_fluidaudio(chunk_path, offset_ms)
             all_words.extend(words)
     finally:
         _cleanup_chunks(chunks, owns_chunks)
@@ -450,16 +424,16 @@ def transcribe_full(wav_path: str, model: str,
     return all_words
 
 
-def merge_diarization_with_whisper(whisper_words: list[dict],
+def merge_diarization_with_transcript(transcript_words: list[dict],
                                    diar_segments: list,
                                    vad_segments: list) -> list[dict]:
-    """Assign speaker channels to whisper tokens using diarization.
+    """Assign speaker channels to transcription tokens using diarization.
 
     Uses bisect for O(log n) lookup. Tokens outside all VAD segments are
-    dropped (catches whisper silence hallucinations).
+    dropped (filters non-speech regions).
 
     Args:
-        whisper_words: list of {start_ms, end_ms, text} from transcribe_full.
+        transcript_words: list of {start_ms, end_ms, text} from transcribe_full.
         diar_segments: Segment objects with start, end, speaker.
         vad_segments: SpeechSegment objects with start, end.
 
@@ -482,7 +456,7 @@ def merge_diarization_with_whisper(whisper_words: list[dict],
     words = []
     filtered = 0
 
-    for tok in whisper_words:
+    for tok in transcript_words:
         mid_s = (tok["start_ms"] + tok["end_ms"]) / 2000.0
 
         # VAD filter: drop tokens outside all speech segments
@@ -539,58 +513,6 @@ def merge_diarization_with_whisper(whisper_words: list[dict],
 # ---------------------------------------------------------------------------
 
 
-SILENCE_HALLUCINATION_RE = re.compile(
-    r"^\s*(thank\s+you\.?|thanks\s+for\s+watching\.?|please\s+subscribe\.?"
-    r"|see\s+you\s+(next\s+time|in\s+the\s+next)\.?|bye[\s.!]*"
-    r"|you\.?|\.+)\s*$",
-    re.IGNORECASE,
-)
-
-
-def _remove_hallucinations(words: list[dict]) -> list[dict]:
-    """Remove OpenOpen-style hallucination words (but keep real words like OpenClaw)."""
-    out = []
-    for w in words:
-        text = w["text"].strip()
-        if re.search(r"Open{2,}|OpenOpen", text):
-            continue
-        out.append(w)
-    return out
-
-
-def _remove_silence_hallucinations(entries: list[dict]) -> list[dict]:
-    """Remove phrases that are classic Whisper silence hallucinations.
-
-    Whisper hallucinates short phrases like 'Thank you.' or 'Thanks for
-    watching.' when processing quiet/silent audio.  These are caught at the
-    phrase level after word merging so multi-word hallucinations are matched.
-    """
-    return [e for e in entries if not SILENCE_HALLUCINATION_RE.match(e["text"].strip())]
-
-
-def _clean_exclamation_artifacts(words: list[dict]) -> list[dict]:
-    """Strip stray punctuation artifacts left by hallucinations."""
-    out = []
-    for w in words:
-        text = w["text"]
-        if text.strip() in ("!", "!!", "!!!", "!!!!"):
-            continue
-        text = re.sub(r"([.?])!+", r"\1", text)
-        text = re.sub(r"^\s*!+", lambda m: m.group(0).replace("!", ""), text)
-        text = re.sub(r"!+$", "", text)
-        w = dict(w, text=text)
-        out.append(w)
-    return out
-
-
-def _strip_trailing_open(words: list[dict]) -> list[dict]:
-    """Remove trailing 'Open' artifacts from merged hallucination remnants."""
-    out = []
-    for w in words:
-        w = dict(w, text=re.sub(r"Open$", "", w["text"]))
-        if w["text"].strip():
-            out.append(w)
-    return out
 
 
 def _dedup_consecutive(words: list[dict]) -> list[dict]:
@@ -800,14 +722,10 @@ def _bridge_merge(entries: list[dict]) -> list[dict]:
 def cleanup(words: list[dict], keep_backchannels: bool = False) -> list[dict]:
     """Run the full multi-pass cleanup pipeline on raw word entries."""
     # Word-level cleanup
-    words = _remove_hallucinations(words)
-    words = _clean_exclamation_artifacts(words)
-    words = _strip_trailing_open(words)
     words = _dedup_consecutive(words)
 
     # Merge words into phrases
     entries = _merge_words_to_phrases(words, gap_ms=2000)
-    entries = _remove_silence_hallucinations(entries)
 
     if keep_backchannels:
         return _merge_same_channel(entries, gap_ms=3000)
@@ -1103,8 +1021,32 @@ def format_aligned_markdown(
 # ---------------------------------------------------------------------------
 
 
+def _detect_channels(path: str) -> int:
+    """Return number of audio channels in file."""
+    try:
+        probe = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=channels",
+                "-of", "csv=p=0",
+                path,
+            ],
+            capture_output=True, text=True, check=True,
+        )
+        return int(probe.stdout.strip())
+    except (subprocess.CalledProcessError, ValueError):
+        return 1
+
+
 def cmd_transcribe(args):
-    """Execute the transcribe subcommand."""
+    """Execute the transcribe subcommand.
+
+    Auto-detects the right pipeline:
+      - Stereo input → split channels, transcribe each (mic + system audio)
+      - Mono + --num-speakers > 1 → diarize then transcribe (conversation)
+      - Mono (default) → plain transcribe, single channel (lecture, voice memo)
+    """
     try:
         wav_path, out_path, session_id = resolve_paths(args.input, args.output)
     except FileNotFoundError as e:
@@ -1120,38 +1062,129 @@ def cmd_transcribe(args):
     except Exception:
         duration = None
 
-    print("SPLITTING_CHANNELS")
-    try:
-        ch0_path, ch1_path = split_stereo(wav_path)
-    except subprocess.CalledProcessError as e:
-        print(f"ERROR:ffmpeg failed: {e.stderr.decode() if e.stderr else e}")
-        sys.exit(1)
+    channels = _detect_channels(wav_path)
+    num_speakers = getattr(args, 'num_speakers', 1)
 
-    try:
-        print("TRANSCRIBING:0,1")
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            fut0 = pool.submit(transcribe_channel, ch0_path, 0, args.model)
-            fut1 = pool.submit(transcribe_channel, ch1_path, 1, args.model)
-            ch0_words = fut0.result()
-            ch1_words = fut1.result()
-    except Exception as e:
-        print(f"ERROR:Transcription failed: {e}")
-        sys.exit(1)
-    finally:
-        for p in (ch0_path, ch1_path):
+    if channels >= 2:
+        # Stereo: split channels, transcribe each separately
+        print("SPLITTING_CHANNELS")
+        try:
+            ch0_path, ch1_path = split_stereo(wav_path)
+        except subprocess.CalledProcessError as e:
+            print(f"ERROR:ffmpeg failed: {e.stderr.decode() if e.stderr else e}")
+            sys.exit(1)
+
+        try:
+            print("TRANSCRIBING:0,1")
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                fut0 = pool.submit(transcribe_channel, ch0_path, 0)
+                fut1 = pool.submit(transcribe_channel, ch1_path, 1)
+                ch0_words = fut0.result()
+                ch1_words = fut1.result()
+        except Exception as e:
+            print(f"ERROR:Transcription failed: {e}")
+            sys.exit(1)
+        finally:
+            for p in (ch0_path, ch1_path):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+        all_words = ch0_words + ch1_words
+
+    elif num_speakers > 1:
+        # Mono multi-speaker: diarize then transcribe
+        print("CONVERTING", flush=True)
+        try:
+            mono_path, is_temp = convert_to_wav_16k(wav_path)
+        except subprocess.CalledProcessError as e:
+            print(f"ERROR:ffmpeg conversion failed: {e.stderr.decode() if e.stderr else e}")
+            sys.exit(1)
+
+        chunk_secs = getattr(args, 'chunk_secs', 1800)
+        diar_tmp = tempfile.mktemp(suffix="_diar.json")
+
+        try:
+            # Run diarization in a subprocess so native model memory is fully
+            # reclaimed before transcription starts (onnxruntime + WeSpeaker
+            # hold ~1GB that gc.collect() cannot free).
+            ns = num_speakers if num_speakers > 0 else 0
+            diar_script = (
+                f"import json, sys; sys.path.insert(0, {os.path.dirname(__file__)!r}); "
+                f"from aside import diarize_chunked; "
+                f"diar, vad = diarize_chunked({mono_path!r}, "
+                f"num_speakers={ns}, chunk_secs={chunk_secs}); "
+                f"f = open({diar_tmp!r}, 'w'); "
+                f"json.dump({{'diar': [{{'start': s.start, 'end': s.end, 'speaker': s.speaker}} for s in diar], "
+                f"'vad': [{{'start': s.start, 'end': s.end}} for s in vad]}}, f); "
+                f"f.close()"
+            )
+            subprocess.run(
+                [sys.executable, "-c", diar_script],
+                check=True, text=True,
+            )
+
+            with open(diar_tmp) as f:
+                diar_data = json.load(f)
+
+            transcript_words = transcribe_full(mono_path, chunk_secs=chunk_secs)
+
+            from types import SimpleNamespace
+            diar_segments = [SimpleNamespace(**s) for s in diar_data["diar"]]
+            vad_segments = [SimpleNamespace(**s) for s in diar_data["vad"]]
+
+            all_words = merge_diarization_with_transcript(
+                transcript_words, diar_segments, vad_segments,
+            )
+        except subprocess.CalledProcessError as e:
+            print(f"ERROR:Diarization failed (exit {e.returncode})")
+            sys.exit(1)
+        except Exception as e:
+            print(f"ERROR:Diarization/transcription failed: {e}")
+            sys.exit(1)
+        finally:
+            if is_temp:
+                try:
+                    os.unlink(mono_path)
+                except OSError:
+                    pass
             try:
-                os.unlink(p)
+                os.unlink(diar_tmp)
             except OSError:
                 pass
 
-    all_words = ch0_words + ch1_words
+    else:
+        # Mono single-speaker: plain transcribe
+        print("CONVERTING")
+        try:
+            mono_path, is_temp = convert_to_wav_16k(wav_path)
+        except subprocess.CalledProcessError as e:
+            print(f"ERROR:ffmpeg failed: {e.stderr.decode() if e.stderr else e}")
+            sys.exit(1)
+
+        try:
+            print("TRANSCRIBING:0")
+            all_words = transcribe_full(mono_path)
+            for w in all_words:
+                w["channel"] = 0
+                w["id"] = str(uuid.uuid4())
+        except Exception as e:
+            print(f"ERROR:Transcription failed: {e}")
+            sys.exit(1)
+        finally:
+            if is_temp:
+                try:
+                    os.unlink(mono_path)
+                except OSError:
+                    pass
+
     print(f"CLEANUP:raw_words={len(all_words)}")
 
     entries = cleanup(all_words, keep_backchannels=args.keep_backchannels)
     print(f"CLEANUP:final_entries={len(entries)}")
 
-    # Emit each entry as a JSON line for streaming to UI
     for e in entries:
         print(f"ENTRY:{json.dumps(e)}", flush=True)
 
@@ -1160,102 +1193,6 @@ def cmd_transcribe(args):
         json.dump(transcript, f, indent=2)
 
     print(f"OUTPUT_FILE:{out_path}")
-
-
-def cmd_diarize(args):
-    """Execute the diarize subcommand."""
-    input_path = os.path.expanduser(args.input)
-    if not os.path.isfile(input_path):
-        print(f"ERROR:File not found: {input_path}")
-        sys.exit(1)
-
-    out_path = args.output
-    if not out_path:
-        out_path = os.path.splitext(input_path)[0] + "_transcript.json"
-
-    try:
-        duration = get_duration(input_path)
-        print(f"DURATION:{duration:.1f}", flush=True)
-    except Exception:
-        duration = None
-
-    # Convert to 16kHz mono WAV
-    print("CONVERTING", flush=True)
-    try:
-        wav_path, is_temp = convert_to_wav_16k(input_path)
-    except subprocess.CalledProcessError as e:
-        print(f"ERROR:ffmpeg conversion failed: {e.stderr.decode() if e.stderr else e}")
-        sys.exit(1)
-
-    diar_tmp = tempfile.mktemp(suffix="_diar.json")
-
-    try:
-        # Run diarization in a subprocess so native model memory is fully
-        # reclaimed before whisper starts (onnxruntime + WeSpeaker hold
-        # ~1GB that gc.collect() cannot free).
-        num_speakers = args.num_speakers if args.num_speakers > 0 else 0
-        diar_script = (
-            f"import json, sys; sys.path.insert(0, {os.path.dirname(__file__)!r}); "
-            f"from aside import diarize_chunked; "
-            f"diar, vad = diarize_chunked({wav_path!r}, "
-            f"num_speakers={num_speakers}, chunk_secs={args.chunk_secs}); "
-            f"f = open({diar_tmp!r}, 'w'); "
-            f"json.dump({{'diar': [{{'start': s.start, 'end': s.end, 'speaker': s.speaker}} for s in diar], "
-            f"'vad': [{{'start': s.start, 'end': s.end}} for s in vad]}}, f); "
-            f"f.close()"
-        )
-        result = subprocess.run(
-            [sys.executable, "-c", diar_script],
-            check=True, text=True,
-        )
-
-        # Load serialized diarization results
-        with open(diar_tmp) as f:
-            diar_data = json.load(f)
-
-        # Transcribe (chunked to limit memory)
-        whisper_words = transcribe_full(wav_path, args.model,
-                                        chunk_secs=args.chunk_secs)
-
-        # Build lightweight segment objects for merge
-        from types import SimpleNamespace
-        diar_segments = [SimpleNamespace(**s) for s in diar_data["diar"]]
-        vad_segments = [SimpleNamespace(**s) for s in diar_data["vad"]]
-
-        # Merge
-        all_words = merge_diarization_with_whisper(
-            whisper_words, diar_segments, vad_segments,
-        )
-    except subprocess.CalledProcessError as e:
-        print(f"ERROR:Diarization failed (exit {e.returncode})")
-        sys.exit(1)
-    except Exception as e:
-        print(f"ERROR:Diarization/transcription failed: {e}")
-        sys.exit(1)
-    finally:
-        if is_temp:
-            try:
-                os.unlink(wav_path)
-            except OSError:
-                pass
-        try:
-            os.unlink(diar_tmp)
-        except OSError:
-            pass
-
-    print(f"CLEANUP:raw_words={len(all_words)}", flush=True)
-    entries = cleanup(all_words, keep_backchannels=args.keep_backchannels)
-    print(f"CLEANUP:final_entries={len(entries)}", flush=True)
-
-    # Emit each entry as a JSON line for streaming to UI
-    for e in entries:
-        print(f"ENTRY:{json.dumps(e)}", flush=True)
-
-    transcript = format_hyprnote(entries)
-    with open(out_path, "w") as f:
-        json.dump(transcript, f, indent=2)
-
-    print(f"OUTPUT_FILE:{out_path}", flush=True)
 
 
 def cmd_align(args):
@@ -1304,30 +1241,16 @@ def main():
     # transcribe subcommand
     p_transcribe = subparsers.add_parser(
         "transcribe",
-        help="Transcribe stereo WAV into Hyprnote transcript.json format.",
+        help="Transcribe audio (auto-detects stereo/mono, optional diarization).",
     )
-    p_transcribe.add_argument("input", help="Path to stereo .wav file or Hyprnote session directory")
+    p_transcribe.add_argument("input", help="Path to audio file or Hyprnote session directory")
     p_transcribe.add_argument("--output", "-o", help="Output path (default: auto-detect)")
+    p_transcribe.add_argument("--num-speakers", type=int, default=1,
+                              help="Number of speakers for mono diarization (default: 1 = no diarization)")
+    p_transcribe.add_argument("--chunk-secs", type=int, default=1800,
+                              help="Chunk duration in seconds for long files (default: 1800)")
     p_transcribe.add_argument("--keep-backchannels", action="store_true",
                               help="Skip backchannel/filler removal passes")
-    p_transcribe.add_argument("--model", default=DEFAULT_MODEL,
-                              help=f"Whisper model repo (default: {DEFAULT_MODEL})")
-
-    # diarize subcommand
-    p_diarize = subparsers.add_parser(
-        "diarize",
-        help="Diarize + transcribe mono/mixed audio (in-person, phone, voice memo).",
-    )
-    p_diarize.add_argument("input", help="Path to audio file (any ffmpeg-readable format)")
-    p_diarize.add_argument("--output", "-o", help="Output path (default: <input>_transcript.json)")
-    p_diarize.add_argument("--num-speakers", type=int, default=2,
-                           help="Expected number of speakers (0 for auto, default: 2)")
-    p_diarize.add_argument("--chunk-secs", type=int, default=1800,
-                           help="Chunk duration in seconds for long files (default: 1800)")
-    p_diarize.add_argument("--keep-backchannels", action="store_true",
-                           help="Skip backchannel/filler removal passes")
-    p_diarize.add_argument("--model", default=DEFAULT_MODEL,
-                           help=f"Whisper model repo (default: {DEFAULT_MODEL})")
 
     # align subcommand
     p_align = subparsers.add_parser(
@@ -1345,8 +1268,6 @@ def main():
 
     if args.command == "transcribe":
         cmd_transcribe(args)
-    elif args.command == "diarize":
-        cmd_diarize(args)
     elif args.command == "align":
         cmd_align(args)
     else:

@@ -14,8 +14,7 @@ Take an aside session end-to-end: transcribe audio, align the transcript with th
 
 ## Prerequisites
 
-- `brew install whisper-cpp` — provides `whisper-cli` for transcription
-- Download model: `hf download ggerganov/whisper.cpp ggml-large-v3-turbo.bin --local-dir ~/.local/share/whisper-cpp/`
+- `fluidaudiocli` binary in `$PATH` — built from [FluidInference/FluidAudio](https://github.com/FluidInference/FluidAudio) (Parakeet TDT v3 via CoreML)
 - `pip install diarize` — for mono/pre-recorded audio diarization (WeSpeaker + Silero VAD, no HF gating)
 
 ## What this produces
@@ -27,15 +26,37 @@ If `--align-only` is passed, only the aligned timeline (step 1) is produced.
 
 ## Arguments
 
-`$ARGUMENTS` format: `<session-name> [--align-only] [--diarize <audio-file> [--num-speakers N]]`
+`$ARGUMENTS` format: `<session-name> [--align-only] [--audio <file>] [--num-speakers N]`
 
 - **session-name** (required): The aside session name (e.g., `my-call`). Used to find/create:
   - Memo: `<session-name>.md` (in the aside working directory)
-  - Audio: `.aside/<session-name>_seg*.wav` (stereo mode) or the `--diarize` file (mono mode)
+  - Audio: `.aside/<session-name>_seg*.wav` (aside recorder) or `--audio` file
   - Metadata: `.aside/<session-name>.meta.json` (for segment offsets and durations)
 - **--align-only** (optional): Stop after producing the aligned timeline. Skip distillation.
-- **--diarize \<audio-file\>** (optional): Use speaker diarization instead of stereo channel separation. For mono/mixed audio: in-person recordings, phone calls, voice memos.
-- **--num-speakers N** (optional, with `--diarize`): Expected speaker count. Default 2. Set to 0 for auto-detection.
+- **--audio \<file\>** (optional): Explicit audio file path (for non-aside recordings).
+- **--num-speakers N** (optional): Override speaker count for diarization. If not provided, the skill infers the mode.
+
+### Mode inference
+
+Before transcribing, the skill should **infer the transcription mode** and confirm with the user:
+
+1. **Read the memo** — look for cues about the recording type:
+   - Names/speakers mentioned → likely multi-speaker
+   - "call", "interview", "chat" in the session name → likely multi-speaker
+   - "lecture", "sermon", "talk", "notes" → likely single-speaker
+   - Aside recorder segments (`.aside/<name>_seg*.wav`) → stereo (mode is automatic)
+
+2. **Check the audio** — stereo vs mono:
+   - Stereo → aside recorder output, automatic channel separation
+   - Mono → present options to user
+
+3. **Ask the user** (for mono audio only):
+   > How should I transcribe this?
+   > 1. **Single speaker** — lecture, voice memo, sermon (fastest)
+   > 2. **Two speakers** — conversation, interview, phone call
+   > 3. **Multiple speakers** — meeting, group discussion (specify count)
+
+   Skip asking if `--num-speakers` was provided or if cues are unambiguous.
 
 ### Parsing $ARGUMENTS
 
@@ -43,7 +64,7 @@ If `--align-only` is passed, only the aligned timeline (step 1) is produced.
 $ARGUMENTS = "standup"
 -> session: "standup"
 -> memo: "standup.md"
--> audio: ".aside/standup_seg*.wav"
+-> audio: ".aside/standup_seg*.wav" (stereo, auto)
 -> output: ".aside/standup_aligned.md"
 
 $ARGUMENTS = "standup --align-only"
@@ -51,14 +72,14 @@ $ARGUMENTS = "standup --align-only"
 -> output: ".aside/standup_aligned.md"
 -> STOP after Phase I
 
-$ARGUMENTS = "coffee-chat --diarize ~/Downloads/recording.m4a"
+$ARGUMENTS = "coffee-chat --audio ~/Downloads/recording.m4a"
 -> session: "coffee-chat"
--> audio: ~/Downloads/recording.m4a (diarize mode)
--> output: ".aside/coffee-chat_transcript.json"
+-> audio: ~/Downloads/recording.m4a
+-> infer mode from memo + ask user
 
-$ARGUMENTS = "coffee-chat --diarize ~/Downloads/recording.m4a --num-speakers 3"
+$ARGUMENTS = "coffee-chat --audio ~/Downloads/recording.m4a --num-speakers 3"
 -> session: "coffee-chat"
--> audio: ~/Downloads/recording.m4a, 3 speakers
+-> audio: ~/Downloads/recording.m4a, 3 speakers (no need to ask)
 ```
 
 ---
@@ -80,31 +101,39 @@ If the memo file doesn't exist, ask the user for the correct session name.
 
 ### Step 2: Transcribe audio
 
-**Standard mode (stereo WAV segments):**
+Run transcription using the unified CLI:
 
-For each WAV segment, run:
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/aside/scripts/aside.py transcribe "<audio-file>" --output "<output-path>" [--num-speakers N]
+```
+
+**Modes** (auto-detected from input format + `--num-speakers`):
+
+| Input | --num-speakers | Behavior |
+|---|---|---|
+| Stereo WAV | (ignored) | Splits channels. Ch0 = mic, Ch1 = system audio. |
+| Mono/any format | 1 (default) | Plain transcription, single channel. |
+| Mono/any format | 2+ | Diarize (WeSpeaker + spectral clustering), then transcribe. |
+
+**For aside recorder sessions** (stereo segments):
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/aside/scripts/aside.py transcribe ".aside/<session-name>_seg<N>.wav" --output "/tmp/<session-name>_seg<N>_transcript.json"
 ```
 
-This produces a JSON file with `transcripts[0].words[]`, each entry containing `start_ms`, `end_ms`, `text`, and `channel`. Channel 0 = mic (local user), channel 1 = system audio (remote participant).
+When there are multiple segments, adjust transcript timestamps by each segment's `offset_ms` from meta so they align to the session's global timeline.
 
-When there are multiple segments (from device switches), adjust transcript timestamps by each segment's `offset_ms` from the database so they align to the session's global timeline.
-
-**Diarize mode (mono/mixed audio — `--diarize` flag):**
-
-When `--diarize <audio-file>` is passed, use the `diarize` subcommand instead of `transcribe`:
+**For mono recordings** (voice memos, external audio):
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/aside/scripts/aside.py diarize "<audio-file>" --output ".aside/<session-name>_transcript.json" --num-speakers <N>
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/aside/scripts/aside.py transcribe "<audio-file>" --output ".aside/<session-name>_transcript.json" --num-speakers 2
 ```
 
-This accepts any ffmpeg-readable format (m4a, wav, mp3, etc.) and produces the same JSON format. Key differences:
-- Speaker separation uses diarization (WeSpeaker embeddings + spectral clustering) instead of stereo channels
-- Channels map to `SPEAKER_00`, `SPEAKER_01`, etc. — not mic/system
+Accepts any ffmpeg-readable format (m4a, wav, mp3, etc.). With `--num-speakers > 1`:
+- Speaker separation uses diarization instead of stereo channels
+- Channels map to `SPEAKER_00`, `SPEAKER_01`, etc.
 - Long files are automatically chunked (30-min default) with cross-chunk speaker consistency
-- VAD filtering drops whisper hallucinations in silent regions
+- VAD filtering drops tokens outside speech regions
 
-**Speaker identification**: In diarize mode, the skill should ask the user to identify which speaker is which during distillation (Step 4). Present a short sample from each channel and ask the user to label them.
+**Speaker identification**: When diarization is used, the skill should ask the user to identify which speaker is which during distillation (Step 4). Present a short sample from each channel and ask the user to label them.
 
 ### Step 3: Align memo + transcript
 
@@ -195,6 +224,7 @@ After both structured and semantic results come back:
    - `1on1-idea-exchange.md` — default for most 1:1 conversations (idea exchange, catch-ups, brainstorms)
    - `discovery-call.md` — client/prospect conversations focused on needs, fit, and next steps
    - `group-conversation.md` — 3+ participants where tracking who thinks what matters
+   - `talk-reflection.md` — sermons, lectures, talks, or any session where the user is listening and reflecting, not conversing. The memo captures their thinking in response to a speaker.
 
    Choose based on the memo and transcript content. If unclear, default to `1on1-idea-exchange`.
 
