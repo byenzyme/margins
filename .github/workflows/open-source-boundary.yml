@@ -23,16 +23,32 @@ jobs:
         run: python3 -m unittest discover -s tests -p 'test_open_source_boundary.py' -v
 
       - name: Audit candidate public surface
-        run: python3 scripts/open_source_boundary.py --check
+        run: |
+          if [ -d public-repository ]; then
+            python3 scripts/open_source_boundary.py --check
+          else
+            audit_path="$RUNNER_TEMP/margins-public-audit"
+            mkdir -p "$audit_path"
+            git archive HEAD | tar -x -C "$audit_path"
+            python3 scripts/open_source_boundary.py --verify-tree "$audit_path"
+          fi
 
       - name: Materialize and test the candidate tree
         run: |
           export_path="$RUNNER_TEMP/margins-public"
           second_export_path="$RUNNER_TEMP/margins-public-second"
-          python3 scripts/open_source_boundary.py --output "$export_path" --execute
-          python3 scripts/open_source_boundary.py --verify-tree "$export_path"
-          python3 scripts/open_source_boundary.py --output "$second_export_path" --execute
-          python3 scripts/open_source_boundary.py --verify-tree "$second_export_path"
+          if [ -d public-repository ]; then
+            python3 scripts/open_source_boundary.py --output "$export_path" --execute
+            python3 scripts/open_source_boundary.py --verify-tree "$export_path"
+            python3 scripts/open_source_boundary.py --output "$second_export_path" --execute
+            python3 scripts/open_source_boundary.py --verify-tree "$second_export_path"
+          else
+            mkdir -p "$export_path" "$second_export_path"
+            git archive HEAD | tar -x -C "$export_path"
+            git archive HEAD | tar -x -C "$second_export_path"
+            python3 scripts/open_source_boundary.py --verify-tree "$export_path"
+            python3 scripts/open_source_boundary.py --verify-tree "$second_export_path"
+          fi
           (
             cd "$export_path"
             find . -type f -print0 | sort -z | xargs -0 sha256sum
