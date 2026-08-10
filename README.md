@@ -1,137 +1,100 @@
-# aside
+# Margins
 
-A meeting capture tool that lives inside your Obsidian vault. Record, take timestamped notes, transcribe locally, and distill into vault-connected artifacts — all without leaving the workflow you already have.
+Meeting notes that compound.
 
-![aside demo](assets/demo.gif)
+Margins records your meetings from the terminal — no bot joins the call —
+and turns them into structured notes in one folder you own. Every note lands
+in the same vault as plain Markdown, so each new meeting is distilled with
+the memory of the ones before it: the same people, projects, and decision
+threads accumulate instead of scattering across a timeline you'll never
+reread.
 
-## Why this exists
+The difference from a transcription tool is what happens around the
+transcript. While Margins records, you jot margin notes in a timestamped
+memo editor — each line stamped against the recording clock. A line at 14:32
+means *this mattered*. Transcription and diarization run on your machine,
+your marginalia are aligned to what was being said when you wrote them, and
+an agent skill distills the result into a real meeting artifact — decisions,
+action items, open threads — grounded in what you flagged, not a generic
+recap.
 
-For people who don't want another app. If you already live in Obsidian and a terminal, aside slots into that workflow — no new window, no account, no integration to configure. It stores sessions inside your vault, transcribes locally, and uses a Claude Code skill to search your existing notes during distillation. The output is a vault note with `[[wikilinks]]`, not a document you have to move somewhere.
-
-Born from two years of the same Obsidian workflow: record, take sparse notes, transcribe, manually stitch the two together, then hunt through old notes for connections. This automates all of it.
-
-## What makes it different
-
-**Vault-native.** Clone it into your Obsidian vault or point it at one. Sessions, recordings, and metadata live in `.aside/`. The distillation output is a vault note, not an export. No sync, no import step — it's already where your thinking lives.
-
-**Your vault is the context window.** Every meeting app can transcribe. None of them know what you've been thinking about for the past two years. Aside's skill searches your vault during distillation — grepping for concrete anchors, running semantic search against your own writing — and weaves those connections into the final note. The meeting doesn't exist in isolation; it lands in the middle of your existing work.
-
-**AI-native where it matters.** The intelligence isn't compiled into the app. The distillation step is a Claude Code skill — a plain markdown file ([`SKILL.md`](skills/aside/SKILL.md)) that teaches Claude how to use your vault as context. You can read it, edit it, swap the template. The skill orchestrates [Enzyme](https://enzyme.garden) search, transcript analysis, and note generation in natural language. No black-box features, no plugin system to learn.
-
-**5 MB binary, ~3,100 lines of code.** A Rust binary for capture, a Python script for transcription cleanup, and a markdown skill file for distillation. Small enough to read the entire codebase in an afternoon, fork it, and make it yours.
-
-**Fully local.** Recording, transcription (whisper.cpp), and storage all happen on your machine. The only network call is the LLM for distillation, and that's through Claude Code — your existing setup, your API key.
-
-## What it does
-
-1. **Records** stereo audio (mic + system audio) while you type timestamped notes in a terminal editor
-2. **Transcribes** locally via whisper.cpp with multi-pass cleanup (hallucination removal, dedup, filler stripping)
-3. **Aligns** transcript and memo on a shared timeline
-4. **Distills** into a structured vault note with connections to your existing notes via [Enzyme](https://enzyme.garden)
-
-## Install
+## Get started
 
 ```bash
-# The recorder
-brew install useenzyme/margins/aside
-
-# The transcriber
-brew install whisper-cpp ffmpeg
-
-# Download the whisper model (~1.5 GB, one-time)
-hf download ggerganov/whisper.cpp ggml-large-v3-turbo.bin \
-  --local-dir ~/.local/share/whisper-cpp/
+brew install useenzyme/margins/margins
+margins new standup
 ```
 
-Or build from source: `cargo install --path .`
+`margins new` starts recording mic and system audio and opens the memo
+editor. Type what you notice; end the session; then let the skill do the
+rest.
 
-macOS only. Requires screen recording permission for system audio capture.
+The distillation skill ships as a Claude Code plugin in this repository
+under `skills/`. Point your agent at a finished session and it transcribes,
+aligns your memo lines, and publishes a structured note into your vault —
+next to every note before it. The skill and its note templates are ordinary
+readable text files: fork them and change what a meeting note *is*.
 
-### Install the Claude Code skill
+## Run the pipeline on any audio
 
-The `/aside` skill handles transcription, alignment, and distillation. This repo is a Claude Code [plugin](https://docs.anthropic.com/en/docs/claude-code/plugins) — install it from Claude Code:
-
-```
-/plugin marketplace add useenzyme/margins
-/plugin install aside
-```
-
-Then `/aside <session-name>` is available in any Claude Code session.
-
-## Usage
-
-### Record
+You can also hand the CLI a file directly — a QuickTime recording, one
+ffmpeg line, an old voice memo — and watch the same pipeline work, entirely
+on your machine:
 
 ```bash
-aside standup           # new session — opens TUI editor + starts recording
-aside --resume standup  # resume an existing session
-aside --list            # list all sessions
+cargo install --locked --path crates/public/margins-cli --features coreml-asr
+export MARGINS_FLUID_COREML_MODEL_DIR=~/models/fluid-coreml
+margins transcribe meeting.wav --speakers 2 --memo notes.md
+margins recent
 ```
 
-The TUI is a timestamped notepad. Each line gets a `[MM:SS]` timestamp when you start typing it. Edit a line later and it shows `[MM:SS ~MM:SS]`.
+`margins transcribe` decodes the audio, runs on-device ASR and diarization,
+aligns the optional memo, and records the session in local SQLite. Models
+are caller-supplied via `MARGINS_FLUID_COREML_MODEL_DIR` (Core ML) or
+`MARGINS_PARAKEET_MODEL_DIR` (Parakeet ONNX).
 
-Keybindings: `Ctrl+D` switch mic, `Ctrl+S` save, `Ctrl+C` quit and save.
+Everything Margins stores is inspectable without Margins: sessions are
+SQLite, notes are Markdown in your vault. Open them with sqlite3, grep,
+Obsidian, or your own agents.
 
-On quit, the memo is published to your Obsidian vault if `.aside/config.toml` is configured.
+## Build with it
 
-### Transcribe + distill
+This repository is also a customization platform: the crates are composable
+building blocks for remote meeting recording and transcription systems.
+Applications can supply their own capture clients, transports, persistence
+adapters, ASR and diarization providers, note templates, and agent
+workflows on top of the same session and meeting contracts.
 
-Use the `/aside` Claude Code skill for the full pipeline:
-
-```
-/aside standup              # transcribe → align → distill → vault note
-/aside standup --align-only # just transcribe and align, no distillation
-```
-
-Or run transcription standalone:
+The workspace uses stable Rust:
 
 ```bash
-python3 skills/aside/scripts/aside.py transcribe .aside/standup_seg0.wav --output .aside/
+cargo build --workspace --locked
+cargo test --workspace --all-targets --no-default-features --locked
 ```
 
-## Vault integration
+Design detail lives in [docs/architecture.md](docs/architecture.md) and
+[docs/public-cli-extraction.md](docs/public-cli-extraction.md); the
+contributor loop is in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Optional. Create `.aside/config.toml`:
+## Trust, security, and privacy boundaries
 
-```toml
-[vault]
-path = "~/obsidian"
-folder = "inbox"
-filename = "{{date:%Y-%m-%d-%-H-%M-%S}}"
-open_in_obsidian = true
-```
+Nothing in these crates makes a network call or emits telemetry;
+persistence is local SQLite and Markdown files. What's public here is
+selected by a fail-closed exact allowlist with a deterministic exporter and
+verifier, so you can check precisely what is in this tree —
+[OPEN_SOURCE.md](OPEN_SOURCE.md) documents the boundary. The crates do not
+provide authentication, transport encryption, consent UX, or retention
+policy; an application embedding them must choose and verify those, and
+should treat audio, transcripts, memos, and notes as sensitive personal
+data.
 
-A template at `.aside/template.md` controls the note format. Variables: `{{name}}`, `{{memo}}`, `{{date:FORMAT}}`, `{{duration}}`.
-
-## How it works
-
-**Recording**: Rust binary captures mic audio via cpal and system audio via Core Audio tap, writing 48kHz stereo WAV. Switch mic devices mid-session with `Ctrl+D` — each switch creates a new audio segment with proper timeline offsets.
-
-**Transcription**: `aside.py` splits stereo into mono channels, transcribes both in parallel with `whisper-cli` (Metal + Flash Attention), then runs cleanup passes: hallucination removal, consecutive word dedup, backchannel/filler stripping, and gap-based phrase merging.
-
-**Alignment**: `aside.py align` interleaves transcript segments with memo lines on a shared millisecond timeline, grouping them into windows. Memo lines act as attention signals — they tell the distillation step what was worth writing down in the moment.
-
-**Distillation**: The skill explores your vault via Enzyme — trending entities, semantic search, grep for concrete anchors — then drafts a structured note weighted by what your memo flagged. Connections you'd never search for manually show up as `[[wikilinks]]` in the final output.
-
-## Project structure
-
-```
-skills/aside/
-  SKILL.md          Claude Code skill — the distillation brain (300 lines)
-  scripts/aside.py  Transcription, cleanup, and alignment (875 lines)
-src/
-  main.rs           CLI and session orchestration
-  recorder.rs       Stereo audio capture (mic + system)
-  app.rs            Timestamped editor state
-  tui.rs            Terminal UI (ratatui)
-  session.rs        Session metadata (JSON)
-  publish.rs        Vault note creation on session end
-  parser.rs         Markdown ↔ editor round-tripping
-  text_helpers.rs   Word/char boundary helpers
-```
-
-Sessions are stored in `.aside/` as WAV segments + JSON metadata + markdown memo.
+Report suspected vulnerabilities privately to the maintainers; never
+include meeting audio, transcripts, credentials, or other user data in an
+issue.
 
 ## License
 
-[GPLv3](LICENSE)
+Apache 2.0 (see `LICENSE`). This tree is exported from a mixed development
+repository through the audited boundary; its presence here is not a claim
+that any crate has been published to a registry, and the license and
+manifests do not grant trademark rights in the Margins name or branding.

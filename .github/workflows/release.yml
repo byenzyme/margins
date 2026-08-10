@@ -1,60 +1,93 @@
-name: Release
+name: Release CLI
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release, for example v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
 
 jobs:
-  build-and-release:
-    runs-on: macos-latest
-    permissions:
-      contents: write
+  release:
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build
-        run: cargo build --release
-
-      - name: Extract version
+      - name: Validate tag and package version
         id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Package tarball
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
-          ARCHIVE="aside-${{ steps.version.outputs.version }}-aarch64-apple-darwin.tar.gz"
-          tar czf "$ARCHIVE" \
-            -C target/release aside \
-            -C "$GITHUB_WORKSPACE" install.sh LICENSE
-          shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
-          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+          case "$RELEASE_TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::Release tag must be vMAJOR.MINOR.PATCH"; exit 1 ;;
+          esac
+          VERSION="${RELEASE_TAG#v}"
+          PACKAGE_VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' crates/public/margins-cli/Cargo.toml | head -1)
+          test "$VERSION" = "$PACKAGE_VERSION" || {
+            echo "::error::Tag $RELEASE_TAG does not match margins-cli $PACKAGE_VERSION"
+            exit 1
+          }
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Create GitHub Release
+      - name: Build and package macOS binaries
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          for TARGET in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked --no-default-features \
+              --manifest-path crates/public/margins-cli/Cargo.toml \
+              --target "$TARGET"
+            ARCHIVE="margins-${VERSION}-${TARGET}.tar.gz"
+            tar -czf "$ARCHIVE" -C "target/${TARGET}/release" margins
+            shasum -a 256 "$ARCHIVE" > "${ARCHIVE}.sha256"
+          done
+
+      - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.version.outputs.tag }}
           generate_release_notes: true
           files: |
-            ${{ env.ARCHIVE }}
-            ${{ env.ARCHIVE }}.sha256
+            margins-*.tar.gz
+            margins-*.tar.gz.sha256
 
-      - name: Update Homebrew formula
+      - name: Update Homebrew tap
+        if: env.HOMEBREW_TAP_TOKEN != ''
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        if: env.HOMEBREW_TAP_TOKEN != ''
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          SHA256=$(cut -d ' ' -f1 "$ARCHIVE.sha256")
-          BINARY_URL="https://github.com/useenzyme/margins/releases/download/v${VERSION}/aside-${VERSION}-aarch64-apple-darwin.tar.gz"
-
-          git clone https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/useenzyme/homebrew-margins.git _tap
-          cd _tap
-          sed -i '' "s|url \".*\"|url \"${BINARY_URL}\"|" Formula/aside.rb
-          sed -i '' "s|sha256 \".*\"|sha256 \"${SHA256}\"|" Formula/aside.rb
+          ARM_ARCHIVE="margins-${VERSION}-aarch64-apple-darwin.tar.gz"
+          INTEL_ARCHIVE="margins-${VERSION}-x86_64-apple-darwin.tar.gz"
+          ARM_SHA=$(cut -d ' ' -f1 "${ARM_ARCHIVE}.sha256")
+          INTEL_SHA=$(cut -d ' ' -f1 "${INTEL_ARCHIVE}.sha256")
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/useenzyme/homebrew-margins.git" tap
+          mkdir -p tap/Formula
+          sed \
+            -e "s/@VERSION@/${VERSION}/g" \
+            -e "s/@ARM_SHA@/${ARM_SHA}/g" \
+            -e "s/@INTEL_SHA@/${INTEL_SHA}/g" \
+            .github/homebrew/margins.rb.template > tap/Formula/margins.rb
+          cd tap
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/aside.rb
-          git commit -m "Update aside to ${VERSION}"
-          git push origin master
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/margins.rb
+          git diff --cached --quiet && exit 0
+          git commit -m "margins ${VERSION}"
+          git push origin HEAD

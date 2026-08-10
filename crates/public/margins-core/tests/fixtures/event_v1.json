@@ -1,0 +1,1 @@
+{"schema":"margins.event","version":1,"sequence":42,"emitted_at_ms":1786377600000,"session_id":"session-1","segment_id":"segment-3","operation_id":"operation-17","kind":"capture.lane_state_changed","payload":{"future_detail":{"x":1},"lane":"system","state":"active"},"future_top":"retained"}

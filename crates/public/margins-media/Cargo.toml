@@ -1,0 +1,40 @@
+[package]
+name = "margins-media"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Portable audio and transcript transforms for Margins"
+repository = "https://github.com/useenzyme/margins"
+readme = "README.md"
+keywords = ["audio", "transcription", "resampling", "media"]
+categories = ["multimedia::audio", "algorithms"]
+
+[features]
+default = []
+parakeet-onnx = ["dep:libloading", "dep:ndarray", "dep:ort", "dep:realfft"]
+parakeet-onnx-dynamic = ["parakeet-onnx", "ort/load-dynamic"]
+coreml-asr = ["dep:block2", "dep:objc2", "dep:objc2-core-ml", "dep:objc2-foundation"]
+polyvoice-diarization = ["dep:polyvoice"]
+polyvoice-coreml = ["polyvoice-diarization", "polyvoice/coreml"]
+
+[dependencies]
+anyhow = "1"
+hound = "3.5"
+libloading = { version = "0.9", optional = true }
+margins-core = { version = "0.1.0", path = "../margins-core" }
+ndarray = { version = "0.17", optional = true }
+ort = { version = "=2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "api-24", "download-binaries", "copy-dylibs", "tls-rustls"] }
+polyvoice = { version = "=0.6.7", optional = true, features = ["onnx", "download", "segmentation", "embedder", "clusterer", "resegmentation", "profile-balanced"] }
+realfft = { version = "3", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+symphonia = { version = "0.6", default-features = false, features = ["aac", "alac", "flac", "isomp4", "mp3", "wav", "pcm"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = { version = "0.6", optional = true }
+objc2 = { version = "0.6", optional = true }
+objc2-core-ml = { version = "0.3", optional = true, features = ["MLModel", "MLMultiArray", "MLModelConfiguration", "MLDictionaryFeatureProvider", "MLFeatureValue", "MLFeatureProvider", "alloc", "block2"] }
+objc2-foundation = { version = "0.3", optional = true, features = ["NSArray", "NSDictionary", "NSError", "NSObject", "NSString", "NSURL", "NSValue", "NSObjCRuntime"] }

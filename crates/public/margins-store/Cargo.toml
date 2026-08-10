@@ -1,0 +1,24 @@
+[package]
+name = "margins-store"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Portable SQLite session persistence for Margins"
+repository = "https://github.com/useenzyme/margins"
+readme = "README.md"
+keywords = ["sqlite", "persistence", "meeting", "sessions"]
+categories = ["database"]
+
+[features]
+default = []
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+margins-core = { version = "0.1.0", path = "../margins-core" }
+rusqlite = { version = "0.39.0", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

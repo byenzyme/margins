@@ -1,0 +1,38 @@
+[package]
+name = "margins-cli"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Standalone public command-line interface for Margins"
+repository = "https://github.com/useenzyme/margins"
+readme = "README.md"
+
+[lib]
+name = "margins_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "margins"
+path = "src/main.rs"
+
+[features]
+default = []
+coreml-asr = ["margins-media/coreml-asr"]
+parakeet-onnx = ["margins-media/parakeet-onnx"]
+polyvoice-diarization = ["margins-media/polyvoice-diarization"]
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+margins-core = { version = "0.1.0", path = "../margins-core" }
+margins-media = { version = "0.1.0", path = "../margins-media" }
+margins-store = { version = "0.1.0", path = "../margins-store" }
+margins-workflows = { version = "0.1.0", path = "../margins-workflows" }
+ratatui = "0.30"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

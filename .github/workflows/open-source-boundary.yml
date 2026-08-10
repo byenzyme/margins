@@ -1,0 +1,114 @@
+name: Open source boundary
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Test boundary enforcement
+        run: python3 -m unittest discover -s tests -p 'test_open_source_boundary.py' -v
+
+      - name: Audit candidate public surface
+        run: python3 scripts/open_source_boundary.py --check
+
+      - name: Materialize and test the candidate tree
+        run: |
+          export_path="$RUNNER_TEMP/margins-public"
+          second_export_path="$RUNNER_TEMP/margins-public-second"
+          python3 scripts/open_source_boundary.py --output "$export_path" --execute
+          python3 scripts/open_source_boundary.py --verify-tree "$export_path"
+          python3 scripts/open_source_boundary.py --output "$second_export_path" --execute
+          python3 scripts/open_source_boundary.py --verify-tree "$second_export_path"
+          (
+            cd "$export_path"
+            find . -type f -print0 | sort -z | xargs -0 sha256sum
+          ) > "$RUNNER_TEMP/margins-public.sha256"
+          (
+            cd "$second_export_path"
+            find . -type f -print0 | sort -z | xargs -0 sha256sum
+          ) > "$RUNNER_TEMP/margins-public-second.sha256"
+          diff -u "$RUNNER_TEMP/margins-public.sha256" "$RUNNER_TEMP/margins-public-second.sha256"
+          (
+            cd "$export_path"
+            PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
+              -s tests -p 'test_open_source_boundary.py' -v
+            build_export="$RUNNER_TEMP/margins-public-build"
+            cp -R . "$build_export"
+            public_crates_test_path="$build_export/crates/public"
+            export CARGO_TARGET_DIR="$RUNNER_TEMP/margins-public-target"
+            cd "$build_export"
+            cargo fetch --locked
+            cargo build --workspace --all-targets --no-default-features --locked --offline
+            cargo test --workspace --all-targets --no-default-features --locked --offline
+            RUSTDOCFLAGS='-D warnings' cargo doc \
+              --workspace --no-default-features --no-deps --locked --offline
+            for crate in \
+              margins-meeting-protocol \
+              margins-core \
+              margins-media \
+              margins-meeting-runtime \
+              margins-store \
+              margins-workflows \
+              margins-cli; do
+              manifest="$public_crates_test_path/$crate/Cargo.toml"
+              metadata="$RUNNER_TEMP/$crate-metadata.json"
+              inventory="$RUNNER_TEMP/$crate-package-files.txt"
+              cargo metadata --format-version 1 --manifest-path "$manifest" > "$metadata"
+              python3 - "$metadata" "$public_crates_test_path" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          metadata = json.loads(Path(sys.argv[1]).read_text())
+          public_root = Path(sys.argv[2]).resolve()
+          for package in metadata["packages"]:
+              manifest = Path(package["manifest_path"]).resolve()
+              if package.get("source") is None and not manifest.is_relative_to(public_root):
+                  raise SystemExit(f"package escapes public export: {manifest}")
+          PY
+              cargo test --manifest-path "$manifest" --no-default-features --all-targets
+              RUSTDOCFLAGS='-D warnings' cargo doc \
+                --manifest-path "$manifest" --no-default-features --no-deps
+              cargo package --manifest-path "$manifest" --allow-dirty --list > "$inventory"
+              grep -qx 'LICENSE' "$inventory"
+              grep -qx 'README.md' "$inventory"
+              tree="$RUNNER_TEMP/$crate-tree.txt"
+              cargo tree --manifest-path "$manifest" \
+                --no-default-features --prefix none > "$tree"
+              if grep -E \
+                '^(margins|margins-capture-native|margins-desktop|cpal|cidre|tauri|windows|objc2|pi_agent_rust) v' \
+                "$tree"; then
+                echo "forbidden dependency in $crate no-default graph" >&2
+                exit 1
+              fi
+            done
+            media_manifest="$public_crates_test_path/margins-media/Cargo.toml"
+            for feature in \
+              parakeet-onnx \
+              parakeet-onnx-dynamic \
+              polyvoice-diarization \
+              polyvoice-coreml \
+              coreml-asr; do
+              cargo check --manifest-path "$media_manifest" \
+                --no-default-features --features "$feature"
+            done
+            cargo check --manifest-path "$media_manifest" --all-features
+            cargo check \
+              --manifest-path "$public_crates_test_path/margins-cli/Cargo.toml" \
+              --all-features --all-targets
+          )
+          python3 scripts/open_source_boundary.py --verify-tree "$export_path"

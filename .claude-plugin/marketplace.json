@@ -1,11 +1,11 @@
 {
-  "name": "aside",
+  "name": "margins",
   "owner": {
     "name": "Joshua Pham"
   },
   "plugins": [
     {
-      "name": "aside",
+      "name": "margins",
       "source": "./",
       "description": "Meeting capture — record mic + system audio, take timestamped notes, transcribe locally, distill into vault-connected notes.",
       "version": "0.1.2"

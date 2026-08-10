@@ -1,0 +1,17 @@
+[package]
+name = "margins-meeting-protocol"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Transport-neutral DTOs for the public Margins meeting runtime protocol"
+repository = "https://github.com/useenzyme/margins"
+readme = "README.md"
+keywords = ["audio", "meeting", "protocol", "transcription"]
+categories = ["data-structures", "encoding"]
+
+[dependencies]
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]

@@ -1,0 +1,24 @@
+[package]
+name = "margins-workflows"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Portable application workflows for Margins"
+repository = "https://github.com/useenzyme/margins"
+readme = "README.md"
+
+[features]
+default = []
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+margins-core = { version = "0.1.0", path = "../margins-core" }
+margins-media = { version = "0.1.0", path = "../margins-media" }
+margins-store = { version = "0.1.0", path = "../margins-store" }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+toml = "0.8"

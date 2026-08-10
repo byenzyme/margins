@@ -1,0 +1,10 @@
+{
+  "sample_rate": 4,
+  "channels": 2,
+  "samples": [0.25, -0.25, 0.5, -0.5, 0.75, -0.75, 1.0, -1.0],
+  "expected_frames": 4,
+  "expected_duration_secs": 1.0,
+  "resample_rate": 2,
+  "expected_channel_0": [0.25, 0.75],
+  "expected_channel_1": [-0.25, -0.75]
+}
