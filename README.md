@@ -33,7 +33,7 @@ Born from two years of the same Obsidian workflow: record, take sparse notes, tr
 
 ```bash
 # The recorder
-brew install jshph/aside/aside
+brew install useenzyme/margins/aside
 
 # The transcriber
 brew install whisper-cpp ffmpeg
@@ -52,7 +52,7 @@ macOS only. Requires screen recording permission for system audio capture.
 The `/aside` skill handles transcription, alignment, and distillation. This repo is a Claude Code [plugin](https://docs.anthropic.com/en/docs/claude-code/plugins) — install it from Claude Code:
 
 ```
-/plugin marketplace add jshph/aside
+/plugin marketplace add useenzyme/margins
 /plugin install aside
 ```
 
