@@ -18,6 +18,6 @@ class Margins < Formula
   end
 
   test do
-    assert_match "Usage:", shell_output("#{bin}/margins --help")
+    assert_match "Usage:", shell_output("#{bin}/margins --help 2>&1", 2)
   end
 end
