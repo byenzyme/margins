@@ -170,6 +170,20 @@ class RepositoryPolicyTests(unittest.TestCase):
         self.assertNotIn("contents: write", workflow)
         self.assertNotIn("parakeet-asr-dynamic", workflow)
 
+        validation = (
+            REPO_ROOT / ".github/workflows/cli-release-validation.yml"
+        ).read_text(encoding="utf-8")
+        normalized_validation = " ".join(validation.split())
+        for required in (
+            "permissions: contents: read",
+            "macos-15-intel",
+            "x86_64-unknown-linux-gnu",
+            "scripts/smoke-official-cli.sh packaged-smoke/margins",
+        ):
+            self.assertIn(required, normalized_validation)
+        for forbidden in ("secrets.", "gh release create", "environment:"):
+            self.assertNotIn(forbidden, validation)
+
     def test_public_meeting_runtime_scope_is_exact_and_standalone_tested(self) -> None:
         manifest = json.loads(
             (REPO_ROOT / "open-source-boundary.json").read_text(encoding="utf-8")
