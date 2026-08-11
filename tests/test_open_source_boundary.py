@@ -129,6 +129,16 @@ class RepositoryPolicyTests(unittest.TestCase):
         ):
             self.assertIn(command, " ".join(workflow.split()))
 
+        release = (REPO_ROOT / "public-repository/release.yml").read_text(
+            encoding="utf-8"
+        )
+        for required in (
+            "runs-on: ubuntu-24.04",
+            "x86_64-unknown-linux-gnu.tar.gz",
+            "sha256sum",
+        ):
+            self.assertIn(required, release)
+
     def test_public_meeting_runtime_scope_is_exact_and_standalone_tested(self) -> None:
         manifest = json.loads(
             (REPO_ROOT / "open-source-boundary.json").read_text(encoding="utf-8")

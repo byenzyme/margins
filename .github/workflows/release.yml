@@ -91,3 +91,52 @@ jobs:
           git diff --cached --quiet && exit 0
           git commit -m "margins ${VERSION}"
           git push origin HEAD
+
+  linux:
+    name: Build Linux x86_64 CLI release
+    needs: release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Validate tag and package version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          case "$RELEASE_TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::Release tag must be vMAJOR.MINOR.PATCH"; exit 1 ;;
+          esac
+          VERSION="${RELEASE_TAG#v}"
+          PACKAGE_VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' crates/public/margins-cli/Cargo.toml | head -1)
+          test "$VERSION" = "$PACKAGE_VERSION" || {
+            echo "::error::Tag $RELEASE_TAG does not match margins-cli $PACKAGE_VERSION"
+            exit 1
+          }
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build and package Linux binary
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cargo build --release --locked --no-default-features \
+            --manifest-path crates/public/margins-cli/Cargo.toml
+          ARCHIVE="margins-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          tar -czf "$ARCHIVE" -C target/release margins
+          sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
+
+      - name: Add Linux archive to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          files: |
+            margins-*-x86_64-unknown-linux-gnu.tar.gz
+            margins-*-x86_64-unknown-linux-gnu.tar.gz.sha256

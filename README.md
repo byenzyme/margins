@@ -25,6 +25,20 @@ brew install useenzyme/margins/margins
 margins new standup
 ```
 
+Linux x86_64 archives and SHA-256 checksums are published on the
+[GitHub Releases](https://github.com/useenzyme/margins/releases) page. Install
+the latest archive with:
+
+```bash
+tar -xzf margins-VERSION-x86_64-unknown-linux-gnu.tar.gz
+install -m 0755 margins ~/.local/bin/margins
+margins --help
+```
+
+The release binary provides the portable CLI without an ASR backend. Build
+from source with `--features parakeet-onnx` when you need local transcription
+on Linux.
+
 `margins new` starts recording mic and system audio and opens the memo
 editor. Type what you notice; end the session; then let the skill do the
 rest.
