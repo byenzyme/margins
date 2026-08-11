@@ -35,9 +35,11 @@ install -m 0755 margins ~/.local/bin/margins
 margins --help
 ```
 
-The release binary provides the portable CLI without an ASR backend. Build
-from source with `--features parakeet-onnx` when you need local transcription
-on Linux.
+Official Homebrew and GitHub Release binaries are produced from the private
+Margins source-of-truth. They compose these public open-core crates with
+non-public platform capture adapters; building this export alone intentionally
+does not reproduce the official recording-capable artifact. Build from source
+with `--features parakeet-onnx` when you need local transcription on Linux.
 
 `margins new` starts recording mic and system audio and opens the memo
 editor. Type what you notice; end the session; then let the skill do the

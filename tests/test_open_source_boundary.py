@@ -134,10 +134,37 @@ class RepositoryPolicyTests(unittest.TestCase):
         )
         for required in (
             "runs-on: ubuntu-24.04",
-            "x86_64-unknown-linux-gnu.tar.gz",
-            "sha256sum",
+            "permissions:\n  contents: read",
+            "cargo build --workspace --all-targets --no-default-features --locked",
+            "Official archives and sha256sum metadata come from useenzyme/margins-desktop",
         ):
             self.assertIn(required, release)
+        for forbidden in ("tags: [\"v*\"]", "action-gh-release", "HOMEBREW_TAP_TOKEN"):
+            self.assertNotIn(forbidden, release)
+
+    def test_official_release_is_private_fail_closed_and_least_privilege(self) -> None:
+        workflow = (REPO_ROOT / ".github/workflows/cli-release.yml").read_text(
+            encoding="utf-8"
+        )
+        normalized = " ".join(workflow.split())
+        for required in (
+            "permissions: contents: read",
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+            "x86_64-unknown-linux-gnu",
+            "features: audio-capture,coreml-asr",
+            "features: audio-capture,parakeet-asr",
+            "--no-default-features --features",
+            "tar -xzf \"$ARCHIVE\" -C packaged-smoke",
+            "scripts/smoke-official-cli.sh packaged-smoke/margins",
+            "GH_TOKEN: ${{ secrets.MARGINS_RELEASE_TOKEN }}",
+            "GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}",
+            "--repo useenzyme/margins",
+            "gh repo clone useenzyme/homebrew-margins",
+        ):
+            self.assertIn(required, normalized)
+        self.assertNotIn("contents: write", workflow)
+        self.assertNotIn("parakeet-asr-dynamic", workflow)
 
     def test_public_meeting_runtime_scope_is_exact_and_standalone_tested(self) -> None:
         manifest = json.loads(
@@ -338,7 +365,7 @@ class RepositoryPolicyTests(unittest.TestCase):
             root_main = root_main_path.read_text(encoding="utf-8")
             self.assertNotIn("derive(Parser)", root_main)
             self.assertNotIn("enum Command", root_main)
-            self.assertIn("margins_cli::main_entry_from_env", root_main)
+            self.assertIn("margins::cli::main_entry_from_env", root_main)
 
     def test_margins_skill_uses_the_standalone_rust_cli(self) -> None:
         skill = (REPO_ROOT / "skills/margins/SKILL.md").read_text(encoding="utf-8")
