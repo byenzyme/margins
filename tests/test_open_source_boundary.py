@@ -142,6 +142,10 @@ class RepositoryPolicyTests(unittest.TestCase):
         for forbidden in ("tags: [\"v*\"]", "action-gh-release", "HOMEBREW_TAP_TOKEN"):
             self.assertNotIn(forbidden, release)
 
+    @unittest.skipUnless(
+        (REPO_ROOT / ".github/workflows/cli-release.yml").is_file(),
+        "official release workflow exists only in the private source repository",
+    )
     def test_official_release_is_private_fail_closed_and_least_privilege(self) -> None:
         workflow = (REPO_ROOT / ".github/workflows/cli-release.yml").read_text(
             encoding="utf-8"
