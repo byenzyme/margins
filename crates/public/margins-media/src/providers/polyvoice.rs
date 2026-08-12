@@ -6,6 +6,29 @@ use polyvoice::pipeline_v2::Pipeline;
 use polyvoice::{ModelRegistry, Profile, SampleRate};
 use std::sync::Mutex;
 
+/// Expected balanced-profile cache files and byte sizes. This lets callers
+/// render aggregate setup progress while Polyvoice retains ownership of secure
+/// downloading, checksum verification, and signature verification.
+pub fn balanced_model_downloads() -> Result<Vec<(std::path::PathBuf, u64)>> {
+    let registry = model_registry()?;
+    let profile = registry
+        .manifest()
+        .profile(Profile::Balanced.manifest_id())
+        .ok_or_else(|| anyhow!("balanced Polyvoice profile is missing"))?;
+    let mut files = Vec::new();
+    for model_id in [&profile.segmenter, &profile.embedder] {
+        let model = registry
+            .manifest()
+            .model(model_id)
+            .ok_or_else(|| anyhow!("Polyvoice model {model_id} is missing"))?;
+        let path = registry.cache_dir().join(&model.filename);
+        if !files.iter().any(|(existing, _)| existing == &path) {
+            files.push((path, model.size.unwrap_or(0)));
+        }
+    }
+    Ok(files)
+}
+
 /// Balanced Polyvoice pipeline with powerset segmentation and WeSpeaker
 /// embeddings. Construction may resolve model assets, but inference never
 /// opens or owns an audio device.
@@ -16,7 +39,7 @@ pub struct PolyvoiceDiarization {
 impl PolyvoiceDiarization {
     /// Construct a diarizer with an optional speaker-count cap.
     pub fn with_speaker_count(max_speakers: Option<usize>) -> Result<Self> {
-        let registry = ModelRegistry::default()?;
+        let registry = model_registry()?;
         let mut builder = Pipeline::builder()
             .profile(Profile::Balanced)
             .with_models_from(registry);
@@ -49,6 +72,13 @@ impl PolyvoiceDiarization {
                 speaker: format!("SPEAKER_{:02}", turn.speaker.0),
             })
             .collect())
+    }
+}
+
+fn model_registry() -> Result<ModelRegistry> {
+    match std::env::var_os("MARGINS_POLYVOICE_MODEL_DIR").filter(|value| !value.is_empty()) {
+        Some(path) => Ok(ModelRegistry::with_cache_dir(path)?),
+        None => Ok(ModelRegistry::default()?),
     }
 }
 

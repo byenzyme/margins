@@ -21,12 +21,21 @@ recap.
 ## Get started
 
 ```bash
-brew install useenzyme/margins/margins
-margins new standup
+# Apple Silicon
+brew install byenzyme/margins/margins
+margins setup
+margins new
 ```
 
-Linux x86_64 archives and SHA-256 checksums are published on the
-[GitHub Releases](https://github.com/useenzyme/margins/releases) page. Install
+`margins setup` detects compatible FluidAudio and Polyvoice caches already on
+the Mac. If either model is missing, it downloads and verifies the local
+transcription and speaker-recognition assets together with one progress display.
+It does not warm CoreML during setup; `margins new` and `margins attach` begin
+loading models early while the session and TUI initialize.
+
+Linux x86_64 archives include Parakeet transcription and Polyvoice speaker
+recognition. Archives and SHA-256 checksums are published on the
+[GitHub Releases](https://github.com/byenzyme/margins/releases) page. Install
 the latest archive with:
 
 ```bash

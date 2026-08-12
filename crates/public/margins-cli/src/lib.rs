@@ -83,6 +83,16 @@ fn run_inner(
                 }
             };
         }
+        // Native model setup lives only in the official private binary, which
+        // intercepts `setup` before delegating here. Handle it explicitly (it
+        // needs no resolved project) so the public standalone CLI reports it
+        // gracefully instead of panicking on the unreachable arm below.
+        Some(Command::Setup) => {
+            return Err(CliError::new(
+                "setup_unavailable",
+                "local model setup is only available in the official Margins binary",
+            ));
+        }
         _ => {}
     }
 
@@ -160,6 +170,7 @@ fn run_inner(
             AgentsCommand::Install => commands::projects::install_agents(work_dir, stdout),
         },
         Some(Command::Project { .. }) | Some(Command::Projects { .. }) => unreachable!(),
+        Some(Command::Setup) => unreachable!(),
     }
 }
 

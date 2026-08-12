@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Portable application workflows for Margins"
-repository = "https://github.com/useenzyme/margins"
+repository = "https://github.com/byenzyme/margins"
 readme = "README.md"
 
 [features]

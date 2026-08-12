@@ -14,6 +14,8 @@ pub struct Args {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Prepare local transcription for this machine
+    Setup,
     /// Start a new current session and open the recorder
     New {
         /// Optional display title; Margins generates the stable session id

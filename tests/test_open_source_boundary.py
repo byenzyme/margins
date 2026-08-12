@@ -136,7 +136,7 @@ class RepositoryPolicyTests(unittest.TestCase):
             "runs-on: ubuntu-24.04",
             "permissions:\n  contents: read",
             "cargo build --workspace --all-targets --no-default-features --locked",
-            "Official archives and sha256sum metadata come from useenzyme/margins-desktop",
+            "Official archives and sha256sum metadata come from byenzyme/margins-desktop",
         ):
             self.assertIn(required, release)
         for forbidden in ("tags: [\"v*\"]", "action-gh-release", "HOMEBREW_TAP_TOKEN"):
@@ -154,17 +154,16 @@ class RepositoryPolicyTests(unittest.TestCase):
         for required in (
             "permissions: contents: read",
             "aarch64-apple-darwin",
-            "x86_64-apple-darwin",
             "x86_64-unknown-linux-gnu",
-            "features: audio-capture,coreml-asr",
-            "features: audio-capture,parakeet-asr",
+            "features: audio-capture,coreml-asr,polyvoice-coreml",
+            "features: audio-capture,parakeet-asr,polyvoice-diarization",
             "--no-default-features --features",
             "tar -xzf \"$ARCHIVE\" -C packaged-smoke",
             "scripts/smoke-official-cli.sh packaged-smoke/margins",
             "GH_TOKEN: ${{ secrets.MARGINS_RELEASE_TOKEN }}",
             "GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}",
-            "--repo useenzyme/margins",
-            "gh repo clone useenzyme/homebrew-margins",
+            "--repo byenzyme/margins",
+            "gh repo clone byenzyme/homebrew-margins",
         ):
             self.assertIn(required, normalized)
         self.assertNotIn("contents: write", workflow)
@@ -176,12 +175,20 @@ class RepositoryPolicyTests(unittest.TestCase):
         normalized_validation = " ".join(validation.split())
         for required in (
             "permissions: contents: read",
-            "macos-15-intel",
+            "macos-15",
             "x86_64-unknown-linux-gnu",
+            "polyvoice-coreml",
+            "polyvoice-diarization",
             "scripts/smoke-official-cli.sh packaged-smoke/margins",
         ):
             self.assertIn(required, normalized_validation)
-        for forbidden in ("secrets.", "gh release create", "environment:"):
+        for forbidden in (
+            "secrets.",
+            "gh release create",
+            "environment:",
+            "macos-15-intel",
+            "x86_64-apple-darwin",
+        ):
             self.assertNotIn(forbidden, validation)
 
     def test_public_meeting_runtime_scope_is_exact_and_standalone_tested(self) -> None:

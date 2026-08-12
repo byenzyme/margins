@@ -31,4 +31,4 @@ jobs:
       - name: Prove this workflow cannot be mistaken for official packaging
         run: |
           echo "The open-core x86_64-unknown-linux-gnu tree is validation-only."
-          echo "Official archives and sha256sum metadata come from useenzyme/margins-desktop."
+          echo "Official archives and sha256sum metadata come from byenzyme/margins-desktop."
