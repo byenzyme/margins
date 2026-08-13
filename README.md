@@ -1,125 +1,137 @@
 # Margins
 
-Meeting notes that compound.
+**Take notes during a meeting the way you already do — a few words when something matters. Margins turns those words, and the recording underneath them, into a clean note in your own folder.**
 
-Margins records your meetings from the terminal — no bot joins the call —
-and turns them into structured notes in one folder you own. Every note lands
-in the same vault as plain Markdown, so each new meeting is distilled with
-the memory of the ones before it: the same people, projects, and decision
-threads accumulate instead of scattering across a timeline you'll never
-reread.
+You know the moment. Someone says something and you think *that's the real problem* — so you type four words while they keep talking. Later the recording is an hour long and those four words are all you actually remember. Every other tool throws away the four words and keeps the hour.
 
-The difference from a transcription tool is what happens around the
-transcript. While Margins records, you jot margin notes in a timestamped
-memo editor — each line stamped against the recording clock. A line at 14:32
-means *this mattered*. Transcription and diarization run on your machine,
-your marginalia are aligned to what was being said when you wrote them, and
-an agent skill distills the result into a real meeting artifact — decisions,
-action items, open threads — grounded in what you flagged, not a generic
-recap.
+Margins keeps the four words. They're the point.
 
-## Get started
+---
 
-```bash
-# Apple Silicon
-brew install byenzyme/margins/margins
-margins setup
-margins new
-```
+## What it is
 
-`margins setup` detects compatible FluidAudio and Polyvoice caches already on
-the Mac. If either model is missing, it downloads and verifies the local
-transcription and speaker-recognition assets together with one progress display.
-It does not warm CoreML during setup; `margins new` and `margins attach` begin
-loading models early while the session and TUI initialize.
+Margins is a meeting recorder you run from your terminal. Start it and a small notes pane opens. While you talk, you jot — half-sentences, reminders to yourself, the thing you don't want to lose. Each line is stamped to the second it happened, against the audio.
 
-Linux x86_64 archives include Parakeet transcription and Polyvoice speaker
-recognition. Archives and SHA-256 checksums are published on the
-[GitHub Releases](https://github.com/byenzyme/margins/releases) page. Install
-the latest archive with:
+When the meeting ends, a note gets written into the folder you were standing in — the same folder as the rest of your notes. It's shaped by what *you* flagged, not by a generic summary. It's a plain Markdown file you own.
 
-```bash
-tar -xzf margins-VERSION-x86_64-unknown-linux-gnu.tar.gz
-install -m 0755 margins ~/.local/bin/margins
-margins --help
-```
+---
 
-Official Homebrew and GitHub Release binaries are produced from the private
-Margins source-of-truth. They compose these public open-core crates with
-non-public platform capture adapters; building this export alone intentionally
-does not reproduce the official recording-capable artifact. Build from source
-with `--features parakeet-onnx` when you need local transcription on Linux.
+## The one line that is the whole product
 
-`margins new` starts recording mic and system audio and opens the memo
-editor. Type what you notice; end the session; then let the skill do the
-rest.
+Here's what you type mid-call — cryptic, fast, for no one but you:
 
-The distillation skill ships as a Claude Code plugin in this repository
-under `skills/`. Point your agent at a finished session and it transcribes,
-aligns your memo lines, and publishes a structured note into your vault —
-next to every note before it. The skill and its note templates are ordinary
-readable text files: fork them and change what a meeting note *is*.
+    [14:32] same objection rui raised in march
 
-## Run the pipeline on any audio
+Here's part of what comes back, written into `~/notes/` next to everything else:
 
-You can also hand the CLI a file directly — a QuickTime recording, one
-ffmpeg line, an old voice memo — and watch the same pipeline work, entirely
-on your machine:
+    Leah's digest objection landed as recognition, not novelty. She described the
+    digest freezing "a living thread into a snapshot," which then "becomes a
+    second source of truth" until "two weeks later nobody knows which version
+    carries the real decision." That is the same objection Rui raised in March —
+    see [[meetings/2026-03-12 Atlas review with Rui|Atlas review with Rui]], where
+    the concern was never day-one accuracy but a brief that ages into a competing
+    authority while the project note changes underneath it.
 
-```bash
-cargo install --locked --path crates/public/margins-cli --features coreml-asr
-export MARGINS_FLUID_COREML_MODEL_DIR=~/models/fluid-coreml
-margins transcribe meeting.wav --speakers 2 --memo notes.md
-margins recent
-```
+You wrote six clipped words. You got back a paragraph that knows *which* objection you meant, and a link to the March note where Rui had already raised it. The call itself never named Rui or the earlier review; your clipped line did. The matching objection and note came from your folder. That's the trick: **the folder is the context.**
 
-`margins transcribe` decodes the audio, runs on-device ASR and diarization,
-aligns the optional memo, and records the session in local SQLite. Models
-are caller-supplied via `MARGINS_FLUID_COREML_MODEL_DIR` (Core ML) or
-`MARGINS_PARAKEET_MODEL_DIR` (Parakeet ONNX).
+You wrote "Rui," so the note followed that thread. On day one, every connection traces to a word you typed — and it is enough. The first note you ever make is already useful, shaped by what you flagged that day.
 
-Everything Margins stores is inspectable without Margins: sessions are
-SQLite, notes are Markdown in your vault. Open them with sqlite3, grep,
-Obsidian, or your own agents.
+Then the folder fills, and the links stop needing your words. The same objection comes back in a meeting phrased nothing like today's, and the note ties them together anyway. A worry you have circled three times — each time in different language — returns as one thread. A decision from a project you have not opened in weeks surfaces beside the thing that just reopened it. You never typed the link. The folder had enough history to catch it on its own.
 
-## Build with it
+There is nothing to turn on. An empty folder can only match the words you give it, so on day one you give it words. A folder with months of meetings starts finding what you left unsaid — the people you keep meeting, the projects that run for quarters, the threads your agents pick up and leave across the folder. The more it holds, the more it connects.
 
-This repository is also a customization platform: the crates are composable
-building blocks for remote meeting recording and transcription systems.
-Applications can supply their own capture clients, transports, persistence
-adapters, ASR and diarization providers, note templates, and agent
-workflows on top of the same session and meeting contracts.
+---
 
-The workspace uses stable Rust:
+## A first session, start to finish
 
-```bash
-cargo build --workspace --locked
-cargo test --workspace --all-targets --no-default-features --locked
-```
+**1. Install.**
 
-Design detail lives in [docs/architecture.md](docs/architecture.md) and
-[docs/public-cli-extraction.md](docs/public-cli-extraction.md); the
-contributor loop is in [CONTRIBUTING.md](CONTRIBUTING.md).
+    brew install byenzyme/margins/margins
 
-## Trust, security, and privacy boundaries
+**2. Download local models (once).** This prepares transcription, speaker recognition, and the local catalyst model. Audio stays on your laptop.
 
-Nothing in these crates makes a network call or emits telemetry;
-persistence is local SQLite and Markdown files. What's public here is
-selected by a fail-closed exact allowlist with a deterministic exporter and
-verifier, so you can check precisely what is in this tree —
-[OPEN_SOURCE.md](OPEN_SOURCE.md) documents the boundary. The crates do not
-provide authentication, transport encryption, consent UX, or retention
-policy; an application embedding them must choose and verify those, and
-should treat audio, transcripts, memos, and notes as sensitive personal
-data.
+    margins setup
 
-Report suspected vulnerabilities privately to the maintainers; never
-include meeting audio, transcripts, credentials, or other user data in an
-issue.
+**3. Record, in the folder where your notes live.** The first time you run `margins new` in a folder, that folder quietly becomes your notes home.
+
+    cd ~/notes
+    margins new --title "sync with priya"
+
+A recorder opens: a bordered pane titled `margins`, a running clock, your mic and the other side's audio both captured. Type whenever you want to mark a moment. Press Enter to commit a line; its timestamp locks to that instant. `^S` saves, `^C` stops.
+
+**4. Turn it into a note.** The writing step is a Claude Code plugin — it arrives as readable files from this same repo, not a service:
+
+    # in Claude Code, once:
+    /plugin marketplace add byenzyme/margins
+    # then, per meeting:
+    /margins sync-with-priya
+
+It transcribes the recording, lines your jottings up against what was actually said, and writes a Markdown note into `~/notes/` — reviewing it with you first.
+
+No account to record. No bot in your call. No dashboard. The writing step uses Claude Code or your configured AI key. A file appears next to your other files.
+
+---
+
+## What makes the note good
+
+Your jottings aren't decoration — they're the priority signal. A line you typed is a moment you chose to keep, so the note leads with those. A line you went back and edited mid-meeting gets extra weight; you clearly weren't done with it. The rest of the transcript supports what you flagged instead of burying it.
+
+The note keeps both sides of the room straight: what the other person actually proposed or pushed back on, versus what you were privately working out in your own notes. Those don't blur into one "the meeting covered…" summary.
+
+And Margins reads the folder you already keep. If you have a page for a person or a project, new notes wire into it — that's how the note above reached Rui's March review, sitting in the same folder. You don't restructure anything; whatever shape your folder has is the shape new notes join.
+
+---
+
+## Not just meetings
+
+Point it at any audio you already have:
+
+    margins transcribe memo.m4a --speakers 2
+
+A voice memo, a call you recorded elsewhere, a debrief you talk through alone — it transcribes the same way and lands in the same folder. Already have a pile of meetings in Granola? Bring them in, so your first distilled note has a past to reach back to:
+
+    margins import granola <export-file>
+
+Everything Margins makes is plain text on your disk. Look at the raw pieces of any recording:
+
+    margins ls                 # your sessions
+    margins recent             # recent meetings, as data
+    margins transcript <id>    # the full transcript + your timed notes
+
+---
+
+## For people who like to take things apart
+
+The last step is an agent reading your folder, so the workflow bends to you:
+
+- Fork the note templates per kind of meeting — 1:1, design review, a talk you're just listening to.
+- Talk to a session before you file it — ask the agent about the transcript, then let it write.
+- Wire an ambient hook that distills each recording as it ends.
+- Script against the Markdown and the local SQLite yourself; it's all on disk.
+- Grow a personal CRM instead of buying one — every note already names its people, so an agent can roll up a page per person: what you last discussed, what you still owe them. See [docs/personal-crm.md](docs/personal-crm.md).
+
+Margins gives you the parts. What you assemble on top is yours.
+
+---
+
+## Requirements
+
+- macOS, for local on-device transcription.
+- [Claude Code](https://claude.ai/code) for the note-writing step. Hosted recall search only turns on if you set an API key.
+- Linux users: grab a binary from [GitHub Releases](../../releases).
+
+Build from source with on-device transcription support:
+
+    cargo install --locked --path crates/public/margins-cli --features coreml-asr
+
+`margins setup` downloads local models for transcription, speaker recognition, and deeper recall. Override transcription model location or version with `MARGINS_FLUID_COREML_MODEL_DIR` and `MARGINS_FLUID_COREML_VERSION`.
+
+---
+
+## What's in this repository
+
+This repo is the open, buildable core of Margins. What ships here is governed by a fail-closed allowlist — see [OPEN_SOURCE.md](OPEN_SOURCE.md) for exactly which crates are included and how the boundary is enforced. Recordings, transcripts, and notes stay on your machine; Margins is built so your sensitive personal data never has to leave it.
 
 ## License
 
-Apache 2.0 (see `LICENSE`). This tree is exported from a mixed development
-repository through the audited boundary; its presence here is not a claim
-that any crate has been published to a registry, and the license and
-manifests do not grant trademark rights in the Margins name or branding.
+Apache 2.0 — see [LICENSE](LICENSE). Inclusion here is not a claim that any crate has been published, and these terms do not grant trademark rights.
