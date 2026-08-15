@@ -41,6 +41,17 @@ impl ProcessRunner for SystemProcessRunner {
 pub trait ProjectService: Send + Sync {
     fn list(&self) -> anyhow::Result<Vec<ResolvedProject>>;
     fn resolve(&self, selector: Option<&str>) -> anyhow::Result<ResolvedProject>;
+    /// Resolve the vault for a session command git-style: an explicit selector
+    /// wins, otherwise walk up from `cwd` for a `.margins/` folder, otherwise the
+    /// current folder is the vault. The default implementation preserves
+    /// selector/registry behavior so test doubles need not implement discovery.
+    fn resolve_vault(
+        &self,
+        selector: Option<&str>,
+        _cwd: &Path,
+    ) -> anyhow::Result<ResolvedProject> {
+        self.resolve(selector)
+    }
     fn set_active(&self, selector: &str) -> anyhow::Result<ResolvedProject>;
     fn add(
         &self,
@@ -227,6 +238,14 @@ impl ProjectService for SystemProjectService {
 
     fn resolve(&self, selector: Option<&str>) -> anyhow::Result<ResolvedProject> {
         margins_workflows::project::resolve_project(selector)
+    }
+
+    fn resolve_vault(
+        &self,
+        selector: Option<&str>,
+        cwd: &Path,
+    ) -> anyhow::Result<ResolvedProject> {
+        margins_workflows::project::resolve_vault(selector, cwd)
     }
 
     fn set_active(&self, selector: &str) -> anyhow::Result<ResolvedProject> {

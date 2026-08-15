@@ -1,6 +1,8 @@
 //! Portable transcript artifact selection and rendering inputs.
 
-use crate::artifacts::confined_session_artifact_access_disk_path;
+use crate::artifacts::{
+    artifact_registry_disk_path, confined_session_artifact_access_disk_path,
+};
 use anyhow::{bail, Context, Result};
 use margins_store::legacy;
 use serde_json::Value;
@@ -34,6 +36,17 @@ pub fn preferred_transcript_path(margins_dir: &Path, name: &str) -> Option<PathB
     let artifact = transcript_artifact_path(margins_dir, name);
     if artifact.exists() {
         return Some(artifact);
+    }
+    if let Some(path) = legacy::list_session_artifacts(margins_dir, name)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|artifact| artifact.kind == legacy::SESSION_ARTIFACT_KIND_TRANSCRIPT)
+        .find_map(|artifact| {
+            confined_session_artifact_access_disk_path(margins_dir, name, &artifact.path)
+        })
+        .filter(|path| path.exists())
+    {
+        return Some(path);
     }
     let aligned = margins_dir.join(format!("{name}_aligned.md"));
     if aligned.exists() {
@@ -71,6 +84,10 @@ pub fn load_transcript_view(
     let meta = legacy::get_session_meta(margins_dir, &name).ok();
     let (source_path, mut body, view) =
         if let Some((path, body)) = read_live_transcript_body(work_dir, margins_dir, &name)? {
+            (path, body, "full")
+        } else if let Some((path, body)) =
+            read_terminal_checkpoint_body(work_dir, margins_dir, &name, meta.as_ref())?
+        {
             (path, body, "full")
         } else {
             let (path, body) = read_registered_or_fallback(work_dir, margins_dir, &name)?;
@@ -110,6 +127,37 @@ pub fn load_transcript_view(
     })
 }
 
+fn read_terminal_checkpoint_body(
+    work_dir: &Path,
+    margins_dir: &Path,
+    name: &str,
+    meta: Option<&legacy::SessionMeta>,
+) -> Result<Option<(PathBuf, String)>> {
+    let checkpoint = legacy::list_session_artifacts(margins_dir, name)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|artifact| artifact.kind == legacy::SESSION_ARTIFACT_KIND_TRANSCRIPT)
+        .filter(|artifact| artifact.path.ends_with(".live-transcript.json"))
+        .find_map(|artifact| {
+            confined_session_artifact_access_disk_path(margins_dir, name, &artifact.path)
+        });
+    let Some(path) = checkpoint else {
+        return Ok(None);
+    };
+    let entries = margins_media::transcript::merge_word_entries_to_phrases(
+        crate::processing::read_transcript_entries(&path)?,
+        2_000,
+    );
+    let Some(meta) = meta else {
+        return Ok(None);
+    };
+    let started_at = legacy::get_session_start_time(margins_dir, name)?;
+    let memo_path = artifact_registry_disk_path(work_dir, margins_dir, &meta.notes_path);
+    let memo = std::fs::read_to_string(memo_path).unwrap_or_default();
+    let body = crate::alignment::render_aligned_markdown(name, &started_at, &memo, &entries);
+    Ok(Some((path, body)))
+}
+
 pub fn read_registered_or_fallback(
     work_dir: &Path,
     margins_dir: &Path,
@@ -119,6 +167,7 @@ pub fn read_registered_or_fallback(
         .unwrap_or_default()
         .into_iter()
         .filter(|artifact| artifact.kind == legacy::SESSION_ARTIFACT_KIND_TRANSCRIPT)
+        .filter(|artifact| !artifact.path.ends_with(".live-transcript.json"))
         .filter_map(|artifact| {
             confined_session_artifact_access_disk_path(margins_dir, name, &artifact.path)
         });

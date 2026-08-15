@@ -278,8 +278,15 @@ pub fn ensure_people_files(
     people: &[String],
 ) -> Result<(), String> {
     let people_dir = vault.join(people_folder.trim());
-    std::fs::create_dir_all(&people_dir)
-        .map_err(|e| format!("Could not create people folder: {e}"))?;
+    if !people_dir.exists() {
+        return Ok(());
+    }
+    if !people_dir.is_dir() {
+        return Err(format!(
+            "Configured people folder is not a directory: {}",
+            people_dir.display()
+        ));
+    }
     for person in people {
         let path = people_dir.join(safe_note_file_name(person));
         if !path.exists() {
@@ -421,6 +428,48 @@ title: 'Customer Sync Recap'
         assert_eq!(
             safe_note_file_name("Team/Platform: Notes.md"),
             "Team-Platform- Notes.md"
+        );
+    }
+
+    #[test]
+    fn ensure_people_files_does_nothing_when_people_folder_is_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault = temp.path();
+
+        ensure_people_files(
+            vault,
+            "people",
+            "# {{name}}\n",
+            &["Ada Lovelace".to_string()],
+        )
+        .unwrap();
+
+        assert!(!vault.join("people").exists());
+    }
+
+    #[test]
+    fn ensure_people_files_maintains_pages_when_people_folder_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault = temp.path();
+        let people_dir = vault.join("people");
+        std::fs::create_dir_all(&people_dir).unwrap();
+        std::fs::write(people_dir.join("Grace Hopper.md"), "existing\n").unwrap();
+
+        ensure_people_files(
+            vault,
+            "people",
+            "# {{name}}\n",
+            &["Ada Lovelace".to_string(), "Grace Hopper".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(people_dir.join("Ada Lovelace.md")).unwrap(),
+            "# Ada Lovelace\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(people_dir.join("Grace Hopper.md")).unwrap(),
+            "existing\n"
         );
     }
 

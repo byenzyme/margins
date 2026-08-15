@@ -118,10 +118,246 @@ fn clap_help_preserves_the_prior_argument_contract() {
     assert!(help.contains("Rebuild alignment from the existing transcript without running ASR"));
 }
 
+#[test]
+fn parser_accepts_workspace_setup_guide_command() {
+    let parsed = Args::try_parse_from(["margins", "guide", "workspace-setup"]).unwrap();
+    assert!(matches!(
+        parsed.command,
+        Some(margins_cli::args::Command::Guide {
+            command: margins_cli::args::GuideCommand::WorkspaceSetup
+        })
+    ));
+}
+
+#[test]
+fn parser_accepts_read_only_and_write_config_scan_commands() {
+    let parsed = Args::try_parse_from(["margins", "scan"]).unwrap();
+    assert!(matches!(
+        parsed.command,
+        Some(margins_cli::args::Command::Scan {
+            write_config: false
+        })
+    ));
+
+    let parsed = Args::try_parse_from(["margins", "scan", "--write-config"]).unwrap();
+    assert!(matches!(
+        parsed.command,
+        Some(margins_cli::args::Command::Scan { write_config: true })
+    ));
+}
+
+#[test]
+fn setup_prints_minimal_handoff_for_absolute_invocation_dir_without_side_effects() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("note.md"), "real note").unwrap();
+    let services = services(temp.path());
+
+    let (result, stdout, stderr) = invoke(&services, temp.path(), &["margins", "setup"]);
+
+    assert!(result.is_ok(), "{stderr}");
+    assert_eq!(
+        stdout,
+        format!(
+            "Paste into your agent:\nSet up Margins in {}. Run margins guide workspace-setup and follow it end to end.\n",
+            temp.path().display()
+        )
+    );
+    assert!(stderr.is_empty());
+    assert!(!temp.path().join(".margins").exists());
+}
+
+#[test]
+fn workspace_setup_guide_is_embedded_margins_native_and_read_only() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("note.md"), "real note").unwrap();
+    let services = services(temp.path());
+
+    let (result, stdout, stderr) = invoke(
+        &services,
+        temp.path(),
+        &["margins", "guide", "workspace-setup"],
+    );
+
+    assert!(result.is_ok(), "{stderr}");
+    assert_eq!(
+        stdout,
+        margins_workflows::resources::MARGINS_WORKSPACE_SETUP_GUIDE
+    );
+    assert!(stdout.contains("margins init"));
+    assert!(stdout.contains("margins scan"));
+    assert!(stdout.contains("top_tags"));
+    assert!(stdout.contains("top_links"));
+    assert!(stdout.contains("log:journal"));
+    assert!(stdout.contains("margins recall"));
+    assert!(stdout.contains(".margins/recall/index.db"));
+    assert!(stdout.contains("~/.margins/config.toml"));
+    assert!(stdout.contains("excluded_folders"));
+    assert!(stdout.contains("entities = ["));
+    assert!(stdout.contains("ask before deleting"));
+    assert!(stdout.contains("Never edits note bodies"));
+    assert!(!stdout.to_lowercase().contains("enzyme"));
+    assert!(!stdout.contains("enzyme doctor"));
+    assert!(!stdout.contains("enzyme scan"));
+    assert!(!stdout.contains("enzyme init"));
+    assert!(!stdout.contains(".enzyme/enzyme.db"));
+    assert!(!stdout.contains(".enzyme/"));
+    assert!(!temp.path().join(".margins").exists());
+}
+
+#[test]
+fn public_capabilities_report_no_recall_composition() {
+    let temp = tempfile::tempdir().unwrap();
+    let services = services(temp.path());
+
+    let (result, stdout, stderr) = invoke(&services, temp.path(), &["margins", "capabilities"]);
+
+    assert!(result.is_ok(), "{stderr}");
+    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(value["schema"], 1);
+    assert_eq!(value["product"], "margins");
+    assert_eq!(value["composition"], "public-open-core");
+    assert_eq!(value["official"], false);
+    assert_eq!(value["recall"]["indexing"], false);
+    assert_eq!(value["recall"]["lookup"], false);
+    assert_eq!(value["recall"]["scan"], false);
+}
+
+#[test]
+fn public_scan_is_not_the_product_workspace_discovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let services = services(temp.path());
+
+    let (result, stdout, stderr) = invoke(&services, temp.path(), &["margins", "scan"]);
+
+    assert!(result.is_err());
+    assert!(stdout.is_empty());
+    assert!(stderr.contains("composition_unavailable"));
+    assert!(stderr.contains("official Margins CLI"));
+    assert!(!temp.path().join(".margins").exists());
+}
+
+#[test]
+fn public_init_is_not_the_product_workspace_setup() {
+    let temp = tempfile::tempdir().unwrap();
+    let services = services(temp.path());
+
+    let (result, stdout, stderr) = invoke(&services, temp.path(), &["margins", "init"]);
+
+    assert!(result.is_err());
+    assert!(stdout.is_empty());
+    assert!(stderr.contains("composition_unavailable"));
+    assert!(stderr.contains("official Margins CLI"));
+    assert!(!temp.path().join(".margins").exists());
+    assert!(!temp.path().join(".margins/recall/index.db").exists());
+}
+
+#[test]
+fn init_xml_can_report_effective_config_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("home/.margins/config.toml");
+    let mut stdout = Vec::new();
+
+    margins_cli::commands::projects::write_init(&mut stdout, temp.path(), "ok", Some(&config))
+        .unwrap();
+
+    assert_eq!(
+        String::from_utf8(stdout).unwrap(),
+        format!(
+            "<margins_init path=\"{}\" status=\"ok\" config_path=\"{}\" />\n",
+            temp.path().display(),
+            config.display()
+        )
+    );
+}
+
 struct RecordingProject {
     root: PathBuf,
     added_paths: Mutex<Vec<String>>,
     resolved_selectors: Mutex<Vec<Option<String>>>,
+}
+
+struct MultiProject {
+    active_id: String,
+    vaults: Vec<ResolvedProject>,
+    list_calls: Mutex<usize>,
+}
+
+impl ProjectService for MultiProject {
+    fn list(&self) -> anyhow::Result<Vec<ResolvedProject>> {
+        *self.list_calls.lock().unwrap() += 1;
+        Ok(self.vaults.clone())
+    }
+
+    fn resolve(&self, selector: Option<&str>) -> anyhow::Result<ResolvedProject> {
+        let id = selector.unwrap_or(&self.active_id);
+        self.vaults
+            .iter()
+            .find(|vault| vault.project.id == id || vault.project.path == id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown test vault {id}"))
+    }
+
+    fn set_active(&self, selector: &str) -> anyhow::Result<ResolvedProject> {
+        self.resolve(Some(selector))
+    }
+
+    fn add(
+        &self,
+        path: &str,
+        _name: Option<&str>,
+        _inbox_folder: Option<&str>,
+    ) -> anyhow::Result<ResolvedProject> {
+        self.resolve(Some(path))
+    }
+}
+
+fn resolved_vault(id: &str, root: &Path) -> ResolvedProject {
+    ResolvedProject {
+        project: ProjectSource {
+            id: id.into(),
+            name: id.into(),
+            path: root.to_string_lossy().into_owned(),
+            inbox_folder: "meetings".into(),
+            people_folder: "people".into(),
+            readiness: "ready".into(),
+        },
+        root_dir: root.to_path_buf(),
+        work_dir: root.to_path_buf(),
+    }
+}
+
+fn seed_inspectable_session(vault: &Path, meeting_id: &str, marker: &str) {
+    let margins_dir = vault.join(".margins");
+    std::fs::create_dir_all(&margins_dir).unwrap();
+    std::fs::write(margins_dir.join(format!("{meeting_id}.md")), marker).unwrap();
+    std::fs::write(
+        margins_dir.join(format!("{meeting_id}_aligned.md")),
+        format!("# {marker}"),
+    )
+    .unwrap();
+    legacy::create_session(
+        &margins_dir,
+        meeting_id,
+        &Local::now(),
+        &format!(".margins/{meeting_id}.md"),
+    )
+    .unwrap();
+    legacy::upsert_session_artifact(
+        &margins_dir,
+        meeting_id,
+        legacy::SESSION_ARTIFACT_KIND_TRANSCRIPT,
+        0,
+        &format!(".margins/{meeting_id}_aligned.md"),
+        "durable",
+        None,
+    )
+    .unwrap();
+}
+
+fn multi_project_services(projects: Arc<MultiProject>) -> CliServices {
+    let mut services = services(&projects.vaults[0].root_dir);
+    services.projects = projects;
+    services
 }
 
 impl RecordingProject {
@@ -156,36 +392,6 @@ impl ProjectService for RecordingProject {
 }
 
 #[test]
-fn projects_add_resolves_relative_paths_from_the_invocation_directory() {
-    let temp = tempfile::tempdir().unwrap();
-    let invocation_dir = temp.path().join("invocation");
-    let project_root = temp.path().join("registered");
-    std::fs::create_dir_all(&invocation_dir).unwrap();
-    std::fs::create_dir_all(&project_root).unwrap();
-    let projects = Arc::new(RecordingProject {
-        root: project_root,
-        added_paths: Mutex::new(Vec::new()),
-        resolved_selectors: Mutex::new(Vec::new()),
-    });
-    let mut services = services(&projects.root);
-    services.projects = projects.clone();
-
-    let (result, _, stderr) = invoke(
-        &services,
-        &invocation_dir,
-        &["margins", "projects", "add", "notes/relative"],
-    );
-    assert!(result.is_ok(), "{stderr}");
-    assert_eq!(
-        projects.added_paths.lock().unwrap().as_slice(),
-        &[invocation_dir
-            .join("notes/relative")
-            .to_string_lossy()
-            .into_owned()]
-    );
-}
-
-#[test]
 fn selected_project_is_forwarded_without_changing_process_cwd() {
     let temp = tempfile::tempdir().unwrap();
     let project_root = temp.path().join("selected-project");
@@ -211,6 +417,136 @@ fn selected_project_is_forwarded_without_changing_process_cwd() {
         &[Some("selected".into())]
     );
     assert_eq!(std::env::current_dir().unwrap(), cwd_before);
+}
+
+#[test]
+fn concrete_meeting_commands_find_the_unique_owning_vault() {
+    let temp = tempfile::tempdir().unwrap();
+    let active = temp.path().join("active");
+    let owner = temp.path().join("owner");
+    std::fs::create_dir_all(active.join(".margins")).unwrap();
+    seed_inspectable_session(&owner, "cross-vault", "owner transcript");
+    let projects = Arc::new(MultiProject {
+        active_id: "active".into(),
+        vaults: vec![
+            resolved_vault("active", &active),
+            resolved_vault("owner", &owner),
+        ],
+        list_calls: Mutex::new(0),
+    });
+    let services = multi_project_services(projects);
+
+    for args in [
+        vec!["margins", "artifacts", "cross-vault"],
+        vec!["margins", "transcript", "cross-vault"],
+    ] {
+        let (result, stdout, stderr) = invoke(&services, &active, &args);
+        assert!(result.is_ok(), "{args:?}: {stderr}");
+        assert!(stdout.contains(&owner.to_string_lossy().to_string()));
+        assert!(!stdout.contains("<exists>false</exists>"));
+    }
+}
+
+#[test]
+fn concrete_meeting_lookup_deduplicates_the_active_vault() {
+    let temp = tempfile::tempdir().unwrap();
+    let active = temp.path().join("active");
+    seed_inspectable_session(&active, "active-meeting", "active transcript");
+    let projects = Arc::new(MultiProject {
+        active_id: "active".into(),
+        // The initial resolved vault is appended by the dispatcher; this list
+        // entry must not make the active meeting look ambiguous.
+        vaults: vec![resolved_vault("active", &active)],
+        list_calls: Mutex::new(0),
+    });
+    let services = multi_project_services(projects);
+
+    let (result, stdout, stderr) = invoke(
+        &services,
+        &active,
+        &["margins", "transcript", "active-meeting"],
+    );
+    assert!(result.is_ok(), "{stderr}");
+    assert!(stdout.contains("active transcript"));
+}
+
+#[test]
+fn duplicate_concrete_meeting_ids_fail_closed_even_when_active_has_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let active = temp.path().join("active");
+    let other = temp.path().join("other");
+    seed_inspectable_session(&active, "duplicate", "active transcript");
+    seed_inspectable_session(&other, "duplicate", "other transcript");
+    let projects = Arc::new(MultiProject {
+        active_id: "active".into(),
+        vaults: vec![
+            resolved_vault("active", &active),
+            resolved_vault("other", &other),
+        ],
+        list_calls: Mutex::new(0),
+    });
+    let services = multi_project_services(projects);
+
+    let (result, stdout, stderr) =
+        invoke(&services, &active, &["margins", "artifacts", "duplicate"]);
+    let error = result.unwrap_err();
+    assert_eq!(error.code(), "ambiguous_meeting");
+    assert!(stdout.is_empty());
+    assert!(stderr.contains("active"));
+    assert!(stderr.contains("other"));
+    assert!(stderr.contains("Pass --project"));
+}
+
+#[test]
+fn explicit_project_remains_authoritative_for_duplicate_meeting_ids() {
+    let temp = tempfile::tempdir().unwrap();
+    let active = temp.path().join("active");
+    let other = temp.path().join("other");
+    seed_inspectable_session(&active, "duplicate", "active transcript");
+    seed_inspectable_session(&other, "duplicate", "other transcript");
+    let projects = Arc::new(MultiProject {
+        active_id: "active".into(),
+        vaults: vec![
+            resolved_vault("active", &active),
+            resolved_vault("other", &other),
+        ],
+        list_calls: Mutex::new(0),
+    });
+    let services = multi_project_services(projects.clone());
+
+    let (result, stdout, stderr) = invoke(
+        &services,
+        &active,
+        &["margins", "transcript", "duplicate", "--project=other"],
+    );
+    assert!(result.is_ok(), "{stderr}");
+    assert!(stdout.contains("other transcript"));
+    assert!(!stdout.contains("active transcript"));
+    assert_eq!(*projects.list_calls.lock().unwrap(), 0);
+}
+
+#[test]
+fn latest_remains_scoped_to_the_active_vault() {
+    let temp = tempfile::tempdir().unwrap();
+    let active = temp.path().join("active");
+    let other = temp.path().join("other");
+    seed_inspectable_session(&active, "active-latest", "active transcript");
+    seed_inspectable_session(&other, "other-latest", "other transcript");
+    let projects = Arc::new(MultiProject {
+        active_id: "active".into(),
+        vaults: vec![
+            resolved_vault("active", &active),
+            resolved_vault("other", &other),
+        ],
+        list_calls: Mutex::new(0),
+    });
+    let services = multi_project_services(projects.clone());
+
+    let (result, stdout, stderr) = invoke(&services, &active, &["margins", "transcript", "latest"]);
+    assert!(result.is_ok(), "{stderr}");
+    assert!(stdout.contains("active transcript"));
+    assert!(!stdout.contains("other transcript"));
+    assert_eq!(*projects.list_calls.lock().unwrap(), 0);
 }
 
 struct EmptyAsr;
@@ -562,16 +898,6 @@ fn xml_and_json_presenters_escape_user_controlled_values() {
     assert!(result.is_ok(), "{stderr}");
     assert!(stdout.contains("<title>A &lt;title&gt; &amp; \"quote\"</title>"));
     assert!(!stdout.contains(''));
-
-    let (result, stdout, stderr) = invoke(
-        &services,
-        temp.path(),
-        &["margins", "projects", "list", "--json"],
-    );
-    assert!(result.is_ok(), "{stderr}");
-    let rows: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(rows[0]["id"], "test");
-    assert_eq!(rows[0]["active"], true);
 }
 
 #[test]
@@ -629,4 +955,51 @@ fn align_only_does_not_consult_unavailable_asr() {
     assert!(result.is_ok(), "{stderr}");
     assert!(stdout.contains("<margins_process meeting_id=\"meeting\" status=\"ok\">"));
     assert!(margins_dir.join("meeting_aligned.md").exists());
+}
+
+#[test]
+fn session_catalog_and_artifact_commands_emit_vault_anchored_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    let margins_dir = vault.join(".margins");
+    std::fs::create_dir_all(&margins_dir).unwrap();
+    let memo = margins_dir.join("meeting.md");
+    let transcript = margins_dir.join("meeting_seg0.live-transcript.json");
+    std::fs::write(&memo, "[00:01] checkpoint").unwrap();
+    std::fs::write(
+        &transcript,
+        r#"{"terminal":true,"transcripts":[{"words":[{"channel":0,"start_ms":500,"end_ms":900,"text":" hello"}]}]}"#,
+    )
+    .unwrap();
+    legacy::create_session(
+        &margins_dir,
+        "meeting",
+        &Local::now(),
+        ".margins/meeting.md",
+    )
+    .unwrap();
+    legacy::upsert_session_artifact(
+        &margins_dir,
+        "meeting",
+        legacy::SESSION_ARTIFACT_KIND_TRANSCRIPT,
+        0,
+        ".margins/meeting_seg0.live-transcript.json",
+        "durable",
+        None,
+    )
+    .unwrap();
+    let services = services(&vault);
+
+    for args in [
+        vec!["margins", "recent"],
+        vec!["margins", "artifacts", "meeting"],
+        vec!["margins", "transcript", "meeting"],
+    ] {
+        let (result, stdout, stderr) = invoke(&services, temp.path(), &args);
+        assert!(result.is_ok(), "{args:?}: {stderr}");
+        assert!(
+            stdout.contains(&vault.to_string_lossy().to_string()),
+            "{args:?} returned a cwd-relative artifact path: {stdout}"
+        );
+    }
 }

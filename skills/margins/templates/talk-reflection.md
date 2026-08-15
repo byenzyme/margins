@@ -41,7 +41,7 @@ Order by weight of the reflection, not chronology. The things I wrote the most a
 
 The emotional and experiential arc beneath the notes — where the talk became personal. These may appear explicitly in my memo or emerge from the pattern of what I chose to write down and when.
 
-This is the section most enriched by vault context. Use Enzyme to find where these threads connect to existing thinking, prior reflections, and lived experience documented elsewhere. The connections should feel like recognition — "I've been here before" — not forced citation.
+This is the section most enriched by vault context. Use prior notes to find where these threads connect to existing thinking, prior reflections, and lived experience documented elsewhere. The connections should feel like recognition — "I've been here before" — not forced citation.
 
 For each:
 - **[Thread name]**: The experience or tension it connects to, what the talk reopened or reframed, and where my vault holds related thinking. Weave [[wikilinks]] into the prose where they deepen the thread. The goal is to show the arc across my own life that the talk illuminated.
@@ -49,6 +49,8 @@ For each:
 ### Open questions
 
 The unresolved tensions — things the talk raised that I'm still sitting with. Frame as genuine questions, not rhetorical ones. These are future journal or conversation starters.
+
+Include 2-5 questions or open threads to bring into future journaling, prayer, or conversation. Keep them grounded in the talk, the memo, or the lived thread the note surfaced.
 ```
 
 ## Rules

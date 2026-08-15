@@ -27,9 +27,10 @@ because they are added to this repository.
   Granola import, vault publishing, alignment, recent/transcript views, confined
   artifact pruning, and process/transcribe orchestration through public ASR and
   diarization ports. Root and desktop consumers use compatibility facades.
-- **CLI:** the independently buildable `margins-cli` library and `margins`
-  binary used by the Margins skill. The native application launcher and server
-  runtime are not included.
+- **CLI:** the independently buildable `margins-cli` library and public
+  development binary, `margins-public`. Released recall-capable product
+  artifacts still install the user-facing `margins` command. The native
+  application launcher and server runtime are not included.
 - **Meeting protocol crate:** the independently buildable V1 mobile/browser/VPS
   relay wire contract under `crates/public/margins-meeting-protocol`.
 - **Meeting runtime crate:** the independently buildable, transport-neutral
@@ -46,9 +47,10 @@ because they are added to this repository.
   materialized export; the private root Cargo package is never selected.
 
 The mixed tree's transitional root Rust package is intentionally not in the
-candidate export. The standalone `margins` binary is owned by the public
-`margins-cli` crate; the mixed root remains a compatibility/composition layer
-and is not needed to build the public repository.
+candidate export. The standalone public development binary is `margins-public`,
+owned by the public `margins-cli` crate; the mixed root remains a
+compatibility/composition layer and is not needed to build the public
+repository.
 
 ## Explicitly outside the boundary
 
@@ -115,6 +117,7 @@ python3 scripts/open_source_boundary.py \
   --output /tmp/margins-public \
   --execute
 python3 scripts/open_source_boundary.py --verify-tree /tmp/margins-public
+python3 scripts/open_source_boundary.py --test-export /tmp/margins-public
 ```
 
 Files are copied in lexical order with normalized file and directory

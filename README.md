@@ -48,7 +48,7 @@ There is nothing to turn on. An empty folder can only match the words you give i
 
     brew install byenzyme/margins/margins
 
-**2. Download local models (once).** This prepares transcription, speaker recognition, and the local catalyst model. Audio stays on your laptop.
+**2. Download local models and copy the setup handoff.** Run this from the folder you want to use as the Margins base, then paste the printed prompt into your agent.
 
     margins setup
 
@@ -118,13 +118,18 @@ Margins gives you the parts. What you assemble on top is yours.
 
 - macOS, for local on-device transcription.
 - [Claude Code](https://claude.ai/code) for the note-writing step. Hosted recall search only turns on if you set an API key.
-- Linux users: grab a binary from [GitHub Releases](../../releases).
+- Linux users: grab the official `margins` binary from [GitHub Releases](../../releases).
 
-Build from source with on-device transcription support:
+The public source tree is for portable crate development. Its CLI binary is
+`margins-public` and intentionally does not provide workspace setup or recall.
+For a fresh product install, use an official release artifact or the private
+source checkout's root `./install.sh`.
 
-    cargo install --locked --path crates/public/margins-cli --features coreml-asr
+Run the public CLI without installing it:
 
-`margins setup` downloads local models for transcription, speaker recognition, and deeper recall. Override transcription model location or version with `MARGINS_FLUID_COREML_MODEL_DIR` and `MARGINS_FLUID_COREML_VERSION`.
+    cargo run --manifest-path crates/public/margins-cli/Cargo.toml -- capabilities
+
+`margins setup` downloads local models for transcription, speaker recognition, and deeper recall, then prints a minimal agent handoff for the current folder. The embedded guide is available with `margins guide workspace-setup`; it tells the agent to run `margins init` and prove retrieval with `margins recall`. Override transcription model location or version with `MARGINS_FLUID_COREML_MODEL_DIR` and `MARGINS_FLUID_COREML_VERSION`.
 
 ---
 

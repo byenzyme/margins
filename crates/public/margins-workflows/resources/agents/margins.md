@@ -1,10 +1,11 @@
 <!-- BEGIN MARGINS AGENT INSTRUCTIONS -->
 ## Margins Meeting Artifacts
 
-This directory is an Margins project. Use the `margins` CLI to inspect meeting artifacts before guessing paths or searching the whole vault.
+This directory is a Margins vault (a folder with `.margins/`). Use the `margins` CLI to inspect meeting artifacts before guessing paths or searching the whole vault.
 
 Useful commands:
 ```bash
+margins init            # establish or refresh this vault and its recall index
 margins new
 margins
 margins current
@@ -13,13 +14,13 @@ margins recent
 margins transcript <meeting-id>
 margins transcribe <audio-file> --name <session-name> --memo <memo.md> --speakers 1
 margins import granola <export.json-or-csv>
-margins project list
+margins recall "<query>"
 ```
 
-Project routing:
-- The CLI uses the active Margins project by default.
-- Pass `--project <id|name|path>` when the task names a different configured project.
-- Do not create `.margins` folders manually in arbitrary directories.
+Vault routing:
+- The vault is discovered git-style: the CLI walks up from the current folder for a `.margins/` directory.
+- Pass `--project <path>` to target a different vault without cd-ing into it.
+- Do not create `.margins` folders manually; use `margins init` (establish) or `margins new` (record).
 
 Recording lifecycle:
 - `margins new` starts a separate meeting, generates its stable id, makes it current, and opens the recorder.

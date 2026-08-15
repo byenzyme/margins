@@ -1,6 +1,6 @@
 [package]
 name = "margins-cli"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Standalone public command-line interface for Margins"
@@ -12,7 +12,7 @@ name = "margins_cli"
 path = "src/lib.rs"
 
 [[bin]]
-name = "margins"
+name = "margins-public"
 path = "src/main.rs"
 
 [features]

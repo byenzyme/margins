@@ -40,6 +40,7 @@ jobs:
           if [ -d public-repository ]; then
             python3 scripts/open_source_boundary.py --output "$export_path" --execute
             python3 scripts/open_source_boundary.py --verify-tree "$export_path"
+            python3 scripts/open_source_boundary.py --test-export "$export_path"
             python3 scripts/open_source_boundary.py --output "$second_export_path" --execute
             python3 scripts/open_source_boundary.py --verify-tree "$second_export_path"
           else
@@ -47,6 +48,7 @@ jobs:
             git archive HEAD | tar -x -C "$export_path"
             git archive HEAD | tar -x -C "$second_export_path"
             python3 scripts/open_source_boundary.py --verify-tree "$export_path"
+            python3 scripts/open_source_boundary.py --test-export "$export_path"
             python3 scripts/open_source_boundary.py --verify-tree "$second_export_path"
           fi
           (

@@ -1,14 +1,14 @@
 ---
 name: margins
-description: End-to-end margins session processing — transcribe, align memo + transcript, distill into a structured vault note via Enzyme.
+description: End-to-end margins session processing — transcribe, align memo + transcript, distill into a structured vault note connected to existing thinking.
 argument-hint: <session-name> [--align-only] [--audio <audio-file> [--speakers N]]
 user-invocable: true
-allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, mcp__enzyme__semantic_search, mcp__enzyme__start_exploring_vault
+allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion
 ---
 
 # Margins — Capture to Vault Note
 
-Take an margins session end-to-end: transcribe audio, align the transcript with the user's real-time memo, distill into a structured vault note connected to existing thinking via Enzyme.
+Take an margins session end-to-end: transcribe audio, align the transcript with the user's real-time memo, distill into a structured vault note connected to existing thinking.
 
 **Environment**: `$OBSIDIAN_VAULT` refers to the Obsidian vault root (the additional working directory configured for this project).
 
@@ -22,7 +22,7 @@ Take an margins session end-to-end: transcribe audio, align the transcript with 
 ## What this produces
 
 1. **Aligned timeline** (`.margins/<session>_aligned.md`) — interleaved transcript + memo on a shared timeline
-2. **Vault note draft or approved final note** — structured note written to the obsidian vault using a template, with Enzyme-sourced connections
+2. **Vault note draft or approved final note** — structured note written to the obsidian vault using a template, with recall-sourced connections
 
 If `--align-only` is passed, only the aligned timeline (step 1) is produced.
 
@@ -49,7 +49,7 @@ Dense interpretive sessions need a slower synthesis pass in the parent session o
 
 - read the preserved raw memo, aligned timeline, transcript, and existing note
 - treat un-timestamped memo/reflection lines as part of the user's attention signal, not leftovers
-- run Enzyme searches from the most distinctive or charged memo language, not only from obvious transcript topics
+- run recall searches from the most distinctive or charged memo language, not only from obvious transcript topics
 - identify the deeper arc underneath the surface topic before drafting
 - produce a draft for review unless the user has already approved writing final notes unattended
 
@@ -72,17 +72,28 @@ Resolve through the standalone Rust CLI before transcribing. This preserves the
 selected project, stable session ids, current pointer, multipart offsets, and
 registered artifact precedence without teaching agents storage internals.
 
-1. Run `margins recent` and match the requested id/title. Use `latest` only
-   when the user explicitly means the newest meeting.
+1. When the user means the newest meeting in the active vault, skip discovery:
+   `margins transcript latest` (and `margins artifacts latest`) resolve it in a
+   single call. Prefer this shorthand over a `margins recent` round-trip. Run
+   `margins recent` only to browse or disambiguate among meetings by id/title.
+   Reach for `margins recent --all` solely as a last resort — when you have no id
+   and the meeting is in another vault. It is a cross-vault discovery aid, not
+   part of the normal resolve path.
 2. Run `margins artifacts "<session-id>"` to inspect registered files and
    existence. Do not query SQLite or broadly glob transcript/audio files.
 3. Run `margins transcript "<session-id>"` to retrieve the preferred full
    transcript or aligned fallback plus memo/saved-note paths.
-4. For a project other than the configured active project, pass the historical
-   global selector as `margins --project "<id-or-path>" ...`; relative audio,
-   memo, and Granola paths remain relative to the invocation directory.
-5. If an aligned transcript is already registered and the user did not ask to
-   rerun, use it. If only alignment must be rebuilt, use `--align-only`.
+4. Concrete meeting IDs are resolved automatically across registered vaults by
+   `artifacts` and `transcript`. If the CLI reports a duplicate-id ambiguity,
+   pass the `vault` id from `recent --all` as the historical global selector:
+   `margins --project "<id-or-path>" ...`. Relative audio, memo, and Granola
+   paths remain relative to the invocation directory.
+5. Treat a successful `margins transcript` body as the usable transcript. In
+   particular, `view="full"` may be rendered directly from a terminal
+   `*.live-transcript.json` checkpoint; consume that body and do **not** run
+   `margins process` merely because no `_aligned.md` file exists. Process only
+   when the transcript command has no usable body, the user explicitly asks to
+   reprocess, or alignment genuinely must be rebuilt.
 6. For audio-only input, call `margins transcribe`; a memo is optional. Do not
    fail solely because timed memo lines are absent.
 7. Never delete artifacts unless the user explicitly asks. Use
@@ -118,7 +129,8 @@ Before transcribing, the skill should **infer the transcription mode** and confi
 $ARGUMENTS = "standup"
 -> session: "standup"
 -> resolve: `margins recent`, then `margins artifacts standup`
--> process: `margins process standup` (channel mode and segment offsets are automatic)
+-> inspect: `margins transcript standup`
+-> process only if no usable transcript is returned
 
 $ARGUMENTS = "standup --align-only"
 -> session: "standup"
@@ -157,17 +169,23 @@ registered files.
 3. Treat the paths and `segments` metadata returned by the CLI as authoritative;
    do not inspect or modify `.margins/sessions.sqlite`.
 4. Templates are read from the **bundle** shipped with the skill (`$CLAUDE_PLUGIN_ROOT/skills/margins/templates/`), which is the source of truth so bundle updates always take effect. A file in `<margins-dir>/templates/<name>.md` is honored only as an explicit user override for that one template. Do **not** auto-seed or copy the bundle into `<margins-dir>/templates/` — auto-seeding turns that directory into a stale cache that shadows later bundle updates.
-5. Use `margins artifacts` and `margins transcript` to check existing aligned
-   and full transcript outputs before retranscribing.
+5. Use `margins artifacts` and `margins transcript` to check existing aligned,
+   terminal-checkpoint, and full transcript outputs before retranscribing. A
+   successful `view="full"` response is sufficient even when its source path
+   ends in `.live-transcript.json`.
 
 If deterministic resolution fails, present the candidate files found and ask the user for the correct session name/path.
 
 ### Step 2: Transcribe audio
 
-Run processing through the standalone public Rust CLI. For an existing Margins
-session, it resolves every registered segment, applies global offsets,
-preserves stereo mic/system channels, writes transcript JSON, and produces the
-aligned timeline:
+Skip this step when `margins transcript` already returned a usable body. Do not
+re-run ASR for a terminal live checkpoint that the CLI rendered as
+`view="full"`.
+
+When processing is actually required, use the standalone public Rust CLI. For
+an existing Margins session, it resolves every registered segment, applies
+global offsets, preserves stereo mic/system channels, writes transcript JSON,
+and produces the aligned timeline:
 
 ```bash
 margins process "<session-name>" [--speakers N]
@@ -222,207 +240,41 @@ This produces the aligned timeline. In the output, `ch0` = mic (the local user),
 
 ## Phase II — Distillation
 
-### Step 4: Memo-guided analysis
+Before drafting, read and apply the shared interpretation rules in `skills/margins/distillation-core.md`. That file is the single source of truth for memo weighting, both-speaker capture, attribution audit, vault evidence, frontmatter matching, people enrichment, template selection, grounding markers, confidence/provenance, and writing style. Do not restate or fork those rules here.
 
-**Source of truth: the full aligned transcript.** Draw the substance of the note from `<margins-dir>/<session-name>_aligned.md` — the complete both-channel timeline. The memo is the *attention signal* that sets priority, not the body of the note. Build the note from the aligned transcript and let the memo decide what surfaces first; do not invert this and reconstruct the conversation from memo lines alone.
+### Step 4: Host-specific evidence setup
 
-If a lighter `_capture_context.md` sidecar is also present (produced by the live worker during desktop capture), treat it as secondary. The live capture context can be lopsided: the live worker sometimes commits only the local mic channel or just the tail of the conversation, so it drops the remote speaker and most of the discussion. Relying on it produces a thin, one-sided note that can even get key points backwards. **If the aligned transcript is materially more complete than the capture context — more entries, both channels present, earlier coverage — distill from the aligned transcript and use the capture context only to corroborate.**
+Use the body returned by `margins transcript "<session-id>"` as the complete
+transcript source. This includes a terminal live checkpoint rendered with
+`view="full"`; it does not need a redundant `margins process` pass. If the CLI
+falls back to an `_aligned.md` file, that body remains usable but can omit
+stretches where no memo was taken. If a desktop `_capture_context.md` sidecar is
+present, pass it through the core's evidence-priority rule rather than treating
+it as authoritative.
 
-1. **Extract topics from memo lines first.** Each memo line marks a moment the user chose to note. Classify each line:
-   - **Decision** — a choice was made ("decided on JWT")
-   - **Action item** — a commitment or next step ("draft RFC by Friday")
-   - **Insight** — a realization or interesting framing ("the real bottleneck is onboarding, not retention")
-   - **Tension** — a disagreement or unresolved question ("revisited auth approach")
-   - **Question** — something to follow up on
-   - **Observation** — neutral notation of what's being discussed
+If diarization was used and speaker labels are still generic, present a short sample from each channel and ask the user to label them before drafting.
 
-2. **Edited memos signal reconsideration.** A memo line followed by `*[edited at MM:SS]*` means the user came back to revise it at that later timestamp. This indicates the topic was important enough to revisit. Weight these higher.
+### Step 5: Vault search
 
-3. **Extract topics from un-noted transcript.** Scan the transcript for significant topics that the user did _not_ memo. These are secondary — the user may have chosen not to note them for a reason, or they may have been too absorbed to write.
+Run vault search using the CLI and apply the core's vault-evidence rules. Treat search as supporting evidence, not a prerequisite.
 
-   **Capture both participants, not just the local user.** The remote speaker (ch1) often carries the most useful content: pointers to specific people or resources, proposed solutions, scope decisions, reframes of the problem, and emotional or relational moves like reassurance or an offer to help. Pull these from the aligned transcript by channel. A good test: a reader should be able to tell from the note what each person actually contributed, named specifically — not a blurred summary of "the conversation."
-
-   **Separate what was said from what the user privately felt.** The memo can record the user's in-the-moment anxiety, intent, or second-guessing, which may diverge from what was actually voiced in the room. Attribute things to the transcript when they were said aloud and to the memo when they were the user's private processing. Do not conflate the two.
-
-   **Audit speaker attribution before drafting.** List the people from session settings/frontmatter, the names mentioned in the transcript, and any absent third parties. Attribute channel turns only to configured or transcript-evidenced participants. If a mentioned person is only someone to coordinate with later, keep them out of speaker attribution and mark uncertainty instead of guessing.
-
-   **Do not drop once-mentioned failure modes.** For each participant, list every failure mode, risk, or negative-space concern they named, including ones mentioned only once or as an margins. These often carry the scoping value of the call and should appear in `Tensions`, `What emerged`, or action items when relevant.
-
-4. **Include un-timestamped memo/reflection lines.** Lines without timestamps, especially lines written after the timed memo stream, are still part of the user's attention signal. They often contain the second-order interpretation the user was working out while listening. Classify them too, and weight charged language highly.
-
-5. **Look for anomalous memo signals.** Identify memo lines that do not fit the obvious transcript template. These may reveal a deeper arc than the transcript's surface category suggests.
-
-6. **Detect missed openings.** If memo lines or later reflections suggest uncertainty, floundering, hesitation, “what should I ask,” or internal analysis that did not become a live question, capture that as a first-class signal. The note may need a section such as `Missed openings`, `Questions I held internally`, or `Follow-up questions to ask next time`.
-
-7. **Detect pivot/reframe turns.** Surface any moment where a participant changes the frame of the work: "not ready", "not complete", "no runbook", "maturity gap", "this is the real problem", "we should not optimize that yet", or similar. Treat these as candidate section anchors, not incidental details.
-
-8. **Build a prioritized topic list.** Memo-marked topics first (ordered by classification weight: decisions > action items > insights > tensions > questions > observations), then anomalous/deeper-arc topics, then significant un-noted transcript topics.
-
-### Step 5: Enzyme vault search
-
-Connect the conversation to existing vault thinking.
-
-Treat vault search as supporting evidence, not as a prerequisite for writing the
-note. If Enzyme is unavailable, uninitialized, or too thin to return useful
-connections, continue from the memo and transcript and say nothing visible about
-the failed mechanism in the saved note.
-
-#### Phase A: Explore the vault
-
-Run a bounded Petri pass first, using a conversation-specific query from the
-memo and transcript:
+For 2-3 conversation-specific queries, run:
 
 ```bash
-enzyme petri --query "specific query"
+margins recall "specific query"
 ```
 
-This returns the **slate** — trending entities with catalysts that represent
-where the vault has already found language for related things. Use the slate to
-calibrate search queries: if the transcript discusses "knowledge management
-tools" but the vault uses "pkm" or "tool-thinking", reach for the vault's
-language. Keep this calibration narrow; do not repaint the whole vault just to
-draft one note. (If an Enzyme MCP server is available instead of the CLI,
-`mcp__enzyme__start_exploring_vault` is the equivalent fallback.)
+Read the root `status` attribute. `status="ok"` means real results. A self-closing `status="thin"` or any `off`, `no_vault`, `degraded`, or `unavailable` status means search should not shape the note; fall back to the memo/transcript and targeted Grep for concrete anchors. Ignore diagnostic stderr in the saved note.
 
-#### Phase B: Search for connections
+Use Grep only for concrete anchors such as existing people links, tags, companies, proper nouns, wikilinks, or note titles.
 
-Use **two search strategies**:
-
-**Structured search (Grep)** — for concrete anchors that exist verbatim in the vault:
-
-- People mentioned: `[[Person Name]]`
-- Tags from the slate that match transcript topics: `#pkm`, `#ai-ux`
-- Companies or proper nouns mentioned in the conversation
-- Wikilinks or note titles
-
-Run Grep for each concrete anchor. Prioritize anchors that appear near memo-marked topics.
-
-**Semantic search** — for themes and concepts without a concrete anchor:
-
-- Formulate 2-3 queries from the prioritized topic list (Step 4), using the vault's vocabulary where possible
-- Focus on memo-marked topics first, especially anomalous or emotionally charged memo language, then significant un-noted topics
-- At least one query should come from the surprising/deeper memo signal rather than the obvious surface topic
-- Queries should be substantive and specific, drawn from actual conversation content
-
-**Good queries** (drawn from specific themes, calibrated to vault language):
-
-- "happenstance interfaces and serendipity in knowledge tools"
-- "creative tool vs consumer tool positioning"
-- "behavioral graph as enabler business"
-
-**Bad queries** (generic):
-
-- "meeting notes"
-- "conversation summary"
-- "knowledge management"
-
-For each query, run `enzyme catalyze "specific query" --limit 5`. Use only supported Enzyme CLI arguments:
-
-```bash
-enzyme petri --query "specific query"
-enzyme catalyze "specific query" --limit 5
-```
-
-Do **not** run unqueried whole-vault `enzyme petri` during Margins note
-distillation. Do **not** pass `--limit`, `--top`, or `--catalyst-budget` to
-`enzyme petri`. Do not use unsupported flags such as `--no-guide`,
-`--catalysts-per-entity`, or `--threshold`. (If an Enzyme MCP server is
-available instead of the CLI, `mcp__enzyme__semantic_search` with `result_limit:
-5` is the equivalent fallback.)
-
-#### Phase C: Read and collect
-
-After both structured and semantic results come back:
-
-- Read the top 3-5 most relevant notes
-- Note the **frontmatter schema** of those notes: which keys appear (e.g. `created`, `tags`, `people`, `type`, `aliases`), their order, and whether values use `[[wikilinks]]` or plain strings. Match this exact key set and ordering in the output note's frontmatter rather than imposing Margins's default keys.
-- If an existing note or reference note for the same session is supplied, its frontmatter schema wins over broader related-note schemas.
-- Note **existing tags** that appear in those notes (for use in the output — never invent tags)
-- Note **people links** (`[[Person Name]]`) that appear
-- Note **connections** between the transcript content and vault content — these become citations in the draft
+Read the top 3-5 most relevant notes, collect existing tags and confirmed wikilinks, and model frontmatter from an existing same-session note first or the closest relevant notes otherwise.
 
 ### Step 6: Template + draft
 
-1. **Select and load template** from the bundle (`$CLAUDE_PLUGIN_ROOT/skills/margins/templates/`), which is the source of truth. For each template, if `<margins-dir>/templates/<name>.md` exists it is an explicit user override and takes precedence; otherwise load the bundled file. Never copy the bundle into `<margins-dir>/templates/` — read the bundle directly so updates always apply.
-   - `1on1-idea-exchange.md` — default for most 1:1 conversations (idea exchange, catch-ups, brainstorms)
-   - `discovery-call.md` — client/prospect conversations focused on needs, fit, and next steps
-   - `group-conversation.md` — 3+ participants where tracking who thinks what matters
-   - `design-scoping-session.md` — architecture, design, or technical scoping sessions (1:1 or group) where the value is the *shape of the problem and the concrete building blocks*, not the texture of the exchange. Use when the conversation produced conclusions that need to survive being disagreed with later — lead with the spine, extract primitives with confidence levels, attribute provenance, make ownership legible.
-   - `talk-reflection.md` — sermons, lectures, talks, or any session where the user is listening and reflecting, not conversing. The memo captures their thinking in response to a speaker.
+Load templates from `$CLAUDE_PLUGIN_ROOT/skills/margins/templates/`, with `<margins-dir>/templates/<name>.md` honored only as an explicit per-template user override. Never copy or auto-seed bundled templates into `<margins-dir>/templates/`.
 
-   Choose based on the memo and transcript content. If unclear, default to `1on1-idea-exchange`. Note that `design-scoping-session` is orthogonal to headcount — a design session can be 1:1 or a group; pick it over `group-conversation` when the design substance matters more than who-thinks-what.
-
-2. **Generate draft** following these principles:
-
-   **Topic ordering**: Use the memo-weighted priority from Step 4. Decisions and action items surface first, then insights and tensions, then anomalous/deeper-arc memo topics, then un-noted topics. This reflects what the user actually cared about during the conversation.
-
-   **Second-pass frame:** Before drafting, write a one-sentence answer for yourself: “Beyond the surface topic, this is really about…” If that sentence only restates the transcript category, think again using the anomalous memo lines and Enzyme results.
-
-   **Reframe check:** Before drafting, identify the strongest turn where someone changed the frame of the work. If the call moved from "finish the thing" to "make a handoffable version", from "debug the feature" to "define the failure mode", or from "extend scope" to "clarify maturity/runbook gaps", give that turn visible weight.
-
-   **Content principles:**
-   - Preserve specifics over generic summary: concrete experiments and their results, named architecture or implementation details, and direct-ish quotes for pivotal moments. Use the participants' actual words.
-   - **Distinguish what was decided from what stayed open.** State decisions that were actually made as settled, and keep unresolved questions or deferred choices in their own thread (`Tensions and open threads` or similar). Do not present an open question as a conclusion, or bury a real decision in hedged language.
-   - **Account for both speakers.** When the remote participant proposed a solution, named a person or resource, made a scope call, reframed the problem, or offered reassurance, name that contribution specifically rather than folding it into a generic recap.
-   - Reconstruct fragmented speech-to-text into intended meaning; flag uncertain reconstructions with [reconstructed]
-   - Weave in vault context as natural `[[wikilink]]` citations where connections exist
-   - Populate frontmatter with tags extracted from Enzyme results only, and grep-confirm each emitted tag before writing (never invent tags)
-   - Frontmatter keys and ordering must match the existing same-session note if one was supplied; otherwise match the vault notes read in Step 5 Phase C. Only fall back to `created` / `tags` / `people` defaults when no existing vault note was available to model from.
-   - Preserve people/attendees from session metadata and source memo/note frontmatter; add them to the `people:` field using `[[Name]]` format, and merge any transcript-evidenced people without dropping supplied names
-   - When the conversation names a project, company, tool, or topic that already has a note in the vault (confirmed via grep/Enzyme in Step 5), wikilink the first in-body mention as `[[Existing Note Title]]`. Only link to notes you confirmed exist — never invent a wikilink target.
-   - Consolidate action items. Every commitment, next step, owner, and deadline mentioned anywhere in the conversation goes into one final `### Action items` section as a checkbox list (`- [ ] ...`). Do not scatter action items across thematic sections.
-   - Skip pleasantries, logistics, and small talk unless they contained real content
-   - Prioritize specificity over comprehensiveness — five vivid points beat fifteen generic bullets
-
-   **Writing style:**
-   Richness comes from specific, transcript-grounded detail, not from more words. Keep the existing style rules below — they make the specifics land:
-   - Direct statements over contrast constructions (no "doesn't X, but Y" patterns)
-   - Use em dashes sparingly
-   - No rhetorical questions as transitions
-   - Avoid AI-typical phrases: "disappears into the background", "perhaps the better question is", "conceived as"
-   - Active voice, concrete language, varied sentence construction
-
-   **Citation integration:**
-   - Reference vault notes naturally: `as explored in [[note title]]` or `connects to [[note title]]`
-   - Use block embeds `![[file#^block-id]]` only when the source has explicit block IDs and the quote is concise and directly relevant
-   - Don't force connections — only cite where the link genuinely enriches the note. For genuinely novel concepts with no vault note, do not invent a wikilink target.
-
-   **Work/scoping-call evidence:**
-   For technical, product, client, sales, or collaboration calls, make the note useful as a future scoping artifact. Before finalizing, check whether the draft includes:
-   - concrete work items, product surfaces, features, or implementation tasks mentioned
-   - examples, screens, flows, data sources, tools, repos, or integrations named in the transcript
-   - open implementation questions and risks
-   - asks made by the other person
-   - next steps proposed by the user
-   - enough transcript-grounded detail to scope follow-up work without re-reading the full transcript
-
-   **Missed-opening / question-capture section:**
-   If the memo suggests the user was internally processing instead of asking live questions, add a compact section capturing:
-   - questions the user seemed to hold internally
-   - moments where a sharper external question could have changed the conversation
-   - follow-up questions to ask in the next call
-     Do this without turning every note into a coaching note; include it only when the memo/transcript supports it.
-
-### Desktop streaming / grounding marker contract
-
-When running inside Margins Desktop or any renderer that supports grounding markers:
-
-- Stream only user-facing final-note Markdown plus hidden grounding comments. Never stream private reasoning.
-- Use memo IDs as attention and grounding signals, not as the final note order. Assign IDs by memo line order: `m001`, `m002`, `m003`, ... including un-timestamped memo/reflection lines when present.
-- Place a marker immediately before the section or paragraph that accounts for those memo IDs:
-
-  ```md
-  <!--MARGINS:USE {"section_id":"weekly-status","memo_ids":["m002"],"mode":"absorbed","disposition":"folded_into_section","transcript_refs":[{"start_secs":64,"end_secs":79,"quote":"weekly status ritual"}],"vault_refs":["Operating cadence.md"]}-->
-
-  ## Weekly status ritual
-  ```
-
-- Supported marker for v1: `MARGINS:USE`. `MARGINS:SOURCES` may be used only if it follows the same line-oriented HTML-comment shape and is safe to strip.
-- Use `mode`/`disposition` language such as `absorbed`, `accounted_for`, `folded_into_section`, `folded_into_action_item`, or `not_included`.
-- Memo lines are attention signals. Do not force verbatim memo text into the note unless the phrasing itself matters.
-- The visible note must remain clean Markdown if all `<!--MARGINS:...-->` comments are stripped.
-- Do **not** add a visible `Grounding`, `Sources`, or memo-accounting section to the note. The renderer uses hidden markers to account for memo lines; visible source UI is handled by the desktop app.
-- Final save should pass clean Markdown to `margins_save_note` and include optional `grounding` metadata when the tool/backend supports it.
+Choose the template using the catalog in `skills/margins/distillation-core.md`, draft according to the shared rules, and preserve clean Markdown if grounding comments are stripped.
 
 ### Step 7: Review
 
@@ -438,14 +290,25 @@ Apply revisions if requested. Iterate until the user is satisfied.
 
 Once approved:
 
+**Where the note lands.** Margins uses a git-style folder model: the vault root
+is the folder that *contains* the `.margins/` directory for this session (walk
+up from the session's `.margins/` path) — this is the folder where the user ran
+`margins new`. The distilled note lands in that vault root, next to the session.
+Never leave a note stranded inside `.margins/` — that directory is Margins'
+internal store, not a note destination. Never create `meetings/`, `people/`, or
+any other folder; if a `people/` (or similar) folder already exists, read it for
+context only.
+
 1. Read `saved_note_path` from `margins transcript "<session-id>"`. If it exists,
    read that note first. Prefer targeted edits or replacing the reviewed
    distillation section; do not discard user edits unless the user explicitly
    approved full replacement. Update frontmatter `tags`/`people` fields from
-   Enzyme results.
-2. If `saved_note_path` is absent, fall back to creating the note via
-   `./scripts/new-note.sh` (run from `$OBSIDIAN_VAULT/`), then populate it with
-   the approved content using the Edit tool.
+   recall results.
+2. If `saved_note_path` is absent, create the note in the vault root
+   (`<vault>/[timestamp] [descriptive name].md`) with the Edit tool. If — and
+   only if — you cannot resolve a vault root at all (no `.margins/` parent folder
+   is discoverable), ask the user once for the destination instead of writing
+   into `.margins/`.
 3. For a newly created, unregistered note, rename with a descriptive suffix
    following vault naming conventions:
    - Keep timestamp prefix
@@ -453,7 +316,7 @@ Once approved:
    - Pattern for conversations: `[timestamp] chat with [person] about [topic].md`
 
 ```bash
-mv "$OBSIDIAN_VAULT/inbox/[old-filename].md" "$OBSIDIAN_VAULT/inbox/[old-filename-prefix] [descriptive name].md"
+mv "<vault>/[old-filename].md" "<vault>/[old-filename-prefix] [descriptive name].md"
 ```
 
 4. Do not rename an already registered saved note or update Margins storage by
@@ -489,12 +352,7 @@ Many transcripts come from speech-to-text and contain fragmented, garbled text. 
 
 ## Confidence calibration and provenance
 
-These apply to any substantive session, and are the core discipline of `design-scoping-session`. They can be layered onto any template.
-
-- **Separate social convergence from concept strength.** A thing everyone nodded at is not the same as a thing that will hold. When a session produced conclusions, mark which you actually trust — `load-bearing` (build on it), `plausible` (real shape, not yet a decision), `soft` (a placeholder for a decision nobody made: a named-but-undefined concept, a metaphor that isn't yet a mapping, positioning doing no design work). Do not let a tidy synthesis launder weak ideas into apparent decisions. A note that says "here's how our ideas combined" is usually hiding this failure.
-- **Attribute provenance.** For substantive points, name who raised each one. In a private note this records where thinking came from; in anything shared it tells a reader who to follow up with and keeps conclusions from reading as if they appeared from nowhere.
-- **Find the spine before drafting.** Beyond the surface topics, what is the one load-bearing claim that reorganizes everything else? If several surface problems turn out to be the same problem, that collapse is usually the most valuable output — lead with it.
-- **Make ownership legible, including `TBD`.** Name contested boundaries rather than smoothing them over.
+Use the shared rules in `skills/margins/distillation-core.md`. Keep this section out of sync by design: the core file owns the policy.
 
 ## Optional: shareable derivative (private + shared split)
 

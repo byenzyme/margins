@@ -1,7 +1,10 @@
 pub mod artifacts;
+pub mod capabilities;
 pub mod capture;
+pub mod guide;
 pub mod import;
 pub mod process;
 pub mod projects;
+pub mod recall;
 pub mod sessions;
 pub mod transcript;

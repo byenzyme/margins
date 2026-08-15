@@ -1,11 +1,36 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(any(test, feature = "test-support"))]
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-use crate::resources::{
-    ENZYME_WORKSPACE_SETUP_SKILL as WORKSPACE_SETUP_SKILL, MARGINS_WORKSPACE_SETUP_SKILL,
-};
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TEST_SETTINGS_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+/// Scoped settings-path injection for tests that exercise real registry I/O.
+/// This is unavailable in production builds and affects only the current test
+/// thread, so parallel tests cannot redirect one another's settings.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub struct TestSettingsPathOverride(Option<PathBuf>);
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for TestSettingsPathOverride {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        TEST_SETTINGS_PATH.with(|path| *path.borrow_mut() = previous);
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn override_settings_path_for_test(path: PathBuf) -> TestSettingsPathOverride {
+    let previous = TEST_SETTINGS_PATH.with(|current| current.replace(Some(path)));
+    TestSettingsPathOverride(previous)
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ProjectSource {
@@ -48,7 +73,168 @@ pub fn inbox_dir(project: &ResolvedProject) -> PathBuf {
     project.root_dir.join(project.project.inbox_folder.trim())
 }
 
+/// Walk UP from `cwd` looking for a directory that contains `.margins/`,
+/// exactly like git discovers `.git`. Returns the vault root (the folder that
+/// *contains* `.margins/`), never `.margins/` itself. Purely read-only: it
+/// never creates anything.
+pub fn discover_vault_root(cwd: &Path) -> Option<PathBuf> {
+    let mut dir = Some(cwd);
+    while let Some(current) = dir {
+        if current.join(".margins").is_dir() {
+            return Some(current.to_path_buf());
+        }
+        dir = current.parent();
+    }
+    None
+}
+
+/// Resolve the vault for a session command, git-style. The model is simply:
+/// record in the current folder.
+///
+/// * An explicit `selector` resolves through the registry.
+/// * Otherwise, walk up from `cwd` for a `.margins/` folder — the root wins over
+///   cwd so a session and its distilled note always belong to the vault root and
+///   the corpus is never split by recording from a subfolder.
+/// * A one-off macOS launcher temp cwd instead uses the configured stable vault;
+///   selecting that temp project explicitly remains authoritative.
+/// * Otherwise, the current folder *is* the vault: return `cwd` as the root.
+///   This never creates anything; recording commands create `.margins/` in cwd
+///   and register it silently via [`register_vault_silently`].
+pub fn resolve_vault(selector: Option<&str>, cwd: &Path) -> Result<ResolvedProject> {
+    if let Some(selector) = selector.map(str::trim).filter(|s| !s.is_empty()) {
+        return resolve_project(Some(selector));
+    }
+
+    let discovered = discover_vault_root(cwd);
+    if is_ephemeral_launcher_dir(cwd) {
+        if let Some(project) = configured_project_for_ephemeral_launcher() {
+            return Ok(resolve_project_paths(project));
+        }
+    }
+
+    let root = discovered.unwrap_or_else(|| cwd.to_path_buf());
+    // Prefer folder config from a registered entry for this root so a known
+    // vault honors a custom inbox/people layout; otherwise derive from the folder.
+    let project = registered_project_for_root(&root).unwrap_or_else(|| {
+        default_project_source(
+            &root.to_string_lossy(),
+            &default_inbox_folder(),
+            &default_people_folder(),
+        )
+    });
+    let project = ProjectSource {
+        path: root.to_string_lossy().to_string(),
+        ..project
+    };
+    Ok(resolve_project_paths(project))
+}
+
+/// Agent/plugin launchers sometimes materialize a process in a one-off
+/// `tempfile` directory even though the surrounding session belongs to a
+/// configured vault. Limit this exception to the launcher directory itself
+/// (not arbitrary descendants of the system temp directory), so ordinary
+/// record-in-current-folder behavior remains unchanged.
+fn is_ephemeral_launcher_dir(path: &Path) -> bool {
+    let path = canonicalize_for_compare(path);
+    let temp = canonicalize_for_compare(&std::env::temp_dir());
+    let Ok(relative) = path.strip_prefix(temp) else {
+        return false;
+    };
+    let mut components = relative.components();
+    let Some(std::path::Component::Normal(name)) = components.next() else {
+        return false;
+    };
+    components.next().is_none()
+        && name
+            .to_str()
+            .is_some_and(|name| name.starts_with(".tmp") || name.starts_with("tmp."))
+}
+
+/// Prefer the explicitly active registered project for an ephemeral launcher.
+/// If an older buggy capture already made the temporary directory active,
+/// recover the stable legacy `vault_path` entry instead.
+fn configured_project_for_ephemeral_launcher() -> Option<ProjectSource> {
+    let settings = load_project_settings().ok()?;
+    let projects = normalize_projects(&settings);
+    let usable = |project: &&ProjectSource| {
+        let root = PathBuf::from(expand_tilde(&project.path));
+        root.is_dir() && !is_ephemeral_launcher_dir(&root)
+    };
+
+    settings
+        .active_project_id
+        .as_deref()
+        .and_then(|id| {
+            projects
+                .iter()
+                .find(|project| project.id == id && usable(project))
+        })
+        .or_else(|| {
+            let configured = settings.vault_path.as_deref()?;
+            let target = canonicalize_for_compare(&PathBuf::from(expand_tilde(configured)));
+            projects.iter().find(|project| {
+                usable(project)
+                    && canonicalize_for_compare(&PathBuf::from(expand_tilde(&project.path)))
+                        == target
+            })
+        })
+        .cloned()
+}
+
+/// Find a registered project whose canonical root matches `root`, if any.
+fn registered_project_for_root(root: &Path) -> Option<ProjectSource> {
+    let settings = load_project_settings().ok()?;
+    let target = canonicalize_for_compare(root);
+    normalize_projects(&settings).into_iter().find(|project| {
+        canonicalize_for_compare(&PathBuf::from(expand_tilde(&project.path))) == target
+    })
+}
+
+/// Best-effort, silent registration of a vault root in settings.json so desktop
+/// and `margins recent --all` can enumerate it. Called by recording commands on
+/// first use. No folder names are written (folder layout is the skill's call);
+/// desktop-configured projects with explicit folders are preserved by
+/// [`upsert_project`]. Never announced; failures are swallowed — bookkeeping
+/// must not break recording.
+pub fn register_vault_silently(root: &Path) {
+    let path = root.to_string_lossy();
+    let _ = upsert_project_inner(
+        &UpsertProject {
+            path: &path,
+            name: None,
+            inbox_folder: None,
+            people_folder: None,
+            readiness: Some("ready"),
+            id_hint: None,
+        },
+        false,
+    );
+}
+
+/// Establish a Margins vault at or above `cwd`, git-style, and return its root.
+///
+/// The shared establisher behind `margins init` (establish-without-recording)
+/// and the recording commands (`margins new`). It honors the nesting guard: if
+/// an existing vault is found by walking up from `cwd`, that root is returned
+/// unchanged — a new `.margins/` is never nested inside an existing vault.
+/// Otherwise `<cwd>/.margins/` is created and the vault is registered silently.
+pub fn ensure_vault(cwd: &Path) -> Result<PathBuf> {
+    if let Some(root) = discover_vault_root(cwd) {
+        // Already inside a vault — never nest. Keep the registry current.
+        register_vault_silently(&root);
+        return Ok(root);
+    }
+    std::fs::create_dir_all(cwd.join(".margins"))
+        .with_context(|| format!("Could not create {}", cwd.join(".margins").display()))?;
+    register_vault_silently(cwd);
+    Ok(cwd.to_path_buf())
+}
+
 pub fn settings_path() -> PathBuf {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(path) = TEST_SETTINGS_PATH.with(|path| path.borrow().clone()) {
+        return path;
+    }
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(profile_slug())
@@ -69,7 +255,7 @@ pub fn resolve_project(selector: Option<&str>) -> Result<ResolvedProject> {
     let project = if let Some(selector) = selector.map(str::trim).filter(|s| !s.is_empty()) {
         find_project(&projects, selector).with_context(|| {
             format!(
-                "Unknown Margins project '{selector}'. Run `margins project list` and choose a configured project."
+                "Unknown Margins vault '{selector}'. Pass the vault folder path with `--project`, or cd into the vault and run `margins init`."
             )
         })?
     } else {
@@ -78,7 +264,7 @@ pub fn resolve_project(selector: Option<&str>) -> Result<ResolvedProject> {
             .and_then(|id| projects.iter().find(|project| project.id == id))
             .or_else(|| projects.first())
             .cloned()
-            .context("No Margins projects are configured. Open Margins Desktop and choose a project folder first.")?
+            .context("No Margins vault found. Run `margins init` in the folder you want to use, or `margins new` to start recording.")?
     };
     Ok(resolve_project_paths(project))
 }
@@ -94,7 +280,7 @@ pub fn set_active_project(selector: &str) -> Result<ResolvedProject> {
     let projects = normalize_projects(&settings);
     let project = find_project(&projects, selector).with_context(|| {
         format!(
-            "Unknown Margins project '{selector}'. `margins project use` only accepts projects already configured in Margins Desktop."
+            "Unknown Margins vault '{selector}'. Pass a folder path, or run `margins init` in the vault."
         )
     })?;
 
@@ -409,6 +595,10 @@ impl UpsertOutcome {
 /// **not** create `.margins/` — callers that need that directory (e.g.
 /// [`add_project`]) are responsible for creating it.
 pub fn upsert_project(input: &UpsertProject<'_>) -> Result<UpsertOutcome> {
+    upsert_project_inner(input, true)
+}
+
+fn upsert_project_inner(input: &UpsertProject<'_>, make_active: bool) -> Result<UpsertOutcome> {
     let expanded = expand_tilde(input.path.trim());
     let root = PathBuf::from(&expanded);
     if !root.exists() {
@@ -435,16 +625,17 @@ pub fn upsert_project(input: &UpsertProject<'_>) -> Result<UpsertOutcome> {
         .map(str::to_string)
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| project_name_from_path(&canonical_str));
+    // Folders are OPTIONAL: a fresh vault leaves them unset so the distillation
+    // skill can decide adaptively later. Only write a folder name when the
+    // caller actually supplies one; on update, absent means "leave as-is".
     let inbox = input
         .inbox_folder
         .map(str::to_string)
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(default_inbox_folder);
+        .filter(|s| !s.trim().is_empty());
     let people = input
         .people_folder
         .map(str::to_string)
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(default_people_folder);
+        .filter(|s| !s.trim().is_empty());
     let readiness = input
         .readiness
         .map(str::to_string)
@@ -475,14 +666,18 @@ pub fn upsert_project(input: &UpsertProject<'_>) -> Result<UpsertOutcome> {
         .as_object_mut()
         .context("Margins settings root is not a JSON object")?;
 
-    let new_entry = serde_json::json!({
-        "id": id,
-        "name": proj_name,
-        "path": canonical_str,
-        "inbox_folder": inbox,
-        "people_folder": people,
-        "readiness": readiness
-    });
+    let mut new_entry_map = serde_json::Map::new();
+    new_entry_map.insert("id".to_string(), Value::String(id.to_string()));
+    new_entry_map.insert("name".to_string(), Value::String(proj_name.clone()));
+    new_entry_map.insert("path".to_string(), Value::String(canonical_str.clone()));
+    if let Some(inbox) = &inbox {
+        new_entry_map.insert("inbox_folder".to_string(), Value::String(inbox.clone()));
+    }
+    if let Some(people) = &people {
+        new_entry_map.insert("people_folder".to_string(), Value::String(people.clone()));
+    }
+    new_entry_map.insert("readiness".to_string(), Value::String(readiness.clone()));
+    let new_entry = Value::Object(new_entry_map);
 
     let projects_arr = obj
         .entry("projects")
@@ -506,13 +701,33 @@ pub fn upsert_project(input: &UpsertProject<'_>) -> Result<UpsertOutcome> {
             .unwrap_or(false)
     });
 
+    // Folder values used to build the returned ResolvedProject: prefer what the
+    // caller supplied, else the already-stored value, else the resolve-time
+    // default. This never *writes* a default folder name into the registration.
+    let mut stored_inbox: Option<String> = None;
+    let mut stored_people: Option<String> = None;
     let (active_id, was_updated) = if let Some(idx) = existing_idx {
+        stored_inbox = projects_arr[idx]
+            .get("inbox_folder")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string);
+        stored_people = projects_arr[idx]
+            .get("people_folder")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string);
         // Update mutable fields in place; preserve the stored id and path spelling
-        // so the rest of the app's references continue to resolve.
+        // so the rest of the app's references continue to resolve. Folder names
+        // are only overwritten when the caller supplies one.
         if let Some(entry_obj) = projects_arr[idx].as_object_mut() {
             entry_obj.insert("name".to_string(), Value::String(proj_name.clone()));
-            entry_obj.insert("inbox_folder".to_string(), Value::String(inbox.clone()));
-            entry_obj.insert("people_folder".to_string(), Value::String(people.clone()));
+            if let Some(inbox) = &inbox {
+                entry_obj.insert("inbox_folder".to_string(), Value::String(inbox.clone()));
+            }
+            if let Some(people) = &people {
+                entry_obj.insert("people_folder".to_string(), Value::String(people.clone()));
+            }
             entry_obj.insert("readiness".to_string(), Value::String(readiness.clone()));
         }
         let stored_id = projects_arr[idx]
@@ -526,10 +741,12 @@ pub fn upsert_project(input: &UpsertProject<'_>) -> Result<UpsertOutcome> {
         (id.to_string(), false)
     };
 
-    obj.insert(
-        "active_project_id".to_string(),
-        Value::String(active_id.clone()),
-    );
+    if make_active {
+        obj.insert(
+            "active_project_id".to_string(),
+            Value::String(active_id.clone()),
+        );
+    }
 
     // Atomic write (tmp + rename) so the app's settings watcher never sees a
     // truncated file mid-write.
@@ -552,8 +769,10 @@ pub fn upsert_project(input: &UpsertProject<'_>) -> Result<UpsertOutcome> {
         id: active_id,
         name: proj_name,
         path: canonical_str,
-        inbox_folder: inbox,
-        people_folder: people,
+        inbox_folder: inbox.or(stored_inbox).unwrap_or_else(default_inbox_folder),
+        people_folder: people
+            .or(stored_people)
+            .unwrap_or_else(default_people_folder),
         readiness,
     };
     let resolved = resolve_project_paths(source);
@@ -591,93 +810,6 @@ pub fn add_project(
     Ok(match outcome {
         UpsertOutcome::Inserted(r) | UpsertOutcome::Updated(r) => r,
     })
-}
-
-/// Write the local setup skills into `<root>/.margins/skills/`.
-/// The generic Enzyme skill is mirrored from enzyme-rust; the Margins wrapper
-/// owns Desktop-specific project, binary, and destination language.
-pub fn install_local_setup_skill(root: &Path) -> Result<PathBuf> {
-    let skills_root = root.join(".margins").join("skills");
-    let enzyme_destination = write_local_skill(
-        &skills_root,
-        "enzyme-workspace-setup",
-        WORKSPACE_SETUP_SKILL,
-    )?;
-    write_local_skill(
-        &skills_root,
-        "margins-workspace-setup",
-        MARGINS_WORKSPACE_SETUP_SKILL,
-    )?;
-    Ok(enzyme_destination)
-}
-
-fn write_local_skill(skills_root: &Path, name: &str, content: &str) -> Result<PathBuf> {
-    let skill_dir = skills_root.join(name);
-    std::fs::create_dir_all(&skill_dir)
-        .with_context(|| format!("Could not create skill directory {}", skill_dir.display()))?;
-    let destination = skill_dir.join("SKILL.md");
-    std::fs::write(&destination, content)
-        .with_context(|| format!("Could not write skill to {}", destination.display()))?;
-    Ok(destination)
-}
-
-/// Run `enzyme -p <root> init`, searching PATH then /opt/homebrew/bin/enzyme
-/// then ~/.local/bin/enzyme.  Returns an error if the binary is missing or
-/// exits non-zero; never panics.
-pub fn init_enzyme(root: &Path) -> Result<()> {
-    let enzyme_bin = find_enzyme_binary().ok_or_else(|| {
-        anyhow::anyhow!(
-            "enzyme binary not found. Install it with `brew install enzyme` or ensure it is on PATH."
-        )
-    })?;
-    let status = std::process::Command::new(&enzyme_bin)
-        .arg("-p")
-        .arg(root)
-        .arg("init")
-        .status()
-        .with_context(|| {
-            format!(
-                "Failed to run {} -p {} init",
-                enzyme_bin.display(),
-                root.display()
-            )
-        })?;
-    if !status.success() {
-        bail!(
-            "`{} -p {} init` exited with status {}",
-            enzyme_bin.display(),
-            root.display(),
-            status
-        );
-    }
-    Ok(())
-}
-
-fn find_enzyme_binary() -> Option<PathBuf> {
-    // 1. PATH
-    if let Ok(output) = std::process::Command::new("which").arg("enzyme").output() {
-        if output.status.success() {
-            let p = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string());
-            if p.exists() {
-                return Some(p);
-            }
-        }
-    }
-    // 2. Common fixed locations
-    for candidate in &["/opt/homebrew/bin/enzyme", "/usr/local/bin/enzyme"] {
-        let p = PathBuf::from(candidate);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    // 3. ~/.local/bin/enzyme
-    if let Some(home) = dirs::home_dir() {
-        let p = home.join(".local/bin/enzyme");
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    None
 }
 
 pub fn project_to_xml(project: &ResolvedProject, active: bool) -> String {
@@ -732,54 +864,47 @@ pub fn xml_escape_attr(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    // Serialize tests that mutate MARGINS_PROFILE env var
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Returns the settings.json path for a given profile slug.
-    fn settings_file_for_profile(profile: &str) -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(format!("margins-{profile}"))
-            .join("settings.json")
+    struct ScopedTestSettings {
+        path: PathBuf,
+        _override: TestSettingsPathOverride,
+        _dir: tempfile::TempDir,
     }
 
-    /// Generate a profile name that is safe for profile_slug() (alphanumeric + dash only).
-    fn unique_test_profile() -> String {
-        // Use thread id as a stable-per-test but unique identifier
-        let tid = std::thread::current().id();
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_micros();
-        // profile_slug will lowercase and keep alphanumeric/dash/underscore
-        format!("t{:?}-{}", tid, ts)
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() {
-                    c.to_ascii_lowercase()
-                } else {
-                    '-'
-                }
-            })
-            .collect::<String>()
-            .trim_matches('-')
-            .to_string()
+    impl ScopedTestSettings {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            let path_override = override_settings_path_for_test(path.clone());
+            Self {
+                path,
+                _override: path_override,
+                _dir: dir,
+            }
+        }
+    }
+
+    #[test]
+    fn ensure_vault_establishes_without_installing_workspace_setup_skill() {
+        let _settings = ScopedTestSettings::new();
+        let tmp = tempfile::tempdir().unwrap();
+
+        let root = ensure_vault(tmp.path()).unwrap();
+
+        assert_eq!(root, tmp.path());
+        assert!(tmp.path().join(".margins").is_dir());
+        assert!(!tmp.path().join(".margins/skills").exists());
     }
 
     #[test]
     fn add_project_creates_entry_and_preserves_unknown_keys() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let settings = ScopedTestSettings::new();
         let tmp = tempfile::tempdir().unwrap();
         let project_dir = tmp.path().join("myproject");
         std::fs::create_dir_all(&project_dir).unwrap();
 
-        let profile = unique_test_profile();
-        std::env::set_var("MARGINS_PROFILE", &profile);
-
         // Pre-seed a settings.json with an unknown desktop-only key
-        let settings_file = settings_file_for_profile(&profile);
+        let settings_file = &settings.path;
         std::fs::create_dir_all(settings_file.parent().unwrap()).unwrap();
         let seed = serde_json::json!({
             "ai_model": "x",
@@ -809,22 +934,16 @@ mod tests {
         );
         let projects = after["projects"].as_array().unwrap();
         assert_eq!(projects.len(), 1);
-
-        std::env::remove_var("MARGINS_PROFILE");
-        let _ = std::fs::remove_dir_all(settings_file.parent().unwrap());
     }
 
     #[test]
     fn add_project_is_idempotent() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let settings = ScopedTestSettings::new();
         let tmp = tempfile::tempdir().unwrap();
         let project_dir = tmp.path().join("idempotent");
         std::fs::create_dir_all(&project_dir).unwrap();
 
-        let profile = unique_test_profile();
-        std::env::set_var("MARGINS_PROFILE", &profile);
-
-        let settings_file = settings_file_for_profile(&profile);
+        let settings_file = &settings.path;
         std::fs::create_dir_all(settings_file.parent().unwrap()).unwrap();
 
         // First add
@@ -841,44 +960,12 @@ mod tests {
             "add_project should be idempotent (1 entry expected, got {})",
             projects.len()
         );
-
-        std::env::remove_var("MARGINS_PROFILE");
-        let _ = std::fs::remove_dir_all(settings_file.parent().unwrap());
     }
 
     #[test]
     fn add_project_rejects_nonexistent_path() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let profile = unique_test_profile();
-        std::env::set_var("MARGINS_PROFILE", &profile);
-
         let result = add_project("/tmp/__margins_test_nonexistent_path_xyz__", None, None);
         assert!(result.is_err(), "Expected error for non-existent path");
-
-        std::env::remove_var("MARGINS_PROFILE");
-    }
-
-    #[test]
-    fn install_local_setup_skill_writes_skill_md() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dest = install_local_setup_skill(tmp.path()).unwrap();
-        assert!(dest.exists(), "SKILL.md was not written");
-        let content = std::fs::read_to_string(&dest).unwrap();
-        assert_eq!(
-            content, WORKSPACE_SETUP_SKILL,
-            "written enzyme-workspace-setup SKILL.md is not byte-identical to the bundled skill"
-        );
-        let margins_dest = tmp
-            .path()
-            .join(".margins")
-            .join("skills")
-            .join("margins-workspace-setup")
-            .join("SKILL.md");
-        let margins_content = std::fs::read_to_string(&margins_dest).unwrap();
-        assert_eq!(
-            margins_content, MARGINS_WORKSPACE_SETUP_SKILL,
-            "written margins-workspace-setup SKILL.md is not byte-identical to the bundled skill"
-        );
     }
 
     #[test]
@@ -939,5 +1026,222 @@ mod tests {
         assert!(xml.contains("    <path>/tmp/a&amp;b</path>\n"));
         assert!(xml.contains("    <inbox_folder>meetings&gt;calls</inbox_folder>\n"));
         assert!(xml.ends_with("  </project>\n"));
+    }
+
+    #[test]
+    fn discover_vault_root_walks_up_to_dot_margins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("vault");
+        let nested = root.join("a").join("b").join("c");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(root.join(".margins")).unwrap();
+
+        let found = discover_vault_root(&nested).expect("should discover vault by walking up");
+        assert_eq!(
+            found.canonicalize().unwrap(),
+            root.canonicalize().unwrap(),
+            "discovery must return the folder containing .margins, not a child"
+        );
+    }
+
+    #[test]
+    fn discover_vault_root_returns_none_without_dot_margins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("x").join("y");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(
+            discover_vault_root(&nested).is_none(),
+            "no .margins/ anywhere up the tree must resolve to None"
+        );
+    }
+
+    #[test]
+    fn resolve_vault_uses_cwd_when_no_vault_and_creates_nothing() {
+        let _settings = ScopedTestSettings::new();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("plain");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let resolved = resolve_vault(None, &cwd).unwrap();
+        assert_eq!(
+            resolved.root_dir.canonicalize().unwrap(),
+            cwd.canonicalize().unwrap(),
+            "with no vault, the current folder is the vault root"
+        );
+        assert!(
+            !cwd.join(".margins").exists(),
+            "resolve_vault must never create .margins/ itself"
+        );
+    }
+
+    #[test]
+    fn resolve_vault_walks_up_to_root_from_subfolder() {
+        let _settings = ScopedTestSettings::new();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("vault");
+        let sub = root.join("meetings").join("deep");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(root.join(".margins")).unwrap();
+
+        // Recording from a subfolder must resolve to the vault root, not the
+        // subfolder, so the corpus is never split.
+        let resolved = resolve_vault(None, &sub).unwrap();
+        assert_eq!(
+            resolved.root_dir.canonicalize().unwrap(),
+            root.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn resolve_vault_prefers_registered_custom_folders() {
+        let settings = ScopedTestSettings::new();
+        let settings_file = &settings.path;
+        std::fs::create_dir_all(settings_file.parent().unwrap()).unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("myvault");
+        std::fs::create_dir_all(root.join(".margins")).unwrap();
+        // A desktop-configured project with an explicit custom inbox folder.
+        upsert_project(&UpsertProject {
+            path: &root.to_string_lossy(),
+            name: None,
+            inbox_folder: Some("calls"),
+            people_folder: None,
+            readiness: Some("ready"),
+            id_hint: None,
+        })
+        .unwrap();
+
+        let resolved = resolve_vault(None, &root.join("sub")).unwrap();
+        assert_eq!(resolved.project.inbox_folder, "calls");
+        assert_eq!(
+            resolved.root_dir.canonicalize().unwrap(),
+            root.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn resolve_vault_uses_configured_vault_for_ephemeral_launcher_cwd() {
+        let settings = ScopedTestSettings::new();
+        let settings_file = &settings.path;
+        std::fs::create_dir_all(settings_file.parent().unwrap()).unwrap();
+
+        let stable_parent = tempfile::tempdir().unwrap();
+        let stable = stable_parent.path().join("obsidian");
+        std::fs::create_dir_all(stable.join(".margins")).unwrap();
+        let launcher = tempfile::Builder::new()
+            .prefix(".tmp")
+            .tempdir_in(std::env::temp_dir())
+            .unwrap();
+        let stable_path = stable.to_string_lossy();
+        let stable_id = "stable-vault".to_string();
+        let launcher_path = launcher.path().to_string_lossy();
+        let launcher_id = "ephemeral-launcher".to_string();
+        let seed = serde_json::json!({
+            "vault_path": stable_path,
+            // Reproduce the damaged state from the old silent registration:
+            // the temp project became active while vault_path stayed stable.
+            "active_project_id": launcher_id,
+            "projects": [
+                { "id": stable_id, "name": "Obsidian", "path": stable_path, "readiness": "ready" },
+                { "id": launcher_id, "name": "Launcher", "path": launcher_path, "readiness": "ready" }
+            ]
+        });
+        std::fs::write(&settings_file, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+
+        let resolved = resolve_vault(None, launcher.path()).unwrap();
+        assert_eq!(
+            resolved.root_dir.canonicalize().unwrap(),
+            stable.canonicalize().unwrap()
+        );
+
+        // An explicit selector remains authoritative, including for recovery
+        // of sessions captured into an old temporary vault.
+        let explicit = resolve_vault(Some(&launcher_id), launcher.path()).unwrap();
+        assert_eq!(
+            explicit.root_dir.canonicalize().unwrap(),
+            launcher.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn resolve_vault_keeps_normal_unregistered_cwd_semantics() {
+        let _settings = ScopedTestSettings::new();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("ordinary-project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let resolved = resolve_vault(None, &cwd).unwrap();
+        assert_eq!(
+            resolved.root_dir.canonicalize().unwrap(),
+            cwd.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn register_vault_silently_registers_without_folder_names() {
+        let settings = ScopedTestSettings::new();
+        let settings_file = &settings.path;
+        std::fs::create_dir_all(settings_file.parent().unwrap()).unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("vault");
+        std::fs::create_dir_all(root.join(".margins")).unwrap();
+
+        register_vault_silently(&root);
+
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings_file).unwrap()).unwrap();
+        let projects = after["projects"].as_array().unwrap();
+        assert_eq!(projects.len(), 1, "silent registration must add the vault");
+        let entry = &projects[0];
+        assert!(
+            entry.get("inbox_folder").is_none() && entry.get("people_folder").is_none(),
+            "silent registration must not write folder names"
+        );
+    }
+
+    #[test]
+    fn register_vault_silently_preserves_desktop_configured_folders() {
+        let settings = ScopedTestSettings::new();
+        let settings_file = &settings.path;
+        std::fs::create_dir_all(settings_file.parent().unwrap()).unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("vault");
+        std::fs::create_dir_all(root.join(".margins")).unwrap();
+        // Desktop registered explicit folders first.
+        upsert_project(&UpsertProject {
+            path: &root.to_string_lossy(),
+            name: None,
+            inbox_folder: Some("calls"),
+            people_folder: Some("contacts"),
+            readiness: Some("ready"),
+            id_hint: None,
+        })
+        .unwrap();
+        let active_before = serde_json::from_str::<serde_json::Value>(
+            &std::fs::read_to_string(&settings_file).unwrap(),
+        )
+        .unwrap()["active_project_id"]
+            .clone();
+
+        let other = tmp.path().join("other-vault");
+        std::fs::create_dir_all(other.join(".margins")).unwrap();
+
+        // A later `margins new` silently re-registers — must not clobber folders.
+        register_vault_silently(&root);
+        // Registering a capture location is catalog bookkeeping, not a user
+        // request to switch the configured active project.
+        register_vault_silently(&other);
+
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings_file).unwrap()).unwrap();
+        let project = &after["projects"].as_array().unwrap()[0];
+        assert_eq!(project["inbox_folder"].as_str(), Some("calls"));
+        assert_eq!(project["people_folder"].as_str(), Some("contacts"));
+        assert_eq!(after["active_project_id"], active_before);
     }
 }

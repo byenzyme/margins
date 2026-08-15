@@ -2,9 +2,11 @@ use crate::commands::sessions::read_current_session;
 use crate::error::CliError;
 use crate::output::{line, xml_escape_attr, xml_escape_text};
 use crate::services::CliServices;
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Duration, Local};
 use std::io::Write;
 use std::path::Path;
+
+const AUDIO_REPROCESS_WINDOW_DAYS: i64 = 14;
 
 pub fn process_session(
     services: &CliServices,
@@ -45,6 +47,30 @@ pub fn process_session(
         Some(services.diarization.as_ref()),
     )
     .map_err(CliError::from_anyhow)?;
+
+    // Downgrade captured audio artifacts to temporary with a reprocess window,
+    // so artifacts-prune can reclaim storage while still allowing re-processing.
+    // Failures are non-fatal: do not block or fail the process command.
+    let expires_at = (services.clock.now() + Duration::days(AUDIO_REPROCESS_WINDOW_DAYS))
+        .to_rfc3339();
+    if let Ok(artifacts) =
+        margins_store::legacy::list_session_artifacts(&margins_dir, &name)
+    {
+        for artifact in artifacts {
+            if artifact.kind == "audio" && artifact.retention_class == "durable" {
+                let _ = margins_store::legacy::upsert_session_artifact(
+                    &margins_dir,
+                    &artifact.session_name,
+                    "audio",
+                    artifact.ordinal,
+                    &artifact.path,
+                    "temporary",
+                    Some(&expires_at),
+                );
+            }
+        }
+    }
+
     line(
         stdout,
         format_args!(

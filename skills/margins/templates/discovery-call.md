@@ -36,6 +36,10 @@ If discussed: what they're working with, when they need it, any constraints. If 
 
 Your honest read on whether this is a good fit, based on the conversation. What aligns, what doesn't, what would need to be true. This section is for you, not for them.
 
+### Questions to bring forward
+
+Questions, concerns, or open threads to bring into the next conversation. Each should be grounded in what they said, what they did not answer, or what would need to be true for fit.
+
 ### Action items
 
 Consolidate every commitment, next step, and follow-up from anywhere in the conversation into this single section — do not leave action items scattered in earlier sections.

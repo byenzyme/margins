@@ -105,6 +105,9 @@ pub fn run(
 
     std::fs::create_dir_all(&margins_dir)
         .map_err(|error| CliError::new("store_failed", error.to_string()))?;
+    // Silent bookkeeping: register this folder as a vault so desktop and
+    // `recent --all` can enumerate it. Best-effort; never announced.
+    margins_workflows::project::register_vault_silently(work_dir);
     if create_new {
         let memo_uri = format!(".margins/{name}.md");
         std::fs::write(work_dir.join(&memo_uri), "")
@@ -197,7 +200,7 @@ fn ensure_permission(services: &CliServices, lane: AudioLane) -> Result<(), CliE
         PermissionState::Unavailable => Err(CliError::capture_unavailable()),
         PermissionState::Denied | PermissionState::Restricted => Err(CliError::new(
             "capture_permission_denied",
-            "capture permission was denied",
+            "Enable in System Settings -> Privacy & Security -> Microphone (and Screen Recording for system audio), then rerun.",
         )),
         _ => Err(CliError::new(
             "capture_open_failed",

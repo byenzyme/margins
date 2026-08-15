@@ -66,6 +66,7 @@ class RepositoryPolicyTests(unittest.TestCase):
             "public-repository/Cargo.toml": "Cargo.toml",
             "public-repository/Cargo.lock": "Cargo.lock",
             "public-repository/README.md": "README.md",
+            "public-repository/docs/personal-crm.md": "docs/personal-crm.md",
             "public-repository/CONTRIBUTING.md": "CONTRIBUTING.md",
             "public-repository/ARCHITECTURE.md": "docs/architecture.md",
             "public-repository/release.yml": ".github/workflows/release.yml",
@@ -100,9 +101,9 @@ class RepositoryPolicyTests(unittest.TestCase):
         )
         normalized_readme = " ".join(readme.split())
         for required in (
-            "remote meeting recording and transcription systems",
-            "customization platform",
-            "Trust, security, and privacy boundaries",
+            "fail-closed allowlist",
+            "OPEN_SOURCE.md",
+            "sensitive personal data",
             "not a claim that any crate has been published",
             "do not grant trademark rights",
         ):
@@ -126,6 +127,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         for command in (
             "cargo build --workspace --all-targets --no-default-features --locked --offline",
             "cargo test --workspace --all-targets --no-default-features --locked --offline",
+            "python3 scripts/open_source_boundary.py --test-export \"$export_path\"",
         ):
             self.assertIn(command, " ".join(workflow.split()))
 
@@ -384,6 +386,7 @@ class RepositoryPolicyTests(unittest.TestCase):
         )
         self.assertIn("margins-cli", workflow)
         self.assertIn('forbidden dependency in $crate no-default graph', workflow)
+        self.assertIn("--test-export", workflow)
 
         root_main_path = REPO_ROOT / "src/main.rs"
         if root_main_path.is_file():

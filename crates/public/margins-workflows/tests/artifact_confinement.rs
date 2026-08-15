@@ -1,7 +1,8 @@
 use chrono::{Duration, Local};
 use margins_store::legacy;
 use margins_workflows::artifacts::{
-    confined_artifact_registry_disk_path, list_artifacts, prune_expired_artifacts,
+    confined_artifact_registry_disk_path, confined_session_artifact_access_disk_path,
+    list_artifacts, prune_expired_artifacts,
 };
 
 #[test]
@@ -96,6 +97,36 @@ fn listing_preserves_exact_legacy_transcript_sidecars_without_probing_other_path
             .unwrap()
             .exists
     );
+}
+
+#[test]
+fn listing_recovers_exact_terminal_capture_artifacts_only_for_their_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join(".margins");
+    std::fs::create_dir_all(&dir).unwrap();
+    for file in ["meet_seg0.wav", "meet_seg0.live-transcript.json"] {
+        std::fs::write(dir.join(file), "intact").unwrap();
+        assert_eq!(
+            confined_session_artifact_access_disk_path(
+                &dir,
+                "meet",
+                &format!(".margins/{file}")
+            ),
+            Some(dir.join(file))
+        );
+    }
+    for path in [
+        ".margins/other_seg0.wav",
+        ".margins/meet_segx.wav",
+        ".margins/meet_seg0.txt",
+        ".margins/nested/meet_seg0.wav",
+    ] {
+        assert_eq!(
+            confined_session_artifact_access_disk_path(&dir, "meet", path),
+            None,
+            "accepted {path}"
+        );
+    }
 }
 
 #[cfg(unix)]

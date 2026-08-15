@@ -14,12 +14,12 @@ pub use services::{
     SessionStore, SystemClock, SystemProcessRunner, SystemProjectService,
 };
 
-use args::{AgentsCommand, Args, Command, ImportCommand, ProjectCommand, ProjectsCommand};
+use args::{AgentsCommand, Args, Command, GuideCommand, ImportCommand};
 use clap::Parser;
 use commands::projects::absolute_from;
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub fn run<I, T>(
     services: &CliServices,
@@ -51,46 +51,35 @@ fn run_inner(
     let args = Args::try_parse_from(args).map_err(|error| CliError::usage(error.to_string()))?;
 
     match args.command {
-        Some(Command::Project { command }) => {
-            return match command {
-                ProjectCommand::List => commands::projects::project_list(services, stdout),
-                ProjectCommand::Current => commands::projects::project_current(services, stdout),
-                ProjectCommand::Use { project } => {
-                    commands::projects::project_use(services, &project, stdout)
-                }
-            };
-        }
-        Some(Command::Projects { command }) => {
-            return match command {
-                ProjectsCommand::List { json } => commands::projects::list(services, json, stdout),
-                ProjectsCommand::Add {
-                    path,
-                    name,
-                    inbox_folder,
-                    init,
-                } => commands::projects::add(
-                    services,
-                    invocation_dir,
-                    &path,
-                    name.as_deref(),
-                    inbox_folder.as_deref(),
-                    init,
-                    stdout,
-                    stderr,
-                ),
-                ProjectsCommand::Init { path } => {
-                    commands::projects::init(services, invocation_dir, path.as_deref(), stdout)
-                }
-            };
-        }
-        // Native model setup lives only in the official private binary, which
-        // intercepts `setup` before delegating here. Handle it explicitly (it
-        // needs no resolved project) so the public standalone CLI reports it
-        // gracefully instead of panicking on the unreachable arm below.
-        Some(Command::Setup) => {
+        // The public open-core crate is not the installable product CLI. The
+        // official `margins` binary composes recall and owns workspace init.
+        Some(Command::Init) => {
             return Err(CliError::new(
-                "setup_unavailable",
-                "local model setup is only available in the official Margins binary",
+                "composition_unavailable",
+                "This public development CLI cannot initialize a Margins recall workspace. Install the official Margins CLI (`./install.sh` or a release artifact) and run `margins guide workspace-setup`.",
+            ));
+        }
+        Some(Command::Setup) => {
+            return commands::guide::setup_handoff(invocation_dir, stdout);
+        }
+        Some(Command::Guide {
+            command: GuideCommand::WorkspaceSetup,
+        }) => {
+            return commands::guide::workspace_setup(stdout);
+        }
+        Some(Command::Capabilities) => {
+            return commands::capabilities::public(stdout);
+        }
+        Some(Command::Recall { .. }) => {
+            return Err(CliError::new(
+                "composition_unavailable",
+                "This public development CLI cannot run Margins recall. Install the official Margins CLI (`./install.sh` or a release artifact).",
+            ));
+        }
+        Some(Command::Scan { .. }) => {
+            return Err(CliError::new(
+                "composition_unavailable",
+                "This public development CLI cannot scan a Margins recall workspace. Install the official Margins CLI (`./install.sh` or a release artifact).",
             ));
         }
         _ => {}
@@ -98,8 +87,14 @@ fn run_inner(
 
     let project = services
         .projects
-        .resolve(project_selector.as_deref())
+        .resolve_vault(project_selector.as_deref(), invocation_dir)
         .map_err(CliError::from_anyhow)?;
+    let project = match &args.command {
+        Some(Command::Transcript { meeting_id }) | Some(Command::Artifacts { meeting_id }) => {
+            resolve_meeting_owner(services, project, project_selector.is_some(), meeting_id)?
+        }
+        _ => project,
+    };
     let work_dir = &project.work_dir;
     match args.command {
         None => commands::capture::run(services, work_dir, None, None, false),
@@ -114,7 +109,14 @@ fn run_inner(
         Some(Command::Rename { title }) => {
             commands::sessions::rename(services, work_dir, &title, stdout)
         }
-        Some(Command::Recent) => commands::transcript::recent(work_dir, stdout),
+        Some(Command::Recent { all }) => {
+            if all {
+                let vaults = services.projects.list().map_err(CliError::from_anyhow)?;
+                commands::transcript::recent_all(&vaults, stdout)
+            } else {
+                commands::transcript::recent(work_dir, stdout)
+            }
+        }
         Some(Command::Transcript { meeting_id }) => {
             commands::transcript::transcript(work_dir, &meeting_id, stdout)
         }
@@ -169,8 +171,77 @@ fn run_inner(
         Some(Command::Agents { command }) => match command {
             AgentsCommand::Install => commands::projects::install_agents(work_dir, stdout),
         },
-        Some(Command::Project { .. }) | Some(Command::Projects { .. }) => unreachable!(),
-        Some(Command::Setup) => unreachable!(),
+        Some(Command::Recall { .. }) => unreachable!("handled before project resolution"),
+        Some(Command::Scan { .. }) => unreachable!("handled before project resolution"),
+        Some(Command::Capabilities) => unreachable!("handled before project resolution"),
+        Some(Command::Init) => unreachable!("handled before project resolution"),
+        Some(Command::Setup) | Some(Command::Guide { .. }) => {
+            unreachable!("handled before project resolution")
+        }
+    }
+}
+
+/// Resolve a concrete meeting id across registered vaults for read-only
+/// inspection commands. Explicit project routing and vault-relative aliases
+/// stay scoped to the initially resolved vault.
+fn resolve_meeting_owner(
+    services: &CliServices,
+    initial: margins_workflows::project::ResolvedProject,
+    has_explicit_project: bool,
+    meeting_id: &str,
+) -> Result<margins_workflows::project::ResolvedProject, CliError> {
+    if has_explicit_project || meeting_id == "latest" {
+        return Ok(initial);
+    }
+
+    let mut vaults = services.projects.list().map_err(CliError::from_anyhow)?;
+    vaults.push(initial.clone());
+    let mut seen = Vec::<PathBuf>::new();
+    let mut owners = Vec::new();
+    for vault in vaults {
+        let root = vault
+            .root_dir
+            .canonicalize()
+            .unwrap_or_else(|_| vault.root_dir.clone());
+        if seen.iter().any(|seen_root| seen_root == &root) {
+            continue;
+        }
+        seen.push(root);
+        let margins_dir = vault.work_dir.join(".margins");
+        if !margins_dir.is_dir() {
+            continue;
+        }
+        let exists = services
+            .sessions
+            .exists(&margins_dir, meeting_id)
+            .map_err(CliError::from_anyhow)?;
+        if exists {
+            owners.push(vault);
+        }
+    }
+
+    match owners.len() {
+        0 => Ok(initial),
+        1 => Ok(owners.remove(0)),
+        _ => {
+            let candidates = owners
+                .iter()
+                .map(|vault| {
+                    format!(
+                        "{} ({})",
+                        vault.project.id,
+                        vault.root_dir.to_string_lossy()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(CliError::new(
+                "ambiguous_meeting",
+                format!(
+                    "Meeting '{meeting_id}' exists in multiple Margins vaults: {candidates}. Pass --project <id-or-path> to choose one."
+                ),
+            ))
+        }
     }
 }
 

@@ -9,6 +9,7 @@ readme = "README.md"
 
 [features]
 default = []
+test-support = []
 
 [dependencies]
 anyhow = "1"

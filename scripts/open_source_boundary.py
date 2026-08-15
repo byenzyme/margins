@@ -565,6 +565,28 @@ def verify_tree(root: Path, manifest: dict) -> tuple[list[str], dict[str, str]]:
     return paths, ownership
 
 
+def test_export(root: Path, manifest: dict) -> None:
+    verify_tree(root, manifest)
+    command = [
+        "cargo",
+        "test",
+        "-p",
+        "margins-cli",
+        "--test",
+        "command_contract",
+        "--locked",
+    ]
+    env = os.environ.copy()
+    with tempfile.TemporaryDirectory(prefix="margins-public-test-target.") as target:
+        env["CARGO_TARGET_DIR"] = target
+        completed = subprocess.run(command, cwd=root, check=False, env=env)
+    if completed.returncode:
+        raise BoundaryError(
+            "exported public CLI command-contract test failed "
+            f"(exit {completed.returncode})"
+        )
+
+
 def materialize(
     source_repo: Path, output: Path, candidates: Sequence[CandidateFile], manifest: dict
 ) -> None:
@@ -654,6 +676,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--verify-tree", type=Path, help="audit an already materialized public tree"
     )
     parser.add_argument(
+        "--test-export",
+        type=Path,
+        help="verify a materialized public tree, then run its margins-cli command-contract test",
+    )
+    parser.add_argument(
         "--output", type=Path, help="new directory to use for a candidate export"
     )
     parser.add_argument(
@@ -664,9 +691,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.execute and args.output is None:
         parser.error("--execute requires --output")
-    modes = sum((bool(args.check), args.verify_tree is not None, bool(args.execute)))
+    modes = sum(
+        (
+            bool(args.check),
+            args.verify_tree is not None,
+            args.test_export is not None,
+            bool(args.execute),
+        )
+    )
     if modes > 1:
-        parser.error("choose only one of --check, --verify-tree, or --execute")
+        parser.error("choose only one of --check, --verify-tree, --test-export, or --execute")
     return args
 
 
@@ -690,6 +724,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             paths, _ = verify_tree(verification_root, manifest)
             print(
                 f"open-source boundary verified: {len(paths)} files in {verification_root}"
+            )
+            return 0
+        if args.test_export is not None:
+            export_root = args.test_export.absolute()
+            paths, _ = verify_tree(export_root, manifest)
+            test_export(export_root, manifest)
+            print(
+                f"open-source export tested: margins-cli command_contract passed "
+                f"for {len(paths)} files in {export_root}"
             )
             return 0
 

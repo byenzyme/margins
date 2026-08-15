@@ -55,7 +55,10 @@ pub fn list(work_dir: &Path, meeting_id: &str, stdout: &mut dyn Write) -> Result
         .map_err(CliError::from_anyhow)?;
         line(
             stdout,
-            format_args!("    <path>{}</path>", xml_escape_text(&artifact.path)),
+            format_args!(
+                "    <path>{}</path>",
+                xml_escape_text(&view.disk_path.to_string_lossy())
+            ),
         )
         .map_err(CliError::from_anyhow)?;
         line(stdout, format_args!("    <exists>{}</exists>", view.exists))

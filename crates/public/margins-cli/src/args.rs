@@ -14,8 +14,13 @@ pub struct Args {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Prepare local transcription for this machine
+    /// Print a short agent handoff for setting up this folder
     Setup,
+    /// Print embedded Margins guides for agents
+    Guide {
+        #[command(subcommand)]
+        command: GuideCommand,
+    },
     /// Start a new current session and open the recorder
     New {
         /// Optional display title; Margins generates the stable session id
@@ -35,7 +40,11 @@ pub enum Command {
     /// Change the current session's display title
     Rename { title: String },
     /// List recent Margins meetings as XML
-    Recent,
+    Recent {
+        /// List meetings across every registered vault, not just this one
+        #[arg(long)]
+        all: bool,
+    },
     /// Print the complete transcript for a meeting as XML (every utterance
     /// plus memo timeline; falls back to the memo-aligned artifact)
     Transcript {
@@ -84,16 +93,21 @@ pub enum Command {
         #[command(subcommand)]
         command: AgentsCommand,
     },
-    /// Inspect or switch the default Margins project used by the CLI
-    Project {
-        #[command(subcommand)]
-        command: ProjectCommand,
+    /// Search the vault for notes and connections related to a query
+    Recall {
+        /// What to look for, in the vault's own language where possible
+        query: String,
     },
-    /// Manage Margins projects (list, add, init)
-    Projects {
-        #[command(subcommand)]
-        command: ProjectsCommand,
+    /// Inspect a vault and suggest folders, tags, links, logs, and exclusions
+    Scan {
+        /// Write the initial suggested policy when this workspace has none
+        #[arg(long)]
+        write_config: bool,
     },
+    /// Print this binary's machine-readable composition capabilities as JSON
+    Capabilities,
+    /// Establish or refresh a Margins vault in this folder
+    Init,
 }
 
 #[derive(Debug, Subcommand)]
@@ -112,45 +126,9 @@ pub enum AgentsCommand {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum ProjectCommand {
-    /// List projects configured in Margins Desktop as XML
-    List,
-    /// Show the current active project as XML
-    Current,
-    /// Set the default CLI/app project to an already configured Margins Desktop project
-    Use {
-        /// Project id, name, root path, or work-dir path from `margins project list`
-        project: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum ProjectsCommand {
-    /// List configured Margins projects
-    List {
-        /// Output as a JSON array
-        #[arg(long)]
-        json: bool,
-    },
-    /// Register a folder as a Margins project (idempotent)
-    Add {
-        /// Project folder path; relative paths resolve from the invocation directory
-        path: String,
-        /// Display name for the project (defaults to folder name)
-        #[arg(long)]
-        name: Option<String>,
-        /// Subfolder for new meeting notes (defaults to "meetings")
-        #[arg(long)]
-        inbox_folder: Option<String>,
-        /// Also run `enzyme -p <path> init` after registering
-        #[arg(long)]
-        init: bool,
-    },
-    /// Initialize enzyme in the active (or specified) project folder
-    Init {
-        /// Path to the project folder (defaults to active project root)
-        path: Option<PathBuf>,
-    },
+pub enum GuideCommand {
+    /// Print the complete Margins workspace setup guide
+    WorkspaceSetup,
 }
 
 /// Preserve the historical global `--project value` and `--project=value`

@@ -130,6 +130,9 @@ pub fn confined_session_artifact_access_disk_path(
         return Some(path);
     }
     single_normal_component(Path::new(session_name))?;
+    if let Some(path) = confined_legacy_capture_disk_path(margins_dir, session_name, registry_path) {
+        return Some(path);
+    }
     let allowed = [
         format!(".margins/{session_name}_aligned.md"),
         format!(".margins/{session_name}_capture_context.md"),
@@ -138,6 +141,37 @@ pub fn confined_session_artifact_access_disk_path(
         return None;
     }
     let file = Path::new(registry_path).file_name()?;
+    let path = margins_dir.join(file);
+    (!is_symlink_or_error(&path)).then_some(path)
+}
+
+/// Admit only the exact root-level filenames emitted by the terminal capture
+/// adapter. These predate the per-session artifact tree but are still durable,
+/// registered artifacts. The session prefix and numeric segment ordinal keep
+/// another session's files and arbitrary `.margins/` children out of scope.
+fn confined_legacy_capture_disk_path(
+    margins_dir: &Path,
+    session_name: &str,
+    registry_path: &str,
+) -> Option<PathBuf> {
+    let path = Path::new(registry_path);
+    let mut components = path.components();
+    let (Some(Component::Normal(root)), Some(Component::Normal(file)), None) =
+        (components.next(), components.next(), components.next())
+    else {
+        return None;
+    };
+    if root != OsStr::new(".margins") {
+        return None;
+    }
+    let file = file.to_str()?;
+    let segment = file.strip_prefix(&format!("{session_name}_seg"))?;
+    let ordinal = segment
+        .strip_suffix(".wav")
+        .or_else(|| segment.strip_suffix(".live-transcript.json"))?;
+    if ordinal.is_empty() || !ordinal.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
     let path = margins_dir.join(file);
     (!is_symlink_or_error(&path)).then_some(path)
 }

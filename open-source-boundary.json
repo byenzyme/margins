@@ -7,6 +7,7 @@
     "public-repository/Cargo.toml": "Cargo.toml",
     "public-repository/Cargo.lock": "Cargo.lock",
     "public-repository/README.md": "README.md",
+    "public-repository/docs/personal-crm.md": "docs/personal-crm.md",
     "public-repository/CONTRIBUTING.md": "CONTRIBUTING.md",
     "public-repository/ARCHITECTURE.md": "docs/architecture.md",
     "public-repository/release.yml": ".github/workflows/release.yml",
@@ -22,10 +23,13 @@
         "crates/public/margins-cli/README.md",
         "crates/public/margins-cli/src/args.rs",
         "crates/public/margins-cli/src/commands/artifacts.rs",
+        "crates/public/margins-cli/src/commands/capabilities.rs",
         "crates/public/margins-cli/src/commands/capture.rs",
+        "crates/public/margins-cli/src/commands/guide.rs",
         "crates/public/margins-cli/src/commands/import.rs",
         "crates/public/margins-cli/src/commands/mod.rs",
         "crates/public/margins-cli/src/commands/process.rs",
+        "crates/public/margins-cli/src/commands/recall.rs",
         "crates/public/margins-cli/src/commands/projects.rs",
         "crates/public/margins-cli/src/commands/sessions.rs",
         "crates/public/margins-cli/src/commands/transcript.rs",
@@ -44,10 +48,13 @@
         "crates/public/margins-cli/README.md",
         "crates/public/margins-cli/src/args.rs",
         "crates/public/margins-cli/src/commands/artifacts.rs",
+        "crates/public/margins-cli/src/commands/capabilities.rs",
         "crates/public/margins-cli/src/commands/capture.rs",
+        "crates/public/margins-cli/src/commands/guide.rs",
         "crates/public/margins-cli/src/commands/import.rs",
         "crates/public/margins-cli/src/commands/mod.rs",
         "crates/public/margins-cli/src/commands/process.rs",
+        "crates/public/margins-cli/src/commands/recall.rs",
         "crates/public/margins-cli/src/commands/projects.rs",
         "crates/public/margins-cli/src/commands/sessions.rs",
         "crates/public/margins-cli/src/commands/transcript.rs",
@@ -60,7 +67,7 @@
         "crates/public/margins-cli/tests/multipart_parity.rs",
         "crates/public/margins-cli/tests/standalone.rs"
       ],
-      "minimum_files": 20
+      "minimum_files": 23
     },
     {
       "name": "margins-store-crate",
@@ -101,7 +108,6 @@
         "crates/public/margins-workflows/LICENSE",
         "crates/public/margins-workflows/README.md",
         "crates/public/margins-workflows/resources/agents/margins.md",
-        "crates/public/margins-workflows/resources/skills/enzyme-workspace-setup/SKILL.md",
         "crates/public/margins-workflows/resources/skills/margins-workspace-setup/SKILL.md",
         "crates/public/margins-workflows/src/agents.rs",
         "crates/public/margins-workflows/src/alignment.rs",
@@ -124,7 +130,6 @@
         "crates/public/margins-workflows/LICENSE",
         "crates/public/margins-workflows/README.md",
         "crates/public/margins-workflows/resources/agents/margins.md",
-        "crates/public/margins-workflows/resources/skills/enzyme-workspace-setup/SKILL.md",
         "crates/public/margins-workflows/resources/skills/margins-workspace-setup/SKILL.md",
         "crates/public/margins-workflows/src/agents.rs",
         "crates/public/margins-workflows/src/alignment.rs",
@@ -142,7 +147,7 @@
         "crates/public/margins-workflows/tests/public_graph.rs",
         "crates/public/margins-workflows/tests/standalone.rs"
       ],
-      "minimum_files": 21
+      "minimum_files": 20
     },
     {
       "name": "meeting-protocol-crate",
@@ -279,6 +284,7 @@
         "public-repository/Cargo.toml",
         "public-repository/Cargo.lock",
         "public-repository/README.md",
+        "public-repository/docs/personal-crm.md",
         "public-repository/CONTRIBUTING.md",
         "public-repository/ARCHITECTURE.md",
         "public-repository/release.yml",
@@ -288,12 +294,13 @@
         "public-repository/Cargo.toml",
         "public-repository/Cargo.lock",
         "public-repository/README.md",
+        "public-repository/docs/personal-crm.md",
         "public-repository/CONTRIBUTING.md",
         "public-repository/ARCHITECTURE.md",
         "public-repository/release.yml",
         "public-repository/homebrew-formula.rb.template"
       ],
-      "minimum_files": 7
+      "minimum_files": 8
     },
     {
       "name": "skills",
@@ -302,6 +309,8 @@
         ".claude-plugin/marketplace.json",
         ".claude-plugin/plugin.json",
         "skills/margins/SKILL.md",
+        "skills/margins/distillation-core.md",
+        "skills/margins/hosts/desktop.md",
         "skills/margins/templates/1on1-idea-exchange.md",
         "skills/margins/templates/design-scoping-session.md",
         "skills/margins/templates/discovery-call.md",
@@ -312,13 +321,15 @@
         ".claude-plugin/marketplace.json",
         ".claude-plugin/plugin.json",
         "skills/margins/SKILL.md",
+        "skills/margins/distillation-core.md",
+        "skills/margins/hosts/desktop.md",
         "skills/margins/templates/1on1-idea-exchange.md",
         "skills/margins/templates/design-scoping-session.md",
         "skills/margins/templates/discovery-call.md",
         "skills/margins/templates/group-conversation.md",
         "skills/margins/templates/talk-reflection.md"
       ],
-      "minimum_files": 8
+      "minimum_files": 10
     },
     {
       "name": "docs",
