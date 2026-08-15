@@ -130,16 +130,16 @@ margins recall "<related person, project, or decision>"
 
 Then query a distinctive phrase from an excluded folder, if one exists. It should not return that excluded file.
 
-Read the XML `status`:
+In an interactive terminal, read the catalyze-style tree (`activated bridges`
+and `surfaced notes`). When stdout is captured or piped, read the compatible JSON
+envelope: each non-empty result uses `file_path`, `content`, and `similarity`
+(plus optional `via_catalyst_id`). Mention one relevant returned note. An empty
+result is acceptable for a small workspace. If recall prints a recovery hint on
+stderr, follow only that hint, rerun `margins init`, and retry recall. If stderr
+says there is no Margins vault, return to the confirmed base folder.
 
-- `ok`: recall retrieval is live. It may be served by bridge retrieval or direct local lookup.
-- `thin`: setup completed, but the included corpus is too small.
-- `no_policy`: `~/.margins/config.toml` is missing the selected workspace section.
-- `no_vault`: you are not inside the initialized workspace.
-- `unavailable`: the installed CLI is not the official recall-capable composition.
-
-`margins recall` is read-only. It must report the same effective `config_path`, and it must not initialize, refresh, edit notes, or contact a model provider.
+`margins recall` is read-only. It must not initialize, refresh, edit notes, or contact a model provider.
 
 ## Report Back
 
-Briefly report the confirmed path; the scan's strongest folder, tag, link, and log candidates; the entities/exclusions selected and why; the `margins init` XML line; whether `.margins/recall/index.db` exists; the recall queries/statuses; and any excluded-content check. Mention small capture habits only when the scan showed a clear gap.
+Briefly report the confirmed path; the scan's strongest folder, tag, link, and log candidates; the entities/exclusions selected and why; the `margins init` XML line; whether `.margins/recall/index.db` exists; the recall queries/result counts; and any excluded-content check. Mention small capture habits only when the scan showed a clear gap.

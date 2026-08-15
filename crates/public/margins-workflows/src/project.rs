@@ -73,14 +73,16 @@ pub fn inbox_dir(project: &ResolvedProject) -> PathBuf {
     project.root_dir.join(project.project.inbox_folder.trim())
 }
 
-/// Walk UP from `cwd` looking for a directory that contains `.margins/`,
-/// exactly like git discovers `.git`. Returns the vault root (the folder that
-/// *contains* `.margins/`), never `.margins/` itself. Purely read-only: it
-/// never creates anything.
+/// Walk UP from `cwd` looking for a directory that contains `.margins/` or
+/// `.obsidian/`, exactly like git discovers `.git`. Returns the nearest vault
+/// root (the folder that contains the marker), never the marker itself. This
+/// lets a first Margins command launched from an Obsidian subfolder establish
+/// its store at the real vault root. Purely read-only: it never creates
+/// anything.
 pub fn discover_vault_root(cwd: &Path) -> Option<PathBuf> {
     let mut dir = Some(cwd);
     while let Some(current) = dir {
-        if current.join(".margins").is_dir() {
+        if current.join(".margins").is_dir() || current.join(".obsidian").is_dir() {
             return Some(current.to_path_buf());
         }
         dir = current.parent();
@@ -92,9 +94,10 @@ pub fn discover_vault_root(cwd: &Path) -> Option<PathBuf> {
 /// record in the current folder.
 ///
 /// * An explicit `selector` resolves through the registry.
-/// * Otherwise, walk up from `cwd` for a `.margins/` folder — the root wins over
-///   cwd so a session and its distilled note always belong to the vault root and
-///   the corpus is never split by recording from a subfolder.
+/// * Otherwise, walk up from `cwd` for a `.margins/` or `.obsidian/` folder —
+///   the root wins over cwd so a session and its distilled note always belong
+///   to the vault root and the corpus is never split by recording from a
+///   subfolder.
 /// * A one-off macOS launcher temp cwd instead uses the configured stable vault;
 ///   selecting that temp project explicitly remains authoritative.
 /// * Otherwise, the current folder *is* the vault: return `cwd` as the root.
@@ -215,12 +218,15 @@ pub fn register_vault_silently(root: &Path) {
 ///
 /// The shared establisher behind `margins init` (establish-without-recording)
 /// and the recording commands (`margins new`). It honors the nesting guard: if
-/// an existing vault is found by walking up from `cwd`, that root is returned
-/// unchanged — a new `.margins/` is never nested inside an existing vault.
+/// an existing Margins or Obsidian vault is found by walking up from `cwd`, that
+/// root is returned unchanged — a new `.margins/` is never nested inside it.
 /// Otherwise `<cwd>/.margins/` is created and the vault is registered silently.
 pub fn ensure_vault(cwd: &Path) -> Result<PathBuf> {
     if let Some(root) = discover_vault_root(cwd) {
-        // Already inside a vault — never nest. Keep the registry current.
+        // Already inside a Margins or Obsidian vault — never nest. An
+        // Obsidian-only root still needs its Margins store established here.
+        std::fs::create_dir_all(root.join(".margins"))
+            .with_context(|| format!("Could not create {}", root.join(".margins").display()))?;
         register_vault_silently(&root);
         return Ok(root);
     }
@@ -1042,6 +1048,37 @@ mod tests {
             root.canonicalize().unwrap(),
             "discovery must return the folder containing .margins, not a child"
         );
+    }
+
+    #[test]
+    fn discover_vault_root_walks_up_to_obsidian_root_before_margins_is_initialized() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("obsidian");
+        let nested = root.join("inbox").join("calls");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(root.join(".obsidian")).unwrap();
+
+        let found = discover_vault_root(&nested).expect("should discover the Obsidian root");
+        assert_eq!(found.canonicalize().unwrap(), root.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn ensure_vault_from_obsidian_subfolder_establishes_margins_at_root() {
+        let _settings = ScopedTestSettings::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("obsidian");
+        let inbox = root.join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::create_dir_all(root.join(".obsidian")).unwrap();
+
+        let established = ensure_vault(&inbox).unwrap();
+
+        assert_eq!(
+            established.canonicalize().unwrap(),
+            root.canonicalize().unwrap()
+        );
+        assert!(root.join(".margins").is_dir());
+        assert!(!inbox.join(".margins").exists());
     }
 
     #[test]

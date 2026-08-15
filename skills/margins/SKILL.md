@@ -264,7 +264,12 @@ For 2-3 conversation-specific queries, run:
 margins recall "specific query"
 ```
 
-Read the root `status` attribute. `status="ok"` means real results. A self-closing `status="thin"` or any `off`, `no_vault`, `degraded`, or `unavailable` status means search should not shape the note; fall back to the memo/transcript and targeted Grep for concrete anchors. Ignore diagnostic stderr in the saved note.
+Interactive terminals show the `enzyme catalyze`-style tree. Agent shell capture
+is non-interactive and returns the compatible JSON envelope; use its `results`
+entries (`file_path`, `content`, `similarity`, and optional `via_catalyst_id`) as
+recall evidence. If `results` is empty, fall back to the memo/transcript and
+targeted Grep for concrete anchors. Recovery and degraded-mode details are
+diagnostic stderr; do not copy them into the saved note.
 
 Use Grep only for concrete anchors such as existing people links, tags, companies, proper nouns, wikilinks, or note titles.
 
@@ -306,9 +311,9 @@ context only.
    recall results.
 2. If `saved_note_path` is absent, create the note in the vault root
    (`<vault>/[timestamp] [descriptive name].md`) with the Edit tool. If — and
-   only if — you cannot resolve a vault root at all (no `.margins/` parent folder
-   is discoverable), ask the user once for the destination instead of writing
-   into `.margins/`.
+   only if — you cannot resolve a vault root at all (no `.margins/` or
+   `.obsidian/` parent folder is discoverable), ask the user once for the
+   destination instead of writing into `.margins/`.
 3. For a newly created, unregistered note, rename with a descriptive suffix
    following vault naming conventions:
    - Keep timestamp prefix
