@@ -958,6 +958,67 @@ fn align_only_does_not_consult_unavailable_asr() {
 }
 
 #[test]
+fn archive_commands_route_new_aligned_output_to_visible_default_folder() {
+    let temp = tempfile::tempdir().unwrap();
+    let margins_dir = temp.path().join(".margins");
+    let memo = margins_dir.join("meeting.md");
+    std::fs::create_dir_all(&margins_dir).unwrap();
+    std::fs::write(&memo, "[00:01] checkpoint").unwrap();
+    legacy::create_session(
+        &margins_dir,
+        "meeting",
+        &Local::now(),
+        ".margins/meeting.md",
+    )
+    .unwrap();
+    legacy::add_segment(
+        &margins_dir,
+        "meeting",
+        0,
+        ".margins/meeting_seg0.wav",
+        0,
+        Some(1.0),
+    )
+    .unwrap();
+    std::fs::write(
+        margins_dir.join("meeting_transcript.json"),
+        r#"{"transcripts":[{"words":[{"channel":0,"start_ms":500,"end_ms":900,"text":"hello"}]}]}"#,
+    )
+    .unwrap();
+    let services = services(temp.path());
+
+    let (result, stdout, stderr) = invoke(&services, temp.path(), &["margins", "archive", "on"]);
+    assert!(result.is_ok(), "{stderr}");
+    assert!(stdout.contains("enabled=\"true\""));
+    assert!(stdout.contains("path=\"") && stdout.contains("_margins"));
+
+    let (result, _, stderr) = invoke(
+        &services,
+        temp.path(),
+        &["margins", "process", "meeting", "--align-only"],
+    );
+    assert!(result.is_ok(), "{stderr}");
+    assert!(temp.path().join("_margins/meeting_aligned.md").is_file());
+    assert!(!margins_dir.join("meeting_aligned.md").exists());
+    assert_eq!(
+        legacy::list_session_artifacts(&margins_dir, "meeting").unwrap()[0].path,
+        "_margins/meeting_aligned.md"
+    );
+
+    let (result, stdout, stderr) =
+        invoke(&services, temp.path(), &["margins", "archive", "status"]);
+    assert!(result.is_ok(), "{stderr}");
+    assert!(stdout.contains("enabled=\"true\""));
+    assert!(stdout.contains("transcripts=\"1\""));
+
+    let (result, stdout, stderr) = invoke(&services, temp.path(), &["margins", "archive", "off"]);
+    assert!(result.is_ok(), "{stderr}");
+    assert!(stdout.contains("enabled=\"false\""));
+    assert!(margins_dir.join("meeting_aligned.md").is_file());
+    assert!(!temp.path().join("_margins").exists());
+}
+
+#[test]
 fn session_catalog_and_artifact_commands_emit_vault_anchored_paths() {
     let temp = tempfile::tempdir().unwrap();
     let vault = temp.path().join("vault");

@@ -58,6 +58,11 @@ pub enum Command {
     },
     /// Delete expired temporary registered artifacts
     ArtifactsPrune,
+    /// Keep aligned transcripts in the visible `_margins/` vault folder
+    Archive {
+        #[command(subcommand)]
+        command: ArchiveCommand,
+    },
     /// Transcribe/import-prep an existing audio file
     Transcribe {
         /// Audio file to decode in Rust, such as WAV, M4A, MP3, FLAC, or AAC
@@ -117,6 +122,16 @@ pub enum ImportCommand {
         /// Granola JSON or CSV export file
         path: PathBuf,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ArchiveCommand {
+    /// Move aligned transcripts into `_margins/` and use it for new output
+    On,
+    /// Move aligned transcripts back into `.margins/`
+    Off,
+    /// Show the current archive location and transcript count
+    Status,
 }
 
 #[derive(Debug, Subcommand)]

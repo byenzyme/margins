@@ -120,16 +120,27 @@ pub fn process_session(
     let memo_path = resolve_input_path(request.work_dir, &meta.notes_path);
     let memo = std::fs::read_to_string(memo_path).unwrap_or_default();
     let aligned = render_aligned_markdown(request.session_name, &session_start, &memo, &entries);
-    let aligned_path = request
+    let local_aligned_path = request
         .margins_dir
         .join(format!("{}_aligned.md", request.session_name));
+    let aligned_path = crate::archive::aligned_output_path(
+        request.work_dir,
+        request.session_name,
+        &local_aligned_path,
+    );
+    std::fs::create_dir_all(aligned_path.parent().expect("aligned path has parent"))?;
     replace_file_atomically(&aligned_path, aligned.as_bytes())?;
+    let local_registry_path = format!(".margins/{}_aligned.md", request.session_name);
     legacy::upsert_session_artifact(
         request.margins_dir,
         request.session_name,
         SESSION_ARTIFACT_KIND_TRANSCRIPT,
         0,
-        &format!(".margins/{}_aligned.md", request.session_name),
+        &crate::archive::aligned_registry_path(
+            request.work_dir,
+            request.session_name,
+            &local_registry_path,
+        ),
         "durable",
         None,
     )?;
@@ -185,7 +196,9 @@ pub fn transcribe_audio(
     let audio_rel = format!(".margins/{name}_seg0.wav");
     let audio_dest = request.margins_dir.join(format!("{name}_seg0.wav"));
     let transcript_json_path = request.margins_dir.join(format!("{name}_transcript.json"));
-    let aligned_path = transcript_artifact_path(request.margins_dir, &name);
+    let local_aligned_path = transcript_artifact_path(request.margins_dir, &name);
+    let aligned_path =
+        crate::archive::aligned_output_path(request.work_dir, &name, &local_aligned_path);
 
     let mono = downmix_to_mono(&source)?;
     let mono = resample_mono_linear(&mono, source.sample_rate, 16_000);
@@ -224,12 +237,13 @@ pub fn transcribe_audio(
             &entries,
         ),
     )?;
+    let local_registry_path = format!(".margins/artifacts/{name}/transcript.md");
     legacy::upsert_session_artifact(
         request.margins_dir,
         &name,
         SESSION_ARTIFACT_KIND_TRANSCRIPT,
         0,
-        &format!(".margins/artifacts/{name}/transcript.md"),
+        &crate::archive::aligned_registry_path(request.work_dir, &name, &local_registry_path),
         "durable",
         None,
     )?;

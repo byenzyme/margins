@@ -117,8 +117,8 @@ pub fn confined_session_artifact_registry_disk_path(
 }
 
 /// Resolve a session artifact for non-destructive access. In addition to the
-/// modern artifact tree, this admits only the two exact legacy transcript
-/// sidecars produced by older CLI versions.
+/// modern artifact tree, this admits the exact legacy transcript sidecars and
+/// the visible `_margins/<session>_aligned.md` archive location.
 pub fn confined_session_artifact_access_disk_path(
     margins_dir: &Path,
     session_name: &str,
@@ -130,18 +130,27 @@ pub fn confined_session_artifact_access_disk_path(
         return Some(path);
     }
     single_normal_component(Path::new(session_name))?;
-    if let Some(path) = confined_legacy_capture_disk_path(margins_dir, session_name, registry_path) {
+    if let Some(path) = confined_legacy_capture_disk_path(margins_dir, session_name, registry_path)
+    {
         return Some(path);
     }
     let allowed = [
         format!(".margins/{session_name}_aligned.md"),
         format!(".margins/{session_name}_capture_context.md"),
     ];
-    if !allowed.iter().any(|candidate| candidate == registry_path) {
+    if allowed.iter().any(|candidate| candidate == registry_path) {
+        let file = Path::new(registry_path).file_name()?;
+        let path = margins_dir.join(file);
+        return (!is_symlink_or_error(&path)).then_some(path);
+    }
+    if registry_path != format!("_margins/{session_name}_aligned.md") {
         return None;
     }
-    let file = Path::new(registry_path).file_name()?;
-    let path = margins_dir.join(file);
+    let archive_dir = margins_dir.parent()?.join("_margins");
+    if is_symlink_or_error(&archive_dir) {
+        return None;
+    }
+    let path = archive_dir.join(format!("{session_name}_aligned.md"));
     (!is_symlink_or_error(&path)).then_some(path)
 }
 

@@ -3,6 +3,7 @@
 
 pub mod agents;
 pub mod alignment;
+pub mod archive;
 pub mod artifacts;
 pub mod granola_import;
 pub mod note_artifacts;

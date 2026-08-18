@@ -14,7 +14,7 @@ pub use services::{
     SessionStore, SystemClock, SystemProcessRunner, SystemProjectService,
 };
 
-use args::{AgentsCommand, Args, Command, GuideCommand, ImportCommand};
+use args::{AgentsCommand, ArchiveCommand, Args, Command, GuideCommand, ImportCommand};
 use clap::Parser;
 use commands::projects::absolute_from;
 use std::ffi::{OsStr, OsString};
@@ -126,6 +126,11 @@ fn run_inner(
         Some(Command::ArtifactsPrune) => {
             commands::artifacts::prune(work_dir, services.clock.now(), stdout)
         }
+        Some(Command::Archive { command }) => match command {
+            ArchiveCommand::On => commands::archive::set(work_dir, true, stdout),
+            ArchiveCommand::Off => commands::archive::set(work_dir, false, stdout),
+            ArchiveCommand::Status => commands::archive::status(work_dir, stdout),
+        },
         Some(Command::Transcribe {
             audio_path,
             name,

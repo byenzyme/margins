@@ -83,6 +83,15 @@ pub struct SessionArtifact {
     pub expires_at: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionArtifactPathUpdate {
+    pub session_name: String,
+    pub kind: String,
+    pub ordinal: i64,
+    pub old_path: String,
+    pub new_path: String,
+}
+
 pub fn database_path(dir: &Path) -> PathBuf {
     dir.join("sessions.sqlite")
 }
@@ -781,6 +790,47 @@ pub fn upsert_session_artifact(
     Ok(())
 }
 
+/// Rewrite a set of registered artifact paths as one all-or-nothing change.
+///
+/// The old path is part of each predicate so a concurrent writer cannot be
+/// silently overwritten. A missing or changed row rolls back the transaction.
+pub fn rewrite_session_artifact_paths(
+    dir: &Path,
+    updates: &[SessionArtifactPathUpdate],
+) -> Result<()> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let mut conn = open_db(dir)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    for update in updates {
+        let changed = tx.execute(
+            r#"
+            UPDATE session_artifacts
+            SET path = ?1
+            WHERE session_name = ?2 AND kind = ?3 AND ordinal = ?4 AND path = ?5
+            "#,
+            params![
+                update.new_path,
+                update.session_name,
+                update.kind,
+                update.ordinal,
+                update.old_path
+            ],
+        )?;
+        if changed != 1 {
+            anyhow::bail!(
+                "artifact path changed while migrating {}:{}:{}",
+                update.session_name,
+                update.kind,
+                update.ordinal
+            );
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn list_session_artifacts(dir: &Path, session_name: &str) -> Result<Vec<SessionArtifact>> {
     let conn = open_db(dir)?;
     let mut stmt = conn.prepare(
@@ -1355,6 +1405,52 @@ mod tests {
         assert_eq!(artifacts[1].path, ".margins/meet_transcript.md");
         assert_eq!(artifacts[1].retention_class, "durable");
         assert!(!artifacts[1].created_at.is_empty());
+    }
+
+    #[test]
+    fn artifact_path_rewrites_are_transactional_and_compare_old_values() {
+        let dir = tempdir().unwrap();
+        let margins_dir = dir.path().join(".margins");
+        let start = Local::now();
+        for session in ["one", "two"] {
+            create_session(&margins_dir, session, &start, &format!("{session}.md")).unwrap();
+            upsert_session_artifact(
+                &margins_dir,
+                session,
+                SESSION_ARTIFACT_KIND_TRANSCRIPT,
+                0,
+                &format!(".margins/{session}_aligned.md"),
+                "durable",
+                None,
+            )
+            .unwrap();
+        }
+        let updates = [
+            SessionArtifactPathUpdate {
+                session_name: "one".to_string(),
+                kind: SESSION_ARTIFACT_KIND_TRANSCRIPT.to_string(),
+                ordinal: 0,
+                old_path: ".margins/one_aligned.md".to_string(),
+                new_path: "_margins/one_aligned.md".to_string(),
+            },
+            SessionArtifactPathUpdate {
+                session_name: "two".to_string(),
+                kind: SESSION_ARTIFACT_KIND_TRANSCRIPT.to_string(),
+                ordinal: 0,
+                old_path: ".margins/stale.md".to_string(),
+                new_path: "_margins/two_aligned.md".to_string(),
+            },
+        ];
+
+        assert!(rewrite_session_artifact_paths(&margins_dir, &updates).is_err());
+        assert_eq!(
+            list_session_artifacts(&margins_dir, "one").unwrap()[0].path,
+            ".margins/one_aligned.md"
+        );
+        assert_eq!(
+            list_session_artifacts(&margins_dir, "two").unwrap()[0].path,
+            ".margins/two_aligned.md"
+        );
     }
 
     #[test]
