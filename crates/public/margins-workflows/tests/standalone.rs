@@ -23,7 +23,6 @@ fn crate_builds_from_an_isolated_public_tree() {
         "margins-media",
         "margins-store",
         "margins-workflows",
-        "margins-meeting-protocol",
     ] {
         copy_tree(&public_dir.join(name), &temp.path().join(name));
     }

@@ -92,11 +92,10 @@ No command in this repository publishes crates. If maintainers later decide
 to publish, crates.io dependencies require this order (crates on the same
 line may follow one another after their prerequisites are available):
 
-1. `margins-meeting-protocol`
-2. `margins-core`, then `margins-meeting-runtime`
-3. `margins-media`, then `margins-store`
-4. `margins-workflows`
-5. `margins-cli`
+1. `margins-core`
+2. `margins-media`, then `margins-store`
+3. `margins-workflows`
+4. `margins-cli`
 
 The package names are not asserted to be reserved or available on crates.io.
 Before any release, verify registry ownership and availability; if a name

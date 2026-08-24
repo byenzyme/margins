@@ -3,7 +3,20 @@
 use crate::{ArtifactId, SegmentId};
 use serde::{Deserialize, Serialize};
 
-pub use margins_meeting_protocol::{DurationMillis, SessionMillis, UnixMillis};
+/// Milliseconds since the Unix epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct UnixMillis(pub u64);
+
+/// Milliseconds from the session's monotonic time origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SessionMillis(pub u64);
+
+/// An elapsed duration in milliseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DurationMillis(pub u64);
 
 /// A logical mono lane in a capture session.
 #[non_exhaustive]

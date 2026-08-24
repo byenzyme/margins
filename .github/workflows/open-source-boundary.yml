@@ -75,10 +75,8 @@ jobs:
             RUSTDOCFLAGS='-D warnings' cargo doc \
               --workspace --no-default-features --no-deps --locked --offline
             for crate in \
-              margins-meeting-protocol \
               margins-core \
               margins-media \
-              margins-meeting-runtime \
               margins-store \
               margins-workflows \
               margins-cli; do

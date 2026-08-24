@@ -2,8 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use margins_meeting_protocol::{ArtifactId, SegmentId, SessionId};
-
 macro_rules! string_id {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
@@ -49,6 +47,12 @@ string_id!(/// Stable identity for a transcript entry.
     TranscriptEntryId);
 string_id!(/// Stable speaker identity within a transcript.
     SpeakerId);
+string_id!(/// Stable ID for a meeting session. Session IDs are chosen by the creator.
+    SessionId);
+string_id!(/// Stable ID for a recording segment.
+    SegmentId);
+string_id!(/// Stable ID for a generated artifact.
+    ArtifactId);
 
 /// Monotonic sequence within one session event stream.
 #[derive(

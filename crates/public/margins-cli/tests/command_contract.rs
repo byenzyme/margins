@@ -135,14 +135,27 @@ fn parser_accepts_read_only_and_write_config_scan_commands() {
     assert!(matches!(
         parsed.command,
         Some(margins_cli::args::Command::Scan {
-            write_config: false
+            write_config: false,
+            update: false,
         })
     ));
 
     let parsed = Args::try_parse_from(["margins", "scan", "--write-config"]).unwrap();
     assert!(matches!(
         parsed.command,
-        Some(margins_cli::args::Command::Scan { write_config: true })
+        Some(margins_cli::args::Command::Scan {
+            write_config: true,
+            update: false,
+        })
+    ));
+
+    let parsed = Args::try_parse_from(["margins", "scan", "--write-config", "--update"]).unwrap();
+    assert!(matches!(
+        parsed.command,
+        Some(margins_cli::args::Command::Scan {
+            write_config: true,
+            update: true,
+        })
     ));
 }
 
@@ -354,6 +367,32 @@ fn seed_inspectable_session(vault: &Path, meeting_id: &str, marker: &str) {
     .unwrap();
 }
 
+fn seed_checkpoint_session(vault: &Path, meeting_id: &str, terminal: bool, decoded: u64) {
+    let margins_dir = vault.join(".margins");
+    std::fs::create_dir_all(&margins_dir).unwrap();
+    std::fs::write(margins_dir.join(format!("{meeting_id}.md")), "[00:01] memo").unwrap();
+    legacy::create_session(
+        &margins_dir,
+        meeting_id,
+        &Local::now(),
+        &format!(".margins/{meeting_id}.md"),
+    )
+    .unwrap();
+    legacy::add_segment(
+        &margins_dir,
+        meeting_id,
+        0,
+        &format!(".margins/{meeting_id}_seg0.wav"),
+        0,
+        None,
+    )
+    .unwrap();
+    let checkpoint = margins_dir.join(format!("{meeting_id}_seg0.live-transcript.json"));
+    let payload = serde_json::json!({"terminal": terminal, "decoded_until_ms": decoded, "transcripts": [{"words": [{"channel": 0, "start_ms": 500, "end_ms": 900, "text": " hello"}]}]});
+    std::fs::write(checkpoint, serde_json::to_vec(&payload).unwrap()).unwrap();
+    std::fs::write(margins_dir.join("current"), format!("{meeting_id}\n")).unwrap();
+}
+
 fn multi_project_services(projects: Arc<MultiProject>) -> CliServices {
     let mut services = services(&projects.vaults[0].root_dir);
     services.projects = projects;
@@ -547,6 +586,76 @@ fn latest_remains_scoped_to_the_active_vault() {
     assert!(stdout.contains("active transcript"));
     assert!(!stdout.contains("other transcript"));
     assert_eq!(*projects.list_calls.lock().unwrap(), 0);
+}
+
+#[test]
+fn transcript_defaults_to_latest_json_and_preserves_default_xml() {
+    let temp = tempfile::tempdir().unwrap();
+    seed_inspectable_session(temp.path(), "latest-json", "latest transcript");
+    let services = services(temp.path());
+
+    let (result, default_xml, stderr) = invoke(&services, temp.path(), &["margins", "transcript"]);
+    assert!(result.is_ok(), "{stderr}");
+    assert!(default_xml
+        .starts_with("<margins_transcript meeting_id=\"latest-json\" view=\"aligned\">\n"));
+
+    let (result, explicit_text, stderr) = invoke(
+        &services,
+        temp.path(),
+        &["margins", "transcript", "--format", "text"],
+    );
+    assert!(result.is_ok(), "{stderr}");
+    assert_eq!(default_xml, explicit_text);
+
+    let (result, stdout, stderr) = invoke(
+        &services,
+        temp.path(),
+        &["margins", "transcript", "--format", "json"],
+    );
+    assert!(result.is_ok(), "{stderr}");
+    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let object = value.as_object().unwrap();
+    for field in [
+        "meeting_id",
+        "body",
+        "view",
+        "decoded_until_ms",
+        "live",
+        "terminal",
+    ] {
+        assert!(object.contains_key(field), "missing JSON field {field}");
+    }
+    assert_eq!(value["meeting_id"], "latest-json");
+    assert_eq!(value["body"], "# latest transcript");
+    assert_eq!(value["view"], "aligned");
+    assert_eq!(value["decoded_until_ms"], 0);
+    assert_eq!(value["live"], false);
+    assert_eq!(value["terminal"], true);
+}
+
+#[test]
+fn transcript_json_reports_live_and_terminal_checkpoint_state() {
+    for (meeting_id, terminal, expected_live, decoded) in [
+        ("live-meeting", false, true, 12_345),
+        ("terminal-meeting", true, false, 67_890),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        seed_checkpoint_session(temp.path(), meeting_id, terminal, decoded);
+        let services = services(temp.path());
+        let (result, stdout, stderr) = invoke(
+            &services,
+            temp.path(),
+            &["margins", "transcript", meeting_id, "--format", "json"],
+        );
+        assert!(result.is_ok(), "{meeting_id}: {stderr}");
+        let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(value["meeting_id"], meeting_id);
+        assert_eq!(value["view"], "full");
+        assert_eq!(value["decoded_until_ms"], decoded);
+        assert_eq!(value["terminal"], terminal);
+        assert_eq!(value["live"], expected_live);
+        assert!(value["body"].as_str().unwrap().contains("hello"));
+    }
 }
 
 struct EmptyAsr;
@@ -1063,4 +1172,44 @@ fn session_catalog_and_artifact_commands_emit_vault_anchored_paths() {
             "{args:?} returned a cwd-relative artifact path: {stdout}"
         );
     }
+}
+#[test]
+fn parser_accepts_note_print_dry_run() {
+    let parsed = Args::try_parse_from(["margins", "note", "--print"]).unwrap();
+    assert!(matches!(
+        parsed.command,
+        Some(margins_cli::args::Command::Note { print: true })
+    ));
+}
+
+#[test]
+fn bare_margins_creates_without_a_current_session_then_resumes_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut services = services(temp.path());
+    services.capture = Arc::new(FakeCapture);
+
+    let (first, _, first_stderr) = invoke(&services, temp.path(), &["margins"]);
+    assert!(first.is_ok(), "{first_stderr}");
+
+    let margins_dir = temp.path().join(".margins");
+    let current = std::fs::read_to_string(margins_dir.join("current")).unwrap();
+    let id = current.trim();
+    let first_meta = legacy::get_session_meta(&margins_dir, id).unwrap();
+    assert_eq!(first_meta.segments.len(), 1);
+
+    let (second, _, second_stderr) = invoke(&services, temp.path(), &["margins"]);
+    assert!(second.is_ok(), "{second_stderr}");
+
+    let second_current = std::fs::read_to_string(margins_dir.join("current")).unwrap();
+    assert_eq!(second_current.trim(), id);
+    let resumed_meta = legacy::get_session_meta(&margins_dir, id).unwrap();
+    assert_eq!(
+        resumed_meta
+            .segments
+            .iter()
+            .map(|segment| segment.segment_index)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    assert_eq!(legacy::list_sessions(&margins_dir).unwrap().len(), 1);
 }

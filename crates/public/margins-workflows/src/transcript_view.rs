@@ -1,8 +1,6 @@
 //! Portable transcript artifact selection and rendering inputs.
 
-use crate::artifacts::{
-    artifact_registry_disk_path, confined_session_artifact_access_disk_path,
-};
+use crate::artifacts::{artifact_registry_disk_path, confined_session_artifact_access_disk_path};
 use anyhow::{bail, Context, Result};
 use margins_store::legacy;
 use serde_json::Value;
@@ -15,6 +13,9 @@ pub struct TranscriptView {
     pub source_path: PathBuf,
     pub body: String,
     pub view: &'static str,
+    pub decoded_until_ms: u64,
+    pub live: bool,
+    pub terminal: bool,
     pub speaker_alias: Option<String>,
     pub started_at: String,
     pub created_at: String,
@@ -23,6 +24,15 @@ pub struct TranscriptView {
     pub people: Vec<String>,
     pub memo_path: String,
     pub saved_note_path: Option<String>,
+}
+
+#[derive(Debug)]
+struct TranscriptSource {
+    source_path: PathBuf,
+    body: String,
+    decoded_until_ms: u64,
+    terminal: bool,
+    live_checkpoint: bool,
 }
 
 pub fn transcript_artifact_path(margins_dir: &Path, name: &str) -> PathBuf {
@@ -82,25 +92,41 @@ pub fn load_transcript_view(
 ) -> Result<TranscriptView> {
     let name = resolve_session_name(margins_dir, requested)?;
     let meta = legacy::get_session_meta(margins_dir, &name).ok();
-    let (source_path, mut body, view) =
-        if let Some((path, body)) = read_live_transcript_body(work_dir, margins_dir, &name)? {
-            (path, body, "full")
-        } else if let Some((path, body)) =
+    let (source, view) =
+        if let Some(source) = read_live_transcript_body(work_dir, margins_dir, &name)? {
+            (source, "full")
+        } else if let Some(source) =
             read_terminal_checkpoint_body(work_dir, margins_dir, &name, meta.as_ref())?
         {
-            (path, body, "full")
+            (source, "full")
         } else {
             let (path, body) = read_registered_or_fallback(work_dir, margins_dir, &name)?;
-            (path, body, "aligned")
+            (
+                TranscriptSource {
+                    source_path: path,
+                    body,
+                    decoded_until_ms: 0,
+                    terminal: true,
+                    live_checkpoint: false,
+                },
+                "aligned",
+            )
         };
+    // The public store has no process-level capture status. A current session
+    // with a non-terminal live source is the strongest honest available signal.
+    let live =
+        source.live_checkpoint && !source.terminal && current_session_matches(margins_dir, &name);
     let speaker_alias = speaker_alias_from_meta(meta.as_ref());
-    body = apply_speaker_alias(&body, speaker_alias.as_deref());
+    let body = apply_speaker_alias(&source.body, speaker_alias.as_deref());
     let saved_note_path = saved_note_path_for_session(margins_dir, &name);
     Ok(TranscriptView {
         session_name: name,
-        source_path,
+        source_path: source.source_path,
         body,
         view,
+        decoded_until_ms: source.decoded_until_ms,
+        live,
+        terminal: source.terminal,
         speaker_alias,
         started_at: meta
             .as_ref()
@@ -132,18 +158,46 @@ fn read_terminal_checkpoint_body(
     margins_dir: &Path,
     name: &str,
     meta: Option<&legacy::SessionMeta>,
-) -> Result<Option<(PathBuf, String)>> {
-    let checkpoint = legacy::list_session_artifacts(margins_dir, name)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|artifact| artifact.kind == legacy::SESSION_ARTIFACT_KIND_TRANSCRIPT)
-        .filter(|artifact| artifact.path.ends_with(".live-transcript.json"))
-        .find_map(|artifact| {
-            confined_session_artifact_access_disk_path(margins_dir, name, &artifact.path)
+) -> Result<Option<TranscriptSource>> {
+    let checkpoint = meta
+        .and_then(|meta| {
+            meta.segments
+                .iter()
+                .filter_map(|segment| {
+                    let path = margins_dir.join(format!(
+                        "{name}_seg{}.live-transcript.json",
+                        segment.segment_index
+                    ));
+                    path.is_file().then_some((segment.segment_index, path))
+                })
+                .max_by_key(|(ordinal, _)| *ordinal)
+                .map(|(_, path)| path)
+        })
+        .or_else(|| {
+            legacy::list_session_artifacts(margins_dir, name)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|artifact| artifact.kind == legacy::SESSION_ARTIFACT_KIND_TRANSCRIPT)
+                .filter(|artifact| artifact.path.ends_with(".live-transcript.json"))
+                .find_map(|artifact| {
+                    confined_session_artifact_access_disk_path(margins_dir, name, &artifact.path)
+                })
         });
     let Some(path) = checkpoint else {
         return Ok(None);
     };
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let checkpoint: Value = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    let decoded_until_ms = checkpoint
+        .get("decoded_until_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let terminal = checkpoint
+        .get("terminal")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let entries = margins_media::transcript::merge_word_entries_to_phrases(
         crate::processing::read_transcript_entries(&path)?,
         2_000,
@@ -155,7 +209,13 @@ fn read_terminal_checkpoint_body(
     let memo_path = artifact_registry_disk_path(work_dir, margins_dir, &meta.notes_path);
     let memo = std::fs::read_to_string(memo_path).unwrap_or_default();
     let body = crate::alignment::render_aligned_markdown(name, &started_at, &memo, &entries);
-    Ok(Some((path, body)))
+    Ok(Some(TranscriptSource {
+        source_path: path,
+        body,
+        decoded_until_ms,
+        terminal,
+        live_checkpoint: true,
+    }))
 }
 
 pub fn read_registered_or_fallback(
@@ -183,8 +243,8 @@ pub fn read_registered_or_fallback(
             }
         }
     }
-    if let Some((path, body)) = read_live_transcript_body(work_dir, margins_dir, name)? {
-        return Ok((path, body));
+    if let Some(source) = read_live_transcript_body(work_dir, margins_dir, name)? {
+        return Ok((source.source_path, source.body));
     }
     bail!("No aligned transcript or capture context found for '{name}'.")
 }
@@ -209,7 +269,7 @@ fn read_live_transcript_body(
     work_dir: &Path,
     dir: &Path,
     name: &str,
-) -> Result<Option<(PathBuf, String)>> {
+) -> Result<Option<TranscriptSource>> {
     let Some(path) = live_transcript_source_path(dir, name) else {
         return Ok(None);
     };
@@ -228,6 +288,11 @@ fn read_live_transcript_body(
         .collect::<Vec<_>>();
     let segment_mode = segment_mode_for_path(&path);
     let mut timeline = Vec::<(u64, usize, String)>::new();
+    let terminal = events
+        .iter()
+        .rev()
+        .find_map(checkpoint_event_terminal)
+        .unwrap_or(false);
     let mut seen = HashSet::new();
     let mut source = if segment_mode {
         "live_segments"
@@ -332,13 +397,33 @@ fn read_live_transcript_body(
             body.push('\n');
         }
     }
-    Ok(Some((path, body)))
+    Ok(Some(TranscriptSource {
+        source_path: path,
+        body,
+        decoded_until_ms: decoded,
+        terminal,
+        live_checkpoint: true,
+    }))
 }
 
 fn segment_mode_for_path(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.contains("segments"))
+}
+
+fn checkpoint_event_terminal(event: &Value) -> Option<bool> {
+    event.get("terminal").and_then(Value::as_bool).or_else(|| {
+        match event.get("kind").and_then(Value::as_str) {
+            Some("live_transcript_finalized") => Some(true),
+            Some("memo_transcript_checkpoint") => Some(false),
+            _ => None,
+        }
+    })
+}
+
+fn current_session_matches(dir: &Path, name: &str) -> bool {
+    std::fs::read_to_string(dir.join("current")).is_ok_and(|current| current.trim() == name)
 }
 
 fn elapsed_line_ms(line: &str) -> Option<u64> {

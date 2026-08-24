@@ -21,9 +21,12 @@ use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
+use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::slice;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 pub const SAMPLE_RATE: u32 = 16_000;
@@ -33,6 +36,13 @@ const MS_PER_ENCODER_FRAME: u64 = 80;
 const MEL_HOP_SAMPLES: usize = 160;
 const MEL_CONTEXT_SAMPLES: usize = SAMPLES_PER_ENCODER_FRAME;
 const OFFLINE_OVERLAP_SAMPLES: usize = 32_000;
+const V2_PREPROCESSOR_BAD_DEFAULT: &str = "(\"DefaultShapes\", {{\"audio_signal\", [1, 1]}})";
+const V2_PREPROCESSOR_SAFE_DEFAULT: &str = "(\"DefaultShapes\", {{\"audio_signal\", [1, 240000]}})";
+const V2_PREPROCESSOR_BAD_RANGE: &str =
+    "(\"RangeDims\", {{\"audio_signal\", [[1, 1], [1, 240000]]}})";
+const V2_PREPROCESSOR_SAFE_RANGE: &str =
+    "(\"RangeDims\", {{\"audio_signal\", [[1, 1], [257, 240000]]}})";
+static PREPROCESSOR_STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FluidCoreMlModelVersion {
@@ -115,7 +125,12 @@ pub struct FluidCoreMlBundle {
 impl FluidCoreMlBundle {
     pub fn from_dir(model_dir: impl AsRef<Path>, version: FluidCoreMlModelVersion) -> Result<Self> {
         let root = resolve_model_root(model_dir.as_ref(), version)?;
-        let preprocessor = root.join("Preprocessor.mlmodelc");
+        let source_preprocessor = root.join("Preprocessor.mlmodelc");
+        let preprocessor = if version == FluidCoreMlModelVersion::V2 {
+            runtime_v2_preprocessor(&source_preprocessor)?
+        } else {
+            source_preprocessor
+        };
         let encoder = root.join("Encoder.mlmodelc");
         let decoder = root.join("Decoder.mlmodelc");
         let vocabulary = root.join("parakeet_vocab.json");
@@ -158,6 +173,157 @@ impl FluidCoreMlBundle {
         .map(|(name, _)| name.to_string())
         .collect()
     }
+}
+
+/// Return a cached copy of the v2 preprocessor with a valid flexible-shape
+/// contract. The upstream compiled bundle advertises one sample as its default
+/// and lower bound even though its reflect-pad stage requires at least 257.
+/// E5RT validates that impossible shape at model teardown and writes a scary
+/// `slice_by_index: zero shape error` directly to stderr.
+///
+/// Margins always supplies 240,000 padded samples, so this changes metadata
+/// only: keep the actual input flexible, make the real padded input the default,
+/// and raise the theoretical lower bound past the 256-sample reflect pad. The
+/// shared FluidAudio cache remains read-only; the small derived bundle lives in
+/// the per-user temporary directory and is content-addressed to the source.
+fn runtime_v2_preprocessor(source: &Path) -> Result<PathBuf> {
+    let model_mil = source.join("model.mil");
+    let model_text = fs::read_to_string(&model_mil)
+        .with_context(|| format!("could not read CoreML preprocessor {}", model_mil.display()))?;
+    let has_bad_default = model_text.contains(V2_PREPROCESSOR_BAD_DEFAULT);
+    let has_bad_range = model_text.contains(V2_PREPROCESSOR_BAD_RANGE);
+    if !has_bad_default && !has_bad_range {
+        return Ok(source.to_path_buf());
+    }
+    if !has_bad_default || !has_bad_range {
+        bail!(
+            "CoreML v2 preprocessor has an unrecognized flexible-shape contract: {}",
+            model_mil.display()
+        );
+    }
+
+    let source_hash = hash_directory(source)?;
+    let cache_root = std::env::temp_dir().join("margins-coreml-preprocessors-v1");
+    let final_dir = cache_root.join(format!("{source_hash:016x}"));
+    let final_model = final_dir.join("Preprocessor.mlmodelc");
+    if has_safe_v2_shape(&final_model) {
+        return Ok(final_model);
+    }
+    fs::create_dir_all(&cache_root)?;
+
+    let ordinal = PREPROCESSOR_STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let staging_dir = cache_root.join(format!(
+        ".{source_hash:016x}.staging-{}-{ordinal}",
+        std::process::id()
+    ));
+    let staging_model = staging_dir.join("Preprocessor.mlmodelc");
+    fs::create_dir(&staging_dir)?;
+    let staged = (|| -> Result<()> {
+        copy_directory(source, &staging_model)?;
+        patch_v2_preprocessor_shape(&staging_model)?;
+        Ok(())
+    })();
+    if let Err(error) = staged {
+        let _ = fs::remove_dir_all(&staging_dir);
+        return Err(error);
+    }
+
+    match fs::rename(&staging_dir, &final_dir) {
+        Ok(()) => Ok(final_model),
+        Err(_) if has_safe_v2_shape(&final_model) => {
+            let _ = fs::remove_dir_all(&staging_dir);
+            Ok(final_model)
+        }
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging_dir);
+            Err(error).context("could not activate corrected CoreML preprocessor")
+        }
+    }
+}
+
+fn patch_v2_preprocessor_shape(preprocessor: &Path) -> Result<()> {
+    let model_mil = preprocessor.join("model.mil");
+    let model_text = fs::read_to_string(&model_mil)?;
+    let model_text = model_text
+        .replacen(V2_PREPROCESSOR_BAD_DEFAULT, V2_PREPROCESSOR_SAFE_DEFAULT, 1)
+        .replacen(V2_PREPROCESSOR_BAD_RANGE, V2_PREPROCESSOR_SAFE_RANGE, 1);
+    fs::write(&model_mil, model_text)?;
+
+    // metadata.json is descriptive rather than executable, but keep tools and
+    // diagnostics honest about the derived bundle's actual input contract.
+    let metadata = preprocessor.join("metadata.json");
+    if let Ok(metadata_text) = fs::read_to_string(&metadata) {
+        let metadata_text = metadata_text
+            .replacen("1 × 1...240000", "1 × 257...240000", 1)
+            .replacen("[[1, 1], [1, 240000]]", "[[1, 1], [257, 240000]]", 1)
+            .replacen(
+                "MultiArray (Float32 1 × 1)",
+                "MultiArray (Float32 1 × 240000)",
+                1,
+            )
+            .replacen("\"shape\" : \"[1, 1]\"", "\"shape\" : \"[1, 240000]\"", 1);
+        fs::write(metadata, metadata_text)?;
+    }
+    if !has_safe_v2_shape(preprocessor) {
+        bail!("failed to correct CoreML v2 preprocessor shape metadata");
+    }
+    Ok(())
+}
+
+fn has_safe_v2_shape(preprocessor: &Path) -> bool {
+    fs::read_to_string(preprocessor.join("model.mil")).is_ok_and(|text| {
+        text.contains(V2_PREPROCESSOR_SAFE_DEFAULT)
+            && text.contains(V2_PREPROCESSOR_SAFE_RANGE)
+            && !text.contains(V2_PREPROCESSOR_BAD_DEFAULT)
+            && !text.contains(V2_PREPROCESSOR_BAD_RANGE)
+    })
+}
+
+fn hash_directory(root: &Path) -> Result<u64> {
+    fn collect(root: &Path, current: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+        for entry in fs::read_dir(current)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                collect(root, &path, files)?;
+            } else if file_type.is_file() {
+                files.push(path.strip_prefix(root)?.to_path_buf());
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    collect(root, root, &mut files)?;
+    files.sort();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for relative in files {
+        relative.hash(&mut hasher);
+        fs::read(root.join(relative))?.hash(&mut hasher);
+    }
+    Ok(hasher.finish())
+}
+
+fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            copy_directory(&source_path, &destination_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &destination_path)?;
+        } else {
+            bail!(
+                "CoreML preprocessor contains an unsupported filesystem entry: {}",
+                source_path.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Direct CoreML Parakeet scaffold using FluidAudio model bundles.
@@ -2688,6 +2854,37 @@ fn f16_to_f32(bits: u16) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn derives_safe_v2_preprocessor_without_mutating_shared_assets() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("Preprocessor.mlmodelc");
+        fs::create_dir_all(source.join("weights")).unwrap();
+        fs::write(
+            source.join("model.mil"),
+            format!("func main {V2_PREPROCESSOR_BAD_DEFAULT} {V2_PREPROCESSOR_BAD_RANGE}\n"),
+        )
+        .unwrap();
+        fs::write(
+            source.join("metadata.json"),
+            "1 × 1...240000\n[[1, 1], [1, 240000]]\nMultiArray (Float32 1 × 1)\n\"shape\" : \"[1, 1]\"\n",
+        )
+        .unwrap();
+        fs::write(source.join("weights/weight.bin"), b"shape-test").unwrap();
+
+        let derived = runtime_v2_preprocessor(&source).unwrap();
+
+        assert_ne!(derived, source);
+        assert!(has_safe_v2_shape(&derived));
+        let original = fs::read_to_string(source.join("model.mil")).unwrap();
+        assert!(original.contains(V2_PREPROCESSOR_BAD_DEFAULT));
+        assert!(original.contains(V2_PREPROCESSOR_BAD_RANGE));
+        let metadata = fs::read_to_string(derived.join("metadata.json")).unwrap();
+        assert!(metadata.contains("1 × 257...240000"));
+        assert!(metadata.contains("[[1, 1], [257, 240000]]"));
+        assert!(metadata.contains("MultiArray (Float32 1 × 240000)"));
+        assert!(metadata.contains("\"shape\" : \"[1, 240000]\""));
+    }
 
     #[test]
     fn pads_to_fluid_frontend_window() {

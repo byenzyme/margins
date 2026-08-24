@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -14,7 +14,7 @@ pub struct Args {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Print a short agent handoff for setting up this folder
+    /// Provision local models, install agent skills, and print a setup handoff
     Setup,
     /// Print embedded Margins guides for agents
     Guide {
@@ -26,6 +26,12 @@ pub enum Command {
         /// Optional display title; Margins generates the stable session id
         #[arg(long)]
         title: Option<String>,
+    },
+    /// Open your coding agent ready to distill the latest session
+    Note {
+        /// Print the selected agent and command without launching it
+        #[arg(long)]
+        print: bool,
     },
     /// Open the recorder for the current session, adding a new segment
     Attach {
@@ -45,11 +51,14 @@ pub enum Command {
         #[arg(long)]
         all: bool,
     },
-    /// Print the complete transcript for a meeting as XML (every utterance
-    /// plus memo timeline; falls back to the memo-aligned artifact)
+    /// Print the complete transcript for a meeting (every utterance plus memo
+    /// timeline; falls back to the memo-aligned artifact)
     Transcript {
-        /// Stable meeting id from `margins recent`, or `latest`
-        meeting_id: String,
+        /// Stable meeting id from `margins recent`; defaults to `latest`
+        meeting_id: Option<String>,
+        /// Output format
+        #[arg(long, value_enum, default_value = "text")]
+        format: TranscriptFormat,
     },
     /// List registered artifacts for a meeting as XML
     Artifacts {
@@ -108,11 +117,20 @@ pub enum Command {
         /// Write the initial suggested policy when this workspace has none
         #[arg(long)]
         write_config: bool,
+        /// Replace an existing workspace policy with the current suggestion
+        #[arg(long)]
+        update: bool,
     },
     /// Print this binary's machine-readable composition capabilities as JSON
     Capabilities,
     /// Establish or refresh a Margins vault in this folder
     Init,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum TranscriptFormat {
+    Text,
+    Json,
 }
 
 #[derive(Debug, Subcommand)]

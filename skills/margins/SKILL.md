@@ -14,10 +14,16 @@ Take an margins session end-to-end: transcribe audio, align the transcript with 
 
 ## Prerequisites
 
-- Standalone public Rust CLI from `crates/public/margins-cli` in `$PATH`, built
-  with the ASR feature for the platform (for example,
-  `cargo install --path crates/public/margins-cli --features coreml-asr`)
-- For multi-speaker audio, build Margins with `polyvoice-diarization` (the default release build includes it)
+- The full `margins` CLI on `$PATH` with `margins setup` already run — setup
+  provisions local transcription and installs this skill. It must be the
+  capture + ASR + recall composition, not a recall-only or ASR-only build:
+  official brew/release installs provide it, and a source build must use
+  `./install.sh` from the repo root (macOS builds the full-featured binary and
+  grants system-audio capture permission), not a bare `--features recall` build.
+  Verify with `margins capabilities` — expect `capture.available: true`,
+  `recall.local_model: true`, and recall `lookup`/`indexing` true.
+- Multi-speaker audio uses diarization (`polyvoice-diarization`), which the
+  default release build and the macOS full build include.
 
 ## What this produces
 

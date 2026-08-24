@@ -28,6 +28,12 @@ Recording lifecycle:
 - `margins attach <meeting-id>` makes an older meeting current before recording another segment.
 - Starting a new meeting replaces the current pointer; it never deletes the previous meeting.
 
+Live meeting feedback (while recording):
+- When the user asks for a live read, a sanity check, or what to say next during an active meeting, fetch the freshest transcript with `margins transcript --format json` (fields: `live`, `decoded_until_ms`, `terminal`, `body`). Answer briefly from the newest complete turn — this is meant to be usable in the room. The `/watermark` skill wraps this flow; offer it when a meeting is live.
+
+Turn a meeting into a note:
+- After a meeting, `margins note` drops the user into their agent seeded to distill the latest session, or run the `/margins` skill directly. Both produce a structured vault note.
+
 Note refinement workflow:
 - Run `margins recent` to identify the meeting and pick its stable meeting id.
 - Run `margins transcript <meeting-id>` for the complete transcript: every utterance with speaker and timestamp, merged with the memo timeline. The root element's `view` attribute says whether you got the full reconstruction (`full`) or only a memo-aligned artifact (`aligned`, which can omit stretches where no memo was taken).

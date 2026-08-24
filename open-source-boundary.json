@@ -22,6 +22,7 @@
         "crates/public/margins-cli/LICENSE",
         "crates/public/margins-cli/README.md",
         "crates/public/margins-cli/src/args.rs",
+        "crates/public/margins-cli/src/commands/archive.rs",
         "crates/public/margins-cli/src/commands/artifacts.rs",
         "crates/public/margins-cli/src/commands/capabilities.rs",
         "crates/public/margins-cli/src/commands/capture.rs",
@@ -47,6 +48,7 @@
         "crates/public/margins-cli/LICENSE",
         "crates/public/margins-cli/README.md",
         "crates/public/margins-cli/src/args.rs",
+        "crates/public/margins-cli/src/commands/archive.rs",
         "crates/public/margins-cli/src/commands/artifacts.rs",
         "crates/public/margins-cli/src/commands/capabilities.rs",
         "crates/public/margins-cli/src/commands/capture.rs",
@@ -67,7 +69,7 @@
         "crates/public/margins-cli/tests/multipart_parity.rs",
         "crates/public/margins-cli/tests/standalone.rs"
       ],
-      "minimum_files": 23
+      "minimum_files": 24
     },
     {
       "name": "margins-store-crate",
@@ -111,6 +113,7 @@
         "crates/public/margins-workflows/resources/skills/margins-workspace-setup/SKILL.md",
         "crates/public/margins-workflows/src/agents.rs",
         "crates/public/margins-workflows/src/alignment.rs",
+        "crates/public/margins-workflows/src/archive.rs",
         "crates/public/margins-workflows/src/artifacts.rs",
         "crates/public/margins-workflows/src/granola_import.rs",
         "crates/public/margins-workflows/src/lib.rs",
@@ -120,6 +123,7 @@
         "crates/public/margins-workflows/src/publish.rs",
         "crates/public/margins-workflows/src/session_index.rs",
         "crates/public/margins-workflows/src/transcript_view.rs",
+        "crates/public/margins-workflows/tests/archive.rs",
         "crates/public/margins-workflows/tests/artifact_confinement.rs",
         "crates/public/margins-workflows/tests/multipart_parity.rs",
         "crates/public/margins-workflows/tests/public_graph.rs",
@@ -133,6 +137,7 @@
         "crates/public/margins-workflows/resources/skills/margins-workspace-setup/SKILL.md",
         "crates/public/margins-workflows/src/agents.rs",
         "crates/public/margins-workflows/src/alignment.rs",
+        "crates/public/margins-workflows/src/archive.rs",
         "crates/public/margins-workflows/src/artifacts.rs",
         "crates/public/margins-workflows/src/granola_import.rs",
         "crates/public/margins-workflows/src/lib.rs",
@@ -142,33 +147,13 @@
         "crates/public/margins-workflows/src/publish.rs",
         "crates/public/margins-workflows/src/session_index.rs",
         "crates/public/margins-workflows/src/transcript_view.rs",
+        "crates/public/margins-workflows/tests/archive.rs",
         "crates/public/margins-workflows/tests/artifact_confinement.rs",
         "crates/public/margins-workflows/tests/multipart_parity.rs",
         "crates/public/margins-workflows/tests/public_graph.rs",
         "crates/public/margins-workflows/tests/standalone.rs"
       ],
-      "minimum_files": 20
-    },
-    {
-      "name": "meeting-protocol-crate",
-      "description": "Independently buildable public V1 wire contract for mobile, browser, relay, and meeting runtime implementations.",
-      "include": [
-        "crates/public/margins-meeting-protocol/Cargo.toml",
-        "crates/public/margins-meeting-protocol/LICENSE",
-        "crates/public/margins-meeting-protocol/README.md",
-        "crates/public/margins-meeting-protocol/src/lib.rs",
-        "crates/public/margins-meeting-protocol/tests/json_contract.rs",
-        "crates/public/margins-meeting-protocol/tests/roundtrip.rs"
-      ],
-      "required_files": [
-        "crates/public/margins-meeting-protocol/Cargo.toml",
-        "crates/public/margins-meeting-protocol/LICENSE",
-        "crates/public/margins-meeting-protocol/README.md",
-        "crates/public/margins-meeting-protocol/src/lib.rs",
-        "crates/public/margins-meeting-protocol/tests/json_contract.rs",
-        "crates/public/margins-meeting-protocol/tests/roundtrip.rs"
-      ],
-      "minimum_files": 6
+      "minimum_files": 22
     },
     {
       "name": "margins-core-crate",
@@ -257,27 +242,6 @@
       "minimum_files": 18
     },
     {
-      "name": "meeting-runtime-crate",
-      "description": "Independently buildable transport-neutral durable state machine for the public meeting protocol.",
-      "include": [
-        "crates/public/margins-meeting-runtime/Cargo.toml",
-        "crates/public/margins-meeting-runtime/LICENSE",
-        "crates/public/margins-meeting-runtime/README.md",
-        "crates/public/margins-meeting-runtime/src/lib.rs",
-        "crates/public/margins-meeting-runtime/tests/concurrent_races.rs",
-        "crates/public/margins-meeting-runtime/tests/runtime_state_machine.rs"
-      ],
-      "required_files": [
-        "crates/public/margins-meeting-runtime/Cargo.toml",
-        "crates/public/margins-meeting-runtime/LICENSE",
-        "crates/public/margins-meeting-runtime/README.md",
-        "crates/public/margins-meeting-runtime/src/lib.rs",
-        "crates/public/margins-meeting-runtime/tests/concurrent_races.rs",
-        "crates/public/margins-meeting-runtime/tests/runtime_state_machine.rs"
-      ],
-      "minimum_files": 6
-    },
-    {
       "name": "repository-shell",
       "description": "Standalone public workspace metadata, reproducible lockfile, project introduction, and contributor guide materialized at the export root.",
       "include": [
@@ -333,18 +297,16 @@
     },
     {
       "name": "docs",
-      "description": "Public-boundary, trust, customization, and licensing documentation.",
+      "description": "Public-boundary, trust, and licensing documentation.",
       "include": [
         "LICENSE",
-        "OPEN_SOURCE.md",
-        "docs/public-cli-extraction.md"
+        "OPEN_SOURCE.md"
       ],
       "required_files": [
         "LICENSE",
-        "OPEN_SOURCE.md",
-        "docs/public-cli-extraction.md"
+        "OPEN_SOURCE.md"
       ],
-      "minimum_files": 3
+      "minimum_files": 2
     },
     {
       "name": "boundary-tooling",

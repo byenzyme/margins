@@ -14,14 +14,6 @@ pub mod memo;
 pub mod session;
 pub mod transcript;
 
-/// Versioned, transport-neutral meeting protocol DTOs.
-///
-/// These are re-exported instead of duplicated so a transport boundary has one
-/// canonical wire representation.
-pub mod wire {
-    pub use margins_meeting_protocol::*;
-}
-
 pub use audio::*;
 pub use capture::*;
 pub use event::*;

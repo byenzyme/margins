@@ -10,6 +10,12 @@ use std::fmt;
 pub const EVENT_SCHEMA: &str = "margins.event";
 pub const EVENT_VERSION_V1: u16 = 1;
 
+/// Largest integer that JSON/JavaScript clients can represent exactly.
+///
+/// Counters and timestamps must not exceed this value so the JSON contract
+/// stays safe for browsers while retaining `u64` storage in Rust.
+pub const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
+
 /// Forward-compatible event kind. Unknown strings are retained verbatim.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -99,12 +105,12 @@ impl EventEnvelope {
         if self.version != EVENT_VERSION_V1 {
             return Err(EventError::invalid_envelope("version must be 1"));
         }
-        if self.sequence.0 > margins_meeting_protocol::MAX_SAFE_JSON_INTEGER {
+        if self.sequence.0 > MAX_SAFE_JSON_INTEGER {
             return Err(EventError::invalid_envelope(
                 "sequence must be exactly representable by JSON/JavaScript",
             ));
         }
-        if self.emitted_at_ms > margins_meeting_protocol::MAX_SAFE_JSON_INTEGER {
+        if self.emitted_at_ms > MAX_SAFE_JSON_INTEGER {
             return Err(EventError::invalid_envelope(
                 "emitted_at_ms must be exactly representable by JSON/JavaScript",
             ));

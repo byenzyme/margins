@@ -25,7 +25,8 @@ pub fn run(
     work_dir: &Path,
     selected: Option<&str>,
     new_title: Option<&str>,
-    create_new: bool,
+    mut create_new: bool,
+    create_if_missing: bool,
 ) -> Result<(), CliError> {
     preflight(services)?;
 
@@ -50,7 +51,18 @@ pub fn run(
         }
         name.to_string()
     } else {
-        read_current_session(services, &margins_dir)?
+        match read_current_session(services, &margins_dir) {
+            Ok(name) => name,
+            Err(error) if create_if_missing && error.code() == "session_not_found" => {
+                create_new = true;
+                unique_session_name(
+                    services,
+                    &margins_dir,
+                    &now.format("%Y-%m-%d-%H-%M-%S").to_string(),
+                )?
+            }
+            Err(error) => return Err(error),
+        }
     };
 
     let (ordinal, offset_ms) = if create_new {
@@ -198,10 +210,14 @@ fn ensure_permission(services: &CliServices, lane: AudioLane) -> Result<(), CliE
     match state {
         PermissionState::Granted => Ok(()),
         PermissionState::Unavailable => Err(CliError::capture_unavailable()),
-        PermissionState::Denied | PermissionState::Restricted => Err(CliError::new(
-            "capture_permission_denied",
-            "Enable in System Settings -> Privacy & Security -> Microphone (and Screen Recording for system audio), then rerun.",
-        )),
+        PermissionState::Denied | PermissionState::Restricted => {
+            let message = match lane {
+                AudioLane::Microphone => "Margins needs Microphone permission. Grant it to your terminal in System Settings > Privacy & Security > Microphone, then quit and reopen the terminal before running Margins again.",
+                AudioLane::System => crate::error::MACOS_SYSTEM_AUDIO_PERMISSION_DENIED_MESSAGE,
+                _ => "Margins does not have the required capture permission. Grant it in System Settings > Privacy & Security, then quit and reopen the terminal before running Margins again.",
+            };
+            Err(CliError::new("capture_permission_denied", message))
+        }
         _ => Err(CliError::new(
             "capture_open_failed",
             "capture permission was not granted",

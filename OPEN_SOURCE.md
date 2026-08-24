@@ -16,27 +16,27 @@ because they are added to this repository.
 
 ## Candidate public surface
 
+The public surface is deliberately small: the local note pipeline you can read,
+run, and fork, plus the one place where audio becomes text.
+
 - **Rust contracts:** `margins-core` contains platform-neutral IDs, values, and
-  ports for capture, sessions, events, ASR, and diarization. It reuses the
-  versioned DTOs in `margins-meeting-protocol`; neither crate contains a native
-  capture, model, server, or desktop implementation.
+  in-process ports for capture, sessions, events, ASR, and diarization. It
+  contains no native capture, model, server, or desktop implementation.
 - **Store crate:** `margins-store` contains the SQLite `SessionRepository`, the
   behavior-preserving legacy database facade, and storage-only session index
   queries. It contains no note-file workflow, native capture, or desktop code.
+- **Media crate:** `margins-media` is the transcription/diarization seam —
+  portable audio, transcript, and resampling values, and optional ASR/diarization
+  provider adapters selected by feature. This is where audio becomes text; a
+  reader can see exactly how, rather than the step being hidden inside a binary.
 - **Workflow crate:** `margins-workflows` owns portable project/setup resources,
   Granola import, vault publishing, alignment, recent/transcript views, confined
-  artifact pruning, and process/transcribe orchestration through public ASR and
-  diarization ports. Root and desktop consumers use compatibility facades.
+  artifact pruning, and process/transcribe orchestration through the public ASR
+  and diarization ports. Root and desktop consumers use compatibility facades.
 - **CLI:** the independently buildable `margins-cli` library and public
   development binary, `margins-public`. Released recall-capable product
   artifacts still install the user-facing `margins` command. The native
   application launcher and server runtime are not included.
-- **Meeting protocol crate:** the independently buildable V1 mobile/browser/VPS
-  relay wire contract under `crates/public/margins-meeting-protocol`.
-- **Meeting runtime crate:** the independently buildable, transport-neutral
-  durable state machine and in-memory test implementation under
-  `crates/public/margins-meeting-runtime`. Network servers, native capture, and
-  concrete production persistence adapters remain outside this scope.
 - **Skills:** agent instructions, templates, tests, and plugin metadata. These
   are intended to remain readable and customizable.
 - **Docs and boundary tooling:** this document, the license, manifest,
@@ -56,10 +56,17 @@ repository.
 
 The denylist covers the Tauri desktop application, native mic/system-audio
 capture, CoreML and other native ASR/diarization implementations, private
-server/runtime launchers, internal agent workflows, credentials, signing
-material, generated/downloaded model files, databases, recordings,
-transcripts, and other user artifacts. Excluding a path is not a security
-claim about it; it means no public artifact should contain it.
+server/runtime launchers, any remote-meeting transport/relay and its durable
+runtime, internal agent workflows, credentials, signing material,
+generated/downloaded model files, databases, recordings, transcripts, and other
+user artifacts. Excluding a path is not a security claim about it; it means no
+public artifact should contain it.
+
+The public surface is not a modular platform and makes no such promise. It is
+the local recording-to-note pipeline plus one honest extension point — the
+`margins-media` transcription/diarization seam — kept legible instead of hidden.
+Any remote/mobile/relay meeting infrastructure is intentionally outside the
+boundary and is not part of the public design.
 
 No export command reads ignored, untracked, or unstaged worktree files. At the
 start of an invocation, the tool writes the Git index to an immutable tree and
@@ -74,23 +81,28 @@ service-token forms before an export can be written.
 ## Trust and customization scope
 
 The candidate surface lets a reviewer inspect and change how persisted
-sessions are represented, how note material is parsed and published, and how
-the Margins skill turns meeting context into notes. Templates and skill
-instructions are ordinary text and can be forked without modifying the native
-application.
+sessions are represented, how audio becomes a transcript, how note material is
+parsed and published, and how the Margins skill turns meeting context into
+notes. Templates and skill instructions are ordinary text and can be forked
+without modifying the native application.
+
+The transcription/diarization step is shown, not hidden. `margins-media` makes
+the "audio in, transcript and speakers out" boundary visible so a reader can
+follow exactly how it happens. That is transparency about today's on-device
+path, not a promise of a stable plugin ecosystem or of a hosted transcription
+option; Margins does not currently offer hosted transcription.
 
 This boundary does **not** make the desktop capture stack independently
 auditable. A public-only checkout cannot verify claims about native audio
 capture, on-device model execution, application signing, auto-update behavior,
 or the private local server. Those components require separate distribution,
 trust, and privacy review. Public code should communicate with a closed
-component only through documented data/protocol boundaries; importing a denied
-runtime module fails the audit.
+component only through documented data boundaries; importing a denied runtime
+module fails the audit.
 
-Customization is supported within the exported
-CLI/core/media/store/workflows/protocol/meeting-runtime/skills surface.
-Replacing capture backends, desktop UI behavior, signing, model packaging, or
-private network-server policy is outside that surface.
+The exported CLI/core/media/store/workflows/skills surface is meant to be read
+and forked. Replacing capture backends, desktop UI behavior, signing, model
+packaging, or private network-server policy is outside that surface.
 
 ## Deterministic audit and export
 
@@ -130,7 +142,7 @@ required files, forbidden imports, credential signatures, and extra files in a
 verified tree. It never publishes, uploads, commits, or replaces an export.
 
 The current export has a top-level public-only Cargo workspace and committed
-lockfile. CI builds and tests all seven packages from that export root with the
+lockfile. CI builds and tests all five packages from that export root with the
 locked graph in offline mode, then retains the per-crate graph, documentation,
 package-inventory, and optional-feature checks. This ensures the repository
 entrypoint works rather than proving only that separately copied crates happen
@@ -139,13 +151,12 @@ to compile.
 The lockfile is the reproducibility baseline for development and CI in the
 standalone workspace. Published libraries, if publication is separately
 authorized, do not impose it on downstream consumers. First-party path and
-version dependencies require registry publication in this order:
-`margins-meeting-protocol`; then `margins-core` and
-`margins-meeting-runtime`; then `margins-media` and `margins-store`; then
-`margins-workflows`; finally `margins-cli`. Those package names are not claimed
-to be reserved or available. Verify registry ownership and name availability,
-and consistently rename manifests, dependency keys, docs, and lockfiles if
-needed, before any attempted publication.
+version dependencies require registry publication in this order: `margins-core`;
+then `margins-media` and `margins-store`; then `margins-workflows`; finally
+`margins-cli`. Those package names are not claimed to be reserved or available.
+Verify registry ownership and name availability, and consistently rename
+manifests, dependency keys, docs, and lockfiles if needed, before any attempted
+publication.
 
 Before publishing a future public repository, review the dry-run inventory,
 materialize into a new temporary directory, run `--verify-tree` there, inspect

@@ -1,18 +1,14 @@
 [workspace]
 members = [
-    "crates/public/margins-meeting-protocol",
     "crates/public/margins-core",
     "crates/public/margins-media",
-    "crates/public/margins-meeting-runtime",
     "crates/public/margins-store",
     "crates/public/margins-workflows",
     "crates/public/margins-cli",
 ]
 default-members = [
-    "crates/public/margins-meeting-protocol",
     "crates/public/margins-core",
     "crates/public/margins-media",
-    "crates/public/margins-meeting-runtime",
     "crates/public/margins-store",
     "crates/public/margins-workflows",
     "crates/public/margins-cli",

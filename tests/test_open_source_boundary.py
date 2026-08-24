@@ -83,10 +83,8 @@ class RepositoryPolicyTests(unittest.TestCase):
         expected_members = {
             f"crates/public/{name}"
             for name in (
-                "margins-meeting-protocol",
                 "margins-core",
                 "margins-media",
-                "margins-meeting-runtime",
                 "margins-store",
                 "margins-workflows",
                 "margins-cli",
@@ -193,35 +191,34 @@ class RepositoryPolicyTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, validation)
 
-    def test_public_meeting_runtime_scope_is_exact_and_standalone_tested(self) -> None:
+    def test_meeting_protocol_and_runtime_are_excluded_from_the_public_surface(
+        self,
+    ) -> None:
         manifest = json.loads(
             (REPO_ROOT / "open-source-boundary.json").read_text(encoding="utf-8")
         )
-        runtime_scope = next(
-            scope
+        scope_names = {scope["name"] for scope in manifest["scopes"]}
+        self.assertNotIn("meeting-protocol-crate", scope_names)
+        self.assertNotIn("meeting-runtime-crate", scope_names)
+
+        selected = {
+            path
             for scope in manifest["scopes"]
-            if scope["name"] == "meeting-runtime-crate"
-        )
-        required = {
-            "crates/public/margins-meeting-runtime/Cargo.toml",
-            "crates/public/margins-meeting-runtime/LICENSE",
-            "crates/public/margins-meeting-runtime/README.md",
-            "crates/public/margins-meeting-runtime/src/lib.rs",
-            "crates/public/margins-meeting-runtime/tests/concurrent_races.rs",
-            "crates/public/margins-meeting-runtime/tests/runtime_state_machine.rs",
+            for path in scope["required_files"]
         }
-        self.assertEqual(set(runtime_scope["required_files"]), required)
-        self.assertEqual(runtime_scope["minimum_files"], len(required))
+        for path in selected:
+            self.assertNotIn("margins-meeting-protocol", path)
+            self.assertNotIn("margins-meeting-runtime", path)
 
         workflow = (
             REPO_ROOT / ".github/workflows/open-source-boundary.yml"
         ).read_text(encoding="utf-8")
         self.assertIn('cp -R . "$build_export"', workflow)
+        self.assertNotIn("margins-meeting-protocol", workflow)
+        self.assertNotIn("margins-meeting-runtime", workflow)
         for crate in (
-            "margins-meeting-protocol",
             "margins-core",
             "margins-media",
-            "margins-meeting-runtime",
             "margins-store",
             "margins-workflows",
             "margins-cli",
@@ -295,10 +292,8 @@ class RepositoryPolicyTests(unittest.TestCase):
             "pi_agent_rust",
         }
         allowed_first_party = {
-            "margins-meeting-protocol": set(),
-            "margins-core": {"margins-meeting-protocol"},
+            "margins-core": set(),
             "margins-media": {"margins-core"},
-            "margins-meeting-runtime": {"margins-meeting-protocol"},
             "margins-store": {"margins-core"},
             "margins-workflows": {
                 "margins-core",
@@ -343,7 +338,8 @@ class RepositoryPolicyTests(unittest.TestCase):
                                 f"{package} path escapes public root: {resolved}",
                             )
                             observed_first_party.add(dependency)
-            self.assertEqual(observed_first_party, allowed_first_party[package])
+            if package in allowed_first_party:
+                self.assertEqual(observed_first_party, allowed_first_party[package])
 
     def test_public_rust_includes_cannot_escape_the_public_tree(self) -> None:
         public_root = (REPO_ROOT / "crates" / "public").resolve()
@@ -405,7 +401,6 @@ class RepositoryPolicyTests(unittest.TestCase):
             "margins transcribe",
         ):
             self.assertIn(command, skill)
-        self.assertIn("crates/public/margins-cli", skill)
         self.assertIn("do not inspect or modify `.margins/sessions.sqlite`", skill)
         for legacy in ("margins.py", "python3", "ffmpeg", "ffprobe"):
             self.assertNotIn(legacy, skill)

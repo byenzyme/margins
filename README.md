@@ -59,16 +59,13 @@ There is nothing to turn on. An empty folder can only match the words you give i
 
 A recorder opens: a bordered pane titled `margins`, a running clock, your mic and the other side's audio both captured. Type whenever you want to mark a moment. Press Enter to commit a line; its timestamp locks to that instant. `^S` saves, `^C` stops.
 
-**4. Turn it into a note.** The writing step is a Claude Code plugin — it arrives as readable files from this same repo, not a service:
+**4. Turn it into a note.** `margins setup` installs the writing skill into Claude Code, Codex, and Cursor automatically:
 
-    # in Claude Code, once:
-    /plugin marketplace add byenzyme/margins
-    # then, per meeting:
     /margins sync-with-priya
 
 It transcribes the recording, lines your jottings up against what was actually said, and writes a Markdown note into `~/notes/` — reviewing it with you first.
 
-No account to record. No bot in your call. No dashboard. The writing step uses Claude Code or your configured AI key. A file appears next to your other files.
+No account to record. No bot in your call. No dashboard. The writing step uses your agent or configured AI key. A file appears next to your other files.
 
 ---
 
@@ -117,7 +114,7 @@ Margins gives you the parts. What you assemble on top is yours.
 ## Requirements
 
 - macOS, for local on-device transcription.
-- [Claude Code](https://claude.ai/code) for the note-writing step. Hosted recall search only turns on if you set an API key.
+- Claude Code, Codex, or Cursor for the agent-driven note-writing step. Hosted recall search only turns on if you set an API key.
 - Linux users: grab the official `margins` binary from [GitHub Releases](../../releases).
 
 The public source tree is for portable crate development. Its CLI binary is

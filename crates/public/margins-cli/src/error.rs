@@ -3,6 +3,29 @@ use std::fmt;
 
 pub const EX_UNAVAILABLE: i32 = 69;
 
+pub const MACOS_SYSTEM_AUDIO_PERMISSION_DENIED_MESSAGE: &str =
+    "Margins needs \"Screen & System Audio Recording\" permission. Grant it to your terminal in System Settings > Privacy & Security > Screen & System Audio Recording, then quit and reopen the terminal before running Margins again.";
+
+pub const MACOS_SYSTEM_AUDIO_TAP_FAILURE_CONTEXT: &str =
+    "could not create the macOS system-audio tap. The most likely cause is missing \"Screen & System Audio Recording\" permission. Grant it to your terminal in System Settings > Privacy & Security > Screen & System Audio Recording, then quit and reopen the terminal before running Margins again";
+
+pub fn macos_system_audio_permission_likely_message(observation: &str) -> String {
+    format!(
+        "{observation}. This most likely means the permission is missing. {MACOS_SYSTEM_AUDIO_PERMISSION_DENIED_MESSAGE}"
+    )
+}
+
+const MACOS_CAPTURE_UNAVAILABLE_MESSAGE: &str =
+    "capture is unavailable. On macOS, the most likely cause is missing \"Screen & System Audio Recording\" permission. Grant it to your terminal in System Settings > Privacy & Security > Screen & System Audio Recording, then quit and reopen the terminal before running Margins again.";
+
+fn capture_unavailable_message() -> &'static str {
+    if cfg!(target_os = "macos") {
+        MACOS_CAPTURE_UNAVAILABLE_MESSAGE
+    } else {
+        "capture is unavailable in this build"
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliError {
     code: &'static str,
@@ -59,10 +82,7 @@ impl CliError {
     }
 
     pub fn capture_unavailable() -> Self {
-        Self::unavailable(
-            "capture_unavailable",
-            "capture is unavailable in this build",
-        )
+        Self::unavailable("capture_unavailable", capture_unavailable_message())
     }
 
     pub fn asr_unavailable() -> Self {
@@ -104,3 +124,31 @@ impl fmt::Display for CliError {
 }
 
 impl std::error::Error for CliError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn macos_capture_messages_name_the_setting_and_required_restart() {
+        for message in [
+            MACOS_CAPTURE_UNAVAILABLE_MESSAGE,
+            MACOS_SYSTEM_AUDIO_PERMISSION_DENIED_MESSAGE,
+            MACOS_SYSTEM_AUDIO_TAP_FAILURE_CONTEXT,
+        ] {
+            assert!(message.contains("Screen & System Audio Recording"));
+            assert!(message.contains("System Settings > Privacy & Security"));
+            assert!(message.contains("terminal"));
+            assert!(message.contains("quit and reopen"));
+        }
+        assert!(MACOS_CAPTURE_UNAVAILABLE_MESSAGE.contains("most likely cause"));
+        assert!(MACOS_SYSTEM_AUDIO_TAP_FAILURE_CONTEXT.contains("most likely cause"));
+        assert!(!MACOS_SYSTEM_AUDIO_PERMISSION_DENIED_MESSAGE.contains("most likely"));
+
+        let likely = macos_system_audio_permission_likely_message(
+            "macOS system-audio IO started but delivered only empty buffers",
+        );
+        assert!(likely.contains("most likely"));
+        assert!(likely.contains(MACOS_SYSTEM_AUDIO_PERMISSION_DENIED_MESSAGE));
+    }
+}

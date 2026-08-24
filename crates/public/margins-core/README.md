@@ -2,9 +2,7 @@
 
 `margins-core` is the dependency-light public contract crate for Margins. It
 contains owned IDs and values plus synchronous, in-process ports for capture,
-session persistence, events, ASR, and diarization. Versioned meeting-runtime
-wire DTOs are re-exported from `margins-meeting-protocol` as
-`margins_core::wire`; they are not duplicated here.
+session persistence, events, ASR, and diarization.
 
 The crate has no default features and no native or persistence implementation.
 In particular, it does not include microphone/system capture, CPAL, CoreAudio,

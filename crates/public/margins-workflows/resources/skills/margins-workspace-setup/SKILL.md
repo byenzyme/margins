@@ -52,7 +52,7 @@ Use the vault's actual names. Do not propose restructuring unless the user asks 
 
 ## 3. Write Recall Policy
 
-Create or update a concise policy section for this exact workspace in `~/.margins/config.toml`. Scope edits only to `[vaults."<canonical workspace path>"]`; do not change sections for other vaults. Use only meaningful choices supported by scan plus inspection. Prefer 3-8 mixed entity anchors and 2-8 excluded folders when the vault supports that; a tiny vault may need fewer. Do not default to folder-only entities when the scan surfaced stronger tags, links, or logs.
+Create or update a concise policy section for this exact workspace in `~/.margins/config.toml`. Use only meaningful choices supported by scan plus inspection. Prefer 3-8 mixed entity anchors and 2-8 excluded folders when the vault supports that; a tiny vault may need fewer. Do not default to folder-only entities when the scan surfaced stronger tags, links, or logs.
 
 For a workspace with no existing policy, use Margins to write the initial suggestion, then review and minimally tune only that new section:
 
@@ -60,45 +60,21 @@ For a workspace with no existing policy, use Margins to write the initial sugges
 margins scan --write-config
 ```
 
-If `current_config.has_curated_entities` is already true, `--write-config` deliberately refuses to overwrite it. Compare the existing section with the fresh scan evidence and update only that section when the setup request authorizes it. Explain evidence before replacing a materially different existing policy.
+If `current_config.has_curated_entities` is already true, the scan is a preview: compare `current_config.entities` and `current_config.excluded_folders` with the proposed top-level `entities` and `excluded_folders`. Explain the evidence before replacing a materially different existing policy. When the proposed policy is appropriate, apply it explicitly:
 
 ```bash
-python3 - <<'PY'
-from pathlib import Path
-vault = Path.cwd().resolve()
-home = Path.home() / ".margins"
-config = home / "config.toml"
-home.mkdir(parents=True, exist_ok=True)
-existing = config.read_text() if config.exists() else "# Margins configuration\n# Edit only the section for the workspace you are setting up.\n"
-header = f'[vaults."{vault}"]'
-if header in existing:
-    raise SystemExit(f"{header} already exists in {config}; update only that section with the inspected policy.")
-with config.open("a") as f:
-    if existing and not existing.endswith("\n"):
-        f.write("\n")
-    if config.stat().st_size == 0:
-        f.write(existing)
-    f.write(f'''
-
-{header}
-entities = [
-  "folder:people",
-  "folder:projects",
-  "#customer",
-  "[[Acme Pilot]]",
-  "log:journal",
-]
-excluded_folders = [
-  "templates",
-  "archive",
-  "attachments",
-]
-''')
-print(config)
-PY
+margins scan --write-config --update
 ```
 
-The Python block is a fallback for environments where `scan --write-config` cannot establish a new section; normally prefer the command. Edit examples before writing: preserve unrelated sections, keep only candidates found by the scan, and use exact entity syntax (`folder:path`, `#tag`, `[[link]]`, `log:name`). For a flat vault, use `folder:.` instead of inventing folders.
+This replaces only the selected workspace's entities and excluded folders with the proposed policy while preserving unrelated sections and vaults. Review the returned `status: "updated"`, `config_path`, and refreshed `current_config` before continuing. Keep only candidates found by the scan and use exact entity syntax (`folder:path`, `#tag`, `[[link]]`, `log:name`). For a flat vault, use `folder:.` instead of inventing folders.
+
+The written section for this workspace looks like:
+
+```toml
+[vaults."<absolute workspace path>"]
+entities = ["folder:people", "folder:projects", "#customer", "[[Acme Pilot]]", "log:journal"]
+excluded_folders = ["templates", "archive"]
+```
 
 If `.margins/recall/index.db` or an older policy section already exists and appears stale or wrong, explain the evidence and ask before deleting or replacing derived state. Updating only this workspace's policy section is allowed; deleting an index is not.
 

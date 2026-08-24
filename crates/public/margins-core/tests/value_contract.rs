@@ -23,10 +23,13 @@ fn session_lifecycle_rejects_resurrection_after_tombstone() {
 }
 
 #[test]
-fn protocol_ids_are_the_same_types_as_core_ids() {
+fn session_ids_serialize_transparently() {
     let core_id: margins_core::SessionId = "session-1".into();
-    let wire_id: margins_core::wire::SessionId = core_id;
-    assert_eq!(wire_id.as_ref(), "session-1");
+    assert_eq!(core_id.as_ref(), "session-1");
+    assert_eq!(
+        serde_json::to_value(&core_id).unwrap(),
+        serde_json::json!("session-1")
+    );
 }
 
 #[test]

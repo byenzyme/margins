@@ -82,6 +82,12 @@ fn run_inner(
                 "This public development CLI cannot scan a Margins recall workspace. Install the official Margins CLI (`./install.sh` or a release artifact).",
             ));
         }
+        Some(Command::Note { .. }) => {
+            return Err(CliError::new(
+                "composition_unavailable",
+                "This public development CLI cannot launch a coding agent. Install the official Margins CLI (`./install.sh` or a release artifact).",
+            ));
+        }
         _ => {}
     }
 
@@ -90,19 +96,25 @@ fn run_inner(
         .resolve_vault(project_selector.as_deref(), invocation_dir)
         .map_err(CliError::from_anyhow)?;
     let project = match &args.command {
-        Some(Command::Transcript { meeting_id }) | Some(Command::Artifacts { meeting_id }) => {
+        Some(Command::Transcript { meeting_id, .. }) => resolve_meeting_owner(
+            services,
+            project,
+            project_selector.is_some(),
+            meeting_id.as_deref().unwrap_or("latest"),
+        )?,
+        Some(Command::Artifacts { meeting_id }) => {
             resolve_meeting_owner(services, project, project_selector.is_some(), meeting_id)?
         }
         _ => project,
     };
     let work_dir = &project.work_dir;
     match args.command {
-        None => commands::capture::run(services, work_dir, None, None, false),
+        None => commands::capture::run(services, work_dir, None, None, false, true),
         Some(Command::New { title }) => {
-            commands::capture::run(services, work_dir, None, title.as_deref(), true)
+            commands::capture::run(services, work_dir, None, title.as_deref(), true, false)
         }
         Some(Command::Attach { session }) => {
-            commands::capture::run(services, work_dir, session.as_deref(), None, false)
+            commands::capture::run(services, work_dir, session.as_deref(), None, false, false)
         }
         Some(Command::Current) => commands::sessions::show_current(services, work_dir, stdout),
         Some(Command::Ls) => commands::sessions::list(services, work_dir, stderr),
@@ -117,9 +129,12 @@ fn run_inner(
                 commands::transcript::recent(work_dir, stdout)
             }
         }
-        Some(Command::Transcript { meeting_id }) => {
-            commands::transcript::transcript(work_dir, &meeting_id, stdout)
-        }
+        Some(Command::Transcript { meeting_id, format }) => commands::transcript::transcript(
+            work_dir,
+            meeting_id.as_deref().unwrap_or("latest"),
+            format,
+            stdout,
+        ),
         Some(Command::Artifacts { meeting_id }) => {
             commands::artifacts::list(work_dir, &meeting_id, stdout)
         }
@@ -180,6 +195,7 @@ fn run_inner(
         Some(Command::Scan { .. }) => unreachable!("handled before project resolution"),
         Some(Command::Capabilities) => unreachable!("handled before project resolution"),
         Some(Command::Init) => unreachable!("handled before project resolution"),
+        Some(Command::Note { .. }) => unreachable!("handled before project resolution"),
         Some(Command::Setup) | Some(Command::Guide { .. }) => {
             unreachable!("handled before project resolution")
         }

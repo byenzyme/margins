@@ -1,13 +1,14 @@
+use crate::args::TranscriptFormat;
 use crate::error::CliError;
 use crate::output::{line, xml_escape_attr, xml_escape_text};
 use margins_workflows::project::ResolvedProject;
+use serde::Serialize;
 use std::io::Write;
 use std::path::Path;
 
 /// One-line, non-nagging hint pointing at the distill skill, printed once when
 /// meetings still have no saved note (the skill has plausibly not been used yet).
-const DISTILL_HINT: &str =
-    "To distill: in Claude Code run /plugin marketplace add byenzyme/margins, then /margins <session>.";
+const DISTILL_HINT: &str = "To distill your latest session, run `margins note`.";
 
 pub fn recent(work_dir: &Path, stdout: &mut dyn Write) -> Result<(), CliError> {
     let margins_dir = work_dir.join(".margins");
@@ -36,11 +37,7 @@ pub fn recent_all(vaults: &[ResolvedProject], stdout: &mut dyn Write) -> Result<
         if !vault.root_dir.join(".margins").exists() {
             continue;
         }
-        any_undistilled |= render_vault_meetings(
-            &vault.work_dir,
-            Some(&vault.project.id),
-            stdout,
-        )?;
+        any_undistilled |= render_vault_meetings(&vault.work_dir, Some(&vault.project.id), stdout)?;
     }
     if any_undistilled {
         line(
@@ -156,6 +153,7 @@ fn render_vault_meetings(
 pub fn transcript(
     work_dir: &Path,
     meeting_id: &str,
+    format: TranscriptFormat,
     stdout: &mut dyn Write,
 ) -> Result<(), CliError> {
     let margins_dir = work_dir.join(".margins");
@@ -176,6 +174,30 @@ pub fn transcript(
         &margins_dir,
         &transcript.memo_path,
     );
+    if format == TranscriptFormat::Json {
+        let memo_path = memo_path.to_string_lossy();
+        let transcript_path = transcript.source_path.to_string_lossy();
+        let report = TranscriptJson {
+            meeting_id: &transcript.session_name,
+            body: &transcript.body,
+            view: transcript.view,
+            decoded_until_ms: transcript.decoded_until_ms,
+            live: transcript.live,
+            terminal: transcript.terminal,
+            title: &transcript.title,
+            started_at: &transcript.started_at,
+            created_at: &transcript.created_at,
+            calendar_event: &transcript.calendar_event,
+            people: &transcript.people,
+            memo_path: &memo_path,
+            saved_note_path: transcript.saved_note_path.as_deref(),
+            transcript_path: &transcript_path,
+            speaker_alias: transcript.speaker_alias.as_deref(),
+        };
+        let json =
+            serde_json::to_string(&report).map_err(|error| CliError::from_anyhow(error.into()))?;
+        return line(stdout, format_args!("{json}")).map_err(CliError::from_anyhow);
+    }
     line(
         stdout,
         format_args!(
@@ -266,4 +288,35 @@ pub fn transcript(
     .map_err(CliError::from_anyhow)?;
     line(stdout, format_args!("  </body>")).map_err(CliError::from_anyhow)?;
     line(stdout, format_args!("</margins_transcript>")).map_err(CliError::from_anyhow)
+}
+
+#[derive(Serialize)]
+struct TranscriptJson<'a> {
+    meeting_id: &'a str,
+    body: &'a str,
+    view: &'a str,
+    decoded_until_ms: u64,
+    live: bool,
+    terminal: bool,
+    title: &'a str,
+    started_at: &'a str,
+    created_at: &'a str,
+    calendar_event: &'a str,
+    people: &'a [String],
+    memo_path: &'a str,
+    saved_note_path: Option<&'a str>,
+    transcript_path: &'a str,
+    speaker_alias: Option<&'a str>,
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn distill_hint_points_at_note_command() {
+        assert_eq!(
+            DISTILL_HINT,
+            "To distill your latest session, run `margins note`."
+        );
+    }
 }

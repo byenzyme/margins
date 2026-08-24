@@ -52,7 +52,7 @@ fn typed_event_conversion_keeps_kind_out_of_payload() {
 #[test]
 fn v1_validation_uses_the_hardened_protocol_json_integer_limit() {
     let mut envelope = EventEnvelope::from_event_v1(
-        EventSequence(margins_core::wire::MAX_SAFE_JSON_INTEGER),
+        EventSequence(margins_core::MAX_SAFE_JSON_INTEGER),
         2,
         SessionId::from("session"),
         Some(SegmentId::from("segment")),
