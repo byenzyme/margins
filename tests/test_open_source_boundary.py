@@ -18,6 +18,58 @@ SCRIPT = REPO_ROOT / "scripts" / "open_source_boundary.py"
 
 
 class RepositoryPolicyTests(unittest.TestCase):
+    def test_cli_user_facing_string_literals_hide_transport_and_engine_names(
+        self,
+    ) -> None:
+        sources = [
+            REPO_ROOT / "src/cli.rs",
+            REPO_ROOT / "crates/public/margins-cli/src/output.rs",
+            REPO_ROOT / "crates/public/margins-cli/src/commands/connect.rs",
+            REPO_ROOT / "crates/public/margins-cli/src/commands/recall.rs",
+            REPO_ROOT / "crates/public/margins-cli/src/commands/projects.rs",
+            REPO_ROOT / "crates/public/margins-cli/src/commands/workspace.rs",
+        ]
+        sinks = re.compile(
+            r"(?:e?println|write|writeln)!|CliError::(?:new|unavailable)"
+        )
+        string_literal = re.compile(r'(?s)(?:r\#*"(.*?)"\#*|"((?:\\.|[^"\\])*)")')
+        forbidden = (
+            "enzyme login",
+            "--use-env-llm",
+            "api.enzyme.garden",
+            "openrouter",
+            "gog",
+        )
+        leaks: list[str] = []
+        for path in sources:
+            text = path.read_text(encoding="utf-8")
+            for match in sinks.finditer(text):
+                opening = text.find("(", match.end())
+                if opening < 0:
+                    continue
+                depth = 0
+                closing = None
+                for index in range(opening, min(len(text), opening + 4000)):
+                    if text[index] == "(":
+                        depth += 1
+                    elif text[index] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            closing = index
+                            break
+                if closing is None:
+                    continue
+                call = text[opening : closing + 1]
+                literals = " ".join(
+                    raw or escaped
+                    for raw, escaped in string_literal.findall(call)
+                ).lower()
+                for term in forbidden:
+                    if term in literals:
+                        line = text.count("\n", 0, match.start()) + 1
+                        leaks.append(f"{path.relative_to(REPO_ROOT)}:{line}: {term}")
+        self.assertEqual(leaks, [], "user-facing CLI literals leaked:\n" + "\n".join(leaks))
+
     @unittest.skipUnless(
         (REPO_ROOT / "public-repository" / "Cargo.toml").is_file(),
         "full mixed-source repository is not present",
@@ -72,10 +124,20 @@ class RepositoryPolicyTests(unittest.TestCase):
             "public-repository/release.yml": ".github/workflows/release.yml",
             "public-repository/homebrew-formula.rb.template": ".github/homebrew/margins.rb.template",
         }
-        self.assertEqual(manifest["export_paths"], expected)
+        self.assertEqual(
+            manifest["export_paths"],
+            expected
+            | {"skills/margins-public/SKILL.md": "skills/margins/SKILL.md"},
+        )
         self.assertEqual(set(scope["include"]), set(expected))
         self.assertEqual(set(scope["required_files"]), set(expected))
         self.assertEqual(scope["minimum_files"], len(expected))
+
+        skills_scope = next(
+            scope for scope in manifest["scopes"] if scope["name"] == "skills"
+        )
+        self.assertIn("skills/margins-public/SKILL.md", skills_scope["include"])
+        self.assertNotIn("skills/margins/SKILL.md", skills_scope["include"])
 
         workspace = tomllib.loads(
             (REPO_ROOT / "public-repository/Cargo.toml").read_text(encoding="utf-8")
@@ -102,7 +164,7 @@ class RepositoryPolicyTests(unittest.TestCase):
             "fail-closed allowlist",
             "OPEN_SOURCE.md",
             "sensitive personal data",
-            "not a claim that any crate has been published",
+            "does not claim that any crate has been published",
             "do not grant trademark rights",
         ):
             self.assertIn(required, normalized_readme)
@@ -190,6 +252,139 @@ class RepositoryPolicyTests(unittest.TestCase):
             "x86_64-apple-darwin",
         ):
             self.assertNotIn(forbidden, validation)
+
+    def test_public_docs_keep_setup_separate_from_distillation(self) -> None:
+        setup = (
+            REPO_ROOT
+            / "crates/public/margins-workflows/resources/skills/margins-workspace-setup/SKILL.md"
+        ).read_text(encoding="utf-8")
+        onboarding = (
+            REPO_ROOT
+            / "crates/public/margins-workflows/resources/skills/margins-guided-onboarding/SKILL.md"
+        ).read_text(encoding="utf-8")
+        distillation = (REPO_ROOT / "skills/margins-public/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        architecture = (REPO_ROOT / "public-repository/ARCHITECTURE.md").read_text(
+            encoding="utf-8"
+        )
+        agents = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+
+        for required in (
+            "Run these commands from the notes folder",
+            'cd "/absolute/path/to/notes"',
+            "`workspace.propose: true`",
+            "writes its explanation to stderr",
+            "ask for explicit consent",
+            "apply the saved plan unchanged",
+            "Do not begin connected-note",
+        ):
+            self.assertIn(required, setup)
+        for forbidden in (
+            "transcribe",
+            "audio",
+            "Enzyme",
+            "fallback",
+            "official composition",
+            "private reveal",
+            "assisted proposal",
+        ):
+            self.assertNotIn(forbidden, setup)
+        declaration = setup.index("margins workspace new practice")
+        proposal = setup.index("margins --workspace practice workspace propose")
+        apply = setup.index("margins --workspace practice workspace apply")
+        initialize = setup.index("margins --workspace practice init")
+        self.assertLess(declaration, proposal)
+        self.assertLess(proposal, apply)
+        self.assertLess(apply, initialize)
+
+        self.assertIn("Connected-note distillation is a separate workflow", onboarding)
+        self.assertIn("from that folder", onboarding)
+        self.assertIn("an explanation to stderr", onboarding)
+        for required in (
+            "The job is complete when the user approves",
+            "Start with the latest Margins session",
+            "command -v margins || command -v margins-public",
+            'guide workspace-setup',
+            "transcript latest --format json",
+            "Run `recent` only when the user needs to browse or disambiguate sessions",
+            "### Explicitly supplied evidence",
+            "matching excerpts with their note paths",
+            "transcript remains the primary factual record",
+            "Show the draft and ask for approval",
+        ):
+            self.assertIn(required, distillation)
+        workspace_check = distillation.index("## 1. Find Margins")
+        session_evidence = distillation.index("## 2. Resolve the session evidence")
+        supplied_evidence = distillation.index("### Explicitly supplied evidence")
+        recall = distillation.index("## 3. Retrieve useful prior context")
+        draft = distillation.index("## 4. Draft the note")
+        approval = distillation.index("## 5. Review and write")
+        self.assertLess(workspace_check, session_evidence)
+        self.assertLess(session_evidence, supplied_evidence)
+        self.assertLess(supplied_evidence, recall)
+        self.assertLess(recall, draft)
+        self.assertLess(draft, approval)
+        self.assertNotIn("Do not assume a captured session exists", distillation)
+        self.assertNotIn("Enzyme", distillation)
+        for runtime_skill in (setup, onboarding, distillation):
+            for boundary_term in (
+                "fallback",
+                "official composition",
+                "public composition",
+                "private reveal",
+                "selected CLI composition",
+                "selected Margins recall composition",
+            ):
+                self.assertNotIn(boundary_term, runtime_skill)
+        for boundary_explanation in (
+            "product binary",
+            "public source-checkout binary",
+            "source-checkout CLI",
+            "active Margins CLI",
+            "This is distillation, not Workspace setup",
+            "underlying implementation",
+            "recall.mode: live_local_markdown",
+        ):
+            self.assertNotIn(boundary_explanation, distillation)
+
+        normalized_architecture = " ".join(architecture.split())
+        for required in (
+            "contains two separate workflows",
+            "capability report includes `workspace.propose: true`",
+            "invites plain-language corrections",
+            "correction is recompiled into a fresh plan",
+            "only the final reviewed plan is applied unchanged",
+            "static skill does not encode or reproduce the recommendation logic",
+            "resolves `transcript latest` by default",
+        ):
+            self.assertIn(required, normalized_architecture)
+        for public_doc in (architecture, (REPO_ROOT / "OPEN_SOURCE.md").read_text(encoding="utf-8")):
+            self.assertNotIn("anchor schema", public_doc)
+        self.assertIn("Do not introduce a", agents)
+        self.assertIn("new anchor schema", agents)
+
+    def test_public_capability_docs_describe_presence_not_closed_catalogs(self) -> None:
+        capability_source = (
+            REPO_ROOT / "crates/public/margins-cli/src/commands/capabilities.rs"
+        ).read_text(encoding="utf-8")
+        for required in (
+            '"declarations": ["workspace", "source"]',
+            '"lifecycle": ["init", "sync"]',
+            '"automation": ["plan", "apply"]',
+            '"workflow": "connected_note"',
+        ):
+            self.assertIn(required, capability_source)
+        for omitted in (
+            '"official"',
+            '"capture"',
+            '"tui"',
+            '"scan"',
+            '"indexing"',
+            '"local_model"',
+            '"propose"',
+        ):
+            self.assertNotIn(omitted, capability_source)
 
     def test_meeting_protocol_and_runtime_are_excluded_from_the_public_surface(
         self,

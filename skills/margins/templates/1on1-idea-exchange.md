@@ -17,7 +17,7 @@ If an idea exchange turns into real design or scoping substance — concrete pri
 
 ### What [other person] thinks
 
-Capture the other person's worldview, frameworks, and opinions as expressed. Use their actual words in quotes when the phrasing is specific or memorable. Organize by theme, not chronology.
+Capture the other person's worldview, frameworks, and opinions as expressed. Use their actual words in quotes when the phrasing is specific or memorable — including when it surfaced in a side thread. Organize by theme, not chronology.
 
 For each theme:
 - **[Theme name drawn from their language]**: What they said, what they believe, how they frame it. Include direct quotes for distinctive phrasings. Note where they pushed back or disagreed.
@@ -31,7 +31,7 @@ For each:
 
 ### What I said that landed
 
-Moments where something I said got a strong reaction, a follow-up question, or shifted the conversation. Brief — just enough to know what to develop further.
+Moments where something I said got a strong reaction, a follow-up question, or shifted the conversation — or where I seemed to find important language or clarify something for myself, even without an obvious reaction from the other person. Brief — just enough to know what to develop further.
 
 ### Tensions and open threads
 

@@ -5,13 +5,17 @@ pub mod agents;
 pub mod alignment;
 pub mod archive;
 pub mod artifacts;
+pub mod catalyst;
 pub mod granola_import;
+pub mod integrations;
+pub mod local_recall;
 pub mod note_artifacts;
 pub mod processing;
 pub mod project;
 pub mod publish;
 pub mod session_index;
 pub mod transcript_view;
+pub mod workspace;
 
 pub mod resources {
     pub const MARGINS_AGENT_INSTRUCTIONS: &str = include_str!("../resources/agents/margins.md");
@@ -19,4 +23,9 @@ pub mod resources {
     /// printed by `margins guide workspace-setup`.
     pub const MARGINS_WORKSPACE_SETUP_GUIDE: &str =
         include_str!("../resources/skills/margins-workspace-setup/SKILL.md");
+    /// The agent-orchestrated first-run experience printed by
+    /// `margins guide onboarding`: install/authorize sources with the user,
+    /// choose a deliberately small first import, and prove the context plane.
+    pub const MARGINS_GUIDED_ONBOARDING: &str =
+        include_str!("../resources/skills/margins-guided-onboarding/SKILL.md");
 }

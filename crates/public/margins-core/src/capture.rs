@@ -63,6 +63,34 @@ pub enum PermissionState {
     Unavailable,
 }
 
+/// Presentation-neutral action for a permission state.
+///
+/// `ProbeOnStart` is intentionally distinct from `Request`: some capture
+/// facilities (notably the macOS system-audio tap) cannot be queried reliably
+/// before IO starts. An explicit capture action may start those lanes and use
+/// delivery health as the source of truth, without treating "unknown" as a
+/// denial or showing a speculative permission prompt.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionAction {
+    Proceed,
+    Request,
+    ProbeOnStart,
+    Blocked,
+    Unavailable,
+}
+
+pub fn permission_action(state: PermissionState) -> PermissionAction {
+    match state {
+        PermissionState::Granted => PermissionAction::Proceed,
+        PermissionState::NotDetermined => PermissionAction::Request,
+        PermissionState::Unknown => PermissionAction::ProbeOnStart,
+        PermissionState::Denied | PermissionState::Restricted => PermissionAction::Blocked,
+        PermissionState::Unavailable => PermissionAction::Unavailable,
+    }
+}
+
 /// Inputs for starting one capture segment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaptureRequest {
@@ -162,6 +190,46 @@ pub struct CaptureLaneSnapshot {
     pub dropped_durable_frames: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error_code: Option<CaptureErrorCode>,
+}
+
+/// Health derived from observed capture delivery, kept separate from TCC or
+/// other permission state. In particular, silent or missing frames are not
+/// promoted to `PermissionDenied`; callers may offer permission guidance as a
+/// likely remedy while preserving the distinction in telemetry and policy.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureLaneHealth {
+    Starting,
+    Healthy,
+    Silent,
+    NoFrames,
+    Degraded,
+    Interrupted,
+    Stopped,
+    Failed,
+}
+
+pub fn capture_lane_health(snapshot: &CaptureLaneSnapshot) -> CaptureLaneHealth {
+    match snapshot.state {
+        CaptureLaneState::Starting => CaptureLaneHealth::Starting,
+        CaptureLaneState::Interrupted => CaptureLaneHealth::Interrupted,
+        CaptureLaneState::Stopped => CaptureLaneHealth::Stopped,
+        CaptureLaneState::Failed => CaptureLaneHealth::Failed,
+        CaptureLaneState::Active => {
+            if snapshot.last_error_code.is_some()
+                || snapshot.dropped_durable_frames > 0
+            {
+                CaptureLaneHealth::Degraded
+            } else if snapshot.delivered_frames == 0 {
+                CaptureLaneHealth::NoFrames
+            } else if !snapshot.observed_signal {
+                CaptureLaneHealth::Silent
+            } else {
+                CaptureLaneHealth::Healthy
+            }
+        }
+    }
 }
 
 /// Immutable state returned by a capture handle.
@@ -295,5 +363,70 @@ impl CaptureProvider for UnavailableCaptureProvider {
         _observer: Arc<dyn CaptureObserver>,
     ) -> Result<Box<dyn CaptureHandle>, CaptureError> {
         Err(self.error())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn active_lane(delivered_frames: u64, observed_signal: bool) -> CaptureLaneSnapshot {
+        CaptureLaneSnapshot {
+            lane: AudioLane::System,
+            state: CaptureLaneState::Active,
+            generation: 1,
+            delivered_frames,
+            durable_frames: delivered_frames,
+            observed_signal,
+            dropped_live_frames: 0,
+            dropped_durable_frames: 0,
+            last_error_code: None,
+        }
+    }
+
+    #[test]
+    fn permission_policy_requests_only_requestable_state() {
+        assert_eq!(
+            permission_action(PermissionState::Granted),
+            PermissionAction::Proceed
+        );
+        assert_eq!(
+            permission_action(PermissionState::NotDetermined),
+            PermissionAction::Request
+        );
+        assert_eq!(
+            permission_action(PermissionState::Unknown),
+            PermissionAction::ProbeOnStart
+        );
+        for state in [PermissionState::Denied, PermissionState::Restricted] {
+            assert_eq!(permission_action(state), PermissionAction::Blocked);
+        }
+        assert_eq!(
+            permission_action(PermissionState::Unavailable),
+            PermissionAction::Unavailable
+        );
+    }
+
+    #[test]
+    fn delivery_health_never_relabels_silence_as_permission_denial() {
+        assert_eq!(
+            capture_lane_health(&active_lane(0, false)),
+            CaptureLaneHealth::NoFrames
+        );
+        assert_eq!(
+            capture_lane_health(&active_lane(48_000, false)),
+            CaptureLaneHealth::Silent
+        );
+        assert_eq!(
+            capture_lane_health(&active_lane(48_000, true)),
+            CaptureLaneHealth::Healthy
+        );
+    }
+
+    #[test]
+    fn durable_loss_takes_precedence_over_signal_health() {
+        let mut lane = active_lane(48_000, true);
+        lane.dropped_durable_frames = 1_000;
+        assert_eq!(capture_lane_health(&lane), CaptureLaneHealth::Degraded);
     }
 }

@@ -1,0 +1,69 @@
+{
+  "events": [
+    {
+      "id": "evt-client-kickoff",
+      "CalendarID": "primary",
+      "status": "confirmed",
+      "summary": "Acme kickoff",
+      "description": "Confirm launch owners and the next customer checkpoint.",
+      "location": "Google Meet",
+      "start": { "dateTime": "2026-08-25T16:00:00Z" },
+      "end": { "dateTime": "2026-08-25T16:45:00Z" },
+      "updated": "2026-08-24T08:30:00Z",
+      "htmlLink": "https://calendar.google.com/calendar/event?eid=fixture-acme-kickoff",
+      "organizer": {
+        "displayName": "Morgan Lee",
+        "email": "morgan@enzyme.dev",
+        "self": true,
+        "responseStatus": "accepted"
+      },
+      "attendees": [
+        {
+          "displayName": "Kevin Chen",
+          "email": "kevin.chen@acme.example",
+          "responseStatus": "accepted"
+        },
+        {
+          "displayName": "Kevin Chen",
+          "email": "kevin.chen@beta.example",
+          "responseStatus": "tentative"
+        },
+        {
+          "displayName": "Board room",
+          "email": "room@example.com",
+          "resource": true,
+          "responseStatus": "accepted"
+        }
+      ]
+    },
+    {
+      "id": "evt-design-review",
+      "CalendarID": "team@enzyme.dev",
+      "status": "confirmed",
+      "summary": "Design review",
+      "start": { "dateTime": "2026-08-26T09:00:00-07:00" },
+      "end": { "dateTime": "2026-08-26T10:00:00-07:00" },
+      "updated": "2026-08-24T09:00:00Z",
+      "attendees": [
+        {
+          "displayName": "Ada Lovelace",
+          "email": "ada@acme.example",
+          "responseStatus": "accepted"
+        },
+        {
+          "email": "friend@gmail.com",
+          "responseStatus": "accepted"
+        }
+      ]
+    },
+    {
+      "id": "evt-cancelled",
+      "CalendarID": "primary",
+      "status": "cancelled",
+      "summary": "Cancelled sync",
+      "start": { "dateTime": "2026-08-27T12:00:00Z" },
+      "updated": "2026-08-24T10:00:00Z"
+    }
+  ],
+  "since": "2026-08-23T00:00:00Z"
+}

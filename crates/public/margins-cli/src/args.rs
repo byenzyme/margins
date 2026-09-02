@@ -14,8 +14,28 @@ pub struct Args {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Provision local models, install agent skills, and print a setup handoff
-    Setup,
+    /// Define and inspect the memory boundary for one practice
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommand,
+    },
+    /// Declare and inspect workspace sources
+    Source {
+        #[command(subcommand)]
+        command: SourceCommand,
+    },
+    /// Set up the capabilities available in this Margins installation
+    Setup {
+        /// Run only this setup area; repeat to select more than one
+        #[arg(long, value_enum)]
+        only: Vec<SetupStepArg>,
+        /// Skip local speech model preparation
+        #[arg(long, value_enum)]
+        skip: Option<SetupSkipArg>,
+        /// Local catalyst model policy when hosted credentials are available
+        #[arg(long, value_enum, default_value_t = SetupLocalModelPolicyArg::Fallback)]
+        local_model: SetupLocalModelPolicyArg,
+    },
     /// Print embedded Margins guides for agents
     Guide {
         #[command(subcommand)]
@@ -111,6 +131,57 @@ pub enum Command {
     Recall {
         /// What to look for, in the vault's own language where possible
         query: String,
+        /// Restrict results to one declared source name
+        #[arg(long)]
+        source: Option<String>,
+    },
+    /// Refresh declared workspace sources and the recall snapshot
+    Sync {
+        /// Narrow sync to one declared source binding
+        #[arg(long)]
+        source: Option<String>,
+        /// Emit the stable margins.sync.v1 JSON contract
+        #[arg(long)]
+        json: bool,
+    },
+    /// Return source-backed relationship context for an external agent as JSON
+    #[command(
+        long_about = "Return the read-only Margins context plane for one person or meeting.\n\nThe stable margins.context.v2 JSON object contains: schema_version, query, meeting, resolved_identities (including resolution evidence), identity_omissions, episodes (including typed evidence and excerpts), open_items (including typed provenance), and source_manifest (including machine-readable freshness). Every claim-bearing item carries a closed evidence handle. This command never generates or interprets content.",
+        after_long_help = "Exactly one of --person or --meeting is required. --cutoff is accepted only with --person. JSON is the only v2 output format, so --json is required."
+    )]
+    Context {
+        /// Exact full name, exact people-note alias, or email address
+        #[arg(long, required_unless_present = "meeting", conflicts_with = "meeting")]
+        person: Option<String>,
+        /// Stable session id, or `next` for the nearest future indexed meeting
+        #[arg(long, required_unless_present = "person", conflicts_with = "person")]
+        meeting: Option<String>,
+        /// Inclusive RFC 3339 timestamp or YYYY-MM-DD evidence cutoff
+        #[arg(long, requires = "person")]
+        cutoff: Option<String>,
+        /// Emit the stable margins.context.v2 JSON contract
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Reconcile and inspect source integrations declared by the Workspace
+    Integrations {
+        #[command(subcommand)]
+        command: IntegrationsCommand,
+    },
+    /// Preview and apply explicit Workspace integration retention
+    Retention {
+        #[command(subcommand)]
+        command: RetentionCommand,
+    },
+    /// Connect Margins to external services
+    Connect {
+        #[command(subcommand)]
+        command: ConnectCommand,
+    },
+    /// Disconnect Margins from an external service
+    Disconnect {
+        #[command(subcommand)]
+        command: DisconnectCommand,
     },
     /// Inspect a vault and suggest folders, tags, links, logs, and exclusions
     Scan {
@@ -121,10 +192,210 @@ pub enum Command {
         #[arg(long)]
         update: bool,
     },
-    /// Print this binary's machine-readable composition capabilities as JSON
+    /// Print this installation's machine-readable capabilities as JSON
     Capabilities,
     /// Establish or refresh a Margins vault in this folder
     Init,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SetupStepArg {
+    Catalyst,
+    Skills,
+    Speech,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SetupSkipArg {
+    Speech,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SetupLocalModelPolicyArg {
+    Fallback,
+    Always,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorkspaceCommand {
+    /// Create a workspace with one writable home notes source
+    New {
+        /// Stable lowercase workspace id
+        id: String,
+        /// Existing folder for writable notes and projected human-readable artifacts
+        #[arg(long)]
+        home: PathBuf,
+        /// Optional display name
+        #[arg(long)]
+        name: Option<String>,
+        /// Emit machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the selected workspace and its state paths
+    Status {
+        /// Emit machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Ground a reading of the Workspace home and draft any settings it needs
+    Propose {
+        /// Emit a margins.workspace.plan.v1 JSON plan
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Compile complete desired Workspace settings into a revisioned plan
+    Plan {
+        /// TOML file containing the complete desired Workspace settings
+        #[arg(long)]
+        desired: PathBuf,
+        /// Emit margins.workspace.plan.v1 JSON
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Atomically apply an exact workspace plan
+    Apply {
+        /// JSON plan emitted by `workspace plan`
+        #[arg(long)]
+        plan: PathBuf,
+        /// Exact base revision the plan was reviewed against
+        #[arg(long)]
+        if_revision: String,
+        /// Stable idempotency key for this mutation attempt
+        #[arg(long)]
+        request_id: String,
+        /// Emit margins.workspace.apply.v1 JSON
+        #[arg(long, required = true)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SourceKindArg {
+    Notes,
+    Captures,
+    GoogleMail,
+    GoogleCalendar,
+    GoogleMeet,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SourceRoleArg {
+    Home,
+    Reference,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SourceCommand {
+    /// Declare a source through the same locked workspace mutation path
+    Add {
+        kind: SourceKindArg,
+        /// Stable source name within the workspace
+        #[arg(long)]
+        name: String,
+        /// Absolute path for notes or captures sources
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Notes role; only reference may be added because home is created with the workspace
+        #[arg(long)]
+        role: Option<SourceRoleArg>,
+        /// Remote account identity for Google sources
+        #[arg(long)]
+        account: Option<String>,
+        /// Non-temporal Gmail search query (google-mail only)
+        #[arg(long, allow_hyphen_values = true)]
+        query: Option<String>,
+        /// Gmail history backfill window in days (google-mail only)
+        #[arg(long)]
+        backfill_days: Option<u32>,
+        /// Calendar history lookback window in days (google-calendar only)
+        #[arg(long)]
+        lookback_days: Option<u32>,
+        /// Calendar future lookahead window in days (google-calendar only)
+        #[arg(long)]
+        lookahead_days: Option<u32>,
+        /// Emit machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// List declared sources and their fixed policies
+    List {
+        /// Emit machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a declared non-required source
+    Remove {
+        name: String,
+        /// Emit machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConnectCommand {
+    /// Connect Google mail, calendar, and files read-only
+    Google {
+        /// Optional expected Google account email safety guard
+        #[arg(long)]
+        account: Option<String>,
+        /// Headless/SSH mode: print consent URL to stderr and store in an owner-only 0600 file
+        #[arg(long)]
+        headless: bool,
+        /// Emit machine-readable status
+        #[arg(long)]
+        json: bool,
+    },
+    /// Connect Granola meeting access over its public MCP authorization flow
+    Granola {
+        /// Optional expected Granola account email safety guard
+        #[arg(long)]
+        account: Option<String>,
+        /// Headless/SSH mode: use PKCE with a private callback prompt and 0600 storage
+        #[arg(long)]
+        headless: bool,
+        /// Emit machine-readable status
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show connection status
+    Status {
+        /// Restrict status to one machine connection service
+        #[arg(long, value_enum)]
+        service: Option<ConnectionServiceArg>,
+        /// Emit machine-readable status
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DisconnectCommand {
+    /// Forget a machine-level Google connection credential
+    Google {
+        /// Connected Google account email to forget on this machine
+        #[arg(long)]
+        account: String,
+        /// Emit machine-readable status
+        #[arg(long)]
+        json: bool,
+    },
+    /// Forget a machine-level Granola connection credential
+    Granola {
+        /// Connected Granola account email to forget on this machine
+        #[arg(long)]
+        account: String,
+        /// Emit machine-readable status
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ConnectionServiceArg {
+    Google,
+    Granola,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -135,7 +406,7 @@ pub enum TranscriptFormat {
 
 #[derive(Debug, Subcommand)]
 pub enum ImportCommand {
-    /// Validate and import a Granola export file into .margins
+    /// Import a Granola export as native notes in the selected Workspace
     Granola {
         /// Granola JSON or CSV export file
         path: PathBuf,
@@ -160,8 +431,91 @@ pub enum AgentsCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum GuideCommand {
-    /// Print the complete Margins workspace setup guide
+    /// Print the agent guide for understanding and setting up a Workspace
     WorkspaceSetup,
+    /// Print the guided onboarding experience for an orchestrating agent
+    Onboarding,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum IntegrationsCommand {
+    /// Reconcile materialized evidence directly from declared bindings
+    Reconcile {
+        /// Reconcile only this connector id
+        #[arg(long)]
+        connector: Option<String>,
+        /// Reconcile only this exact connector account
+        #[arg(long, requires = "connector")]
+        account: Option<String>,
+        /// Exact workspace revision being reconciled
+        #[arg(long)]
+        if_revision: String,
+        /// Stable idempotency key for this reconcile attempt
+        #[arg(long)]
+        request_id: String,
+        /// Emit margins.integrations.reconcile.v1 JSON
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Show ledger-backed health and freshness for declared connectors
+    Status {
+        /// Emit machine-readable status results
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RetentionScopeArg {
+    Expired,
+    RawCache,
+    Tombstones,
+    Materialization,
+    All,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RetentionConnectorArg {
+    #[value(name = "email")]
+    Email,
+    #[value(name = "gcal")]
+    Gcal,
+    #[value(name = "google_meet")]
+    GoogleMeet,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RetentionCommand {
+    /// Produce a deterministic read-only destructive preview
+    Preview {
+        /// Closed connector id: email, gcal, or google_meet
+        #[arg(long, value_enum)]
+        connector: RetentionConnectorArg,
+        /// Exact normalized connector account
+        #[arg(long)]
+        account: String,
+        /// Independently purgeable state class
+        #[arg(long, value_enum)]
+        scope: RetentionScopeArg,
+        /// Emit margins.retention.preview.v1 JSON
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Atomically apply an exact destructive preview
+    Apply {
+        /// JSON preview emitted by `retention preview`
+        #[arg(long)]
+        plan: PathBuf,
+        /// Exact Workspace revision the preview was compiled against
+        #[arg(long)]
+        if_revision: String,
+        /// Stable idempotency key for this destructive mutation
+        #[arg(long)]
+        request_id: String,
+        /// Emit margins.retention.apply.v1 JSON
+        #[arg(long, required = true)]
+        json: bool,
+    },
 }
 
 /// Preserve the historical global `--project value` and `--project=value`
@@ -191,4 +545,32 @@ pub fn strip_project_arg(
         }
     }
     Ok((project, output))
+}
+
+/// Extract the global `--workspace` selector wherever it appears.
+pub fn strip_workspace_arg(
+    args: impl IntoIterator<Item = OsString>,
+) -> Result<(Option<String>, Vec<OsString>), String> {
+    let mut output = Vec::new();
+    let mut workspace = None;
+    let mut args = args.into_iter();
+    if let Some(binary) = args.next() {
+        output.push(binary);
+    }
+    while let Some(arg) = args.next() {
+        if arg == "--workspace" {
+            let value = args
+                .next()
+                .ok_or_else(|| "--workspace requires an id".to_string())?;
+            workspace = Some(value.to_string_lossy().into_owned());
+        } else if let Some(value) = arg
+            .to_str()
+            .and_then(|text| text.strip_prefix("--workspace="))
+        {
+            workspace = Some(value.to_string());
+        } else {
+            output.push(arg);
+        }
+    }
+    Ok((workspace, output))
 }

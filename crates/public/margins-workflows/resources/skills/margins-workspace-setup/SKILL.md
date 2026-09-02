@@ -1,121 +1,229 @@
 ---
 name: margins-workspace-setup
-description: Set up a Margins workspace from the user's chosen base folder. Run Margins' filesystem scan, review its folder, tag, link, and running-log evidence, update only the selected workspace section in ~/.margins/config.toml, run margins init, then prove margins recall. Never edits note bodies.
+description: Set up a Margins Workspace so the notes, thinking, and relationships of one practice become legible to recall. Declare the folders that hold that practice — for one person or a shared team vault — let Margins show back what it understands about them, invite plain-language corrections, persist only the settings needed to keep that understanding true, and prove it with one live local recall result. Use whenever someone wants to point Margins at their notes, add or change which folders it reads, or confirm that setup actually worked.
 allowed-tools: Bash, Read, Glob, Grep
 ---
 
 # Margins Workspace Setup
 
-Set up Margins in the folder named by the user. Margins records meetings, saves notes in this workspace, and uses `.margins/recall/index.db` for the vault recall index. Its machine-owned recall policy lives at `~/.margins/config.toml`; local model files live at `~/.margins/models/`. Any target projection artifacts are vault-specific under `.margins/recall/targets/` and never modify target directories.
+Setup exists to make one knowledge practice legible to Margins: to show where the
+work, thinking, and relationships accumulate, to surface the consequential
+questions Margins can already answer from that material, and to persist only the
+minimum settings needed to keep that understanding true. The practice may belong to
+one person or a shared team vault. It ends by proving one of those questions with a
+live local recall result over the practice's own notes.
 
-Keep the workflow bounded. Do not move, rename, delete, summarize, or rewrite notes. Do not edit credentials, provider settings, model files, or unrelated workspace sections. The only planned mutations are the selected workspace section in `~/.margins/config.toml` and the files created by `margins init`.
+Act as a reflective setup guide, not a configuration closer. The user should leave
+with a recognizable account of their practice and confidence about what Margins will
+read, attend to, write into, and leave alone. A mechanically valid config is not, by
+itself, a successful setup.
 
-## 1. Confirm The Workspace
+Setup is not distillation. Distillation turns a transcript or memo into a
+connected note once a Workspace exists; that is a separate workflow.
 
-Work from the provided base folder:
+Hold this mental model as you work, because every command below serves it:
 
-```bash
-cd "<workspace path>"
-pwd
-```
+- A **Workspace** is the durable read / write / attention boundary for a single
+  practice: the one home folder Margins may write approved notes into, the
+  reference folders it may read, and what it should ignore.
+- **propose** is a read-only grounded review — Margins grounds an initial reading
+  in the Workspace home and tells you what it understands the practice to be, with
+  a draft of the settings that reading implies. Your Source declarations still
+  define the full recall boundary.
+- **plan** and **apply** are the exact consent seam: a plan is the precise list of
+  setting changes, and apply commits only the plan the user actually saw.
+- **init** and **sync** materialize the Workspace so recall can run over it.
+- **recall** proves a question the interpretation promised, using the user's real
+  notes.
 
-Use that path as the Margins base unless it is empty, missing, scratch space, or clearly not where the user's notes live. If the path is wrong, stop and ask for the right folder before writing anything.
+All machine state lives under the Margins home in `workspaces/<id>/`. Never create
+`.margins` inside a notes folder, and never rewrite existing notes during setup —
+the practice on disk belongs to the user, not to us.
 
-## 2. Scan And Inspect Read-Only
+## Start from the practice, not the settings
 
-Run Margins' filesystem-only discovery before choosing policy:
+Before touching config, learn what the user is actually keeping and why. Which
+folder holds the notes they think in? Are there other folders — research, a shared
+vault, an archive — they want searched but never written to? One folder becomes
+the Workspace home; any others are read-only reference Sources.
 
-```bash
-margins scan
-```
+Listen for the user's own names for the work, the relationships that matter, and
+what they hope Margins will help them remember. Form a small, tentative reading of
+the practice rather than a taxonomy: where work accumulates, how it changes over
+time, which projects or relationships continue across notes, and what looks
+incidental. The goal is recognition, not an impressive-sounding analysis.
 
-This does not open or create the recall database. Read its JSON evidence, especially `entities`, `top_tags`, `top_links`, `top_folders`, `folder_stats`, `folder_page_entities`, recognized `log:` entries, `frontmatter_samples`, `entity_samples`, `current_config`, and `excluded_folders`. It is the source of truth for what Margins can extract; do not replace it with folder counts or filename guesses.
+## Check what this build can do
 
-Use read-only shell commands only to validate and contextualize the scan. Sample the folder tree and representative Markdown from likely note areas:
-
-```bash
-find . -maxdepth 3 -type d | sort | sed 's#^\./##' | head -120
-find . -type f -name '*.md' \
-  -not -path './.margins/*' -not -path './.git/*' -not -path './.obsidian/*' \
-  | sort | head -80
-```
-
-Open a small, representative set behind the scan's strongest and weakest candidates: meeting notes, daily notes, people pages, project pages, tagged notes, frequently linked pages, recognized running logs, and obvious templates/archive/noise. Diagnose what Margins can use:
-
-- Useful entities: meaningful base folders such as `people` or `projects`, recurring tags such as `#customer`, frequently linked notes like `[[Acme Pilot]]`, and recognized single-file timelines such as `log:journal`.
-- Exclude from recall: templates, archive/trash, imports, raw transcripts, attachments, generated files, app/runtime folders, and noisy reference dumps.
-- Weak signals: very short notes, inconsistent names, important non-Markdown material, or many notes directly at the root.
-
-Prefer candidates supported by multiple real, recent notes. Prefer a base folder over its descendants when it already covers them. Treat page links already covered by an expandable folder as evidence about that folder, not duplicate configured entities. Never invent tags, links, or logs that the scan did not extract.
-
-Use the vault's actual names. Do not propose restructuring unless the user asks later.
-
-## 3. Write Recall Policy
-
-Create or update a concise policy section for this exact workspace in `~/.margins/config.toml`. Use only meaningful choices supported by scan plus inspection. Prefer 3-8 mixed entity anchors and 2-8 excluded folders when the vault supports that; a tiny vault may need fewer. Do not default to folder-only entities when the scan surfaced stronger tags, links, or logs.
-
-For a workspace with no existing policy, use Margins to write the initial suggestion, then review and minimally tune only that new section:
-
-```bash
-margins scan --write-config
-```
-
-If `current_config.has_curated_entities` is already true, the scan is a preview: compare `current_config.entities` and `current_config.excluded_folders` with the proposed top-level `entities` and `excluded_folders`. Explain the evidence before replacing a materially different existing policy. When the proposed policy is appropriate, apply it explicitly:
+Run:
 
 ```bash
-margins scan --write-config --update
+margins capabilities
 ```
 
-This replaces only the selected workspace's entities and excluded folders with the proposed policy while preserving unrelated sections and vaults. Review the returned `status: "updated"`, `config_path`, and refreshed `current_config` before continuing. Keep only candidates found by the scan and use exact entity syntax (`folder:path`, `#tag`, `[[link]]`, `log:name`). For a flat vault, use `folder:.` instead of inventing folders.
+If the report includes `workspace.propose: true`, this build can ground an
+interpretation in the Workspace home before initialization. That grounded review is
+the centerpiece of setup, so use the named-Workspace path below. Otherwise, declare
+the folder directly.
 
-The written section for this workspace looks like:
+## Declare one folder directly
 
-```toml
-[vaults."<absolute workspace path>"]
-entities = ["folder:people", "folder:projects", "#customer", "[[Acme Pilot]]", "log:journal"]
-excluded_folders = ["templates", "archive"]
-```
-
-If `.margins/recall/index.db` or an older policy section already exists and appears stale or wrong, explain the evidence and ask before deleting or replacing derived state. Updating only this workspace's policy section is allowed; deleting an index is not.
-
-## 4. Initialize Margins
-
-Run setup from the confirmed base folder:
+When there is a single notes folder and no `workspace.propose`, the Workspace is
+that folder. Run these commands from the notes folder:
 
 ```bash
+cd "/absolute/path/to/notes"
 margins init
-test -f .margins/recall/index.db && echo "recall index exists"
+margins sync --json
+margins recall "an exact phrase from these notes"
+margins workspace status --json
 ```
 
-The command should print one XML line:
+`init` adopts the current directory as the Workspace home. `sync` refreshes the
+declared Sources so recall is current; recall itself reads the Markdown live at
+query time. Be precise about this proof: an exact-phrase result pointing to an
+existing note proves that the Source is inside the recall boundary and setup can
+retrieve it. It does not by itself prove a broader interpretation of the
+practice. `status --json` reports the Workspace id and its state path.
 
-```xml
-<margins_init path="<absolute workspace path>" status="ok" config_path="<home>/.margins/config.toml" />
-```
+## Declare a named Workspace and its Sources
 
-The `path` and `config_path` attributes must match the confirmed workspace and `~/.margins/config.toml`. `status="thin"` means there is not enough included note material yet. If `status="no_policy"` or the command fails with a missing-policy message, fix the selected `[vaults."..."]` section and rerun `margins init`.
-
-## 5. Prove Retrieval
-
-Choose one exact phrase and one related semantic query from included notes. Run each twice to check stable behavior:
+Use this path when the user has more than one folder, or when `workspace.propose:
+true` is present. Name the practice, set its home, and add each reference folder.
+Do not run `init` or `sync` yet — the grounded review comes next, against the
+Workspace you just declared:
 
 ```bash
-margins recall "<exact phrase from an included note>"
-margins recall "<related person, project, or decision>"
+margins workspace new practice --home "/absolute/path/to/notes"
+margins --workspace practice source add notes \
+  --name research --role reference --path "/absolute/path/to/research"
+margins --workspace practice source list --json
 ```
 
-Then query a distinctive phrase from an excluded folder, if one exists. It should not return that excluded file.
+The home is the one folder where approved notes may be written; reference Sources
+are searched but never modified. That read / write boundary is the durable part of
+the Workspace.
 
-In an interactive terminal, read the catalyze-style tree (`activated bridges`
-and `surfaced notes`). When stdout is captured or piped, read the compatible JSON
-envelope: each non-empty result uses `file_path`, `content`, and `similarity`
-(plus optional `via_catalyst_id`). Mention one relevant returned note. An empty
-result is acceptable for a small workspace. If recall prints a recovery hint on
-stderr, follow only that hint, rerun `margins init`, and retry recall. If stderr
-says there is no Margins vault, return to the confirmed base folder.
+## Lead with understanding, then review settings
 
-`margins recall` is read-only. It must not initialize, refresh, edit notes, or contact a model provider.
+Only when `margins capabilities` reports `workspace.propose: true`:
 
-## Report Back
+```bash
+margins --workspace practice workspace propose \
+  --json > /tmp/margins-workspace-plan.json
+```
 
-Briefly report the confirmed path; the scan's strongest folder, tag, link, and log candidates; the entities/exclusions selected and why; the `margins init` XML line; whether `.margins/recall/index.db` exists; the recall queries/result counts; and any excluded-content check. Mention small capture habits only when the scan showed a clear gap.
+The command writes its explanation to stderr and the `margins.workspace.plan.v1`
+plan to stdout. The explanation — what Margins understands this practice to be, and
+the consequential questions it can answer — is the centerpiece; the plan is a draft
+of the settings that understanding implies.
+
+Present the understanding first. Keep the explanation's evidence faithful — the
+folders, notes, and connections it actually cites — before restating it in the
+user's own vocabulary. Then ask, in ordinary language, what is wrong or missing —
+not "approve these settings," but "does this match how you work, and what did it
+miss?" A healthy Workspace often needs no setting change at all and still deserves
+the richest interpretation and a real recall proof.
+
+Do not merely recite scan findings or turn the first user response into a config
+decision. Help the user see a coherent picture: what this practice appears to be,
+where its continuity lives, what Margins could help them follow, and where the
+reading is uncertain. Use tentative language when the evidence is ambiguous. When
+the user corrects that picture, reflect the revised understanding back in their
+terms and make sure it now feels accurate before deriving settings from it.
+
+Only after the user has reacted to the understanding do you turn to the concrete
+plan. A factual correction is not automatically consent. First confirm that the
+user recognizes the revised account and understands the resulting attention and
+read/write boundaries. If `actions` is empty, tell the user that no settings need
+to change, skip consent and `workspace apply`, and continue to the recall proof.
+Otherwise, show the exact plan actions and ask for explicit consent, framing those
+actions as the settings consequence of the confirmed understanding. Do not
+reconstruct unsupported reasons for how the command chose an action. If the user
+consents to the plan as shown, apply the saved plan unchanged:
+
+```bash
+margins --workspace practice workspace apply \
+  --plan /tmp/margins-workspace-plan.json \
+  --if-revision "<base_revision from the plan>" \
+  --request-id "<unique setup request id>" --json
+```
+
+`--if-revision` refuses to apply if the Workspace changed underneath you;
+`--request-id` makes the apply idempotent. The plan you apply is always the exact
+plan the user saw.
+
+### When the user corrects a supported Source or policy
+
+Supported corrections are anything the Workspace config can represent: a folder in
+the wrong role, a folder that should be excluded, a reference that should be the
+home, or policy — an excluded folder or tag, or a surfaced folder, tag, person,
+project, or running log made central (pinned) or kept out of attention (excluded).
+Use only an item the review surfaced and preserve its displayed spelling when
+forming the config reference: `folder:<displayed path>`, `#<displayed tag>`,
+`[[<displayed linked name>]]`, or `log:<displayed log name>`. Never infer a new
+entity. Do not hand-edit the plan JSON. The plan carries the full desired state it
+would produce; start from that desired state, write a complete desired-state TOML,
+and change only what the user corrected.
+
+```bash
+margins --workspace practice workspace plan \
+  --desired /tmp/margins-workspace-desired.toml --json \
+  > /tmp/margins-workspace-plan.json
+```
+
+This compiles a fresh, exact plan from the user's correction. If the new plan has no
+actions, report that no settings need to change and skip apply. Otherwise, present
+that new plan, get explicit consent, and apply it unchanged with the same
+`--if-revision` / `--request-id` guards. Apply is refused unless the plan still
+matches the current Workspace, so the plan you apply is always the plan the user
+last saw — never JSON you edited by hand.
+
+If the correction is descriptive but implies no runtime setting — how the user
+thinks about the material, what a folder is really for — keep it in the interaction
+rather than inventing config, and let it shape the recall phrase you choose to prove
+setup. If the correction asks for something the Workspace cannot represent — a
+folder that is neither home nor reference, a rule the policy fields don't cover —
+say so plainly instead of manufacturing a setting to stand in for it.
+
+## Initialize and prove
+
+Once any review is settled, materialize the named Workspace and prove a real
+question:
+
+```bash
+margins --workspace practice init
+margins --workspace practice sync --json
+margins --workspace practice recall "<question from the confirmed understanding>"
+margins --workspace practice recall "<distinctive phrase from research>" --source research
+```
+
+When a grounded review supplied a question, use that question first and verify that
+the result cites a real note supporting the answer. Use an exact phrase as the
+source-boundary check, especially for each reference Source. Keep the claims
+separate: the phrase proves reachability; the grounded question tests the
+understanding the user confirmed.
+
+Close the loop in plain language. Explain what the result demonstrates about the
+practice, remind the user what Margins will attend to and leave alone, and name one
+useful question they can now return with. If the result does not support the shared
+understanding, say so and revisit the interpretation instead of declaring setup
+complete.
+
+## Report
+
+Report the Workspace id and state path, the declared local Sources, the `init` /
+`sync` results, at least one source-backed recall result, and — when a grounded
+review was available — whether its suggested settings were accepted, corrected and
+recompiled, or left unchanged. Also summarize the user's confirmed understanding of
+the practice and the resulting read/write/attention boundaries. Confirm the notes
+folders were untouched and hold no `.margins` state.
+Do not begin connected-note distillation as part of setup.
+
+## Automation with an existing desired config
+
+When automation already holds a complete desired Workspace config, `workspace plan
+--desired ... --json` compiles the reviewable `margins.workspace.plan.v1`, and
+`workspace apply` commits it with its base revision and a unique request id. Never
+make a person author desired-state TOML just to complete ordinary setup — that is
+the machine's job, reserved here for recompiling a plan from a correction.

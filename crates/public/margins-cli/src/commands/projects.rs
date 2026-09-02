@@ -13,7 +13,7 @@ pub fn establish(
     stdout: &mut dyn Write,
 ) -> Result<(), CliError> {
     let root = establish_root(invocation_dir, dir)?;
-    write_init(stdout, &root, "ok", None)
+    write_init(stdout, &root, "ok", None, None)
 }
 
 /// Establish the vault without publishing a final status. The official binary
@@ -33,6 +33,7 @@ pub fn write_init(
     root: &Path,
     status: &str,
     config_path: Option<&Path>,
+    catalyst: Option<&margins_workflows::catalyst::CatalystStatus>,
 ) -> Result<(), CliError> {
     let config_attr = config_path
         .map(|path| {
@@ -42,13 +43,24 @@ pub fn write_init(
             )
         })
         .unwrap_or_default();
+    let catalyst_attrs = catalyst
+        .map(|status| {
+            format!(
+                " catalyst=\"{}\" reason=\"{}\"",
+                status.mode.as_str(),
+                xml_escape_attr(status.reason)
+            )
+        })
+        .unwrap_or_default();
     line(
         stdout,
         format_args!(
-            "<margins_init path=\"{}\" status=\"{}\"{} />",
+            "<margins_init path=\"{}\" status=\"{}\" build_commit=\"{}\"{}{} />",
             xml_escape_attr(&root.to_string_lossy()),
             xml_escape_attr(status),
+            xml_escape_attr(crate::build_info::get().commit),
             config_attr,
+            catalyst_attrs,
         ),
     )
     .map_err(CliError::from_anyhow)

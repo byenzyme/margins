@@ -1,7 +1,7 @@
 use crate::args::TranscriptFormat;
 use crate::error::CliError;
 use crate::output::{line, xml_escape_attr, xml_escape_text};
-use margins_workflows::project::ResolvedProject;
+use margins_workflows::project::{is_margins_machine_state_dir, ResolvedProject};
 use serde::Serialize;
 use std::io::Write;
 use std::path::Path;
@@ -12,7 +12,7 @@ const DISTILL_HINT: &str = "To distill your latest session, run `margins note`."
 
 pub fn recent(work_dir: &Path, stdout: &mut dyn Write) -> Result<(), CliError> {
     let margins_dir = work_dir.join(".margins");
-    if !margins_dir.exists() {
+    if !margins_dir.exists() || is_margins_machine_state_dir(&margins_dir) {
         line(stdout, format_args!("<margins_recent />")).map_err(CliError::from_anyhow)?;
         return Ok(());
     }
@@ -34,7 +34,8 @@ pub fn recent_all(vaults: &[ResolvedProject], stdout: &mut dyn Write) -> Result<
     line(stdout, format_args!("<margins_recent>")).map_err(CliError::from_anyhow)?;
     let mut any_undistilled = false;
     for vault in vaults {
-        if !vault.root_dir.join(".margins").exists() {
+        let margins_dir = vault.root_dir.join(".margins");
+        if !margins_dir.exists() || is_margins_machine_state_dir(&margins_dir) {
             continue;
         }
         any_undistilled |= render_vault_meetings(&vault.work_dir, Some(&vault.project.id), stdout)?;
@@ -182,6 +183,8 @@ pub fn transcript(
             body: &transcript.body,
             view: transcript.view,
             decoded_until_ms: transcript.decoded_until_ms,
+            committed_until_ms: transcript.committed_until_ms,
+            updated_at_unix_ms: transcript.updated_at_unix_ms,
             live: transcript.live,
             terminal: transcript.terminal,
             title: &transcript.title,
@@ -296,6 +299,8 @@ struct TranscriptJson<'a> {
     body: &'a str,
     view: &'a str,
     decoded_until_ms: u64,
+    committed_until_ms: u64,
+    updated_at_unix_ms: u64,
     live: bool,
     terminal: bool,
     title: &'a str,

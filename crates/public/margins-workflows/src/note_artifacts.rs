@@ -9,6 +9,12 @@ pub struct NoteFrontmatter {
     pub tags: Vec<String>,
     pub people: Vec<String>,
     pub people_present: bool,
+    /// People entries that could not be interpreted without guessing. These
+    /// remain available as source evidence instead of being projected as a
+    /// corrupted identity.
+    pub people_unparsed: Vec<String>,
+    /// Human-readable reasons corresponding to rejected people evidence.
+    pub people_parse_warnings: Vec<String>,
     pub reflection_type: Option<String>,
     pub title: Option<String>,
     /// Durable backlink to the originating session, stamped into distilled
@@ -121,6 +127,7 @@ pub fn parse_note_frontmatter(text: &str) -> NoteFrontmatter {
 
 fn parse_frontmatter_block(block: &str) -> NoteFrontmatter {
     let mut frontmatter = NoteFrontmatter::default();
+    parse_people_frontmatter(block, &mut frontmatter);
     let mut current_key: Option<String> = None;
 
     for raw in block.lines() {
@@ -132,7 +139,9 @@ fn parse_frontmatter_block(block: &str) -> NoteFrontmatter {
         let trimmed = line.trim_start();
         if trimmed.starts_with("- ") {
             if let Some(key) = current_key.as_deref() {
-                frontmatter_push_value(&mut frontmatter, key, trimmed.trim_start_matches("- "));
+                if !is_people_key(key) {
+                    frontmatter_push_value(&mut frontmatter, key, trimmed.trim_start_matches("- "));
+                }
             }
             continue;
         }
@@ -148,7 +157,7 @@ fn parse_frontmatter_block(block: &str) -> NoteFrontmatter {
         let value = value.trim();
         current_key = Some(key.clone());
         mark_frontmatter_key(&mut frontmatter, &key);
-        if !value.is_empty() {
+        if !value.is_empty() && !is_people_key(&key) {
             for item in parse_frontmatter_values(value) {
                 frontmatter_push_value(&mut frontmatter, &key, &item);
             }
@@ -167,10 +176,189 @@ fn parse_frontmatter_block(block: &str) -> NoteFrontmatter {
 }
 
 fn mark_frontmatter_key(frontmatter: &mut NoteFrontmatter, key: &str) {
-    match key {
-        "person" | "people" | "attendees" => frontmatter.people_present = true,
-        _ => {}
+    if is_people_key(key) {
+        frontmatter.people_present = true;
     }
+}
+
+fn is_people_key(key: &str) -> bool {
+    matches!(key, "person" | "people" | "attendees")
+}
+
+fn parse_people_frontmatter(block: &str, frontmatter: &mut NoteFrontmatter) {
+    let lines = block.lines().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
+        if line.starts_with(char::is_whitespace) {
+            index += 1;
+            continue;
+        }
+        let Some((key, inline)) = line.split_once(':') else {
+            index += 1;
+            continue;
+        };
+        if !is_people_key(key.trim()) {
+            index += 1;
+            continue;
+        }
+
+        frontmatter.people_present = true;
+        let inline = inline.trim();
+        if !inline.is_empty() && inline != "[]" {
+            for value in parse_frontmatter_values(inline) {
+                push_people_scalar(frontmatter, &value, &value);
+            }
+        }
+
+        index += 1;
+        let mut entry: Vec<&str> = Vec::new();
+        while index < lines.len() && lines[index].starts_with(char::is_whitespace) {
+            let trimmed = lines[index].trim();
+            if let Some(item) = trimmed.strip_prefix('-') {
+                flush_people_entry(frontmatter, &entry);
+                entry.clear();
+                entry.push(item.trim());
+            } else if !trimmed.is_empty() {
+                entry.push(trimmed);
+            }
+            index += 1;
+        }
+        flush_people_entry(frontmatter, &entry);
+    }
+}
+
+fn flush_people_entry(frontmatter: &mut NoteFrontmatter, lines: &[&str]) {
+    if lines.is_empty() {
+        return;
+    }
+    let raw = lines.join("\n");
+    let first = lines[0].trim();
+    let quoted = first.starts_with(['\'', '"']);
+    let mapping_style = !quoted && first.contains(':');
+    if !mapping_style {
+        if lines.len() == 1 {
+            push_people_scalar(frontmatter, first, &raw);
+        } else {
+            preserve_unparsed_person(frontmatter, &raw, "unexpected continuation lines");
+        }
+        return;
+    }
+
+    let mut name = None;
+    let mut email = None;
+    for line in lines {
+        let Some((key, value)) = line.split_once(':') else {
+            preserve_unparsed_person(frontmatter, &raw, "mapping field has no colon");
+            return;
+        };
+        let value = clean_frontmatter_scalar(value);
+        match key.trim() {
+            "name" | "display_name" | "displayName" if name.is_none() => name = Some(value),
+            "email" if email.is_none() => email = Some(value),
+            known if matches!(known, "name" | "display_name" | "displayName" | "email") => {
+                preserve_unparsed_person(frontmatter, &raw, "duplicate mapping field");
+                return;
+            }
+            _ => {
+                preserve_unparsed_person(frontmatter, &raw, "unsupported mapping field");
+                return;
+            }
+        }
+    }
+
+    let supplied_email = email.filter(|value| !value.is_empty());
+    let scalar = name
+        .filter(|value| !value.is_empty())
+        .or_else(|| supplied_email.clone());
+    let Some(scalar) = scalar else {
+        preserve_unparsed_person(frontmatter, &raw, "mapping has no name or email value");
+        return;
+    };
+    match normalize_person_scalar(&scalar, supplied_email.as_deref()) {
+        Some(person) => frontmatter.people.push(person),
+        None => preserve_unparsed_person(frontmatter, &raw, "invalid name/email evidence"),
+    }
+}
+
+fn push_people_scalar(frontmatter: &mut NoteFrontmatter, scalar: &str, raw: &str) {
+    match normalize_person_scalar(scalar, None) {
+        Some(person) => frontmatter.people.push(person),
+        None => preserve_unparsed_person(frontmatter, raw, "unrecognized scalar identity"),
+    }
+}
+
+fn normalize_person_scalar(raw: &str, supplied_email: Option<&str>) -> Option<String> {
+    let cleaned = clean_frontmatter_scalar(raw);
+    if cleaned.is_empty() || cleaned == "[]" {
+        return None;
+    }
+
+    let (identity, embedded_email) = split_angle_email(&cleaned);
+    let email = supplied_email
+        .map(str::trim)
+        .filter(|value| is_email(value))
+        .or(embedded_email);
+    if supplied_email.is_some() && email.is_none() {
+        return None;
+    }
+
+    let identity = identity.trim();
+    let name = if let Some(inner) = identity
+        .strip_prefix("[[")
+        .and_then(|value| value.strip_suffix("]]"))
+    {
+        let target = inner.split(['|', '#']).next().unwrap_or_default().trim();
+        target.rsplit('/').next().unwrap_or(target).trim()
+    } else {
+        if identity.contains("[[") || identity.contains("]]") {
+            return None;
+        }
+        identity
+    };
+    if name.is_empty() && email.is_none() {
+        return None;
+    }
+    if email.is_none() && !name.chars().any(char::is_alphabetic) {
+        return None;
+    }
+    let name = if name.is_empty() { email? } else { name };
+    Some(match email {
+        Some(email) if name != email => format!("{name} <{email}>"),
+        _ => name.to_string(),
+    })
+}
+
+fn split_angle_email(value: &str) -> (&str, Option<&str>) {
+    let Some(open) = value.rfind('<') else {
+        return (value, None);
+    };
+    let Some(email) = value[open + 1..].strip_suffix('>') else {
+        return (value, None);
+    };
+    if is_email(email.trim()) {
+        (&value[..open], Some(email.trim()))
+    } else {
+        (value, None)
+    }
+}
+
+fn is_email(value: &str) -> bool {
+    let Some((local, domain)) = value.split_once('@') else {
+        return false;
+    };
+    !local.is_empty()
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && !value.chars().any(char::is_whitespace)
+}
+
+fn preserve_unparsed_person(frontmatter: &mut NoteFrontmatter, raw: &str, reason: &str) {
+    frontmatter.people_unparsed.push(raw.to_string());
+    frontmatter.people_parse_warnings.push(format!(
+        "people entry preserved but not projected ({reason}): {raw}"
+    ));
 }
 
 fn frontmatter_push_value(frontmatter: &mut NoteFrontmatter, key: &str, raw: &str) {
@@ -374,6 +562,48 @@ reflectionType: retro
         assert_eq!(parsed.tags, vec!["meeting", "project"]);
         assert_eq!(parsed.people, vec!["Ada Lovelace", "Grace Hopper"]);
         assert_eq!(parsed.reflection_type.as_deref(), Some("retro"));
+    }
+
+    #[test]
+    fn parses_people_frontmatter_shapes_without_mangling_identity() {
+        let cases = [
+            ("people: Kevin", "Kevin"),
+            ("people:\n  - 'Kevin Smith'", "Kevin Smith"),
+            ("people:\n  - [[Ada Lovelace]]", "Ada Lovelace"),
+            (
+                "attendees:\n  - '[[Alice Morgan]] <alice@example.com>'",
+                "Alice Morgan <alice@example.com>",
+            ),
+            ("people:\n  - name: Kevin", "Kevin"),
+            (
+                "attendees:\n  - name: Ada Lovelace\n    email: ada@example.com",
+                "Ada Lovelace <ada@example.com>",
+            ),
+        ];
+
+        for (frontmatter, expected) in cases {
+            let parsed = parse_note_frontmatter(&format!("---\n{frontmatter}\n---\n# Body\n"));
+            assert_eq!(parsed.people, vec![expected], "{frontmatter}");
+            assert!(parsed.people_unparsed.is_empty(), "{frontmatter}");
+            assert!(parsed.people_parse_warnings.is_empty(), "{frontmatter}");
+        }
+    }
+
+    #[test]
+    fn preserves_and_flags_unparseable_people_evidence() {
+        let parsed = parse_note_frontmatter(
+            "---\npeople:\n  - role: decision-maker\n  - name: Ada Lovelace\n    email: not-an-email\n---\n",
+        );
+
+        assert!(parsed.people.is_empty());
+        assert_eq!(
+            parsed.people_unparsed,
+            vec![
+                "role: decision-maker",
+                "name: Ada Lovelace\nemail: not-an-email"
+            ]
+        );
+        assert_eq!(parsed.people_parse_warnings.len(), 2);
     }
 
     #[test]

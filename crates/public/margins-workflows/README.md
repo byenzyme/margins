@@ -1,13 +1,23 @@
 # margins-workflows
 
-`margins-workflows` owns Margins' portable application services: project
-resolution and setup resources, Granola import and vault publishing, transcript
-and memo alignment, transcript/recent/artifact views, artifact confinement and
-pruning, and file transcription/session processing through the public
-`AsrBackend` and `DiarizationBackend` ports.
+Portable Margins application workflows shared by CLI builds.
 
-The crate contains no device capture, Tauri, CPAL, CIDRE, desktop, or private
-runtime dependency. Callers provide explicit project and `.margins` paths and
-model backends. The transitional root crate exposes thin compatibility facades
-so existing CLI and desktop behavior continues to use the same implementation
-and on-disk schema.
+For setup, the crate owns Workspace and Source declarations, deterministic
+plan/apply mutations, initialization and synchronization, and a fully open local
+recall path. `local_recall` walks declared Markdown Sources read-only at
+query time, honors Workspace exclusions, and returns typed evidence paths.
+
+Setup starts from the practice the user wants Margins to remember, then declares
+the folders that define its read/write boundary. A CLI build may add
+`workspace.propose` to ground an initial reading in the Workspace home, invite
+plain-language corrections, and emit any minimal settings consequence in the
+existing Workspace plan format. A corrected desired state is compiled into a new
+plan; only the final reviewed plan is applied before `init`, `sync`, and recall
+proof. This does not introduce a second config format.
+
+Connected-note distillation is a separate agent workflow. It may consume this
+crate's live local recall or another source-backed recall implementation through
+the same `margins.recall.v1` contract.
+
+The crate also owns session and artifact workflows, integration contracts,
+imports, publishing, alignment, and transcript views.

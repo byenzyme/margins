@@ -1,0 +1,37 @@
+{
+  "thread": {
+    "id": "t-client",
+    "historyId": "41004",
+    "messages": [
+      {
+        "id": "m-client",
+        "threadId": "t-client",
+        "internalDate": 1787220300000,
+        "headers": {
+          "from": "Alice Client <alice@acme.test>",
+          "to": "Owner <owner@example.com>",
+          "subject": "Pilot follow-up",
+          "date": "Thu, 20 Aug 2026 10:05:00 +0000",
+          "message_id": "<m-client@acme.test>"
+        },
+        "body": "Can we review the pilot results on Tuesday?"
+      },
+      {
+        "id": "m-owner-reply",
+        "threadId": "t-client",
+        "internalDate": 1787221200000,
+        "headers": {
+          "from": "Owner <owner@example.com>",
+          "to": "Alice Client <alice@acme.test>",
+          "subject": "Re: Pilot follow-up",
+          "date": "Thu, 20 Aug 2026 10:20:00 +0000",
+          "in-reply-to": "<m-client@acme.test>",
+          "references": "<m-client@acme.test>",
+          "message_id": "<m-owner-reply@gmail.com>"
+        },
+        "body": "Tuesday works for me."
+      }
+    ]
+  },
+  "downloaded": []
+}

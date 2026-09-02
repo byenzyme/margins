@@ -6,6 +6,7 @@ use margins_store::legacy;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranscriptView {
@@ -14,6 +15,11 @@ pub struct TranscriptView {
     pub body: String,
     pub view: &'static str,
     pub decoded_until_ms: u64,
+    pub committed_until_ms: u64,
+    /// Filesystem-derived snapshot time. This is deliberately not persisted in
+    /// the transcript schema: the source artifact's mtime is the freshness
+    /// signal.
+    pub updated_at_unix_ms: u64,
     pub live: bool,
     pub terminal: bool,
     pub speaker_alias: Option<String>,
@@ -31,6 +37,7 @@ struct TranscriptSource {
     source_path: PathBuf,
     body: String,
     decoded_until_ms: u64,
+    committed_until_ms: u64,
     terminal: bool,
     live_checkpoint: bool,
 }
@@ -66,7 +73,7 @@ pub fn preferred_transcript_path(margins_dir: &Path, name: &str) -> Option<PathB
     if capture.exists() {
         return Some(capture);
     }
-    live_transcript_source_path(margins_dir, name)
+    freshest_live_transcript_path(margins_dir, name)
 }
 
 pub fn resolve_session_name(margins_dir: &Path, requested: &str) -> Result<String> {
@@ -93,7 +100,7 @@ pub fn load_transcript_view(
     let name = resolve_session_name(margins_dir, requested)?;
     let meta = legacy::get_session_meta(margins_dir, &name).ok();
     let (source, view) =
-        if let Some(source) = read_live_transcript_body(work_dir, margins_dir, &name)? {
+        if let Some(source) = read_freshest_live_transcript(work_dir, margins_dir, &name)? {
             (source, "full")
         } else if let Some(source) =
             read_terminal_checkpoint_body(work_dir, margins_dir, &name, meta.as_ref())?
@@ -106,6 +113,7 @@ pub fn load_transcript_view(
                     source_path: path,
                     body,
                     decoded_until_ms: 0,
+                    committed_until_ms: 0,
                     terminal: true,
                     live_checkpoint: false,
                 },
@@ -119,12 +127,15 @@ pub fn load_transcript_view(
     let speaker_alias = speaker_alias_from_meta(meta.as_ref());
     let body = apply_speaker_alias(&source.body, speaker_alias.as_deref());
     let saved_note_path = saved_note_path_for_session(margins_dir, &name);
+    let updated_at_unix_ms = source_modified_unix_ms(&source.source_path);
     Ok(TranscriptView {
         session_name: name,
         source_path: source.source_path,
         body,
         view,
         decoded_until_ms: source.decoded_until_ms,
+        committed_until_ms: source.committed_until_ms,
+        updated_at_unix_ms,
         live,
         terminal: source.terminal,
         speaker_alias,
@@ -194,6 +205,14 @@ fn read_terminal_checkpoint_body(
         .get("decoded_until_ms")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    // Compact CLI checkpoints contain committed words only. Older checkpoint
+    // schemas did not spell out their commit watermark, so decoded progress is
+    // the honest compatibility default for those artifacts.
+    let committed_until_ms = checkpoint
+        .get("committed_until_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(decoded_until_ms)
+        .min(decoded_until_ms);
     let terminal = checkpoint
         .get("terminal")
         .and_then(Value::as_bool)
@@ -213,6 +232,7 @@ fn read_terminal_checkpoint_body(
         source_path: path,
         body,
         decoded_until_ms,
+        committed_until_ms,
         terminal,
         live_checkpoint: true,
     }))
@@ -243,19 +263,115 @@ pub fn read_registered_or_fallback(
             }
         }
     }
-    if let Some(source) = read_live_transcript_body(work_dir, margins_dir, name)? {
+    if let Some(source) = read_freshest_live_transcript(work_dir, margins_dir, name)? {
         return Ok((source.source_path, source.body));
     }
     bail!("No aligned transcript or capture context found for '{name}'.")
 }
 
-fn live_transcript_source_path(dir: &Path, name: &str) -> Option<PathBuf> {
+fn freshest_live_transcript_path(dir: &Path, name: &str) -> Option<PathBuf> {
+    let snapshot = dir.join(format!("{name}_live_transcript_snapshot.json"));
+    let journal = live_transcript_journal_path(dir, name);
+    std::iter::once(snapshot)
+        .chain(journal)
+        .filter(|path| path.is_file())
+        .max_by_key(|path| source_modified_unix_ms(path))
+}
+
+fn live_transcript_journal_path(dir: &Path, name: &str) -> Option<PathBuf> {
     let segments = dir.join(format!("{name}_live_transcript_segments.jsonl"));
     if jsonl_has_event(&segments) {
         return Some(segments);
     }
     let legacy = dir.join(format!("{name}_backchannel_trace.jsonl"));
     jsonl_has_event(&legacy).then_some(legacy)
+}
+
+fn read_freshest_live_transcript(
+    work_dir: &Path,
+    dir: &Path,
+    name: &str,
+) -> Result<Option<TranscriptSource>> {
+    let snapshot = read_live_transcript_snapshot(work_dir, dir, name)?;
+    let journal = read_live_transcript_body(work_dir, dir, name)?;
+    Ok(match (snapshot, journal) {
+        (Some(snapshot), Some(journal)) => {
+            if source_modified_unix_ms(&snapshot.source_path)
+                >= source_modified_unix_ms(&journal.source_path)
+            {
+                Some(snapshot)
+            } else {
+                Some(journal)
+            }
+        }
+        (snapshot, journal) => snapshot.or(journal),
+    })
+}
+
+fn read_live_transcript_snapshot(
+    work_dir: &Path,
+    dir: &Path,
+    name: &str,
+) -> Result<Option<TranscriptSource>> {
+    let path = dir.join(format!("{name}_live_transcript_snapshot.json"));
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return Ok(None);
+    };
+    let Ok(snapshot) = serde_json::from_str::<Value>(&raw) else {
+        // A replaceable live view is opportunistic. Ignore an unreadable
+        // snapshot and fall back to the durable journal/checkpoint chain.
+        return Ok(None);
+    };
+    let decoded_until_ms = snapshot
+        .get("decoded_until_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let committed_until_ms = snapshot
+        .get("committed_until_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(decoded_until_ms)
+        .min(decoded_until_ms);
+    let source = snapshot
+        .get("transcript_source")
+        .and_then(Value::as_str)
+        .filter(|source| !source.trim().is_empty())
+        .unwrap_or("live_snapshot");
+    let transcript = snapshot
+        .get("transcript")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let memo = read_live_memo(work_dir, dir, name);
+    let timeline = transcript
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .enumerate()
+        .map(|(seq, line)| {
+            (
+                elapsed_line_ms(line).unwrap_or(committed_until_ms),
+                seq,
+                line.to_string(),
+            )
+        })
+        .collect();
+    Ok(Some(TranscriptSource {
+        source_path: path,
+        body: render_live_capture_context(
+            name,
+            source,
+            decoded_until_ms,
+            committed_until_ms,
+            timeline,
+            &memo,
+        ),
+        decoded_until_ms,
+        committed_until_ms,
+        terminal: snapshot
+            .get("terminal")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        live_checkpoint: true,
+    }))
 }
 
 fn jsonl_has_event(path: &Path) -> bool {
@@ -270,7 +386,7 @@ fn read_live_transcript_body(
     dir: &Path,
     name: &str,
 ) -> Result<Option<TranscriptSource>> {
-    let Some(path) = live_transcript_source_path(dir, name) else {
+    let Some(path) = live_transcript_journal_path(dir, name) else {
         return Ok(None);
     };
     let raw = std::fs::read_to_string(&path)
@@ -351,10 +467,23 @@ fn read_live_transcript_body(
     if timeline.is_empty() {
         return Ok(None);
     }
-    let memo = legacy::get_session_meta(dir, name)
+    let memo = read_live_memo(work_dir, dir, name);
+    let body = render_live_capture_context(name, &source, decoded, committed, timeline, &memo);
+    Ok(Some(TranscriptSource {
+        source_path: path,
+        body,
+        decoded_until_ms: decoded,
+        committed_until_ms: committed.min(decoded),
+        terminal,
+        live_checkpoint: true,
+    }))
+}
+
+fn read_live_memo(work_dir: &Path, dir: &Path, name: &str) -> String {
+    legacy::get_session_meta(dir, name)
         .ok()
-        .and_then(|m| {
-            let path = PathBuf::from(m.notes_path);
+        .and_then(|meta| {
+            let path = PathBuf::from(meta.notes_path);
             std::fs::read_to_string(if path.is_absolute() {
                 path
             } else {
@@ -362,7 +491,17 @@ fn read_live_transcript_body(
             })
             .ok()
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+fn render_live_capture_context(
+    name: &str,
+    source: &str,
+    decoded: u64,
+    committed: u64,
+    timeline: Vec<(u64, usize, String)>,
+    memo: &str,
+) -> String {
     let mut rows = timeline
         .into_iter()
         .map(|(ms, seq, text)| (ms, 0u8, seq, text))
@@ -397,13 +536,16 @@ fn read_live_transcript_body(
             body.push('\n');
         }
     }
-    Ok(Some(TranscriptSource {
-        source_path: path,
-        body,
-        decoded_until_ms: decoded,
-        terminal,
-        live_checkpoint: true,
-    }))
+    body
+}
+
+fn source_modified_unix_ms(path: &Path) -> u64 {
+    path.metadata()
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|elapsed| elapsed.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
 }
 
 fn segment_mode_for_path(path: &Path) -> bool {
@@ -582,6 +724,68 @@ mod tests {
         assert!(view.body.contains("[00:02] memo: memo"));
         assert!(view.body.contains("[00:03] user: kept"));
         assert!(!view.body.contains("leaked"));
+    }
+
+    #[test]
+    fn live_segment_view_exposes_only_committed_progress_and_derived_freshness() {
+        let temp = tempfile::tempdir().unwrap();
+        let work_dir = temp.path();
+        let margins_dir = work_dir.join(".margins");
+        legacy::create_session(&margins_dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
+        std::fs::write(margins_dir.join("meet.md"), "[00:02] memo").unwrap();
+        std::fs::write(margins_dir.join("current"), "meet\n").unwrap();
+        std::fs::write(
+            margins_dir.join("meet_live_transcript_segments.jsonl"),
+            concat!(
+                "{\"kind\":\"checkpoint\",\"start_ms\":0,",
+                "\"decoded_until_ms\":5000,\"committed_until_ms\":3000,",
+                "\"segment_transcript\":\"[00:01] user: hello\"}\n"
+            ),
+        )
+        .unwrap();
+
+        let view = load_transcript_view(work_dir, &margins_dir, "meet").unwrap();
+
+        assert_eq!(view.decoded_until_ms, 5_000);
+        assert_eq!(view.committed_until_ms, 3_000);
+        assert!(view.updated_at_unix_ms > 0);
+        assert!(view.live);
+        assert!(!view.terminal);
+    }
+
+    #[test]
+    fn bounded_live_snapshot_is_a_complete_transcript_view_without_a_journal() {
+        let temp = tempfile::tempdir().unwrap();
+        let work_dir = temp.path();
+        let margins_dir = work_dir.join(".margins");
+        legacy::create_session(&margins_dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
+        std::fs::write(margins_dir.join("meet.md"), "[00:02] memo").unwrap();
+        std::fs::write(margins_dir.join("current"), "meet\n").unwrap();
+        std::fs::write(
+            margins_dir.join("meet_live_transcript_snapshot.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "terminal": false,
+                "decoded_until_ms": 5_000,
+                "committed_until_ms": 3_000,
+                "transcript_source": "committed",
+                "transcript": "[00:01] user: stable words"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let view = load_transcript_view(work_dir, &margins_dir, "meet").unwrap();
+
+        assert_eq!(
+            view.source_path,
+            margins_dir.join("meet_live_transcript_snapshot.json")
+        );
+        assert_eq!(view.decoded_until_ms, 5_000);
+        assert_eq!(view.committed_until_ms, 3_000);
+        assert!(view.body.contains("[00:01] user: stable words"));
+        assert!(view.body.contains("[00:02] memo: memo"));
+        assert!(view.live);
     }
 
     #[test]

@@ -1,0 +1,22 @@
+{
+  "thread": {
+    "historyId": "51001",
+    "id": "t-new-noisy",
+    "messages": [
+      {
+        "id": "m-new-noisy",
+        "threadId": "t-new-noisy",
+        "internalDate": 1787227200000,
+        "headers": {
+          "from": "Fresh Bot <newbot@fresh-noise.test>",
+          "to": "Owner <owner@example.com>",
+          "subject": "Automated selector digest",
+          "date": "Thu, 20 Aug 2026 12:00:00 +0000",
+          "list-unsubscribe": "<https://fresh-noise.test/unsubscribe>"
+        },
+        "body": "A newly selected automated digest used to prove pull refreshes policy evidence with the same authoritative snapshot."
+      }
+    ]
+  },
+  "downloaded": []
+}

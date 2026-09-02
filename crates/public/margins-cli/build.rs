@@ -1,0 +1,53 @@
+use chrono::{SecondsFormat, Utc};
+use std::env;
+use std::path::Path;
+use std::process::Command;
+
+fn git(repo: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn main() {
+    println!("cargo:rerun-if-env-changed=MARGINS_BUILD_COMMIT");
+
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    let repo = Path::new(&manifest_dir);
+    let git_commit = git(repo, &["rev-parse", "HEAD"]).filter(|value| !value.is_empty());
+    let override_commit = env::var("MARGINS_BUILD_COMMIT")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let commit = override_commit
+        .as_deref()
+        .or(git_commit.as_deref())
+        .unwrap_or("unknown");
+    let short = if commit == "unknown" {
+        "unknown".to_string()
+    } else {
+        commit.chars().take(12).collect()
+    };
+    let git_available = git_commit.is_some();
+    let dirty = if git_available {
+        git(repo, &["status", "--porcelain"]).is_some_and(|status| !status.is_empty())
+    } else {
+        commit == "unknown"
+    };
+    let branch = git(repo, &["symbolic-ref", "--short", "HEAD"]).unwrap_or_default();
+    let built_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let profile = env::var("PROFILE").unwrap_or_else(|_| "unknown".to_string());
+
+    println!("cargo:rustc-env=MARGINS_BUILD_COMMIT_VALUE={commit}");
+    println!("cargo:rustc-env=MARGINS_BUILD_SHORT_VALUE={short}");
+    println!("cargo:rustc-env=MARGINS_BUILD_DIRTY_VALUE={dirty}");
+    println!("cargo:rustc-env=MARGINS_BUILD_BRANCH_VALUE={branch}");
+    println!("cargo:rustc-env=MARGINS_BUILD_AT_VALUE={built_at}");
+    println!("cargo:rustc-env=MARGINS_BUILD_PROFILE_VALUE={profile}");
+}

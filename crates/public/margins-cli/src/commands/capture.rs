@@ -3,7 +3,7 @@ use crate::error::CliError;
 use crate::services::CliServices;
 use margins_core::{
     ArtifactDestination, AudioLane, CaptureAction, CaptureCommand, CaptureObserver,
-    CaptureOperationId, CaptureRequest, CaptureState, EventEnvelope, PcmChunk, PermissionState,
+    CaptureOperationId, CaptureRequest, CaptureState, EventEnvelope, PcmChunk, PermissionAction,
     SegmentId, SessionId,
 };
 use std::path::Path;
@@ -195,22 +195,20 @@ fn preflight(services: &CliServices) -> Result<(), CliError> {
 }
 
 fn ensure_permission(services: &CliServices, lane: AudioLane) -> Result<(), CliError> {
-    let state = services
+    let mut state = services
         .capture
         .permission(lane)
         .map_err(CliError::capture)?;
-    let state = if state == PermissionState::NotDetermined {
-        services
+    if margins_core::permission_action(state) == PermissionAction::Request {
+        state = services
             .capture
             .request_permission(lane)
-            .map_err(CliError::capture)?
-    } else {
-        state
-    };
-    match state {
-        PermissionState::Granted => Ok(()),
-        PermissionState::Unavailable => Err(CliError::capture_unavailable()),
-        PermissionState::Denied | PermissionState::Restricted => {
+            .map_err(CliError::capture)?;
+    }
+    match margins_core::permission_action(state) {
+        PermissionAction::Proceed | PermissionAction::ProbeOnStart => Ok(()),
+        PermissionAction::Unavailable => Err(CliError::capture_unavailable()),
+        PermissionAction::Blocked => {
             let message = match lane {
                 AudioLane::Microphone => "Margins needs Microphone permission. Grant it to your terminal in System Settings > Privacy & Security > Microphone, then quit and reopen the terminal before running Margins again.",
                 AudioLane::System => crate::error::MACOS_SYSTEM_AUDIO_PERMISSION_DENIED_MESSAGE,
@@ -218,9 +216,13 @@ fn ensure_permission(services: &CliServices, lane: AudioLane) -> Result<(), CliE
             };
             Err(CliError::new("capture_permission_denied", message))
         }
-        _ => Err(CliError::new(
+        PermissionAction::Request => Err(CliError::new(
             "capture_open_failed",
             "capture permission was not granted",
+        )),
+        _ => Err(CliError::new(
+            "capture_open_failed",
+            "capture permission state is unsupported by this CLI",
         )),
     }
 }

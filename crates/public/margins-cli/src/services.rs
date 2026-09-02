@@ -240,11 +240,7 @@ impl ProjectService for SystemProjectService {
         margins_workflows::project::resolve_project(selector)
     }
 
-    fn resolve_vault(
-        &self,
-        selector: Option<&str>,
-        cwd: &Path,
-    ) -> anyhow::Result<ResolvedProject> {
+    fn resolve_vault(&self, selector: Option<&str>, cwd: &Path) -> anyhow::Result<ResolvedProject> {
         margins_workflows::project::resolve_vault(selector, cwd)
     }
 

@@ -73,21 +73,43 @@ pub fn inbox_dir(project: &ResolvedProject) -> PathBuf {
     project.root_dir.join(project.project.inbox_folder.trim())
 }
 
-/// Walk UP from `cwd` looking for a directory that contains `.margins/` or
-/// `.obsidian/`, exactly like git discovers `.git`. Returns the nearest vault
-/// root (the folder that contains the marker), never the marker itself. This
-/// lets a first Margins command launched from an Obsidian subfolder establish
-/// its store at the real vault root. Purely read-only: it never creates
-/// anything.
+/// Walk UP from `cwd` looking for a directory that contains a vault-local
+/// `.margins/` or `.obsidian/`, exactly like git discovers `.git`. Margins'
+/// machine-level state directory is not a vault marker. Returns the nearest
+/// vault root (the folder that contains the marker), never the marker itself.
+/// This lets a first Margins command launched from an Obsidian subfolder
+/// establish its store at the real vault root. Purely read-only: it never
+/// creates anything.
 pub fn discover_vault_root(cwd: &Path) -> Option<PathBuf> {
+    let machine_state = crate::workspace::margins_home().ok();
+    discover_vault_root_with_machine_state(cwd, machine_state.as_deref())
+}
+
+fn discover_vault_root_with_machine_state(
+    cwd: &Path,
+    machine_state: Option<&Path>,
+) -> Option<PathBuf> {
     let mut dir = Some(cwd);
     while let Some(current) = dir {
-        if current.join(".margins").is_dir() || current.join(".obsidian").is_dir() {
+        let margins_dir = current.join(".margins");
+        let margins_is_machine_state = machine_state.is_some_and(|state| {
+            canonicalize_for_compare(state) == canonicalize_for_compare(&margins_dir)
+        });
+        if (margins_dir.is_dir() && !margins_is_machine_state) || current.join(".obsidian").is_dir()
+        {
             return Some(current.to_path_buf());
         }
         dir = current.parent();
     }
     None
+}
+
+/// Whether `path` is Margins' machine-level configuration/state directory,
+/// rather than a vault-local session store that happens to share its name.
+pub fn is_margins_machine_state_dir(path: &Path) -> bool {
+    crate::workspace::margins_home()
+        .ok()
+        .is_some_and(|state| canonicalize_for_compare(&state) == canonicalize_for_compare(path))
 }
 
 /// Resolve the vault for a session command, git-style. The model is simply:
@@ -1047,6 +1069,40 @@ mod tests {
             found.canonicalize().unwrap(),
             root.canonicalize().unwrap(),
             "discovery must return the folder containing .margins, not a child"
+        );
+    }
+
+    #[test]
+    fn discover_vault_root_ignores_machine_state_dot_margins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let machine_state = home.join(".margins");
+        let nested = home.join("projects").join("margins");
+        std::fs::create_dir_all(&machine_state).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(
+            discover_vault_root_with_machine_state(&nested, Some(&machine_state)),
+            None,
+            "machine state must not make the entire home directory a session vault"
+        );
+    }
+
+    #[test]
+    fn discover_vault_root_prefers_real_vault_below_machine_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let machine_state = home.join(".margins");
+        let vault = home.join("notes");
+        let nested = vault.join("inbox").join("calls");
+        std::fs::create_dir_all(&machine_state).unwrap();
+        std::fs::create_dir_all(vault.join(".margins")).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(
+            discover_vault_root_with_machine_state(&nested, Some(&machine_state)),
+            Some(vault),
+            "a nearer vault-local marker must still win"
         );
     }
 

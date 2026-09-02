@@ -107,11 +107,7 @@ fn listing_recovers_exact_terminal_capture_artifacts_only_for_their_session() {
     for file in ["meet_seg0.wav", "meet_seg0.live-transcript.json"] {
         std::fs::write(dir.join(file), "intact").unwrap();
         assert_eq!(
-            confined_session_artifact_access_disk_path(
-                &dir,
-                "meet",
-                &format!(".margins/{file}")
-            ),
+            confined_session_artifact_access_disk_path(&dir, "meet", &format!(".margins/{file}")),
             Some(dir.join(file))
         );
     }

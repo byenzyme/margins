@@ -1,30 +1,43 @@
 # margins-cli
 
-`margins-cli` owns the public Margins command parser, dispatch, and output
-contracts. It composes the portable `margins-core`, `margins-media`,
-`margins-store`, and `margins-workflows` crates without depending on the
-private desktop or native-capture implementation.
+The standalone Margins command parser and dispatcher.
 
-The default binary intentionally has no device-capture or model backend. Its
-capture, ASR, and diarization failures are typed and stable; callers may inject
-implementations through `CliServices` when embedding the library.
+The source-checkout binary is named `margins-public`; released product builds
+may install it as `margins`. Substitute `margins-public` in the examples below
+when running directly from this workspace.
 
-This crate is not the product fresh-install route and its binary is named
-`margins-public` to avoid colliding with the official `margins` command.
-Workspace setup and recall are intentionally unavailable in this composition:
-they require the official recall-capable binary, which creates
-`.margins/recall/index.db` and uses `~/.margins/config.toml` plus
-`~/.margins/models/`. Use the repository root `./install.sh` or official
-release artifacts when you need the user-facing `margins` command.
+The public binary reports and runs useful local workflows:
 
-For parser/contract development, run it from the public repository root:
-
-```console
-cargo run --manifest-path crates/public/margins-cli/Cargo.toml -- capabilities
+```bash
+cd /absolute/path/to/notes
+margins init
+margins sync --json
+margins recall "a phrase already in these notes"
 ```
 
-Or run it without installing:
+`init` resolves or creates a Workspace. `sync` confirms declared Sources are
+ready. `recall` reads declared Markdown at query time and returns source-backed
+`margins.recall.v1` results, with no separate indexing command or wait.
 
-```console
-cargo run --manifest-path crates/public/margins-cli/Cargo.toml -- recent
+For multiple folders:
+
+```bash
+margins workspace new practice --home /absolute/path/to/notes
+margins --workspace practice source add notes \
+  --name research --role reference --path /absolute/path/to/research
 ```
+
+Choosing folders directly is the standard setup path. `workspace plan` and
+`workspace apply` provide optional deterministic automation. A CLI build may
+also report `workspace.propose: true`; when present, the setup skill asks that
+command to ground an initial reading in the Workspace home and explain what Margins
+understands the practice to be, leads with that understanding, and invites
+plain-language corrections. A correction is recompiled into a fresh plan with
+`workspace plan --desired`; only the final plan you reviewed is applied,
+unchanged, before `init`/`sync`.
+
+Connected-note distillation is a separate skill workflow. It starts with the
+latest Margins session unless the user selects another session or supplies a
+transcript, memo, or text. Builds with a speech adapter list `audio` in
+`distillation.inputs`. The skill uses the `margins.recall.v1` results returned by
+the CLI.

@@ -1,0 +1,23 @@
+{
+  "thread": {
+    "historyId": "41001",
+    "id": "t-unrelated",
+    "messages": [
+      {
+        "id": "m-unrelated",
+        "threadId": "t-unrelated",
+        "internalDate": 1787223600000,
+        "headers": {
+          "from": "News Bot <newsletter@noise.test>",
+          "to": "Owner <owner@example.com>",
+          "cc": "A Person <a@x.io>",
+          "subject": "Daily digest",
+          "date": "Thu, 20 Aug 2026 11:00:00 +0000",
+          "list-unsubscribe": "<https://noise.test/unsubscribe>"
+        },
+        "body": "A broad mailbox item that must never become an Episode. map aim fit ask act run fix try log tag set own due win gap risk test ship plan note goal user need cost time data code work team lead sync scope proof trust learn build check share align decide review followup measure adapt govern track report close open ready clear exact valid sound grounded useful durable stable direct honest concrete specific relevant timely owned scoped tested traced cited linked."
+      }
+    ]
+  },
+  "downloaded": []
+}

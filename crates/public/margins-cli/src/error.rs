@@ -1,4 +1,5 @@
 use margins_core::{CaptureError, CaptureErrorCode, DiarizationErrorCode, TranscriptErrorCode};
+use serde_json::{json, Value};
 use std::fmt;
 
 pub const EX_UNAVAILABLE: i32 = 69;
@@ -31,6 +32,9 @@ pub struct CliError {
     code: &'static str,
     message: String,
     exit_code: i32,
+    retryable: bool,
+    details: Option<Value>,
+    reported: bool,
 }
 
 impl CliError {
@@ -39,6 +43,9 @@ impl CliError {
             code,
             message: message.into(),
             exit_code: 1,
+            retryable: false,
+            details: None,
+            reported: false,
         }
     }
 
@@ -47,6 +54,9 @@ impl CliError {
             code,
             message: message.into(),
             exit_code: EX_UNAVAILABLE,
+            retryable: true,
+            details: None,
+            reported: false,
         }
     }
 
@@ -55,7 +65,25 @@ impl CliError {
             code: "usage",
             message: message.into(),
             exit_code: 2,
+            retryable: false,
+            details: None,
+            reported: false,
         }
+    }
+
+    pub fn with_details(mut self, details: Value) -> Self {
+        self.details = Some(details);
+        self
+    }
+
+    pub fn retryable(mut self, retryable: bool) -> Self {
+        self.retryable = retryable;
+        self
+    }
+
+    pub fn reported(mut self) -> Self {
+        self.reported = true;
+        self
     }
 
     pub fn code(&self) -> &'static str {
@@ -68,6 +96,18 @@ impl CliError {
 
     pub fn exit_code(&self) -> i32 {
         self.exit_code
+    }
+
+    pub fn retryable_value(&self) -> bool {
+        self.retryable
+    }
+
+    pub fn details(&self) -> Option<&Value> {
+        self.details.as_ref()
+    }
+
+    pub fn is_reported(&self) -> bool {
+        self.reported
     }
 
     pub fn capture(error: CaptureError) -> Self {
@@ -98,6 +138,45 @@ impl CliError {
 
     pub fn from_anyhow(error: anyhow::Error) -> Self {
         for cause in error.chain() {
+            if let Some(error) =
+                cause.downcast_ref::<margins_workflows::workspace::WorkspaceMutationError>()
+            {
+                return match error {
+                    margins_workflows::workspace::WorkspaceMutationError::RevisionConflict {
+                        expected,
+                        actual,
+                    } => Self::new("workspace_revision_conflict", error.to_string())
+                        .with_details(
+                            json!({"expected_revision": expected, "actual_revision": actual}),
+                        )
+                        .retryable(true),
+                    margins_workflows::workspace::WorkspaceMutationError::IdempotencyConflict {
+                        request_id,
+                    } => Self::new("idempotency_conflict", error.to_string())
+                        .with_details(json!({"request_id": request_id})),
+                    margins_workflows::workspace::WorkspaceMutationError::InvalidPlan(_) => {
+                        Self::new("workspace_plan_invalid", error.to_string())
+                    }
+                };
+            }
+            if let Some(error) =
+                cause.downcast_ref::<margins_workflows::integrations::RetentionMutationError>()
+            {
+                return match error {
+                    margins_workflows::integrations::RetentionMutationError::InvalidPlan(_) => {
+                        Self::new("retention_plan_invalid", error.to_string())
+                    }
+                    margins_workflows::integrations::RetentionMutationError::PlanStale {
+                        expected_fingerprint,
+                        actual_fingerprint,
+                    } => Self::new("retention_plan_stale", error.to_string())
+                        .with_details(json!({
+                            "expected_ledger_fingerprint": expected_fingerprint,
+                            "actual_ledger_fingerprint": actual_fingerprint,
+                        }))
+                        .retryable(true),
+                };
+            }
             if let Some(error) = cause.downcast_ref::<margins_core::TranscriptError>() {
                 return if error.code == TranscriptErrorCode::Unavailable {
                     Self::asr_unavailable()

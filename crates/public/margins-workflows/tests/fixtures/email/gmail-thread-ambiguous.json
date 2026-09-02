@@ -1,0 +1,33 @@
+{
+  "thread": {
+    "historyId": "41002",
+    "id": "t-ambiguous",
+    "messages": [
+      {
+        "id": "m-kevin-one",
+        "threadId": "t-ambiguous",
+        "internalDate": 1787302800000,
+        "headers": {
+          "from": "Kevin <kevin.one@north.test>",
+          "to": "Owner <owner@example.com>",
+          "subject": "Introductions",
+          "date": "Fri, 21 Aug 2026 09:00:00 +0000"
+        },
+        "body": "North Kevin here."
+      },
+      {
+        "id": "m-kevin-two",
+        "threadId": "t-ambiguous",
+        "internalDate": 1787303700000,
+        "headers": {
+          "from": "Kevin <kevin.two@south.test>",
+          "to": "Owner <owner@example.com>",
+          "subject": "Re: Introductions",
+          "date": "Fri, 21 Aug 2026 09:15:00 +0000"
+        },
+        "body": "South Kevin replying separately."
+      }
+    ]
+  },
+  "downloaded": []
+}

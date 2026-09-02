@@ -51,6 +51,7 @@ fn crate_builds_from_an_isolated_public_tree() {
         .args(["check", "--lib", "--offline", "--manifest-path"])
         .arg(&manifest)
         .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .env("CARGO_BUILD_BUILD_DIR", temp.path().join("target"))
         .output()
         .unwrap();
     assert!(

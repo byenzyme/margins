@@ -33,6 +33,8 @@ Separate what was said aloud from what the user privately felt or noticed. Attri
 
 Do not drop once-mentioned failure modes, risks, or negative-space concerns. For each participant, preserve every failure mode they named, even once. These often carry the scoping value of the call.
 
+Importance is not decided only by the main topic or who had the most airtime. A side thread can hold the phrase that reveals the stakes, something about the relationship, or the thought being worked out. Listen for language that carries a frame, a position, or a shift in what the conversation means — and preserve that phrasing when it matters. Apply this ear to both speakers while keeping attribution clear.
+
 ## Attribution Audit
 
 Before drafting, audit people and speakers:
@@ -51,9 +53,13 @@ People-page enrichment is state-dependent. Never create a `people/` folder or an
 
 Vault search and supplied vault context are supporting evidence, not setup. If the vault is empty, unavailable, or too thin, continue from the memo and transcript without visible mechanism language in the saved note.
 
-Use vault context to calibrate vocabulary, confirm existing wikilinks and tags, and bridge this capture to prior thinking. Prefer a few high-signal bridges over many shallow citations.
+When the host exposes recall directly, treat it as peripheral vision while understanding the conversation. First find the deeper arc and the uncertainty that prior context could actually change. Search when history could sharpen interpretation, vocabulary, attribution, or action—not merely because related notes exist. The active synthesizer owns that retrieval loop: form a focused query, inspect what came back, refine or follow a promising lead when useful, and stop when another search is unlikely to change the note. When the host instead supplies a precomputed vault-context bundle, judge that evidence by the same standard without trying to initiate another search.
 
-Recall queries must use the vault's own vocabulary, not generic category labels. Build them from memo-marked or anomalous language first, then transcript nouns, people, projects, tools, and tensions. At least one query must come from the memo's most surprising, charged, or user-marked signal, even if the obvious transcript topic would be easier to search.
+Use vault context to calibrate vocabulary, confirm existing wikilinks and tags, and bridge this capture to prior thinking when a bridge exists. Prefer a few high-signal bridges over many shallow citations.
+
+Recall queries should use the vault's own vocabulary, not generic category labels. Begin with memo-marked, anomalous, surprising, charged, or still-forming language, then use transcript nouns, people, projects, tools, and tensions to disambiguate. Give the memo's most consequential non-obvious signal first consideration even when the obvious transcript topic would be easier to search. Usually a few focused searches are enough; this is a judgment, not a quota.
+
+Retrieved context earns its place only when it changes how the capture should be understood or carried forward. It is valid to use none of it.
 
 Only emit tags that already exist in evidence you read or confirmed. When a project, company, tool, person, or topic already has a confirmed note in the vault, wikilink the first in-body mention as `[[Existing Note Title]]`. Never invent wikilink targets.
 
@@ -87,7 +93,7 @@ Distinguish settled decisions from open questions. State decisions as settled on
 
 Consolidate action items. Every commitment, next step, owner, and deadline mentioned anywhere in the conversation goes into one final `### Action items` section as a checkbox list. Do not scatter action items across thematic sections.
 
-Skip pleasantries, logistics, and small talk unless they contained real content. Prioritize specificity over comprehensiveness.
+Keep the main thread of the conversation clear. Side conversations and tangents can still hold consequential moments — a phrase that reframes the stakes, reveals something about the relationship, or changes how someone thinks about something. When you find one, promote that moment into the relevant note section rather than keeping or discarding the whole tangent. Skip pleasantries and logistics that carry no substance. Prioritize specificity over comprehensiveness.
 
 For poor transcripts, reconstruct intended meaning from context and memo lines. Preserve distinctive phrasing. Flag uncertain reconstructions with `[reconstructed]` or `[unclear]`. Do not reproduce speech-to-text artifacts.
 

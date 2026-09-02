@@ -34,6 +34,23 @@ pub fn write_error(stderr: &mut dyn Write, error: &CliError) -> io::Result<()> {
     )
 }
 
+pub fn write_json_error(stderr: &mut dyn Write, error: &CliError) -> io::Result<()> {
+    serde_json::to_writer(
+        &mut *stderr,
+        &serde_json::json!({
+            "schema_version": "margins.error.v1",
+            "ok": false,
+            "error": {
+                "code": error.code(),
+                "message": error.message(),
+                "retryable": error.retryable_value(),
+                "details": error.details(),
+            }
+        }),
+    )?;
+    writeln!(stderr)
+}
+
 pub fn line(output: &mut dyn Write, args: std::fmt::Arguments<'_>) -> anyhow::Result<()> {
     output.write_fmt(args)?;
     output.write_all(b"\n")?;

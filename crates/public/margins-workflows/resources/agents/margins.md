@@ -14,6 +14,8 @@ margins recent
 margins transcript <meeting-id>
 margins transcribe <audio-file> --name <session-name> --memo <memo.md> --speakers 1
 margins import granola <export.json-or-csv>
+margins connect status --service granola --json
+margins connect granola --headless --account <bound-account-email> --json
 margins recall "<query>"
 ```
 
