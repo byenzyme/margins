@@ -34,17 +34,13 @@ with `source add`. Users do not need to write a desired TOML document.
 `workspace plan` and `workspace apply` remain an optional deterministic
 automation path over the same public Workspace protocol.
 
-Some Margins builds may report `workspace.propose: true`. That command grounds an
-initial reading in the Workspace home and writes a human-readable explanation of
-what Margins understands the practice to be to stderr, alongside a draft
-`margins.workspace.plan.v1` on stdout. Your Source declarations still define the
-full recall boundary. The setup agent leads with that understanding, asks in
-plain language what is wrong or missing, and only then reviews the settings. If
-you correct a folder's role or a policy, it compiles a fresh plan from your
-feedback with `workspace plan --desired`; the plan that is finally applied is
-always the exact one you last reviewed, unchanged, before `init` and `sync`. The
-static setup skill invokes this capability when it is present; it does not
-contain or reproduce the recommendation logic.
+Some Margins builds may report `recall.scan: true`. The setup agent consumes the
+complete read-only `scan.v2` result as grounded evidence about the Workspace home,
+then explains what Margins understands the practice to be and asks in plain
+language what is wrong or missing. Your Source declarations still define the full
+recall boundary. If settings follow from the confirmed understanding, the agent
+compiles a fresh plan with `workspace plan --desired`; the plan finally applied is
+always the exact one last reviewed, unchanged, before `init` and `sync`.
 
 ## Distillation
 

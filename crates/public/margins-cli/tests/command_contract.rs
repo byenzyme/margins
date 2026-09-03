@@ -10,10 +10,6 @@ use margins_core::{
     CaptureSnapshot, CaptureState, PermissionState, TranscriptError,
 };
 use margins_store::legacy;
-use margins_workflows::integrations::{
-    CalendarEventAttendee, CalendarEventDelta, CalendarEventEvidence, ConnectorCtx, HealthStatus,
-    IntegrationsStore,
-};
 use margins_workflows::project::{ProjectSource, ResolvedProject};
 use margins_workflows::workspace::{self, GmailCollectionSelector, WorkspaceBinding};
 use std::io::{Read, Write as IoWrite};
@@ -27,305 +23,6 @@ use std::thread;
 use std::time::Duration;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-fn seed_context_fixture(root: &Path, stale: bool) {
-    let margins_dir = root.join("captures/.margins");
-    std::fs::create_dir_all(&margins_dir).unwrap();
-    std::fs::create_dir_all(root.join("people")).unwrap();
-    std::fs::create_dir_all(root.join("meetings")).unwrap();
-    std::fs::create_dir_all(root.join("exports")).unwrap();
-
-    let notes = [
-        (
-            "people/Ada Lovelace.md",
-            "---\ntitle: Ada Lovelace\naliases: [Ada]\nemail: ada@example.com\n---\n# Ada Lovelace\n",
-            serde_json::json!({}),
-            Vec::<&str>::new(),
-        ),
-        (
-            "people/Kevin Stone.md",
-            "---\ntitle: Kevin Stone\naliases: [Kevin]\nemail: kevin.stone@example.com\n---\n# Kevin Stone\n",
-            serde_json::json!({}),
-            Vec::<&str>::new(),
-        ),
-        (
-            "people/Kevin Chen.md",
-            "---\ntitle: Kevin Chen\naliases: [Kevin]\nemail: kevin.chen@example.com\n---\n# Kevin Chen\n",
-            serde_json::json!({}),
-            Vec::<&str>::new(),
-        ),
-        (
-            "meetings/ada-call.md",
-            "---\npeople: ['[[Ada Lovelace]]']\n---\n# Customer call\nAgreed on the migration sequence.\n- [ ] Send Ada the migration plan\n",
-            serde_json::json!({
-                "source": "granola",
-                "source_id": "episode-ada-1",
-                "kind": "meeting_note",
-                "occurred_at": "2026-08-01T10:00:00Z",
-                "provenance": root.join("exports/granola-ada.json").to_string_lossy(),
-            }),
-            vec!["people/ada lovelace"],
-        ),
-        (
-            "meetings/after-cutoff.md",
-            "---\npeople: ['[[Ada Lovelace]]']\n---\n# Later call\nThis must not leak backward.\n",
-            serde_json::json!({
-                "source": "folder",
-                "source_id": "episode-ada-later",
-                "kind": "meeting_note",
-                "occurred_at": "2026-08-12T10:00:00Z",
-                "provenance": root.join("meetings/after-cutoff.md").to_string_lossy(),
-            }),
-            vec!["ada lovelace"],
-        ),
-    ];
-    std::fs::write(root.join("exports/granola-ada.json"), "source receipt").unwrap();
-
-    let recall_path = root.join("index.db");
-    let conn = rusqlite::Connection::open(&recall_path).unwrap();
-    conn.execute_batch(
-        "CREATE TABLE docs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_ref TEXT NOT NULL UNIQUE,
-            title TEXT,
-            content TEXT,
-            content_hash TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            modified_at INTEGER NOT NULL,
-            indexed_at INTEGER NOT NULL,
-            metadata TEXT DEFAULT '{}'
-         );
-         CREATE TABLE doc_links (
-            doc_id INTEGER NOT NULL,
-            link TEXT NOT NULL,
-            PRIMARY KEY (doc_id, link)
-         );",
-    )
-    .unwrap();
-    let indexed_at = chrono::Utc::now().timestamp_millis();
-    for (source_ref, content, metadata, links) in notes {
-        let path = root.join(source_ref);
-        std::fs::write(&path, content).unwrap();
-        let modified_at = if stale {
-            0
-        } else {
-            path.metadata()
-                .unwrap()
-                .modified()
-                .unwrap()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64
-        };
-        conn.execute(
-            "INSERT INTO docs (source_ref, title, content, content_hash, created_at, modified_at, indexed_at, metadata)
-             VALUES (?1, NULL, ?2, 'fixture-hash', ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                source_ref,
-                content,
-                chrono::DateTime::parse_from_rfc3339("2026-07-01T00:00:00Z")
-                    .unwrap()
-                    .timestamp_millis(),
-                modified_at,
-                indexed_at,
-                metadata.to_string(),
-            ],
-        )
-        .unwrap();
-        let doc_id = conn.last_insert_rowid();
-        for link in links {
-            conn.execute(
-                "INSERT INTO doc_links (doc_id, link) VALUES (?1, ?2)",
-                rusqlite::params![doc_id, link],
-            )
-            .unwrap();
-        }
-    }
-    drop(conn);
-
-    let next = chrono::DateTime::parse_from_rfc3339("2026-08-11T09:00:00Z")
-        .unwrap()
-        .with_timezone(&Local);
-    legacy::create_session(
-        &margins_dir,
-        "upcoming-ada",
-        &next,
-        ".margins/upcoming-ada.md",
-    )
-    .unwrap();
-    legacy::set_calendar_event(
-        &margins_dir,
-        "upcoming-ada",
-        legacy::CalendarEventMeta {
-            title: "Ada planning".into(),
-            start: Some("2026-08-11T09:00:00Z".into()),
-            end: Some("2026-08-11T09:30:00Z".into()),
-            calendar_id: Some("primary".into()),
-            event_id: Some("calendar-1".into()),
-        },
-        vec!["Ada Lovelace".into(), "Kevin".into()],
-    )
-    .unwrap();
-}
-
-fn seed_calendar_meeting(root: &Path, source_id: &str, starts_at: &str) -> PathBuf {
-    let store = IntegrationsStore::open(root).unwrap();
-    let ctx = ConnectorCtx {
-        vault_root: root.to_path_buf(),
-        connector_id: "gcal".into(),
-        account: "ada@example.com".into(),
-        command_path: None,
-    };
-    let selector = margins_workflows::workspace::CalendarCollectionSelector::default_declaration();
-    let scope = margins_workflows::integrations::GoogleCalendarScope::for_selector(
-        &selector,
-        chrono::Utc::now(),
-    )
-    .unwrap()
-    .as_range();
-    let occurred_from = chrono::DateTime::parse_from_rfc3339(starts_at)
-        .unwrap()
-        .with_timezone(&chrono::Utc);
-    store
-        .apply_calendar_event_delta(
-            &ctx,
-            CalendarEventDelta {
-                events: vec![CalendarEventEvidence {
-                    source_id: source_id.into(),
-                    calendar_id: "primary".into(),
-                    occurred_from,
-                    occurred_to: Some(occurred_from + chrono::Duration::minutes(30)),
-                    title: "Ada planning from calendar".into(),
-                    body_text: "Calendar fixture".into(),
-                    href: Some(format!("https://calendar.google.com/event?eid={source_id}")),
-                }],
-                attendees: vec![
-                    CalendarEventAttendee {
-                        source_id: source_id.into(),
-                        attendee_key: "email:ada@example.com".into(),
-                        position: 0,
-                        display_name: "Ada Lovelace".into(),
-                        email: Some("ada@example.com".into()),
-                        response_status: Some("accepted".into()),
-                        is_self: false,
-                        organizer: false,
-                    },
-                    CalendarEventAttendee {
-                        source_id: source_id.into(),
-                        attendee_key: "name:kevin".into(),
-                        position: 1,
-                        display_name: "Kevin".into(),
-                        email: None,
-                        response_status: None,
-                        is_self: false,
-                        organizer: false,
-                    },
-                ],
-                tombstone_source_ids: Vec::new(),
-                raw_items: Vec::new(),
-                scope,
-                complete_snapshot: false,
-                materialization_fingerprint: selector.materialization_fingerprint().unwrap(),
-                next_cursor: None,
-            },
-            None,
-        )
-        .unwrap();
-    store.db_path().to_path_buf()
-}
-
-fn seed_materialized_email(root: &Path) -> PathBuf {
-    let store = IntegrationsStore::open(root).unwrap();
-    let ctx = ConnectorCtx {
-        vault_root: root.to_path_buf(),
-        connector_id: "email".into(),
-        account: "owner@example.com".into(),
-        command_path: None,
-    };
-    let occurred = chrono::DateTime::parse_from_rfc3339("2026-08-09T12:00:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
-    let selector = margins_workflows::workspace::GmailCollectionSelector::default_declaration();
-    store
-        .replace_email_thread_snapshot_with_materialization_fingerprint(
-            &ctx,
-            vec![margins_workflows::integrations::ThreadEvidence {
-                thread_id: "thread-materialized".into(),
-                occurred_from: occurred,
-                occurred_to: occurred,
-                body_text:
-                    "Alice confirmed the migration follow-up from the materialized thread."
-                        .into(),
-                href: Some(
-                    "https://mail.google.com/mail/?authuser=owner%40example.com#all/thread-materialized"
-                        .into(),
-                ),
-            }],
-            vec![margins_workflows::integrations::ParticipantThread {
-                participant: "alice@acme.test".into(),
-                thread_id: "thread-materialized".into(),
-                last_interaction: occurred,
-                sampling_score: Some(1),
-            }],
-            &selector.materialization_fingerprint().unwrap(),
-        )
-        .unwrap();
-    store
-        .update_health(&ctx, HealthStatus::Fresh, None)
-        .unwrap();
-    store.db_path().to_path_buf()
-}
-
-fn assert_context_v2_schema(value: &serde_json::Value) {
-    assert_eq!(value["schema_version"], "margins.context.v2");
-    assert!(value["query"].is_object());
-    assert!(value["query"]["kind"].is_string());
-    assert!(value["query"]["value"].is_string());
-    assert!(value["query"]["cutoff"].is_string());
-    assert!(value["resolved_identities"].is_array());
-    assert!(value["identity_omissions"].is_array());
-    assert!(value["episodes"].is_array());
-    assert!(value["open_items"].is_array());
-    assert!(value["source_manifest"].is_object());
-    assert_eq!(value["source_manifest"]["freshness"]["status"], "fresh");
-    assert_eq!(value["source_manifest"]["freshness"]["stale"], false);
-    assert!(value["source_manifest"]["sources"].is_array());
-    if value["meeting"].is_object() {
-        assert!(matches!(
-            value["meeting"]["source"].as_str(),
-            Some("session" | "calendar_event")
-        ));
-    }
-    for identity in value["resolved_identities"].as_array().unwrap() {
-        assert!(identity["id"].is_string());
-        assert!(identity["display_name"].is_string());
-        assert!(identity["aliases"].is_array());
-        assert!(identity["emails"].is_array());
-        assert!(identity["total_evidence_count"].is_u64());
-        assert!(identity["resolution_evidence"].is_array());
-        assert!(identity["resolution_evidence"].as_array().unwrap().len() <= 5);
-        for evidence in identity["resolution_evidence"].as_array().unwrap() {
-            assert!(evidence["provenance"]["evidence"]["kind"].is_string());
-        }
-    }
-    for episode in value["episodes"].as_array().unwrap() {
-        for key in ["id", "kind", "occurred_at", "excerpt"] {
-            assert!(episode[key].is_string(), "episode.{key} must be a string");
-        }
-        assert!(episode["evidence"]["kind"].is_string());
-        assert!(episode.get("excerpt_path").is_none());
-        assert!(episode["provenance"]["source"].is_string());
-        assert!(episode["provenance"]["source_id"].is_string());
-        assert!(episode["provenance"]["evidence"]["kind"].is_string());
-    }
-    for item in value["open_items"].as_array().unwrap() {
-        for key in ["id", "text", "status", "episode_id"] {
-            assert!(item[key].is_string(), "open_items.{key} must be a string");
-        }
-        assert!(item["provenance"]["evidence"]["kind"].is_string());
-        assert!(item["provenance"]["anchor"].is_string());
-    }
-}
 
 #[derive(Clone)]
 struct FixedProject(PathBuf);
@@ -432,16 +129,18 @@ fn clap_help_preserves_the_prior_argument_contract() {
 }
 
 #[test]
-fn context_help_documents_the_stable_agent_contract() {
-    let error = Args::try_parse_from(["margins", "context", "--help"]).unwrap_err();
-    let help = error.to_string();
-    assert!(help.contains("margins.context.v2"));
-    assert!(help.contains("resolved_identities"));
-    assert!(help.contains("identity_omissions"));
-    assert!(help.contains("Every claim-bearing item carries a closed evidence handle"));
-    assert!(help.contains("--person <PERSON>"));
-    assert!(help.contains("--meeting <MEETING>"));
-    assert!(help.contains("--json"));
+fn removed_context_subcommand_is_rejected() {
+    let error = Args::try_parse_from([
+        "margins",
+        "context",
+        "--person",
+        "ada@example.com",
+        "--json",
+    ])
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("unrecognized subcommand 'context'"));
 }
 
 #[test]
@@ -459,83 +158,6 @@ fn recall_parser_accepts_declared_source_filter() {
         Some(margins_cli::args::Command::Recall { query, source })
             if query == "relationship context" && source.as_deref() == Some("mail")
     ));
-}
-
-#[test]
-fn context_person_returns_schema_valid_source_backed_evidence() {
-    let temp = tempfile::tempdir().unwrap();
-    seed_context_fixture(temp.path(), false);
-    let services = services(temp.path());
-    let recall_path = temp.path().join("index.db");
-    let sessions_path = temp.path().join("captures/.margins/sessions.sqlite");
-    let recall_before = std::fs::read(&recall_path).unwrap();
-    let sessions_before = std::fs::read(&sessions_path).unwrap();
-
-    let (result, stdout, stderr) = invoke(
-        &services,
-        temp.path(),
-        &[
-            "margins",
-            "context",
-            "--person",
-            "ada@example.com",
-            "--cutoff",
-            "2026-08-10",
-            "--json",
-        ],
-    );
-
-    assert!(result.is_ok(), "{stderr}");
-    assert!(stderr.is_empty());
-    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_context_v2_schema(&value);
-    assert_eq!(value["query"]["kind"], "person");
-    assert_eq!(
-        value["resolved_identities"][0]["display_name"],
-        "Ada Lovelace"
-    );
-    assert_eq!(
-        value["resolved_identities"][0]["emails"][0],
-        "ada@example.com"
-    );
-    assert!(value["episodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|episode| episode["id"] == "granola:episode-ada-1"));
-    assert!(!value["episodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|episode| episode["id"] == "folder:episode-ada-later"));
-    assert_eq!(
-        value["open_items"][0]["text"],
-        "Send Ada the migration plan"
-    );
-    assert_eq!(value["open_items"][0]["status"], "open");
-    assert_eq!(value["source_manifest"]["freshness"]["status"], "fresh");
-    assert_eq!(std::fs::read(recall_path).unwrap(), recall_before);
-    assert_eq!(std::fs::read(sessions_path).unwrap(), sessions_before);
-}
-
-#[test]
-fn context_never_merges_people_sharing_a_first_name() {
-    let temp = tempfile::tempdir().unwrap();
-    seed_context_fixture(temp.path(), false);
-    let services = services(temp.path());
-
-    let (result, stdout, stderr) = invoke(
-        &services,
-        temp.path(),
-        &["margins", "context", "--person", "Kevin", "--json"],
-    );
-
-    let error = result.unwrap_err();
-    assert_eq!(error.code(), "context_identity_ambiguous");
-    assert!(stdout.is_empty());
-    assert!(stderr.contains("Kevin Stone"));
-    assert!(stderr.contains("Kevin Chen"));
-    assert!(stderr.contains("will not merge"));
 }
 
 #[test]
@@ -599,320 +221,6 @@ fn granola_import_cli_emits_native_note_without_session_or_source_state() {
 }
 
 #[test]
-fn context_meeting_next_omits_ambiguous_attendees_and_uses_start_cutoff() {
-    let temp = tempfile::tempdir().unwrap();
-    seed_context_fixture(temp.path(), false);
-    let services = services(temp.path());
-
-    let (result, stdout, stderr) = invoke(
-        &services,
-        temp.path(),
-        &["margins", "context", "--meeting", "next", "--json"],
-    );
-
-    assert!(result.is_ok(), "{stderr}");
-    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_context_v2_schema(&value);
-    assert_eq!(value["meeting"]["id"], "upcoming-ada");
-    assert_eq!(value["meeting"]["source"], "session");
-    assert_eq!(value["query"]["cutoff"], "2026-08-11T09:00:00+00:00");
-    assert_eq!(value["resolved_identities"].as_array().unwrap().len(), 1);
-    assert_eq!(value["identity_omissions"].as_array().unwrap().len(), 1);
-    assert_eq!(value["identity_omissions"][0]["query"], "Kevin");
-    assert_eq!(
-        value["identity_omissions"][0]["reason"],
-        "ambiguous_identity"
-    );
-    assert_eq!(
-        value["identity_omissions"][0]["candidates"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
-    assert!(!value["episodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|episode| episode["id"] == "folder:episode-ada-later"));
-}
-
-#[test]
-fn context_meeting_next_uses_calendar_episode_in_calendar_only_vault() {
-    let temp = tempfile::tempdir().unwrap();
-    seed_context_fixture(temp.path(), false);
-    std::fs::remove_file(temp.path().join("captures/.margins/sessions.sqlite")).unwrap();
-    seed_calendar_meeting(temp.path(), "calendar-later", "2026-08-11T10:30:00Z");
-    let integrations_path =
-        seed_calendar_meeting(temp.path(), "calendar-only", "2026-08-11T08:30:00Z");
-    let integrations_before = std::fs::read(&integrations_path).unwrap();
-    let services = services(temp.path());
-
-    let (result, stdout, stderr) = invoke(
-        &services,
-        temp.path(),
-        &["margins", "context", "--meeting", "next", "--json"],
-    );
-
-    assert!(result.is_ok(), "{stderr}");
-    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_context_v2_schema(&value);
-    assert_eq!(value["meeting"]["id"], "gcal:ada@example.com:calendar-only");
-    assert_eq!(value["meeting"]["source"], "calendar_event");
-    assert_eq!(value["query"]["cutoff"], "2026-08-11T08:30:00+00:00");
-    assert_eq!(value["resolved_identities"].as_array().unwrap().len(), 1);
-    assert!(value["resolved_identities"][0]["resolution_evidence"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|evidence| evidence["kind"] == "calendar_attendee_email"));
-    assert_eq!(value["identity_omissions"][0]["query"], "Kevin");
-    assert_eq!(
-        value["identity_omissions"][0]["reason"],
-        "ambiguous_identity"
-    );
-    assert!(value["source_manifest"]["sources"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|source| source["id"] == "margins_integrations"));
-    assert_eq!(
-        std::fs::read(integrations_path).unwrap(),
-        integrations_before
-    );
-
-    let store = IntegrationsStore::open(temp.path()).unwrap();
-    let ctx = ConnectorCtx {
-        vault_root: temp.path().to_path_buf(),
-        connector_id: "gcal".into(),
-        account: "ada@example.com".into(),
-        command_path: None,
-    };
-    store
-        .record_failed_reconcile(&ctx, "simulated Calendar refresh failure")
-        .unwrap();
-    let (stale_result, stale_stdout, stale_stderr) = invoke(
-        &services,
-        temp.path(),
-        &["margins", "context", "--meeting", "next", "--json"],
-    );
-    assert!(stale_result.is_ok(), "{stale_stderr}");
-    let stale: serde_json::Value = serde_json::from_str(&stale_stdout).unwrap();
-    assert_eq!(stale["meeting"]["id"], "gcal:ada@example.com:calendar-only");
-    assert_eq!(stale["source_manifest"]["freshness"]["status"], "error");
-    assert_eq!(stale["source_manifest"]["freshness"]["stale"], true);
-    assert_eq!(
-        stale["source_manifest"]["freshness"]["reason"],
-        "refresh_failed"
-    );
-}
-
-#[test]
-fn context_meeting_next_dedupes_overlapping_session_and_calendar_episode() {
-    let temp = tempfile::tempdir().unwrap();
-    seed_context_fixture(temp.path(), false);
-    let integrations_path =
-        seed_calendar_meeting(temp.path(), "overlapping-calendar", "2026-08-11T09:03:00Z");
-    seed_calendar_meeting(temp.path(), "distinct-later", "2026-08-11T10:00:00Z");
-    let integrations_before = std::fs::read(&integrations_path).unwrap();
-    let services = services(temp.path());
-
-    let (result, stdout, stderr) = invoke(
-        &services,
-        temp.path(),
-        &["margins", "context", "--meeting", "next", "--json"],
-    );
-
-    assert!(result.is_ok(), "{stderr}");
-    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_context_v2_schema(&value);
-    assert_eq!(value["meeting"]["id"], "upcoming-ada");
-    assert_eq!(value["meeting"]["source"], "session");
-    assert_eq!(value["query"]["cutoff"], "2026-08-11T09:00:00+00:00");
-    assert_eq!(value["resolved_identities"].as_array().unwrap().len(), 1);
-    assert_eq!(value["identity_omissions"].as_array().unwrap().len(), 1);
-    assert!(value["resolved_identities"][0]["resolution_evidence"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|evidence| evidence["kind"] == "calendar_attendee_email"));
-    assert_eq!(
-        std::fs::read(integrations_path).unwrap(),
-        integrations_before
-    );
-}
-
-#[test]
-fn context_meeting_caps_identity_evidence_and_reports_total_count() {
-    let temp = tempfile::tempdir().unwrap();
-    seed_context_fixture(temp.path(), false);
-    for index in 0..8 {
-        seed_calendar_meeting(
-            temp.path(),
-            &format!("calendar-evidence-{index}"),
-            &format!("2026-08-{:02}T10:00:00Z", 12 + index),
-        );
-    }
-    let services = services(temp.path());
-
-    let (result, stdout, stderr) = invoke(
-        &services,
-        temp.path(),
-        &["margins", "context", "--meeting", "next", "--json"],
-    );
-
-    assert!(result.is_ok(), "{stderr}");
-    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let identity = &value["resolved_identities"][0];
-    assert_eq!(identity["resolution_evidence"].as_array().unwrap().len(), 5);
-    assert!(identity["total_evidence_count"].as_u64().unwrap() > 5);
-    let unique = identity["resolution_evidence"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|evidence| {
-            (
-                evidence["kind"].as_str().unwrap(),
-                evidence["value"].as_str().unwrap(),
-                evidence["provenance"]["source_id"].as_str().unwrap(),
-            )
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(unique.len(), 5);
-    assert!(
-        stdout.len() < 40_000,
-        "bounded context JSON was {} bytes",
-        stdout.len()
-    );
-}
-
-#[test]
-fn context_person_reads_materialized_email_with_gmail_provenance() {
-    let temp = tempfile::tempdir().unwrap();
-    seed_context_fixture(temp.path(), false);
-    let ledger_path = seed_materialized_email(temp.path());
-    let ledger_before = std::fs::read(&ledger_path).unwrap();
-    let services = services(temp.path());
-
-    let (result, stdout, stderr) = invoke(
-        &services,
-        temp.path(),
-        &[
-            "margins",
-            "context",
-            "--person",
-            "alice@acme.test",
-            "--cutoff",
-            "2026-08-10",
-            "--json",
-        ],
-    );
-
-    assert!(result.is_ok(), "{stderr}");
-    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_context_v2_schema(&value);
-    assert_eq!(
-        value["resolved_identities"][0]["display_name"],
-        "alice@acme.test"
-    );
-    let email = value["episodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|episode| episode["id"] == "email:thread-materialized")
-        .expect("materialized email is returned as context");
-    assert_eq!(email["kind"], "email");
-    assert!(email["excerpt"]
-        .as_str()
-        .unwrap()
-        .contains("materialized thread"));
-    assert_eq!(email["provenance"]["evidence"]["kind"], "external_record");
-    assert_eq!(email["provenance"]["evidence"]["connector_id"], "email");
-    assert_eq!(
-        email["provenance"]["evidence"]["source_id"],
-        "thread-materialized"
-    );
-    assert!(email["provenance"]["evidence"]["href"]
-        .as_str()
-        .unwrap()
-        .starts_with("https://mail.google.com/mail/"));
-    assert_eq!(email["provenance"]["anchor"], "thread_evidence");
-    assert_eq!(email["evidence"], email["provenance"]["evidence"]);
-    assert!(email.get("excerpt_path").is_none());
-    assert!(value["resolved_identities"][0]["resolution_evidence"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|evidence| evidence["provenance"]["anchor"] == "participant_threads:0"));
-    assert_eq!(std::fs::read(ledger_path).unwrap(), ledger_before);
-
-    let store = IntegrationsStore::open(temp.path()).unwrap();
-    let ctx = ConnectorCtx {
-        vault_root: temp.path().to_path_buf(),
-        connector_id: "email".into(),
-        account: "owner@example.com".into(),
-        command_path: None,
-    };
-    store
-        .record_failed_reconcile(&ctx, "simulated refresh failure")
-        .unwrap();
-    let (result, stdout, stderr) = invoke(
-        &services,
-        temp.path(),
-        &[
-            "margins",
-            "context",
-            "--person",
-            "alice@acme.test",
-            "--cutoff",
-            "2026-08-10",
-            "--json",
-        ],
-    );
-    assert!(result.is_ok(), "{stderr}");
-    let stale: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(stale["source_manifest"]["freshness"]["status"], "error");
-    assert_eq!(stale["source_manifest"]["freshness"]["stale"], true);
-    assert_eq!(
-        stale["source_manifest"]["freshness"]["reason"],
-        "refresh_failed"
-    );
-    assert!(stale["episodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|episode| episode["id"] == "email:thread-materialized"));
-}
-
-#[test]
-fn context_missing_or_stale_product_store_is_a_clear_error() {
-    let missing = tempfile::tempdir().unwrap();
-    let missing_services = services(missing.path());
-    let (result, stdout, stderr) = invoke(
-        &missing_services,
-        missing.path(),
-        &["margins", "context", "--person", "Ada Lovelace", "--json"],
-    );
-    assert_eq!(result.unwrap_err().code(), "context_store_missing");
-    assert!(stdout.is_empty());
-    assert!(stderr.contains("index.db"));
-    assert!(stderr.contains("margins init"));
-
-    let stale = tempfile::tempdir().unwrap();
-    seed_context_fixture(stale.path(), true);
-    let stale_services = services(stale.path());
-    let (result, stdout, stderr) = invoke(
-        &stale_services,
-        stale.path(),
-        &["margins", "context", "--person", "Ada Lovelace", "--json"],
-    );
-    assert_eq!(result.unwrap_err().code(), "context_store_stale");
-    assert!(stdout.is_empty());
-    assert!(stderr.contains("source files changed after indexing"));
-    assert!(stderr.contains("Refresh the product recall index"));
-}
-
-#[test]
 fn parser_accepts_workspace_setup_guide_command() {
     let parsed = Args::try_parse_from(["margins", "guide", "workspace-setup"]).unwrap();
     assert!(matches!(
@@ -963,7 +271,6 @@ fn parser_accepts_source_add_calendar_selector_flags() {
 
 #[test]
 fn parser_accepts_workspace_plan_apply_and_integrations_reconcile() {
-    Args::try_parse_from(["margins", "workspace", "propose", "--json"]).unwrap();
     Args::try_parse_from([
         "margins",
         "workspace",
@@ -979,13 +286,32 @@ fn parser_accepts_workspace_plan_apply_and_integrations_reconcile() {
         "apply",
         "--plan",
         "plan.json",
+        "--json",
+    ])
+    .unwrap();
+    assert!(Args::try_parse_from([
+        "margins",
+        "workspace",
+        "apply",
+        "--plan",
+        "plan.json",
         "--if-revision",
         "abc",
+        "--json",
+    ])
+    .is_err());
+    assert!(Args::try_parse_from([
+        "margins",
+        "workspace",
+        "apply",
+        "--plan",
+        "plan.json",
         "--request-id",
         "req-1",
         "--json",
     ])
-    .unwrap();
+    .is_err());
+    assert!(Args::try_parse_from(["margins", "workspace", "propose", "--json"]).is_err());
     for args in [
         vec![
             "margins",
@@ -2596,33 +1922,15 @@ fn integrations_cli_reconciles_native_google_bindings_and_replays_idempotently()
 }
 
 #[test]
-fn parser_accepts_read_only_and_write_config_scan_commands() {
+fn parser_accepts_only_read_only_scan() {
     let parsed = Args::try_parse_from(["margins", "scan"]).unwrap();
     assert!(matches!(
         parsed.command,
-        Some(margins_cli::args::Command::Scan {
-            write_config: false,
-            update: false,
-        })
+        Some(margins_cli::args::Command::Scan)
     ));
 
-    let parsed = Args::try_parse_from(["margins", "scan", "--write-config"]).unwrap();
-    assert!(matches!(
-        parsed.command,
-        Some(margins_cli::args::Command::Scan {
-            write_config: true,
-            update: false,
-        })
-    ));
-
-    let parsed = Args::try_parse_from(["margins", "scan", "--write-config", "--update"]).unwrap();
-    assert!(matches!(
-        parsed.command,
-        Some(margins_cli::args::Command::Scan {
-            write_config: true,
-            update: true,
-        })
-    ));
+    assert!(Args::try_parse_from(["margins", "scan", "--write-config"]).is_err());
+    assert!(Args::try_parse_from(["margins", "scan", "--update"]).is_err());
 }
 
 #[test]
@@ -2696,7 +2004,7 @@ fn parser_accepts_repeatable_setup_only_and_speech_skip() {
 }
 
 #[test]
-fn workspace_setup_guide_is_embedded_margins_native_and_read_only() {
+fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("note.md"), "real note").unwrap();
     let services = services(temp.path());
@@ -2719,31 +2027,91 @@ fn workspace_setup_guide_is_embedded_margins_native_and_read_only() {
     assert!(stdout.contains("source add notes"));
     assert!(stdout.contains("Run these commands from the notes folder"));
     assert!(stdout.contains("cd \"/absolute/path/to/notes\""));
-    assert!(stdout.contains("`workspace.propose: true`"));
-    assert!(stdout.contains("writes its explanation to stderr"));
-    assert!(stdout.contains("Present the understanding first"));
+    assert!(stdout.contains("`recall.scan: true`"));
+    assert!(stdout.contains("Read the complete saved `scan.v2` result"));
+    assert!(stdout.contains("Show the user an understanding, not scan output"));
+    assert!(stdout.contains("The field names below are for your analysis"));
+    assert!(stdout.contains("match how you work, and what did it miss?"));
     assert!(stdout.contains("If `actions` is empty"));
-    assert!(stdout.contains("consent and `workspace apply`"));
-    assert!(stdout.contains("exact plan actions and ask for explicit consent"));
+    assert!(stdout.contains("ask for explicit consent"));
     assert!(stdout.contains("apply the saved plan unchanged"));
-    assert!(stdout.contains("what is wrong or missing"));
     assert!(stdout.contains("workspace plan"));
-    assert!(stdout.contains("Do not hand-edit the plan JSON"));
-    assert!(stdout.contains("Use only an item the review surfaced"));
-    assert!(stdout.contains("folder:<displayed path>"));
+    assert!(stdout.contains("Never hand-edit plan JSON"));
+    assert!(stdout.contains("Use exactly the spellings surfaced by scan"));
+    assert!(stdout.contains("folder:<path>"));
+    assert!(stdout.contains("`[policy].entities`"));
+    assert!(stdout.contains("profile = \"relational\""));
+    assert!(stdout.contains("expandable = true"));
+    for field in [
+        "summary",
+        "instructions",
+        "coverage_entities",
+        "entity_curation_candidates",
+        "top_entities",
+        "top_folders",
+        "top_tags",
+        "top_links",
+        "entity_samples",
+        "sample_files",
+        "folder_stats",
+        "folder_page_entities",
+        "folder_children",
+        "tag_children",
+        "frontmatter_samples",
+        "current_config",
+        "available_profiles",
+    ] {
+        assert!(
+            stdout.contains(&format!("`{field}`")),
+            "missing scan field {field}"
+        );
+    }
+    assert!(stdout.contains("`current_config.config_path`"));
+    for profile in [
+        "relational",
+        "operational",
+        "decision_trace",
+        "resonance_trace",
+        "reflective",
+        "tension_trace",
+        "preference_evidence",
+    ] {
+        assert!(
+            stdout.contains(&format!("`{profile}`")),
+            "missing profile {profile}"
+        );
+    }
+    let normalized_guide = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(normalized_guide.contains("frequency alone does not establish importance"));
+    assert!(normalized_guide.contains("not a weight or an importance score"));
+    assert!(normalized_guide.contains("Leave an ambiguous entity without a profile"));
+    assert!(normalized_guide.contains("one note per person is an optional practice"));
+    assert!(normalized_guide.contains("Do not create, reorganize, or configure those notes"));
     assert!(stdout.contains("Do not begin connected-note distillation as part of setup"));
     let declaration = stdout.find("margins workspace new practice").unwrap();
-    let proposal = stdout
-        .find("margins --workspace practice workspace propose")
+    let scan = stdout.find("margins --workspace practice scan").unwrap();
+    let understanding = stdout
+        .find("## 4. Show the user an understanding, not scan output")
+        .unwrap();
+    let plan = stdout
+        .find("margins --workspace practice workspace plan")
         .unwrap();
     let apply = stdout
         .find("margins --workspace practice workspace apply")
         .unwrap();
     let initialize = stdout.find("margins --workspace practice init").unwrap();
-    assert!(declaration < proposal && proposal < apply && apply < initialize);
-    assert!(!stdout.contains("transcribe"));
-    assert!(!stdout.contains("audio"));
+    assert!(
+        declaration < scan
+            && scan < understanding
+            && understanding < plan
+            && plan < apply
+            && apply < initialize
+    );
+    assert!(!stdout.contains("margins transcribe"));
     assert!(!stdout.contains("scan --write-config"));
+    assert!(!stdout.contains("workspace propose"));
+    assert!(!stdout.contains("--if-revision"));
+    assert!(!stdout.contains("--request-id"));
     assert!(!stdout.contains("fallback"));
     assert!(!stdout.contains("official composition"));
     assert!(!stdout.contains("private reveal"));
@@ -2840,16 +2208,19 @@ fn guided_onboarding_ends_setup_before_distillation() {
     assert!(stdout.contains("Setup ends when"));
     assert!(stdout.contains("Connected-note distillation is a separate workflow"));
     assert!(stdout.contains("from that folder"));
-    assert!(stdout.contains("an explanation to stderr"));
-    assert!(stdout.contains("When the plan has no actions, skip consent"));
-    assert!(stdout.contains("actions, obtain explicit consent"));
-    assert!(stdout.contains("apply the emitted plan"));
-    assert!(stdout.contains("reconstruct how"));
-    assert!(stdout.contains("preserve the surfaced item's displayed spelling"));
+    assert!(stdout.contains("complete `scan.v2` result"));
+    let normalized_onboarding = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(normalized_onboarding.contains("coverage entities, curation candidates"));
+    assert!(stdout.contains("If the plan has no actions"));
+    assert!(stdout.contains("skip both consent and apply"));
+    assert!(normalized_onboarding.contains("show its actions, obtain explicit consent"));
+    assert!(stdout.contains("apply the saved plan unchanged"));
+    assert!(stdout.contains("evidence—not as a script"));
+    assert!(stdout.contains("`current_config.config_path`"));
     let declaration = stdout.find("3. Otherwise create").unwrap();
-    let proposal = stdout.find("4. When `workspace.propose: true`").unwrap();
+    let scan = stdout.find("4. When `recall.scan: true`").unwrap();
     let initialize = stdout.find("5. Run `init`").unwrap();
-    assert!(declaration < proposal && proposal < initialize);
+    assert!(declaration < scan && scan < initialize);
     assert!(!stdout.contains("transcribe"));
     assert!(!stdout.contains("audio"));
     assert!(!stdout.contains("fallback"));

@@ -8,12 +8,11 @@ recall path. `local_recall` walks declared Markdown Sources read-only at
 query time, honors Workspace exclusions, and returns typed evidence paths.
 
 Setup starts from the practice the user wants Margins to remember, then declares
-the folders that define its read/write boundary. A CLI build may add
-`workspace.propose` to ground an initial reading in the Workspace home, invite
-plain-language corrections, and emit any minimal settings consequence in the
-existing Workspace plan format. A corrected desired state is compiled into a new
-plan; only the final reviewed plan is applied before `init`, `sync`, and recall
-proof. This does not introduce a second config format.
+the folders that define its read/write boundary. A CLI build may add a read-only
+`scan.v2` evidence surface. The setup skill consumes that complete evidence to
+form a grounded interpretation and invite plain-language corrections. Any desired
+settings are compiled into a plan; only the final reviewed plan is applied before
+`init`, `sync`, and recall proof. This does not introduce a second config format.
 
 Connected-note distillation is a separate agent workflow. It may consume this
 crate's live local recall or another source-backed recall implementation through

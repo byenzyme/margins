@@ -16,16 +16,13 @@ latest or selected Margins session / supplied evidence
 ```
 
 `workspace plan` and `workspace apply` provide optional deterministic automation
-over the same declarations. A CLI build may add `workspace.propose`; when its
-capability report includes `workspace.propose: true`, the setup skill invokes
-it after declaration. The command grounds an initial reading in the Workspace
-home, writes an explanation of what Margins understands the practice to be to
-stderr, and emits a draft plan to stdout; the declared Sources still define the
-full recall boundary. The agent leads with that understanding and invites
-plain-language corrections; a correction is recompiled into a fresh plan with
-`workspace plan --desired`, and only the final reviewed plan is applied unchanged
-before `init` and `sync`. The static skill does not encode or reproduce the
-recommendation logic.
+over the same declarations. A CLI build may report `recall.scan: true`; the setup
+skill then consumes the complete read-only `scan.v2` evidence after declaration.
+The skill—not a second CLI renderer—forms the grounded interpretation, leads with
+that understanding, and invites plain-language corrections. Any desired settings
+are compiled with `workspace plan --desired`; a correction is recompiled into a
+fresh plan, and only the final reviewed plan is applied unchanged before `init` and
+`sync`. Declared Sources still define the full recall boundary.
 
 Distillation starts only after setup is ready. It resolves `transcript latest`
 by default, while a session id or supplied transcript, memo, text, or supported

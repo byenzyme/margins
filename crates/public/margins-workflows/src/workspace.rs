@@ -340,16 +340,54 @@ pub fn meet_collection_namespace(account: &str) -> Result<String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum WorkspaceEntity {
+    Simple(String),
+    WithOptions(BTreeMap<String, WorkspaceEntityOptions>),
+}
+
+impl WorkspaceEntity {
+    pub fn simple(entity_ref: impl Into<String>) -> Self {
+        Self::Simple(entity_ref.into())
+    }
+
+    pub fn entries(&self) -> Vec<(&str, Option<&WorkspaceEntityOptions>)> {
+        match self {
+            Self::Simple(entity_ref) => vec![(entity_ref.as_str(), None)],
+            Self::WithOptions(entries) => entries
+                .iter()
+                .map(|(entity_ref, options)| (entity_ref.as_str(), Some(options)))
+                .collect(),
+        }
+    }
+
+    pub fn with_options(entity_ref: impl Into<String>, options: WorkspaceEntityOptions) -> Self {
+        Self::WithOptions(BTreeMap::from([(entity_ref.into(), options)]))
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceEntityOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub expandable: bool,
+    #[serde(default, skip_serializing)]
+    pub children: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspacePolicy {
     #[serde(default = "default_excluded_folders")]
     pub excluded_folders: Vec<String>,
     #[serde(default)]
     pub excluded_tags: Vec<String>,
-    /// Entity refs that must be included in the ordinary recall entity surface.
-    /// Uses the engine's existing syntax (`[[person@example.com]]`, `#tag`,
-    /// `folder:name`, or `log:name`).
+    /// The curated catalyst entity surface. This is the same shape and meaning
+    /// as enzyme-rust's workspace `entities`: a simple entity ref, or an entity
+    /// ref with a catalyst profile and/or explicit folder expansion.
+    ///
     #[serde(default)]
-    pub pinned_entities: Vec<String>,
+    pub entities: Vec<WorkspaceEntity>,
     /// Link, tag, or folder entity refs that must never receive catalysts.
     /// Evidence mentioning an excluded entity remains indexed and may support
     /// another entity.
@@ -386,7 +424,7 @@ impl Default for WorkspacePolicy {
         Self {
             excluded_folders: default_excluded_folders(),
             excluded_tags: Vec::new(),
-            pinned_entities: Vec::new(),
+            entities: Vec::new(),
             excluded_entities: Vec::new(),
         }
     }
@@ -1221,16 +1259,14 @@ pub fn plan_workspace_config(
 pub fn apply_workspace_plan(
     workspace: &mut ResolvedWorkspace,
     plan: &WorkspacePlan,
-    expected_revision: &str,
-    request_id: &str,
 ) -> Result<WorkspaceApplyReceipt> {
-    validate_request_id(request_id)?;
-    let request_hash = workspace_apply_request_hash(plan, expected_revision)?;
+    let request_hash = workspace_apply_request_hash(plan)?;
+    let request_id = format!("workspace-apply-{request_hash}");
     let _lock = lock_workspace_ready(&workspace.state_dir)?;
-    if let Some(mut receipt) = load_workspace_receipt(&workspace.state_dir, request_id)? {
+    if let Some(mut receipt) = load_workspace_receipt(&workspace.state_dir, &request_id)? {
         if receipt.request_hash != request_hash {
             return Err(WorkspaceMutationError::IdempotencyConflict {
-                request_id: request_id.to_string(),
+                request_id: request_id.clone(),
             }
             .into());
         }
@@ -1241,15 +1277,9 @@ pub fn apply_workspace_plan(
 
     let current = read_config(&workspace.config_path)?;
     let actual_revision = workspace_revision(&current)?;
-    if expected_revision != plan.base_revision {
-        return Err(WorkspaceMutationError::InvalidPlan(
-            "--if-revision must equal the plan base_revision".to_string(),
-        )
-        .into());
-    }
-    if actual_revision != expected_revision {
+    if actual_revision != plan.base_revision {
         return Err(WorkspaceMutationError::RevisionConflict {
-            expected: expected_revision.to_string(),
+            expected: plan.base_revision.clone(),
             actual: actual_revision,
         }
         .into());
@@ -1267,10 +1297,10 @@ pub fn apply_workspace_plan(
         schema_version: WORKSPACE_APPLY_SCHEMA.to_string(),
         ok: true,
         workspace_id: current.id,
-        request_id: request_id.to_string(),
+        request_id,
         request_hash,
         plan_id: plan.plan_id.clone(),
-        before_revision: expected_revision.to_string(),
+        before_revision: plan.base_revision.clone(),
         after_revision,
         replayed: false,
         actions: plan
@@ -1299,18 +1329,8 @@ pub fn apply_workspace_plan(
     Ok(receipt)
 }
 
-fn workspace_apply_request_hash(plan: &WorkspacePlan, expected_revision: &str) -> Result<String> {
-    #[derive(Serialize)]
-    struct Request<'a> {
-        plan: &'a WorkspacePlan,
-        expected_revision: &'a str,
-    }
-
-    let bytes = serde_json::to_vec(&Request {
-        plan,
-        expected_revision,
-    })
-    .context("serializing workspace apply request")?;
+fn workspace_apply_request_hash(plan: &WorkspacePlan) -> Result<String> {
+    let bytes = serde_json::to_vec(plan).context("serializing workspace apply request")?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
@@ -2148,6 +2168,34 @@ mod tests {
     }
 
     #[test]
+    fn workspace_entity_curation_matches_enzyme_shape() {
+        let temp = tempfile::tempdir().unwrap();
+        let margins_home = temp.path().join("state");
+        let notes = temp.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        let mut config = create_workspace(&margins_home, "practice", None, &notes)
+            .unwrap()
+            .config;
+        config.policy.entities = vec![
+            WorkspaceEntity::simple("#enzyme"),
+            WorkspaceEntity::with_options(
+                "folder:people",
+                WorkspaceEntityOptions {
+                    profile: Some("relational".to_string()),
+                    expandable: true,
+                    children: Vec::new(),
+                },
+            ),
+        ];
+
+        let raw = toml::to_string_pretty(&config).unwrap();
+        assert!(raw.contains("entities = ["), "{raw}");
+        assert!(raw.contains("profile = \"relational\""), "{raw}");
+        assert!(raw.contains("expandable = true"), "{raw}");
+        assert_eq!(toml::from_str::<WorkspaceConfig>(&raw).unwrap(), config);
+    }
+
+    #[test]
     fn config_rejects_fields_owned_by_another_binding_variant() {
         let invalid = r#"
 id = "practice"
@@ -2437,7 +2485,7 @@ account = "owner@example.com"
     }
 
     #[test]
-    fn workspace_plan_apply_replays_and_rejects_conflicts() {
+    fn workspace_plan_apply_derives_replay_identity_and_rejects_stale_plans() {
         let temp = tempfile::tempdir().unwrap();
         let margins_home = temp.path().join("state");
         let notes = temp.path().join("notes");
@@ -2456,50 +2504,25 @@ account = "owner@example.com"
         let plan = plan_workspace_config(&workspace.config, desired).unwrap();
         assert_eq!(plan.schema_version, WORKSPACE_PLAN_SCHEMA);
         assert_eq!(plan.actions.len(), 2);
-        let receipt =
-            apply_workspace_plan(&mut workspace, &plan, &plan.base_revision, "request-1").unwrap();
+        let receipt = apply_workspace_plan(&mut workspace, &plan).unwrap();
         assert!(!receipt.replayed);
         assert_eq!(receipt.schema_version, WORKSPACE_APPLY_SCHEMA);
         assert_eq!(receipt.request_hash.len(), 64);
+        assert_eq!(
+            receipt.request_id,
+            format!("workspace-apply-{}", receipt.request_hash)
+        );
         assert_eq!(workspace.config.name.as_deref(), Some("Client practice"));
 
-        let replay =
-            apply_workspace_plan(&mut workspace, &plan, &plan.base_revision, "request-1").unwrap();
+        let replay = apply_workspace_plan(&mut workspace, &plan).unwrap();
         assert!(replay.replayed);
         assert_eq!(replay.after_revision, receipt.after_revision);
-
-        let changed_revision_conflict =
-            apply_workspace_plan(&mut workspace, &plan, &"0".repeat(64), "request-1").unwrap_err();
-        assert!(changed_revision_conflict
-            .downcast_ref::<WorkspaceMutationError>()
-            .is_some_and(|error| matches!(
-                error,
-                WorkspaceMutationError::IdempotencyConflict { .. }
-            )));
 
         let mut changed = workspace.config.clone();
         changed.name = Some("Different plan".to_string());
         let changed_plan = plan_workspace_config(&workspace.config, changed).unwrap();
-        let conflict = apply_workspace_plan(
-            &mut workspace,
-            &changed_plan,
-            &changed_plan.base_revision,
-            "request-1",
-        )
-        .unwrap_err();
-        assert!(conflict
-            .downcast_ref::<WorkspaceMutationError>()
-            .is_some_and(|error| matches!(
-                error,
-                WorkspaceMutationError::IdempotencyConflict { .. }
-            )));
-
-        let mismatched_request =
-            apply_workspace_plan(&mut workspace, &changed_plan, &"0".repeat(64), "request-2")
-                .unwrap_err();
-        assert!(mismatched_request
-            .downcast_ref::<WorkspaceMutationError>()
-            .is_some_and(|error| matches!(error, WorkspaceMutationError::InvalidPlan(_))));
+        let changed_receipt = apply_workspace_plan(&mut workspace, &changed_plan).unwrap();
+        assert_ne!(changed_receipt.request_id, receipt.request_id);
 
         let stale_plan = plan_workspace_config(&workspace.config, {
             let mut desired = workspace.config.clone();
@@ -2509,16 +2532,10 @@ account = "owner@example.com"
         .unwrap();
         let mut changed_policy = workspace.config.policy.clone();
         changed_policy
-            .pinned_entities
-            .push("[[stale-plan@example.com]]".to_string());
+            .entities
+            .push(WorkspaceEntity::simple("[[stale-plan@example.com]]"));
         update_policy(&mut workspace, changed_policy).unwrap();
-        let stale = apply_workspace_plan(
-            &mut workspace,
-            &stale_plan,
-            &stale_plan.base_revision,
-            "request-3",
-        )
-        .unwrap_err();
+        let stale = apply_workspace_plan(&mut workspace, &stale_plan).unwrap_err();
         assert!(stale
             .downcast_ref::<WorkspaceMutationError>()
             .is_some_and(|error| matches!(error, WorkspaceMutationError::RevisionConflict { .. })));
@@ -2534,13 +2551,14 @@ account = "owner@example.com"
         let mut desired = workspace.config.clone();
         desired.name = Some("Recovered transaction".to_string());
         let plan = plan_workspace_config(&workspace.config, desired.clone()).unwrap();
-        let request_id = "recover-request";
+        let request_hash = workspace_apply_request_hash(&plan).unwrap();
+        let request_id = format!("workspace-apply-{request_hash}");
         let receipt = WorkspaceApplyReceipt {
             schema_version: WORKSPACE_APPLY_SCHEMA.to_string(),
             ok: true,
             workspace_id: plan.workspace_id.clone(),
-            request_id: request_id.to_string(),
-            request_hash: workspace_apply_request_hash(&plan, &plan.base_revision).unwrap(),
+            request_id: request_id.clone(),
+            request_hash,
             plan_id: plan.plan_id.clone(),
             before_revision: plan.base_revision.clone(),
             after_revision: workspace_revision(&desired).unwrap(),
@@ -2563,15 +2581,14 @@ account = "owner@example.com"
         )
         .unwrap();
 
-        let recovered =
-            apply_workspace_plan(&mut workspace, &plan, &plan.base_revision, request_id).unwrap();
+        let recovered = apply_workspace_plan(&mut workspace, &plan).unwrap();
         assert!(recovered.replayed);
         assert_eq!(
             workspace.config.name.as_deref(),
             Some("Recovered transaction")
         );
         assert!(!workspace_transaction_path(&workspace.state_dir).exists());
-        assert!(workspace_receipt_path(&workspace.state_dir, request_id).is_file());
+        assert!(workspace_receipt_path(&workspace.state_dir, &request_id).is_file());
     }
 
     #[test]

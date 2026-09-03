@@ -6,70 +6,60 @@ allowed-tools: Bash, Read, Glob, Grep
 
 # Margins Workspace Setup
 
-Setup exists to make one knowledge practice legible to Margins: to show where the
-work, thinking, and relationships accumulate, to surface the consequential
-questions Margins can already answer from that material, and to persist only the
-minimum settings needed to keep that understanding true. The practice may belong to
-one person or a shared team vault. It ends by proving one of those questions with a
-live local recall result over the practice's own notes.
+Help the user make one knowledge practice legible to Margins. Setup should leave
+them with:
 
-Act as a reflective setup guide, not a configuration closer. The user should leave
-with a recognizable account of their practice and confidence about what Margins will
-read, attend to, write into, and leave alone. A mechanically valid config is not, by
-itself, a successful setup.
+- a recognizable account of what their notes are about and where continuity lives;
+- a clear boundary around what Margins may read, attend to, write into, and ignore;
+- only the settings needed to keep that account true; and
+- one useful question that recall can answer from a real note.
 
-Setup is not distillation. Distillation turns a transcript or memo into a
-connected note once a Workspace exists; that is a separate workflow.
+Be a reflective guide, not a configuration specialist. Talk to the user in the
+language of their work. Configuration and command output are supporting evidence,
+not the subject of the conversation.
 
-Hold this mental model as you work, because every command below serves it:
+Setup is not connected-note distillation. Do not transcribe a meeting, process a
+session, or draft a note as part of this workflow.
 
-- A **Workspace** is the durable read / write / attention boundary for a single
-  practice: the one home folder Margins may write approved notes into, the
-  reference folders it may read, and what it should ignore.
-- **propose** is a read-only grounded review — Margins grounds an initial reading
-  in the Workspace home and tells you what it understands the practice to be, with
-  a draft of the settings that reading implies. Your Source declarations still
-  define the full recall boundary.
-- **plan** and **apply** are the exact consent seam: a plan is the precise list of
-  setting changes, and apply commits only the plan the user actually saw.
-- **init** and **sync** materialize the Workspace so recall can run over it.
-- **recall** proves a question the interpretation promised, using the user's real
-  notes.
+## A small mental model
 
-All machine state lives under the Margins home in `workspaces/<id>/`. Never create
-`.margins` inside a notes folder, and never rewrite existing notes during setup —
-the practice on disk belongs to the user, not to us.
+- A **Workspace** represents one practice. Its home is the only notes folder where
+  Margins may write an approved note. Reference Sources may be searched but not
+  modified.
+- **Scan** is a read-only look at the Workspace home. The complete result gives you
+  evidence for understanding the practice; it does not replace your judgment.
+- **Plan** turns a complete desired Workspace configuration into an exact, reviewable
+  list of changes. **Apply** commits only that plan.
+- **Init** and **sync** prepare recall. **Recall** proves that the declared Sources
+  are useful and reachable.
 
-## Start from the practice, not the settings
+All Margins state belongs under its own `workspaces/<id>/` state directory. Never
+create `.margins` inside a notes folder or rewrite the user's existing notes during
+setup.
 
-Before touching config, learn what the user is actually keeping and why. Which
-folder holds the notes they think in? Are there other folders — research, a shared
-vault, an archive — they want searched but never written to? One folder becomes
-the Workspace home; any others are read-only reference Sources.
+## 1. Start with the practice
 
-Listen for the user's own names for the work, the relationships that matter, and
-what they hope Margins will help them remember. Form a small, tentative reading of
-the practice rather than a taxonomy: where work accumulates, how it changes over
-time, which projects or relationships continue across notes, and what looks
-incidental. The goal is recognition, not an impressive-sounding analysis.
+Ask which folder holds the notes the user thinks in. Ask whether other folders—such
+as research, a shared vault, or an archive—should be searchable without becoming a
+write destination.
 
-## Check what this build can do
+Listen for the user's own names for the work, the projects and relationships that
+continue over time, and what they hope Margins will help them remember. Keep your
+initial reading tentative.
 
-Run:
+Then check the available capabilities:
 
 ```bash
 margins capabilities
 ```
 
-If the report includes `workspace.propose: true`, this build can ground an
-interpretation in the Workspace home before initialization. That grounded review is
-the centerpiece of setup, so use the named-Workspace path below. Otherwise, declare
-the folder directly.
+If the report includes `recall.scan: true`, use the named Workspace and grounded
+review path. Also use that path when the practice has more than one Source. For one
+notes folder on a build without scan, use the direct path.
 
-## Declare one folder directly
+## 2. Direct setup when scan is unavailable
 
-When there is a single notes folder and no `workspace.propose`, the Workspace is
-that folder. Run these commands from the notes folder:
+Run these commands from the notes folder:
 
 ```bash
 cd "/absolute/path/to/notes"
@@ -79,92 +69,72 @@ margins recall "an exact phrase from these notes"
 margins workspace status --json
 ```
 
-`init` adopts the current directory as the Workspace home. `sync` refreshes the
-declared Sources so recall is current; recall itself reads the Markdown live at
-query time. Be precise about this proof: an exact-phrase result pointing to an
-existing note proves that the Source is inside the recall boundary and setup can
-retrieve it. It does not by itself prove a broader interpretation of the
-practice. `status --json` reports the Workspace id and its state path.
+An exact-phrase result pointing to an existing note proves that the folder is
+inside the recall boundary. It does not prove a broader interpretation of the
+practice. Report that distinction plainly.
 
-## Declare a named Workspace and its Sources
+## 3. Declare a named Workspace and gather evidence
 
-Use this path when the user has more than one folder, or when `workspace.propose:
-true` is present. Name the practice, set its home, and add each reference folder.
-Do not run `init` or `sync` yet — the grounded review comes next, against the
-Workspace you just declared:
+Choose the one writable home, add each read-only reference Source, and save the
+complete scan result before initializing:
 
 ```bash
 margins workspace new practice --home "/absolute/path/to/notes"
 margins --workspace practice source add notes \
   --name research --role reference --path "/absolute/path/to/research"
 margins --workspace practice source list --json
+margins --workspace practice scan > /tmp/margins-workspace-scan.json
 ```
 
-The home is the one folder where approved notes may be written; reference Sources
-are searched but never modified. That read / write boundary is the durable part of
-the Workspace.
+Source declarations define the full recall boundary. Scan examines the home so you
+can understand it; it does not silently add Sources. Do not run `init` or `sync`
+until the grounded review is settled.
 
-## Lead with understanding, then review settings
+## 4. Show the user an understanding, not scan output
 
-Only when `margins capabilities` reports `workspace.propose: true`:
+Read the complete saved `scan.v2` result. Use the evidence reference below so that
+you consider its coverage, candidates, representative files, structure, metadata,
+existing settings, and catalyst profiles together. Do not reduce the scan to its
+top-ranked folders or copy its candidates mechanically.
 
-```bash
-margins --workspace practice workspace propose \
-  --json > /tmp/margins-workspace-plan.json
-```
+Form a short account of:
 
-The command writes its explanation to stderr and the `margins.workspace.plan.v1`
-plan to stdout. The explanation — what Margins understands this practice to be, and
-the consequential questions it can answer — is the centerpiece; the plan is a draft
-of the settings that understanding implies.
+- what this practice appears to be and where its history accumulates;
+- which projects, subjects, or relationships seem to continue across notes;
+- which material looks incidental or structural; and
+- one or two consequential questions Margins may be able to answer.
 
-Present the understanding first. Keep the explanation's evidence faithful — the
-folders, notes, and connections it actually cites — before restating it in the
-user's own vocabulary. Then ask, in ordinary language, what is wrong or missing —
-not "approve these settings," but "does this match how you work, and what did it
-miss?" A healthy Workspace often needs no setting change at all and still deserves
-the richest interpretation and a real recall proof.
+If the evidence is sparse, contradictory, or too abstract, read a bounded set of
+the files referenced by the scan. Use note content and patterns of use—not folder
+names alone—to infer what something means.
 
-Do not merely recite scan findings or turn the first user response into a config
-decision. Help the user see a coherent picture: what this practice appears to be,
-where its continuity lives, what Margins could help them follow, and where the
-reading is uncertain. Use tentative language when the evidence is ambiguous. When
-the user corrects that picture, reflect the revised understanding back in their
-terms and make sure it now feels accurate before deriving settings from it.
+Present this account in ordinary language. Cite recognizable folders, notes, and
+connections, but do not narrate schema fields or ranking mechanics. Ask: “Does this
+match how you work, and what did it miss?” Reflect corrections back in the user's
+terms before deriving settings. A factual correction is not consent to change the
+Workspace.
 
-Only after the user has reacted to the understanding do you turn to the concrete
-plan. A factual correction is not automatically consent. First confirm that the
-user recognizes the revised account and understands the resulting attention and
-read/write boundaries. If `actions` is empty, tell the user that no settings need
-to change, skip consent and `workspace apply`, and continue to the recall proof.
-Otherwise, show the exact plan actions and ask for explicit consent, framing those
-actions as the settings consequence of the confirmed understanding. Do not
-reconstruct unsupported reasons for how the command chose an action. If the user
-consents to the plan as shown, apply the saved plan unchanged:
+A healthy Workspace may need no setting change. It should still receive a rich
+interpretation and a real recall proof.
 
-```bash
-margins --workspace practice workspace apply \
-  --plan /tmp/margins-workspace-plan.json \
-  --if-revision "<base_revision from the plan>" \
-  --request-id "<unique setup request id>" --json
-```
+## 5. Persist only consequences the user recognizes
 
-`--if-revision` refuses to apply if the Workspace changed underneath you;
-`--request-id` makes the apply idempotent. The plan you apply is always the exact
-plan the user saw.
+After the user recognizes the account, decide whether any durable setting follows.
+Ordinary setup changes should be narrow:
 
-### When the user corrects a supported Source or policy
+- add a structural folder that should be ignored;
+- correct a Source boundary or role;
+- choose an explicit, stable set of existing subjects for attention; or
+- add an evidence-backed catalyst profile or folder expansion to such a subject.
 
-Supported corrections are anything the Workspace config can represent: a folder in
-the wrong role, a folder that should be excluded, a reference that should be the
-home, or policy — an excluded folder or tag, or a surfaced folder, tag, person,
-project, or running log made central (pinned) or kept out of attention (excluded).
-Use only an item the review surfaced and preserve its displayed spelling when
-forming the config reference: `folder:<displayed path>`, `#<displayed tag>`,
-`[[<displayed linked name>]]`, or `log:<displayed log name>`. Never infer a new
-entity. Do not hand-edit the plan JSON. The plan carries the full desired state it
-would produce; start from that desired state, write a complete desired-state TOML,
-and change only what the user corrected.
+Explicit entity curation is optional. Leave it automatic when the evidence is
+uncertain or the user wants Margins to keep adapting. Never turn every scan
+candidate into configuration, invent an entity, or configure a structure that does
+not exist.
+
+When a setting is needed, read and copy the complete config at
+`current_config.config_path`. Do not reconstruct it from the scan summary. Change
+only the confirmed setting, save a complete desired-state TOML file, and compile it:
 
 ```bash
 margins --workspace practice workspace plan \
@@ -172,24 +142,30 @@ margins --workspace practice workspace plan \
   > /tmp/margins-workspace-plan.json
 ```
 
-This compiles a fresh, exact plan from the user's correction. If the new plan has no
-actions, report that no settings need to change and skip apply. Otherwise, present
-that new plan, get explicit consent, and apply it unchanged with the same
-`--if-revision` / `--request-id` guards. Apply is refused unless the plan still
-matches the current Workspace, so the plan you apply is always the plan the user
-last saw — never JSON you edited by hand.
+If `actions` is empty, explain that no settings need to change and skip both consent
+and apply. Otherwise, translate each action into its user-visible consequence and
+ask for explicit consent. If the user agrees, apply the saved plan unchanged:
 
-If the correction is descriptive but implies no runtime setting — how the user
-thinks about the material, what a folder is really for — keep it in the interaction
-rather than inventing config, and let it shape the recall phrase you choose to prove
-setup. If the correction asks for something the Workspace cannot represent — a
-folder that is neither home nor reference, a rule the policy fields don't cover —
-say so plainly instead of manufacturing a setting to stand in for it.
+```bash
+margins --workspace practice workspace apply \
+  --plan /tmp/margins-workspace-plan.json \
+  --json
+```
 
-## Initialize and prove
+Apply derives its revision check and retry identity from the plan. It rejects a
+stale or altered plan and commits atomically.
 
-Once any review is settled, materialize the named Workspace and prove a real
-question:
+If the user corrects the understanding after seeing a plan, return to the complete
+desired config, change only that correction, and run `workspace plan --desired`
+again. Show the fresh plan before applying it. Never hand-edit plan JSON.
+
+If a correction changes only how the user describes the practice, keep it in the
+conversation and let it shape the recall proof. Do not manufacture a setting for
+something the Workspace cannot represent.
+
+## 6. Initialize and prove the setup
+
+Once the review is settled:
 
 ```bash
 margins --workspace practice init
@@ -198,32 +174,97 @@ margins --workspace practice recall "<question from the confirmed understanding>
 margins --workspace practice recall "<distinctive phrase from research>" --source research
 ```
 
-When a grounded review supplied a question, use that question first and verify that
-the result cites a real note supporting the answer. Use an exact phrase as the
-source-boundary check, especially for each reference Source. Keep the claims
-separate: the phrase proves reachability; the grounded question tests the
-understanding the user confirmed.
+When possible, test both claims:
 
-Close the loop in plain language. Explain what the result demonstrates about the
-practice, remind the user what Margins will attend to and leave alone, and name one
-useful question they can now return with. If the result does not support the shared
-understanding, say so and revisit the interpretation instead of declaring setup
-complete.
+- A distinctive phrase proves that a declared Source is reachable.
+- A question from the confirmed account tests whether Margins can support the
+  understanding you presented.
 
-## Report
+Verify that each result cites a real supporting note. If recall contradicts the
+account, revisit the interpretation rather than declaring success.
 
-Report the Workspace id and state path, the declared local Sources, the `init` /
-`sync` results, at least one source-backed recall result, and — when a grounded
-review was available — whether its suggested settings were accepted, corrected and
-recompiled, or left unchanged. Also summarize the user's confirmed understanding of
-the practice and the resulting read/write/attention boundaries. Confirm the notes
-folders were untouched and hold no `.margins` state.
+Report the Workspace id and state path, its home and reference Sources, any approved
+attention or exclusion settings, the `init` and `sync` results, and at least one
+source-backed recall result. Restate what the user can expect Margins to remember
+and confirm that their notes were not modified.
+
 Do not begin connected-note distillation as part of setup.
 
-## Automation with an existing desired config
+## Evidence reference: reading the complete scan
 
-When automation already holds a complete desired Workspace config, `workspace plan
---desired ... --json` compiles the reviewable `margins.workspace.plan.v1`, and
-`workspace apply` commits it with its base revision and a unique request id. Never
-make a person author desired-state TOML just to complete ordinary setup — that is
-the machine's job, reserved here for recompiling a plan from a correction.
+The field names below are for your analysis. The user normally needs the meaning you
+derive from them, not the names themselves.
+
+| Evidence | What it helps you judge |
+| --- | --- |
+| `schema_version`, `scan_id`, `vault_path`, `generated_at`, `status`, `files` | Which scan you are reading and the home it describes. |
+| `instructions`, `summary` | The scan's own cautions and the overall size, age, and shape of the material. |
+| `coverage_entities` | A small set chosen to cover distinct parts of the notes, so a large folder does not crowd out a smaller but meaningful area. Start here for breadth. |
+| `entity_curation_candidates` | Existing folders that may deserve stable attention, with representative samples and page structure. Use these to investigate, not to auto-configure. |
+| `top_entities`, `top_folders`, `top_tags`, `top_links` | Frequent or prominent threads. Compare them with coverage evidence; frequency alone does not establish importance. |
+| `entity_samples`, `sample_files` | Concrete excerpts and files that reveal what a candidate means in practice. |
+| `folder_stats`, `folder_page_entities`, `folder_children`, `tag_children` | How the material is organized, whether a folder contains durable linked pages, and whether parent/child choices would duplicate attention. |
+| `frontmatter_samples` | Metadata conventions already used by the notes. Treat them as evidence of an existing practice, not a schema to impose. |
+| `current_config` | What Margins already attends to or excludes. `current_config.config_path` locates the complete config to copy before planning a change. |
+| `available_profiles` | The catalyst profiles supported by this build. Never configure a profile that the scan does not list. |
+| `entities`, `excluded_folders` | Compatibility summaries. Use their richer supporting fields above before making a judgment. |
+
+Keep the whole scan available while reasoning. Absence and disagreement between
+sections are useful evidence; do not force a recommendation merely because a field
+is present.
+
+## Evidence reference: entities and catalyst profiles
+
+An entity is an existing thread—such as a folder, tag, linked note, or running
+log—that Margins can build recall catalysts around. A non-empty `[policy].entities`
+list is the exact stable attention surface: Margins selects those entities instead
+of appending automatic choices. An empty list leaves attention adaptive.
+
+Use exactly the spellings surfaced by scan:
+
+```toml
+[policy]
+entities = [
+  "#enzyme",
+  { "folder:people" = { profile = "relational", expandable = true } },
+]
+```
+
+Valid simple forms are `folder:<path>`, `#<tag>`, `[[<linked name>]]`, and
+`log:<name>`. An entity may also have a `profile` or, for a folder,
+`expandable = true`.
+
+A catalyst profile changes the kinds of questions Margins develops for an entity;
+it is not a weight or an importance score. Use `available_profiles` as the
+authoritative catalog for the installed build. Offer a profile only when
+representative notes make the posture clear:
+
+| Profile | Use when the notes primarily preserve… |
+| --- | --- |
+| `relational` | a continuing relationship and its history. |
+| `operational` | unresolved execution, ownership, and coordination. |
+| `decision_trace` | decisions, bets, and their rationale. |
+| `resonance_trace` | material repeatedly connected to active thinking. |
+| `reflective` | patterns emerging through reflection over time. |
+| `tension_trace` | unresolved assumptions, competing forces, and tradeoffs. |
+| `preference_evidence` | stable preferences demonstrated by actions. |
+
+Leave an ambiguous entity without a profile.
+
+Use `expandable = true` only for a folder whose `folder_page_entities` and
+`folder_stats` show real child pages that the user wants treated as separate
+threads. Dense linked folders may expand automatically. Never persist the child
+links themselves merely because they live in an expandable folder.
+
+For a meeting-oriented practice, durable person or relationship notes can make
+preparation and follow-up more continuous. If that structure already exists and
+the evidence supports it, explain the benefit and ask whether the user wants it in
+the stable attention surface, usually with `relational`. If recurring people appear
+but no durable structure exists, you may explain that one note per person is an
+optional practice. Do not create, reorganize, or configure those notes during
+setup.
+
+When automatic attention is left in place, note-only Workspaces draw from the scan's
+folder, tag, link, and log coverage. Workspaces with connected mail or calendar
+Sources use bounded, noise-filtered people signals instead. If those signals are
+not safe enough, Margins chooses none rather than guessing.

@@ -3,7 +3,6 @@ pub mod artifacts;
 pub mod capabilities;
 pub mod capture;
 pub mod connect;
-pub mod context;
 pub mod guide;
 pub mod import;
 pub mod integrations;

@@ -31,7 +31,6 @@
         "crates/public/margins-cli/src/commands/capabilities.rs",
         "crates/public/margins-cli/src/commands/capture.rs",
         "crates/public/margins-cli/src/commands/connect.rs",
-        "crates/public/margins-cli/src/commands/context.rs",
         "crates/public/margins-cli/src/commands/guide.rs",
         "crates/public/margins-cli/src/commands/import.rs",
         "crates/public/margins-cli/src/commands/integrations.rs",
@@ -68,7 +67,6 @@
         "crates/public/margins-cli/src/commands/capabilities.rs",
         "crates/public/margins-cli/src/commands/capture.rs",
         "crates/public/margins-cli/src/commands/connect.rs",
-        "crates/public/margins-cli/src/commands/context.rs",
         "crates/public/margins-cli/src/commands/guide.rs",
         "crates/public/margins-cli/src/commands/import.rs",
         "crates/public/margins-cli/src/commands/integrations.rs",
@@ -92,7 +90,7 @@
         "crates/public/margins-cli/tests/multipart_parity.rs",
         "crates/public/margins-cli/tests/standalone.rs"
       ],
-      "minimum_files": 35
+      "minimum_files": 34
     },
     {
       "name": "margins-store-crate",

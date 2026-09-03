@@ -26,8 +26,8 @@ Keep it bounded:
 1. Ask which folder holds the practice the user thinks in, and whether any other
    folders should be searched as read-only reference Sources. Resolve absolute
    paths, then run `margins capabilities` to see what this build can do.
-2. When there is one folder and capabilities do not report `workspace.propose:
-   true`, run `margins init` from that folder, then `margins sync --json`, then
+2. When there is one folder and capabilities do not report `recall.scan: true`,
+   run `margins init` from that folder, then `margins sync --json`, then
    recall a distinctive phrase you already know is in the notes — recall reads the
    Markdown live. Stop once the proof points at a real note.
 3. Otherwise create a named Workspace with `workspace new` and add each extra
@@ -35,28 +35,23 @@ Keep it bounded:
    the reference folders it only reads. Do not run `init` or `sync` yet — the
    review grounds its reading in the home first, while the Sources you declare
    define the full recall boundary.
-4. When `workspace.propose: true` is present, run `workspace propose`. It writes
-   an explanation to stderr and the plan to stdout. Lead with the explanation: tell
-   the user, in plain language, what Margins understands this practice to be. Make
-   it a coherent, tentative account of where work and relationships continue, not a
-   recitation of scan statistics. Ask what feels accurate, what is wrong or missing,
-   and what would make the Workspace feel properly set up. Reflect corrections back
-   in the user's terms before resolving them into settings; a factual correction is
-   not consent. A healthy Workspace can need no change at all and still earn a real
-   recall proof. When the plan has no actions, skip consent and apply and continue
-   to the proof. Otherwise, show the exact actions, obtain explicit consent, and
-   apply the emitted plan unchanged, framing those actions as consequences of the
-   confirmed understanding. Do not reconstruct how it chose the actions or invent
-   unsupported reasons. If the user corrects something the Workspace can represent
-   — a folder's role, an excluded folder, or a central or de-emphasized tag, person,
-   or project — start from the desired state the proposal already carries,
-   preserve the surfaced item's displayed spelling when forming its config
-   reference, write a complete revised desired-state TOML changing only what they corrected, and
-   recompile it with `workspace plan --desired`. If the new plan has actions, show
-   it, obtain consent, and apply it unchanged; otherwise skip apply. If the
-   correction needs no setting, keep it in the conversation and let it shape the
-   proof; if the Workspace cannot represent it, say so. If the user declines, keep
-   the Workspace and Sources unchanged.
+4. When `recall.scan: true` is present, run `scan` for the named Workspace and
+   consume the complete `scan.v2` result. Use its coverage entities, curation
+   candidates, representative samples, hierarchy, frontmatter, exclusions, current
+   config, and available profiles as evidence—not as a script. Tell the user, in
+   plain language, what Margins understands this practice to be. Make it a coherent,
+   tentative account of where work and relationships continue, not a recitation of
+   scan statistics. Ask what feels accurate, what is wrong or missing, and what
+   would make the Workspace feel properly set up. Reflect corrections in the user's
+   terms before resolving them into settings; a factual correction is not consent.
+   A healthy Workspace can need no change and still earn a real recall proof. When
+   a supported setting follows, read the complete config at
+   `current_config.config_path` instead of reconstructing it from the scan, compile
+   the exact desired state with `workspace plan --desired`, show its actions, obtain
+   explicit consent, and apply the saved plan unchanged. If the plan has no actions,
+   skip both consent and apply. If a correction needs no setting, keep it in the
+   conversation and let it shape the proof; if the Workspace cannot represent it,
+   say so. If the user declines, keep the Workspace and Sources unchanged.
 5. Run `init`, `sync`, and the recall proof for the named Workspace, choosing a
    question that reflects the understanding the user confirmed. Explain what the
    result demonstrates, restate the final read/write/attention boundaries in plain

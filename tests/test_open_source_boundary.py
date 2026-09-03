@@ -273,17 +273,31 @@ class RepositoryPolicyTests(unittest.TestCase):
         for required in (
             "Run these commands from the notes folder",
             'cd "/absolute/path/to/notes"',
-            "`workspace.propose: true`",
-            "writes its explanation to stderr",
+            "`recall.scan: true`",
+            "Read the complete saved `scan.v2` result",
+            "Show the user an understanding, not scan output",
+            "The field names below are for your analysis",
+            "`coverage_entities`",
+            "`entity_curation_candidates`",
+            "`available_profiles`",
+            "`current_config.config_path`",
             "ask for explicit consent",
             "apply the saved plan unchanged",
             "Do not begin connected-note",
         ):
             self.assertIn(required, setup)
+        for profile in (
+            "relational",
+            "operational",
+            "decision_trace",
+            "resonance_trace",
+            "reflective",
+            "tension_trace",
+            "preference_evidence",
+        ):
+            self.assertIn(f"`{profile}`", setup)
         for forbidden in (
-            "transcribe",
-            "audio",
-            "Enzyme",
+            "margins transcribe",
             "fallback",
             "official composition",
             "private reveal",
@@ -291,16 +305,22 @@ class RepositoryPolicyTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, setup)
         declaration = setup.index("margins workspace new practice")
-        proposal = setup.index("margins --workspace practice workspace propose")
+        scan = setup.index("margins --workspace practice scan")
+        understanding = setup.index("## 4. Show the user an understanding, not scan output")
+        plan = setup.index("margins --workspace practice workspace plan")
         apply = setup.index("margins --workspace practice workspace apply")
         initialize = setup.index("margins --workspace practice init")
-        self.assertLess(declaration, proposal)
-        self.assertLess(proposal, apply)
+        self.assertLess(declaration, scan)
+        self.assertLess(scan, understanding)
+        self.assertLess(understanding, plan)
+        self.assertLess(plan, apply)
         self.assertLess(apply, initialize)
 
         self.assertIn("Connected-note distillation is a separate workflow", onboarding)
         self.assertIn("from that folder", onboarding)
-        self.assertIn("an explanation to stderr", onboarding)
+        self.assertIn("complete `scan.v2` result", onboarding)
+        normalized_onboarding = " ".join(onboarding.split())
+        self.assertIn("coverage entities, curation candidates", normalized_onboarding)
         for required in (
             "The job is complete when the user approves",
             "Start with the latest Margins session",
@@ -351,11 +371,12 @@ class RepositoryPolicyTests(unittest.TestCase):
         normalized_architecture = " ".join(architecture.split())
         for required in (
             "contains two separate workflows",
-            "capability report includes `workspace.propose: true`",
+            "report `recall.scan: true`",
+            "complete read-only `scan.v2` evidence",
+            "skill—not a second CLI renderer—forms the grounded interpretation",
             "invites plain-language corrections",
             "correction is recompiled into a fresh plan",
             "only the final reviewed plan is applied unchanged",
-            "static skill does not encode or reproduce the recommendation logic",
             "resolves `transcript latest` by default",
         ):
             self.assertIn(required, normalized_architecture)

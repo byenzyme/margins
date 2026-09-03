@@ -162,14 +162,6 @@ fn run_inner(
             );
         }
         Some(Command::Workspace {
-            command: WorkspaceCommand::Propose { .. },
-        }) => {
-            return Err(CliError::unavailable(
-                "workspace_propose_unavailable",
-                "This installation does not include a grounded Workspace review. Continue with the Source choices and recall proof in `margins guide workspace-setup`.",
-            ));
-        }
-        Some(Command::Workspace {
             command: WorkspaceCommand::Plan { desired, .. },
         }) => {
             return commands::workspace::plan(
@@ -180,20 +172,12 @@ fn run_inner(
             );
         }
         Some(Command::Workspace {
-            command:
-                WorkspaceCommand::Apply {
-                    plan,
-                    if_revision,
-                    request_id,
-                    ..
-                },
+            command: WorkspaceCommand::Apply { plan, .. },
         }) => {
             return commands::workspace::apply(
                 workspace_selector.as_deref(),
                 invocation_dir,
                 &absolute_from(invocation_dir, &plan),
-                &if_revision,
-                &request_id,
                 stdout,
             );
         }
@@ -250,30 +234,6 @@ fn run_inner(
                 json,
                 stdout,
                 stderr,
-            );
-        }
-        Some(Command::Context {
-            person,
-            meeting,
-            cutoff,
-            json,
-        }) if workspace_selected => {
-            let workspace = commands::workspace::resolve(
-                workspace_selector.as_deref(),
-                invocation_dir,
-                stderr,
-            )?;
-            let project = workspace_project_adapter(&workspace);
-            return commands::context::run(
-                &workspace.state_dir,
-                &workspace.home_dir,
-                &project.project.people_folder,
-                person.as_deref(),
-                meeting.as_deref(),
-                cutoff.as_deref(),
-                json,
-                services.clock.now(),
-                stdout,
             );
         }
         // A Workspace owns both recall state and captured-session state. Keep
@@ -479,7 +439,7 @@ fn run_inner(
                 stdout,
             );
         }
-        Some(Command::Scan { .. }) => {
+        Some(Command::Scan) => {
             return Err(CliError::new(
                 "composition_unavailable",
                 "This public development CLI cannot scan a Margins recall workspace. Install the official Margins CLI (`./install.sh` or a release artifact).",
@@ -496,10 +456,7 @@ fn run_inner(
         .projects
         .resolve_vault(project_selector.as_deref(), invocation_dir)
         .map_err(CliError::from_anyhow)?;
-    if matches!(
-        args.command,
-        Some(Command::Integrations { .. }) | Some(Command::Context { .. })
-    ) {
+    if matches!(args.command, Some(Command::Integrations { .. })) {
         vault_guard::require_evidenced_vault(&project)?;
     }
     let project = match &args.command {
@@ -512,15 +469,6 @@ fn run_inner(
         Some(Command::Artifacts { meeting_id }) => {
             resolve_meeting_owner(services, project, project_selector.is_some(), meeting_id)?
         }
-        Some(Command::Context {
-            meeting: Some(meeting_id),
-            ..
-        }) if meeting_id != "next" => resolve_context_meeting_owner(
-            services,
-            project,
-            project_selector.is_some(),
-            meeting_id,
-        )?,
         _ => project,
     };
     let work_dir = &project.work_dir;
@@ -627,23 +575,7 @@ fn run_inner(
         },
         Some(Command::Recall { .. }) => unreachable!("handled before project resolution"),
         Some(Command::Sync { .. }) => unreachable!("handled before project resolution"),
-        Some(Command::Context {
-            person,
-            meeting,
-            cutoff,
-            json,
-        }) => commands::context::run(
-            work_dir,
-            &project.root_dir,
-            &project.project.people_folder,
-            person.as_deref(),
-            meeting.as_deref(),
-            cutoff.as_deref(),
-            json,
-            services.clock.now(),
-            stdout,
-        ),
-        Some(Command::Scan { .. }) => unreachable!("handled before project resolution"),
+        Some(Command::Scan) => unreachable!("handled before project resolution"),
         Some(Command::Capabilities) => unreachable!("handled before project resolution"),
         Some(Command::Init) => unreachable!("handled before project resolution"),
         Some(Command::Note { .. }) => unreachable!("handled before project resolution"),
@@ -677,61 +609,6 @@ fn workspace_project_adapter(
         },
         root_dir: workspace.home_dir.clone(),
         work_dir: workspace.state_dir.clone(),
-    }
-}
-
-/// Resolve context meeting ownership without opening any session database in
-/// write/migration mode. Read-only is part of the external-agent contract.
-fn resolve_context_meeting_owner(
-    services: &CliServices,
-    initial: margins_workflows::project::ResolvedProject,
-    has_explicit_project: bool,
-    meeting_id: &str,
-) -> Result<margins_workflows::project::ResolvedProject, CliError> {
-    if has_explicit_project {
-        return Ok(initial);
-    }
-
-    let mut vaults = services.projects.list().map_err(CliError::from_anyhow)?;
-    vaults.push(initial.clone());
-    let mut seen = Vec::<PathBuf>::new();
-    let mut owners = Vec::new();
-    for vault in vaults {
-        let root = vault
-            .root_dir
-            .canonicalize()
-            .unwrap_or_else(|_| vault.root_dir.clone());
-        if seen.iter().any(|seen_root| seen_root == &root) {
-            continue;
-        }
-        seen.push(root);
-        if commands::context::meeting_exists_read_only(&vault.work_dir, meeting_id)? {
-            owners.push(vault);
-        }
-    }
-
-    match owners.len() {
-        0 => Ok(initial),
-        1 => Ok(owners.remove(0)),
-        _ => {
-            let candidates = owners
-                .iter()
-                .map(|vault| {
-                    format!(
-                        "{} ({})",
-                        vault.project.id,
-                        vault.root_dir.to_string_lossy()
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            Err(CliError::new(
-                "ambiguous_meeting",
-                format!(
-                    "Meeting '{meeting_id}' exists in multiple Margins vaults: {candidates}. Pass --project <id-or-path> to choose one."
-                ),
-            ))
-        }
     }
 }
 

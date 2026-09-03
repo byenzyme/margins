@@ -111,8 +111,6 @@ pub fn apply(
     selector: Option<&str>,
     cwd: &Path,
     plan_path: &Path,
-    expected_revision: &str,
-    request_id: &str,
     stdout: &mut dyn Write,
 ) -> Result<(), CliError> {
     let selector = require_explicit_workspace(selector)?;
@@ -139,8 +137,7 @@ pub fn apply(
         ));
     }
     let receipt =
-        workspace::apply_workspace_plan(&mut workspace, &plan, expected_revision, request_id)
-            .map_err(CliError::from_anyhow)?;
+        workspace::apply_workspace_plan(&mut workspace, &plan).map_err(CliError::from_anyhow)?;
     serde_json::to_writer_pretty(&mut *stdout, &receipt)
         .map_err(|error| CliError::new("output_failed", error.to_string()))?;
     writeln!(stdout).map_err(|error| CliError::new("output_failed", error.to_string()))

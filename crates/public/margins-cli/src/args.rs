@@ -144,25 +144,6 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Return source-backed relationship context for an external agent as JSON
-    #[command(
-        long_about = "Return the read-only Margins context plane for one person or meeting.\n\nThe stable margins.context.v2 JSON object contains: schema_version, query, meeting, resolved_identities (including resolution evidence), identity_omissions, episodes (including typed evidence and excerpts), open_items (including typed provenance), and source_manifest (including machine-readable freshness). Every claim-bearing item carries a closed evidence handle. This command never generates or interprets content.",
-        after_long_help = "Exactly one of --person or --meeting is required. --cutoff is accepted only with --person. JSON is the only v2 output format, so --json is required."
-    )]
-    Context {
-        /// Exact full name, exact people-note alias, or email address
-        #[arg(long, required_unless_present = "meeting", conflicts_with = "meeting")]
-        person: Option<String>,
-        /// Stable session id, or `next` for the nearest future indexed meeting
-        #[arg(long, required_unless_present = "person", conflicts_with = "person")]
-        meeting: Option<String>,
-        /// Inclusive RFC 3339 timestamp or YYYY-MM-DD evidence cutoff
-        #[arg(long, requires = "person")]
-        cutoff: Option<String>,
-        /// Emit the stable margins.context.v2 JSON contract
-        #[arg(long, required = true)]
-        json: bool,
-    },
     /// Reconcile and inspect source integrations declared by the Workspace
     Integrations {
         #[command(subcommand)]
@@ -183,15 +164,8 @@ pub enum Command {
         #[command(subcommand)]
         command: DisconnectCommand,
     },
-    /// Inspect a vault and suggest folders, tags, links, logs, and exclusions
-    Scan {
-        /// Write the initial suggested policy when this workspace has none
-        #[arg(long)]
-        write_config: bool,
-        /// Replace an existing workspace policy with the current suggestion
-        #[arg(long)]
-        update: bool,
-    },
+    /// Inspect a vault and emit grounded setup evidence without changing it
+    Scan,
     /// Print this installation's machine-readable capabilities as JSON
     Capabilities,
     /// Establish or refresh a Margins vault in this folder
@@ -238,12 +212,6 @@ pub enum WorkspaceCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Ground a reading of the Workspace home and draft any settings it needs
-    Propose {
-        /// Emit a margins.workspace.plan.v1 JSON plan
-        #[arg(long, required = true)]
-        json: bool,
-    },
     /// Compile complete desired Workspace settings into a revisioned plan
     Plan {
         /// TOML file containing the complete desired Workspace settings
@@ -258,12 +226,6 @@ pub enum WorkspaceCommand {
         /// JSON plan emitted by `workspace plan`
         #[arg(long)]
         plan: PathBuf,
-        /// Exact base revision the plan was reviewed against
-        #[arg(long)]
-        if_revision: String,
-        /// Stable idempotency key for this mutation attempt
-        #[arg(long)]
-        request_id: String,
         /// Emit margins.workspace.apply.v1 JSON
         #[arg(long, required = true)]
         json: bool,
