@@ -1125,13 +1125,6 @@ successful pulls run bounded, resumable per-entity catalyst generation; an
 incomplete inventory reports `status=catalysts_pending` with curated-entity,
 catalyst, and pending-item counts until generation completes.
 
-Native Markdown is the narrow exception needed to prove a declared notes
-boundary. A multi-word verbatim phrase may contribute bounded, exact-first hits
-from the already-indexed snapshot, with no generator fallback and no direct
-embedding ranker. This does not apply to ledger-backed mail, calendar, or Meet
-content. Explicit catalyst attention therefore shapes associative recall without
-making another Markdown folder inside the Workspace unreachable.
-
 **Superseded 2026-08-25 by automatic correspondent entities.** In this paragraph,
 "curated entities" now means selected automatic or explicitly configured entities,
 minus explicit exclusions; the fail-closed and offline contracts are unchanged.

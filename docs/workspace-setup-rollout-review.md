@@ -20,33 +20,25 @@ consent, or expected settings. Discovering and applying the embedded guide is
 part of the product being reviewed.
 
 Use a realistic notes practice and a release-candidate binary. The default lane
-is a genuinely fresh setup for that practice: prior folder-local, current
-Workspace, and legacy path-addressed setup state must not influence what the
-agent discovers. Keep the leading prompt fixed, record the exact model/provider,
-and preserve the raw transcript.
+is a genuinely fresh setup for that practice: prior folder-local and global
+Workspace state must not influence what the agent discovers. Keep the leading
+prompt fixed, record the exact model/provider, and preserve the raw transcript.
 
 ## Capture without prescribing
 
 Quit Margins and stop every other Margins process before this review. `prepare`
-temporarily isolates three kinds of existing state in the private run directory:
+temporarily moves two kinds of existing state into the private run directory:
 
 - the practice's `.margins/` folder, if present; and
-- the complete `$MARGINS_HOME/workspaces/` registry; and
-- `$MARGINS_HOME/config.toml`, with only legacy `[vaults.*]` and
-  `[workspaces.*]` entries whose note roots overlap this practice removed from
-  the temporary active copy.
+- the complete `$MARGINS_HOME/workspaces/` registry.
 
 The whole registry is isolated—not only the expected Workspace—because unrelated
 Workspace ids affect implicit naming, and a faulty rollout must not be able to
 mutate an unbacked entry. Existing Workspaces are temporarily unavailable until
 finalization. Moving the registry whole ensures old config, indexes, catalysts,
 captures, receipts, and partial transactions cannot leak into the rollout. The
-harness records which prior bindings overlapped the practice for review. Global
-`[llm]`, `[defaults]`, and `[update]` settings and setup entries for other note
-roots remain active, so the rollout retains realistic machine capabilities
-without inheriting the practice's decisions. Unsupported or malformed global
-config fails preparation before any state is moved. The harness does not touch
-`.obsidian/` or machine-level catalyst credentials, models, or account
+harness records which prior bindings overlapped the practice for review. It does
+not touch `.obsidian/` or machine-level catalyst credentials, models, or account
 connections; those are installation capabilities rather than setup for this
 folder.
 
@@ -95,24 +87,22 @@ Workspaces, preserve that diagnostic and run `finalize` without
 the independent reviewer.
 
 `finalize` snapshots the generated Workspace state and complete configs under
-the run directory, then restores the original Workspace directories,
-folder-local `.margins/` state, and original root config byte-for-byte (including
-a pre-existing symlink and its mode). Restoration is itself a hard gate. If the
-run is interrupted after `prepare`, recover explicitly with:
+the run directory, then restores the original Workspace directories and
+folder-local `.margins/` state. Restoration is itself a hard gate. If the run is
+interrupted after `prepare`, recover explicitly with:
 
 ```bash
 "$HARNESS" restore --run-dir "$RUN_DIR"
 ```
 
 `prepare` and `finalize` record raw Markdown hashes, Workspace-state hashes,
-root-config entry metadata and hashes, generated config, and the transcript.
-They do not copy note bodies, call a model, prescribe command transitions, or
-infer consent. The hard gate fails if Markdown changed, recognizable credential
-material appears in the transcript or observer-facing status/config views, or
-pre-existing setup cannot be restored exactly. When a credential gate fires,
-the captured view replaces matching values with labeled redactions and records
-the original artifact's hash; it does not duplicate the leaked value into that
-review view.
+generated config, and the transcript. They do not copy note bodies, call a
+model, prescribe command transitions, or infer consent. The hard gate fails if
+Markdown changed, recognizable credential material appears in the transcript
+or observer-facing status/config views, or pre-existing setup cannot be restored
+exactly. When a credential gate fires, the captured view replaces matching
+values with labeled redactions and records the original artifact's hash; it
+does not duplicate the leaked value into that review view.
 
 Keep this evidence and its backup local: filenames, configuration, indexes,
 captures, and the raw conversation may still be private even when no note bodies

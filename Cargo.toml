@@ -1,6 +1,6 @@
 [package]
 name = "margins"
-version = "0.4.9"
+version = "0.4.7"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -14,6 +14,7 @@ members = [
     "crates/public/margins-workflows",
     "crates/public/margins-meeting-protocol",
     "crates/public/margins-meeting-runtime",
+    "crates/public/margins-live-runtime",
     "crates/private/recall-engine",
 ]
 default-members = [
@@ -25,6 +26,7 @@ default-members = [
     "crates/public/margins-workflows",
     "crates/public/margins-meeting-protocol",
     "crates/public/margins-meeting-runtime",
+    "crates/public/margins-live-runtime",
 ]
 exclude = ["desktop/src-tauri"]
 resolver = "2"

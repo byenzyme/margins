@@ -9,13 +9,11 @@ tool sequence or maintain a state-transition model.
 from __future__ import annotations
 
 import argparse
-import copy
 import hashlib
 import json
 import os
 import re
 import shlex
-import stat
 import sys
 import tomllib
 from datetime import datetime, timezone
@@ -104,29 +102,6 @@ def write_json(path: Path, value: object) -> None:
             temporary.unlink()
 
 
-def atomic_write_bytes(path: Path, value: bytes, mode: int = 0o600) -> None:
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(value)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        try:
-            directory_fd = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        except OSError:
-            pass
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-
-
 def read_json(path: Path) -> object:
     return json.loads(path.read_text())
 
@@ -144,230 +119,6 @@ def paths_overlap(left: Path, right: Path) -> bool:
     return any(same_path(left, candidate) for candidate in (right, *right.parents)) or any(
         same_path(right, candidate) for candidate in (left, *left.parents)
     )
-
-
-def path_entry_snapshot(path: Path) -> dict[str, object]:
-    if not path.exists() and not path.is_symlink():
-        return {"exists": False}
-    metadata = path.lstat()
-    result: dict[str, object] = {
-        "exists": True,
-        "mode": stat.S_IMODE(metadata.st_mode),
-    }
-    if path.is_symlink():
-        result.update({"kind": "symlink", "target": os.readlink(path)})
-        try:
-            target = path.resolve(strict=True)
-        except OSError:
-            target = None
-        if target is not None and target.is_file():
-            result.update(
-                {
-                    "target_sha256": sha256(target),
-                    "target_size": target.stat().st_size,
-                }
-            )
-    elif path.is_file():
-        result.update(
-            {
-                "kind": "file",
-                "sha256": sha256(path),
-                "size": path.stat().st_size,
-            }
-        )
-    else:
-        raise SystemExit(f"expected a file or symlink at {path}")
-    return result
-
-
-def config_path(value: str, source: Path) -> Path:
-    path = Path(os.path.expanduser(value))
-    if not path.is_absolute():
-        raise SystemExit(f"global config contains a relative setup path in {source}: {value}")
-    return path.resolve()
-
-
-def global_setup_for_vault(
-    document: dict[str, object], vault: Path, source: Path
-) -> tuple[dict[str, object], set[str], set[str]]:
-    matching_vaults: set[str] = set()
-    matching_workspaces: set[str] = set()
-    evidence: dict[str, object] = {"vaults": [], "workspaces": []}
-
-    vaults = document.get("vaults", {})
-    if not isinstance(vaults, dict):
-        raise SystemExit(f"global config has an invalid [vaults] table: {source}")
-    for key in sorted(vaults):
-        if not isinstance(key, str):
-            continue
-        path = config_path(key, source)
-        if paths_overlap(path, vault):
-            matching_vaults.add(key)
-            evidence["vaults"].append({"key": key, "path": str(path)})
-
-    workspaces = document.get("workspaces", {})
-    if not isinstance(workspaces, dict):
-        raise SystemExit(f"global config has an invalid [workspaces] table: {source}")
-    for name in sorted(workspaces):
-        workspace = workspaces[name]
-        if not isinstance(name, str) or not isinstance(workspace, dict):
-            continue
-        sources = workspace.get("sources", {})
-        if not isinstance(sources, dict):
-            raise SystemExit(
-                f"global config workspace {name!r} has an invalid sources table: {source}"
-            )
-        overlapping: list[str] = []
-        for binding in sources.values():
-            if not isinstance(binding, dict) or not isinstance(binding.get("path"), str):
-                continue
-            path = config_path(binding["path"], source)
-            if paths_overlap(path, vault):
-                overlapping.append(str(path))
-        if overlapping:
-            matching_workspaces.add(name)
-            evidence["workspaces"].append(
-                {"name": name, "overlapping_sources": sorted(set(overlapping))}
-            )
-
-    return evidence, matching_vaults, matching_workspaces
-
-
-def toml_header_path(line: str) -> tuple[str, ...] | None:
-    stripped = line.lstrip()
-    if not stripped.startswith("["):
-        return None
-    array = stripped.startswith("[[")
-    opening = 2 if array else 1
-    closing = "]]" if array else "]"
-    quote: str | None = None
-    escaped = False
-    end = None
-    index = opening
-    while index < len(stripped):
-        character = stripped[index]
-        if quote == '"':
-            if escaped:
-                escaped = False
-            elif character == "\\":
-                escaped = True
-            elif character == '"':
-                quote = None
-        elif quote == "'":
-            if character == "'":
-                quote = None
-        elif character in {'"', "'"}:
-            quote = character
-        elif stripped.startswith(closing, index):
-            end = index + len(closing)
-            break
-        index += 1
-    if end is None:
-        return None
-    suffix = stripped[end:].strip()
-    if suffix and not suffix.startswith("#"):
-        return None
-    header = stripped[:end]
-    probe = "__margins_rollout_header_probe__"
-    try:
-        parsed = tomllib.loads(f"{header}\n{probe} = true\n")
-    except tomllib.TOMLDecodeError:
-        return None
-
-    def find(value: object, path: tuple[str, ...]) -> tuple[str, ...] | None:
-        if isinstance(value, dict):
-            if probe in value:
-                return path
-            for key, child in value.items():
-                found = find(child, (*path, str(key)))
-                if found is not None:
-                    return found
-        elif isinstance(value, list):
-            for child in value:
-                found = find(child, path)
-                if found is not None:
-                    return found
-        return None
-
-    return find(parsed, ())
-
-
-def filtered_global_config(
-    path: Path, vault: Path
-) -> tuple[bytes | None, dict[str, object]]:
-    if not path.exists() and not path.is_symlink():
-        return None, {"vaults": [], "workspaces": []}
-    try:
-        original = path.read_bytes()
-        text = original.decode("utf-8")
-        parsed = tomllib.loads(text)
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
-        raise SystemExit(f"cannot safely isolate global setup in {path}: {error}")
-    evidence, matching_vaults, matching_workspaces = global_setup_for_vault(
-        parsed, vault, path
-    )
-    if not matching_vaults and not matching_workspaces:
-        return original, evidence
-
-    output: list[str] = []
-    skipped: set[tuple[str, str]] = set()
-    skip_section = False
-    for line in text.splitlines(keepends=True):
-        header = toml_header_path(line)
-        if header is not None:
-            target: tuple[str, str] | None = None
-            if len(header) >= 2 and header[0] == "vaults" and header[1] in matching_vaults:
-                target = ("vaults", header[1])
-            elif (
-                len(header) >= 2
-                and header[0] == "workspaces"
-                and header[1] in matching_workspaces
-            ):
-                target = ("workspaces", header[1])
-            skip_section = target is not None
-            if target is not None:
-                skipped.add(target)
-        if not skip_section:
-            output.append(line)
-
-    expected = {("vaults", key) for key in matching_vaults} | {
-        ("workspaces", key) for key in matching_workspaces
-    }
-    if skipped != expected:
-        missing = ", ".join(f"{kind}.{key}" for kind, key in sorted(expected - skipped))
-        raise SystemExit(
-            "cannot safely isolate inline or unsupported global setup entries in "
-            f"{path}: {missing}"
-        )
-    filtered = "".join(output).encode()
-    try:
-        filtered_document = tomllib.loads(filtered.decode())
-    except tomllib.TOMLDecodeError as error:
-        raise SystemExit(f"filtered global config is invalid for {path}: {error}")
-    _, remaining_vaults, remaining_workspaces = global_setup_for_vault(
-        filtered_document, vault, path
-    )
-    if remaining_vaults or remaining_workspaces:
-        raise SystemExit(f"target setup remains in filtered global config: {path}")
-    expected_document = copy.deepcopy(parsed)
-    expected_vaults = expected_document.get("vaults", {})
-    expected_workspaces = expected_document.get("workspaces", {})
-    if isinstance(expected_vaults, dict):
-        for key in matching_vaults:
-            expected_vaults.pop(key, None)
-    if isinstance(expected_workspaces, dict):
-        for key in matching_workspaces:
-            expected_workspaces.pop(key, None)
-    for document in (expected_document, filtered_document):
-        for key in ("vaults", "workspaces"):
-            if document.get(key) == {}:
-                document.pop(key)
-    if filtered_document != expected_document:
-        raise SystemExit(
-            "cannot safely preserve unrelated global config while isolating setup in "
-            f"{path}"
-        )
-    return filtered, evidence
 
 
 def local_binding_paths(config_path: Path) -> list[Path]:
@@ -472,11 +223,6 @@ def prepare(args: argparse.Namespace) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
     run_dir.chmod(0o700)
 
-    global_config = margins_home / "config.toml"
-    filtered_config, preexisting_global_setup = filtered_global_config(
-        global_config, vault
-    )
-    global_config_before = path_entry_snapshot(global_config)
     all_workspace_ids, affected = workspace_inventory(margins_home, vault, strict=False)
     workspaces_root = margins_home / "workspaces"
     workspace_registry_existed = workspaces_root.exists() or workspaces_root.is_symlink()
@@ -491,13 +237,11 @@ def prepare(args: argparse.Namespace) -> int:
     )
     write_json(run_dir / "preexisting-workspaces.json", affected)
     write_json(run_dir / "preexisting-workspace-state.json", workspace_registry_state)
-    write_json(run_dir / "preexisting-global-setup.json", preexisting_global_setup)
-    write_json(run_dir / "global-config-before.json", global_config_before)
 
     local_state = vault / ".margins"
     local_state_exists = local_state.exists() or local_state.is_symlink()
     manifest = {
-        "schema": "margins.workspace-setup-rollout-review.v3",
+        "schema": "margins.workspace-setup-rollout-review.v2",
         "prepared_at": datetime.now(timezone.utc).isoformat(),
         "vault": str(vault),
         "margins_home": str(margins_home),
@@ -505,7 +249,6 @@ def prepare(args: argparse.Namespace) -> int:
         "preexisting_workspaces": affected,
         "workspace_registry_backed_up": workspace_registry_existed,
         "vault_local_state_backed_up": local_state_exists,
-        "global_config_backed_up": global_config_before.get("exists") is True,
     }
     write_json(run_dir / "run.json", manifest)
 
@@ -520,7 +263,6 @@ def prepare(args: argparse.Namespace) -> int:
     backup_root = run_dir / "backup"
     backup_root.mkdir(mode=0o700)
     moved: list[tuple[Path, Path]] = []
-    active_global_config_created = False
     try:
         if local_state.exists() or local_state.is_symlink():
             destination = backup_root / "vault-dot-margins"
@@ -530,23 +272,7 @@ def prepare(args: argparse.Namespace) -> int:
             destination = backup_root / "workspaces"
             move_path(workspaces_root, destination)
             moved.append((workspaces_root, destination))
-        if global_config_before.get("exists") is True:
-            destination = backup_root / "global-config.toml"
-            move_path(global_config, destination)
-            moved.append((global_config, destination))
-            if filtered_config is None:
-                raise SystemExit("global config disappeared while preparing the rollout")
-            atomic_write_bytes(global_config, filtered_config)
-            active_global_config_created = True
     except BaseException:
-        if active_global_config_created and (
-            global_config.exists() or global_config.is_symlink()
-        ):
-            if global_config.is_dir() and not global_config.is_symlink():
-                raise SystemExit(
-                    f"cannot roll back unexpected directory at {global_config}"
-                )
-            global_config.unlink()
         for source, destination in reversed(moved):
             if destination.exists() or destination.is_symlink():
                 source.parent.mkdir(parents=True, exist_ok=True)
@@ -605,14 +331,9 @@ def restore_preexisting_state(run_dir: Path, manifest: dict[str, object]) -> dic
         raise SystemExit("invalid preexisting_workspaces in run.json")
     expected_workspace_state = read_json(run_dir / "preexisting-workspace-state.json")
     expected_local_state = read_json(run_dir / "vault-local-state-before.json")
-    global_config_snapshot_path = run_dir / "global-config-before.json"
-    tracks_global_config = global_config_snapshot_path.is_file()
-    expected_global_config = (
-        read_json(global_config_snapshot_path) if tracks_global_config else None
-    )
     if not isinstance(expected_workspace_state, dict) or not isinstance(
         expected_local_state, dict
-    ) or (tracks_global_config and not isinstance(expected_global_config, dict)):
+    ):
         raise SystemExit("invalid preexisting state snapshots")
 
     moved_generated: list[str] = []
@@ -668,56 +389,21 @@ def restore_preexisting_state(run_dir: Path, manifest: dict[str, object]) -> dic
         move_path(local_state, destination)
         moved_generated.append(str(destination))
 
-    global_config = margins_home / "config.toml"
-    if tracks_global_config:
-        global_backup = backup_root / "global-config.toml"
-        global_backup_exists = global_backup.exists() or global_backup.is_symlink()
-        global_config_exists = global_config.exists() or global_config.is_symlink()
-        had_global_config = manifest.get("global_config_backed_up") is True
-        if global_backup_exists:
-            if global_config_exists:
-                destination = unused_destination(generated_root / "global-config.toml")
-                move_path(global_config, destination)
-                moved_generated.append(str(destination))
-            move_path(global_backup, global_config)
-            restored.append(str(global_config))
-        elif had_global_config:
-            if not global_config_exists:
-                raise SystemExit("global config and its backup are both missing")
-            if path_entry_snapshot(global_config) != expected_global_config:
-                raise SystemExit(
-                    "global config backup is missing and the active config does not "
-                    "match the pre-run state"
-                )
-            restored.append(str(global_config))
-        elif global_config_exists:
-            destination = unused_destination(generated_root / "global-config.toml")
-            move_path(global_config, destination)
-            moved_generated.append(str(destination))
-
     final_ids, _ = workspace_inventory(margins_home, vault, strict=False)
     expected_ids = manifest.get("workspace_ids_before", [])
     if not isinstance(expected_ids, list):
         raise SystemExit("invalid workspace_ids_before in run.json")
     registry_exact = state_snapshot(workspaces_root) == expected_workspace_state
     local_state_exact = state_snapshot(local_state) == expected_local_state
-    global_config_exact = (
-        path_entry_snapshot(global_config) == expected_global_config
-        if tracks_global_config
-        else True
-    )
     result = {
-        "schema": "margins.workspace-setup-rollout-restoration.v2",
+        "schema": "margins.workspace-setup-rollout-restoration.v1",
         "restored": (
             sorted(final_ids) == sorted(str(value) for value in expected_ids)
             and registry_exact
             and local_state_exact
-            and global_config_exact
         ),
         "workspace_registry_exact": registry_exact,
         "vault_local_state_exact": local_state_exact,
-        "global_config_exact": global_config_exact,
-        "global_config_tracked": tracks_global_config,
         "expected_workspace_ids": sorted(str(value) for value in expected_ids),
         "actual_workspace_ids": sorted(final_ids),
         "restored_paths": restored,
@@ -776,11 +462,6 @@ def finalize(args: argparse.Namespace) -> int:
             hashlib.sha256(config_bytes).hexdigest() + "\n"
         )
 
-    write_json(
-        run_dir / "global-config-after.json",
-        path_entry_snapshot(margins_home / "config.toml"),
-    )
-
     restoration = restore_preexisting_state(run_dir, manifest)
 
     before_vault = read_json(run_dir / "vault-before.json")
@@ -799,18 +480,9 @@ def finalize(args: argparse.Namespace) -> int:
     local_state_before = read_json(run_dir / "vault-local-state-before.json")
     local_state_after = state_snapshot(vault / ".margins")
     write_json(run_dir / "vault-local-state-restored.json", local_state_after)
-    global_config_snapshot_path = run_dir / "global-config-before.json"
-    if global_config_snapshot_path.is_file():
-        global_config_after = path_entry_snapshot(margins_home / "config.toml")
-        write_json(run_dir / "global-config-restored.json", global_config_after)
-        global_config_before = read_json(global_config_snapshot_path)
-        global_config_restored = global_config_before == global_config_after
-    else:
-        global_config_restored = True
     workspace_restored = (
         before_state == restored_state
         and local_state_before == local_state_after
-        and global_config_restored
         and restoration.get("restored") is True
     )
 

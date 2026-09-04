@@ -1,0 +1,63 @@
+{
+  "name": "bb-plugin-margins",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Control a running Margins meeting from a bb thread.",
+  "keywords": [
+    "bb-plugin",
+    "margins",
+    "meetings"
+  ],
+  "license": "MIT",
+  "files": [
+    "dist",
+    "server.ts",
+    "app.tsx",
+    "host.ts",
+    "src",
+    "skills",
+    "README.md"
+  ],
+  "type": "module",
+  "scripts": {
+    "build": "bb plugin build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "lucide-react": "^0.468.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.4.17",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "bb-app": "0.41.0",
+    "cron-parser": "^5.4.0",
+    "jsdom": "^29.0.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "vitest": "^4.1.1"
+  },
+  "engines": {
+    "bb": ">=0.41.0",
+    "bbPluginSdk": ">=0.4.17"
+  },
+  "bb": {
+    "name": "Margins",
+    "description": "Control a running Margins meeting from a bb thread.",
+    "branding": {
+      "icon": "Mic"
+    },
+    "server": "./server.ts",
+    "app": "./app.tsx",
+    "host": "./host.ts",
+    "skills": [
+      "skills"
+    ]
+  }
+}

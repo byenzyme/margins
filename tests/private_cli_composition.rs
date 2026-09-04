@@ -70,24 +70,6 @@ fn standalone_connection_routes_pin_file_credentials_without_indirect_keychain_f
 }
 
 #[test]
-fn production_source_add_help_exposes_granola_workspace_source() {
-    let temp = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_margins-private"))
-        .args(["source", "add", "--help"])
-        .env_clear()
-        .env("HOME", temp.path())
-        .env("MARGINS_HOME", temp.path().join("margins-home"))
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    assert!(output.stderr.is_empty());
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("granola"), "{stdout}");
-    assert!(stdout.contains("last_30_days"), "{stdout}");
-}
-
-#[test]
 fn production_capture_preflights_and_opens_native_lanes_before_session_reservation() {
     let composition = source("src/cli.rs");
     let interactive = composition

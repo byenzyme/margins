@@ -32,9 +32,6 @@ session, or draft a note as part of this workflow.
   list of changes. **Apply** commits only that plan.
 - **Init** and **sync** prepare recall. **Recall** proves that the declared Sources
   are useful and reachable.
-- Connected services, including Granola, are two-step: first authorize the
-  machine connection, then bind the account as a typed Workspace Source before
-  sync. A successful connection alone does not expand the Workspace boundary.
 
 All Margins state belongs under its own `workspaces/<id>/` state directory. Never
 create `.margins` inside a notes folder or rewrite the user's existing notes during
@@ -71,10 +68,6 @@ hosted lease at the start of a grounded review: the interpretation and consent
 conversation may take time, and a short-lived lease should begin as late as
 possible. If catalyst setup is needed, do it immediately before `init` as described
 below.
-
-Treat memories or transcripts from earlier setup attempts as hypotheses, never as
-evidence that the installed build still has the same behavior. Establish current
-behavior from this Workspace's scan, plan, init, sync, and recall results.
 
 If the report includes `recall.scan: true`, use the named Workspace and grounded
 review path. Also use that path when the practice has more than one Source. For one
@@ -115,23 +108,6 @@ can understand it; it does not silently add Sources. Do not run `init` or `sync`
 until the grounded review is settled, and do not run recall until after init and
 sync.
 
-If the user wants Granola in this Workspace, keep it on the same Source path
-rather than switching to file import:
-
-```bash
-margins connect status --service granola --json
-margins connect granola --account <account-email>
-margins --workspace practice source add granola \
-  --name granola --account <account-email> --time-range last_30_days
-margins --workspace practice source list --json
-```
-
-The status output should show the account as authorized before binding or sync.
-After binding, `sync`/reconcile fetches the connected account through the Granola
-connector. `margins import granola <export.json-or-csv>` is only for an offline
-export file the user already has; do not present it as the continuation for a
-successful OAuth/MCP connection.
-
 ## 4. Show the user an understanding, not scan output
 
 Read the complete saved `scan.v2` result. Use the evidence reference below so that
@@ -155,12 +131,6 @@ connections, but do not narrate schema fields or ranking mechanics. Ask: “Does
 match how you work, and what did it miss?” Reflect corrections back in the user's
 terms before deriving settings. A factual correction is not consent to change the
 Workspace.
-
-The user's opening request to “set up Margins,” “follow this guide end to end,” or
-otherwise complete setup authorizes this review workflow; it is not advance consent
-to settings you have not shown them yet. Pause here for their answer. Do not prepare,
-plan, or apply exclusions, attention, profiles, expansion, or Source changes in the
-same turn as the opening request.
 
 A healthy Workspace may need no setting change. It should still receive a rich
 interpretation and a real recall proof.
@@ -221,10 +191,6 @@ Only make settings the user consented to after seeing the current plan. Any
 fallback policy change requires a fresh desired config, a fresh plan, and fresh
 consent before apply.
 
-Never infer plan consent from the opening setup request, the instruction to follow
-this guide, or permission to work autonomously. Consent must be a later user reply
-to the concrete consequences of the current plan.
-
 If a correction changes only how the user describes the practice, keep it in the
 conversation and let it shape the recall proof. Do not manufacture a setting for
 something the Workspace cannot represent.
@@ -245,18 +211,6 @@ files to diagnose it. If setup still reports no usable catalyst, stop and report
 that readiness failure; do not run `init` repeatedly and do not install a different
 fallback policy without the user's consent.
 
-Provisioning can also persist a machine-level catalyst mode outside the Workspace.
-If you run `margins setup`, say so in the final state-change summary. Do not claim
-that only the Workspace state changed when setup created or changed machine-level
-Margins configuration.
-
-If `init` fails after an approved plan, preserve that approved policy while you
-report and diagnose the failure. Do not apply automatic attention, remove a
-profile, or try another policy as a diagnostic shortcut. Any such fallback is a
-new material setting: show a fresh plan and wait for fresh consent. A
-`live_lexical` status only confirms that an index exists; it does not establish
-that the recall command is usable when catalyst readiness is still pending.
-
 Then initialize and prove recall in this order:
 
 ```bash
@@ -268,17 +222,12 @@ margins --workspace practice recall "<distinctive phrase from research>" --sourc
 
 When possible, test both claims:
 
-- A distinctive phrase proves that a declared Source is reachable. Copy one
-  contiguous, verbatim phrase of roughly 5–10 words from the body of a scan-cited
-  note; do not substitute a title, filename, or bag of related keywords.
+- A distinctive phrase proves that a declared Source is reachable.
 - A question from the confirmed account tests whether Margins can support the
   understanding you presented.
 
 Verify that each result cites a real supporting note. If recall contradicts the
-account, revisit the interpretation rather than declaring success. A nearby semantic
-result is not an exact-phrase boundary proof: if the distinctive phrase does not
-retrieve the note containing it, report that proof as incomplete instead of
-silently substituting a different query or describing semantic recall as equivalent.
+account, revisit the interpretation rather than declaring success.
 
 Report the Workspace id and state path, its home and reference Sources, any approved
 attention or exclusion settings, the `init` and `sync` results, and at least one

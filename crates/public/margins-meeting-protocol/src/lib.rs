@@ -26,6 +26,9 @@ pub const PROTOCOL_VERSION_V1: u16 = 1;
 /// contract safe for browsers while retaining `u64` storage in Rust.
 pub const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
 
+/// V1 path prefix for the desktop live loopback API.
+pub const DESKTOP_LIVE_API_PREFIX_V1: &str = "/v1/live";
+
 /// A local, message-level V1 validation failure.
 ///
 /// Validation that needs durable session state (idempotency conflicts, prior
@@ -145,6 +148,9 @@ string_id!(/// Stable ID for a generated memo.
 string_id!(/// Stable ID for a generated artifact.
     ArtifactId);
 
+string_id!(/// Stable idempotency key for one live API write.
+    LiveOperationId);
+
 /// Milliseconds since the Unix epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -159,6 +165,242 @@ pub struct SessionMillis(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct DurationMillis(pub u64);
+
+/// Endpoint metadata written by the process that owns local meeting capture.
+///
+/// This is intentionally distinct from the hosted `margins-server` process.
+/// The token is only safe because the discovery file is written with private
+/// file permissions by the local runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesktopLiveDiscoveryV1 {
+    pub protocol_version: ProtocolVersionV1,
+    pub runtime: DesktopLiveRuntimeV1,
+    pub profile: String,
+    pub pid: u32,
+    pub base_url: String,
+    pub token: String,
+    pub permissions: DesktopLivePermissionsV1,
+    pub endpoints: DesktopLiveEndpointsV1,
+    pub generated_at_unix_ms: UnixMillis,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopLiveRuntimeV1 {
+    MarginsDesktop,
+    MarginsCli,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesktopLivePermissionsV1 {
+    pub loopback_only: bool,
+    pub private_file: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesktopLiveEndpointsV1 {
+    pub snapshot: String,
+    pub start: String,
+    pub pause: String,
+    pub resume: String,
+    pub stop: String,
+    pub append_memo: String,
+    pub update_notepad: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveSessionStatusV1 {
+    Idle,
+    Starting,
+    Recording,
+    Paused,
+    Finalizing,
+    NeedsAttention,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesktopLiveSnapshotV1 {
+    pub protocol_version: ProtocolVersionV1,
+    pub server_unix_ms: UnixMillis,
+    pub session: Option<DesktopLiveSessionV1>,
+    pub health: DesktopLiveHealthV1,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rolling_transcript: Vec<DesktopLiveTranscriptLineV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memo_lines: Vec<DesktopLiveMemoLineV1>,
+    /// Opaque identity for the complete timestamped memo behind `memo_lines`.
+    /// Clients send it back when replacing the visible notepad text so an old
+    /// browser view cannot silently overwrite newer notes.
+    pub notepad_revision: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesktopLiveSessionV1 {
+    pub session_id: SessionId,
+    pub status: LiveSessionStatusV1,
+    pub elapsed_ms: DurationMillis,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesktopLiveHealthV1 {
+    pub capture_phase: String,
+    pub tap_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tap_warning: Option<String>,
+    pub system_audio_expected: bool,
+    pub system_audio_observed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_freshness: Option<DesktopLiveTranscriptFreshnessV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesktopLiveTranscriptFreshnessV1 {
+    pub decoded_until_ms: DurationMillis,
+    pub committed_until_ms: DurationMillis,
+    pub updated_at_unix_ms: UnixMillis,
+    pub age_ms: DurationMillis,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesktopLiveTranscriptLineV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_ms: Option<SessionMillis>,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesktopLiveMemoLineV1 {
+    pub index: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_ms: Option<SessionMillis>,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesktopLiveStartRequestV1 {
+    pub operation_id: LiveOperationId,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+}
+
+impl DesktopLiveStartRequestV1 {
+    pub fn validate(&self) -> Result<(), ValidationErrorV1> {
+        validate_id("operation_id", self.operation_id.as_ref())?;
+        if self.name.trim().is_empty() {
+            Err(invalid("name", "must not be empty"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesktopLiveSessionRequestV1 {
+    pub operation_id: LiveOperationId,
+    pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_generation: Option<u64>,
+}
+
+impl DesktopLiveSessionRequestV1 {
+    pub fn validate(&self) -> Result<(), ValidationErrorV1> {
+        validate_id("operation_id", self.operation_id.as_ref())?;
+        validate_id("session_id", self.session_id.as_ref())?;
+        if let Some(generation) = self.expected_generation {
+            validate_json_integer("expected_generation", generation)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesktopLiveAppendMemoRequestV1 {
+    pub operation_id: LiveOperationId,
+    pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_generation: Option<u64>,
+    pub text: String,
+}
+
+impl DesktopLiveAppendMemoRequestV1 {
+    pub fn validate(&self) -> Result<(), ValidationErrorV1> {
+        validate_id("operation_id", self.operation_id.as_ref())?;
+        validate_id("session_id", self.session_id.as_ref())?;
+        if let Some(generation) = self.expected_generation {
+            validate_json_integer("expected_generation", generation)?;
+        }
+        if self.text.trim().is_empty() {
+            Err(invalid("text", "must not be empty"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesktopLiveUpdateNotepadRequestV1 {
+    pub operation_id: LiveOperationId,
+    pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_generation: Option<u64>,
+    pub expected_notepad_revision: String,
+    pub text: String,
+}
+
+impl DesktopLiveUpdateNotepadRequestV1 {
+    pub fn validate(&self) -> Result<(), ValidationErrorV1> {
+        validate_id("operation_id", self.operation_id.as_ref())?;
+        validate_id("session_id", self.session_id.as_ref())?;
+        if let Some(generation) = self.expected_generation {
+            validate_json_integer("expected_generation", generation)?;
+        }
+        validate_id("expected_notepad_revision", &self.expected_notepad_revision)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesktopLiveMutationResponseV1 {
+    pub protocol_version: ProtocolVersionV1,
+    pub idempotent_replay: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_session_id: Option<SessionId>,
+    pub snapshot: DesktopLiveSnapshotV1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopLiveErrorCodeV1 {
+    Unauthorized,
+    BadRequest,
+    NoActiveSession,
+    SessionMismatch,
+    GenerationMismatch,
+    NotepadChanged,
+    AlreadyRecording,
+    Busy,
+    NotReady,
+    Internal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesktopLiveErrorV1 {
+    pub code: DesktopLiveErrorCodeV1,
+    pub message: String,
+    pub retryable: bool,
+}
+
+impl DesktopLiveErrorV1 {
+    pub fn new(code: DesktopLiveErrorCodeV1, message: impl Into<String>, retryable: bool) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            retryable,
+        }
+    }
+}
 
 /// A client-to-runtime message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

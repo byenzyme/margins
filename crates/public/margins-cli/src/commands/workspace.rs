@@ -1,4 +1,4 @@
-use crate::args::{GranolaTimeRangeArg, SourceKindArg, SourceRoleArg};
+use crate::args::{SourceKindArg, SourceRoleArg};
 use crate::error::CliError;
 use anyhow::Context;
 use margins_workflows::catalyst::{selected_status, CatalystStatus};
@@ -273,7 +273,6 @@ pub fn add_source(
     backfill_days: Option<u32>,
     lookback_days: Option<u32>,
     lookahead_days: Option<u32>,
-    time_range: Option<GranolaTimeRangeArg>,
     json: bool,
     stdout: &mut dyn Write,
     _stderr: &mut dyn Write,
@@ -286,7 +285,6 @@ pub fn add_source(
         kind,
         SourceKind::GoogleMail | SourceKind::GoogleCalendar | SourceKind::GoogleMeet
     );
-    let granola_kind = kind == SourceKind::Granola;
     if path.is_some() && !local_path_kind {
         return Err(CliError::new(
             "invalid_source_flags",
@@ -299,10 +297,10 @@ pub fn add_source(
             "--role applies only to notes sources",
         ));
     }
-    if account.is_some() && !(google_kind || granola_kind) {
+    if account.is_some() && !google_kind {
         return Err(CliError::new(
             "invalid_source_flags",
-            "--account applies only to Google and Granola sources",
+            "--account applies only to Google sources",
         ));
     }
     if (query.is_some() || backfill_days.is_some()) && kind != SourceKind::GoogleMail {
@@ -317,12 +315,6 @@ pub fn add_source(
             "--lookback-days and --lookahead-days apply only to google-calendar sources",
         ));
     }
-    if time_range.is_some() && kind != SourceKind::Granola {
-        return Err(CliError::new(
-            "invalid_granola_flags",
-            "--time-range applies only to granola sources",
-        ));
-    }
     let path = path
         .map(|path| {
             if path.is_absolute() {
@@ -332,18 +324,11 @@ pub fn add_source(
             }
         })
         .map(|path| path.canonicalize().unwrap_or(path));
-    let account = if google_kind || granola_kind {
-        if granola_kind {
-            account
-                .map(workspace::normalize_granola_account)
-                .transpose()
-                .map_err(CliError::from_anyhow)?
-        } else {
-            account
-                .map(workspace::normalize_google_account)
-                .transpose()
-                .map_err(CliError::from_anyhow)?
-        }
+    let account = if google_kind {
+        account
+            .map(workspace::normalize_google_account)
+            .transpose()
+            .map_err(CliError::from_anyhow)?
     } else {
         None
     };
@@ -400,19 +385,6 @@ pub fn add_source(
             account: account
                 .with_context(|| "google-meet sources require --account")
                 .map_err(CliError::from_anyhow)?,
-        },
-        SourceKind::Granola => WorkspaceBinding::Granola {
-            account: account
-                .with_context(|| "granola sources require --account")
-                .map_err(CliError::from_anyhow)?,
-            collection: margins_workflows::workspace::GranolaCollectionSelector {
-                time_range: match time_range.unwrap_or(GranolaTimeRangeArg::Last30Days) {
-                    GranolaTimeRangeArg::Last30Days => {
-                        margins_workflows::workspace::GranolaTimeRange::Last30Days
-                    }
-                },
-                workspace_only: false,
-            },
         },
     };
     workspace::add_source(&mut workspace, name, binding).map_err(CliError::from_anyhow)?;
@@ -602,7 +574,6 @@ fn source_kind(kind: SourceKindArg) -> SourceKind {
         SourceKindArg::GoogleMail => SourceKind::GoogleMail,
         SourceKindArg::GoogleCalendar => SourceKind::GoogleCalendar,
         SourceKindArg::GoogleMeet => SourceKind::GoogleMeet,
-        SourceKindArg::Granola => SourceKind::Granola,
     }
 }
 

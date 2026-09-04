@@ -35,10 +35,10 @@ pub use google_native::{
 };
 pub use granola_native::{
     connect_granola_account, fetch_granola_import_batch, granola_failure_info,
-    list_granola_accounts, sync_granola_binding, GranolaAccountStore, GranolaConnectionMetadata,
-    GranolaConnectionReady, GranolaCredentialBackendKind, GranolaFailureInfo,
-    GranolaMcpImportBatch, GranolaNativeError, GranolaOAuthMode, GranolaOAuthPresenter,
-    GRANOLA_CONNECTOR_ID, GRANOLA_MCP_URL, GRANOLA_PROTECTED_RESOURCE_METADATA_URL,
+    list_granola_accounts, GranolaAccountStore, GranolaConnectionMetadata, GranolaConnectionReady,
+    GranolaCredentialBackendKind, GranolaFailureInfo, GranolaMcpImportBatch, GranolaNativeError,
+    GranolaOAuthMode, GranolaOAuthPresenter, GRANOLA_MCP_URL,
+    GRANOLA_PROTECTED_RESOURCE_METADATA_URL,
 };
 pub use importer::Importer;
 pub use store::{apply_retention, preview_retention, IntegrationsStore};

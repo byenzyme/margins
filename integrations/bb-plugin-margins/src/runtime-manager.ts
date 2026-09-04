@@ -1,0 +1,287 @@
+import { createHash } from "node:crypto";
+import { execFile as execFileCallback, spawn as spawnChild } from "node:child_process";
+import {
+  chmod,
+  copyFile,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { homedir, platform } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
+
+const execFile = promisify(execFileCallback);
+
+export const RUNTIME_RELEASE_VERSION = "0.4.9";
+const RELEASE_API = `https://api.github.com/repos/byenzyme/margins/releases/tags/v${RUNTIME_RELEASE_VERSION}`;
+const MAX_ARCHIVE_BYTES = 128 * 1024 * 1024;
+
+export type RuntimeStartResult = "started" | "not_found" | "unsupported" | "update_needed";
+
+interface ReleaseAsset {
+  name?: unknown;
+  browser_download_url?: unknown;
+  digest?: unknown;
+  size?: unknown;
+}
+
+interface RuntimeManagerOptions {
+  env?: NodeJS.ProcessEnv;
+  fetchImpl?: typeof fetch;
+  homeDir?: string;
+  platform?: NodeJS.Platform;
+  arch?: string;
+  spawn?: typeof spawnChild;
+  execFile?: typeof execFile;
+}
+
+function targetName(hostPlatform: NodeJS.Platform, arch: string) {
+  if (hostPlatform === "darwin" && arch === "arm64") return "aarch64-apple-darwin";
+  return null;
+}
+
+function executableNames() {
+  return ["margins", "margins-live"] as const;
+}
+
+async function isRegularExecutable(path: string) {
+  try {
+    const stat = await lstat(path);
+    return stat.isFile() && !stat.isSymbolicLink() && (stat.mode & 0o111) !== 0;
+  } catch {
+    return false;
+  }
+}
+
+function sha256(bytes: Uint8Array) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function selectAsset(raw: unknown, expectedName: string) {
+  if (typeof raw !== "object" || raw === null) return null;
+  const assets = (raw as { assets?: unknown }).assets;
+  if (!Array.isArray(assets)) return null;
+  const asset = assets.find(
+    (candidate): candidate is ReleaseAsset =>
+      typeof candidate === "object" &&
+      candidate !== null &&
+      (candidate as ReleaseAsset).name === expectedName,
+  );
+  if (
+    !asset ||
+    typeof asset.browser_download_url !== "string" ||
+    typeof asset.digest !== "string" ||
+    !/^sha256:[a-f0-9]{64}$/.test(asset.digest) ||
+    typeof asset.size !== "number" ||
+    !Number.isSafeInteger(asset.size) ||
+    asset.size <= 0 ||
+    asset.size > MAX_ARCHIVE_BYTES
+  ) {
+    return null;
+  }
+  let url: URL;
+  try {
+    url = new URL(asset.browser_download_url);
+  } catch {
+    return null;
+  }
+  if (
+    url.protocol !== "https:" ||
+    url.hostname !== "github.com" ||
+    !url.pathname.startsWith(
+      `/byenzyme/margins/releases/download/v${RUNTIME_RELEASE_VERSION}/`,
+    )
+  ) {
+    return null;
+  }
+  return {
+    url: url.toString(),
+    digest: asset.digest.slice("sha256:".length),
+    size: asset.size,
+  };
+}
+
+async function downloadPinnedArchive(
+  fetchImpl: typeof fetch,
+  expectedName: string,
+  signal?: AbortSignal,
+) {
+  const release = await fetchImpl(RELEASE_API, {
+    signal,
+    headers: { accept: "application/vnd.github+json", "user-agent": "bb-plugin-margins" },
+  });
+  if (release.status === 404) return null;
+  if (!release.ok) throw new Error(`release lookup failed (${release.status})`);
+  const asset = selectAsset(await release.json(), expectedName);
+  if (!asset) throw new Error(`release v${RUNTIME_RELEASE_VERSION} has no verified ${expectedName}`);
+
+  const response = await fetchImpl(asset.url, { signal, redirect: "follow" });
+  if (!response.ok) throw new Error(`runtime download failed (${response.status})`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength !== asset.size) {
+    throw new Error(`runtime download was incomplete (${bytes.byteLength} of ${asset.size} bytes)`);
+  }
+  const observed = sha256(bytes);
+  if (observed !== asset.digest) throw new Error("runtime download did not match its release digest");
+  return bytes;
+}
+
+async function replaceManagedBinary(source: string, destination: string) {
+  const marker = `${destination}.bb-margins-managed`;
+  const exists = await lstat(destination).catch(() => null);
+  if (exists) {
+    const managed = await readFile(marker, "utf8")
+      .then((value) => value.startsWith("managed-by=bb-plugin-margins\n"))
+      .catch(() => false);
+    if (!managed) {
+      throw new Error(`${destination} already exists and was not installed by the Margins bb plugin`);
+    }
+  }
+  const temp = `${destination}.tmp-${process.pid}-${Date.now()}`;
+  await copyFile(source, temp);
+  await chmod(temp, 0o755);
+  await rename(temp, destination);
+  await writeFile(
+    marker,
+    `managed-by=bb-plugin-margins\nversion=${RUNTIME_RELEASE_VERSION}\n`,
+    { mode: 0o600 },
+  );
+}
+
+async function copyRuntimeBinary(source: string, destination: string) {
+  const temp = `${destination}.tmp-${process.pid}-${Date.now()}`;
+  await copyFile(source, temp);
+  await chmod(temp, 0o755);
+  await rename(temp, destination);
+}
+
+async function hasLiveProtocol(path: string, execFileImpl: typeof execFile) {
+  if (!(await isRegularExecutable(path))) return false;
+  try {
+    const { stdout } = await execFileImpl(path, ["capabilities"], {
+      timeout: 5_000,
+      maxBuffer: 1024 * 1024,
+    });
+    const report = JSON.parse(stdout) as Record<string, unknown>;
+    return (
+      report.schema === 1 &&
+      report.product === "margins-live" &&
+      report.protocol_version === 1 &&
+      report.recording === true &&
+      report.editable_notepad === true
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function installRuntime(input: {
+  archive: Uint8Array;
+  dataDir: string;
+  runtimeBinDir: string;
+  cliBinDir: string;
+  execFileImpl: typeof execFile;
+  signal?: AbortSignal;
+}) {
+  await mkdir(input.dataDir, { recursive: true });
+  await mkdir(input.runtimeBinDir, { recursive: true });
+  const tempDir = await mkdtemp(join(input.dataDir, "install-"));
+  try {
+    const archivePath = join(tempDir, "margins.tar.gz");
+    const unpacked = join(tempDir, "unpacked");
+    await mkdir(unpacked);
+    await writeFile(archivePath, input.archive, { mode: 0o600 });
+    await input.execFileImpl("/usr/bin/tar", ["-xzf", archivePath, "-C", unpacked], {
+      signal: input.signal,
+    });
+    for (const name of executableNames()) {
+      const source = join(unpacked, name);
+      const stat = await lstat(source).catch(() => null);
+      if (!stat?.isFile() || stat.isSymbolicLink()) {
+        throw new Error(`the Margins release did not contain a regular ${name} executable`);
+      }
+      await copyRuntimeBinary(source, join(input.runtimeBinDir, name));
+    }
+
+    // Make the normal command available to agents and shells when that path is
+    // free or already belongs to this plugin. An existing Margins command is
+    // left alone; an unrelated command is never overwritten.
+    await mkdir(input.cliBinDir, { recursive: true });
+    const cliDestination = join(input.cliBinDir, "margins");
+    const cliExists = await lstat(cliDestination).catch(() => null);
+    const pluginManaged = await readFile(`${cliDestination}.bb-margins-managed`, "utf8")
+      .then((value) => value.startsWith("managed-by=bb-plugin-margins\n"))
+      .catch(() => false);
+    if (!cliExists || pluginManaged) {
+      await replaceManagedBinary(join(unpacked, "margins"), cliDestination);
+    }
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+}
+
+function startDetached(
+  runtimePath: string,
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  spawnImpl: typeof spawnChild,
+) {
+  const child = spawnImpl(runtimePath, [], {
+    cwd,
+    env,
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+}
+
+export function createRuntimeManager(options: RuntimeManagerOptions = {}) {
+  const env = options.env ?? process.env;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const home = options.homeDir ?? homedir();
+  const hostPlatform = options.platform ?? platform();
+  const hostArch = options.arch ?? process.arch;
+  const spawnImpl = options.spawn ?? spawnChild;
+  const execFileImpl = options.execFile ?? execFile;
+
+  return {
+    async ensure(input: { dataDir: string; signal?: AbortSignal }): Promise<RuntimeStartResult> {
+      if (env.MARGINS_LIVE_API_URL?.trim() && env.MARGINS_LIVE_API_TOKEN?.trim()) {
+        return "started";
+      }
+      const cliBinDir = env.MARGINS_CLI_BIN_DIR?.trim() || join(home, ".local", "bin");
+      const runtimeBinDir = join(input.dataDir, "runtime", `v${RUNTIME_RELEASE_VERSION}`);
+      const configuredRuntime = env.MARGINS_LIVE_RUNTIME_PATH?.trim();
+      const runtimePath = configuredRuntime || join(runtimeBinDir, "margins-live");
+
+      if (!(await hasLiveProtocol(runtimePath, execFileImpl))) {
+        if (configuredRuntime) return "not_found";
+        const target = targetName(hostPlatform, hostArch);
+        if (!target) return "unsupported";
+        const expectedName = `margins-${RUNTIME_RELEASE_VERSION}-${target}.tar.gz`;
+        const archive = await downloadPinnedArchive(fetchImpl, expectedName, input.signal);
+        if (!archive) return "update_needed";
+        await installRuntime({
+          archive,
+          dataDir: input.dataDir,
+          runtimeBinDir,
+          cliBinDir,
+          execFileImpl,
+          signal: input.signal,
+        });
+      }
+
+      const selected = configuredRuntime || join(runtimeBinDir, "margins-live");
+      if (!(await hasLiveProtocol(selected, execFileImpl))) return "not_found";
+      startDetached(selected, env, home, spawnImpl);
+      return "started";
+    },
+  };
+}
+
+export const runtimeManagerInternals = { hasLiveProtocol, selectAsset, sha256, targetName };

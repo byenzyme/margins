@@ -34,9 +34,8 @@ use margins_workflows::integrations::{
     GOOGLE_MEET_MATERIALIZATION_FINGERPRINT,
 };
 use margins_workflows::workspace::{
-    calendar_collection_namespace, gmail_collection_namespace, granola_collection_namespace,
-    meet_collection_namespace, native_markdown_collection_namespace, ResolvedWorkspace, SourceKind,
-    WorkspaceBinding,
+    calendar_collection_namespace, gmail_collection_namespace, meet_collection_namespace,
+    native_markdown_collection_namespace, ResolvedWorkspace, SourceKind, WorkspaceBinding,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
@@ -50,9 +49,8 @@ const USEFULNESS_THRESHOLD: usize = 5;
 /// command flag-free.
 const RESULT_LIMIT: usize = 8;
 /// Cap on entities given thematic bridges per build, to bound LLM spend. Recall
-/// generates bridges for the most frequent entities. A bounded literal phrase
-/// lookup remains available across the declared document boundary so curation
-/// cannot make indexed Sources unreachable.
+/// generates bridges for the most frequent entities. Content outside those
+/// curated entities is intentionally not exposed through raw-content search.
 const MAX_BRIDGED_ENTITIES: usize = crate::workspace_recall::ENGINE_ENTITY_LIMIT;
 
 pub fn workspace_source_refresh_staleness(
@@ -106,18 +104,6 @@ pub fn workspace_source_refresh_staleness(
                         "google_meet",
                         account.as_str(),
                         Ok(GOOGLE_MEET_MATERIALIZATION_FINGERPRINT.to_string()),
-                        Ok(None),
-                    )),
-                )),
-                WorkspaceBinding::Granola {
-                    account,
-                    collection,
-                } => Some((
-                    granola_collection_namespace(account),
-                    Some((
-                        "granola",
-                        account.as_str(),
-                        collection.materialization_fingerprint(),
                         Ok(None),
                     )),
                 )),
@@ -396,8 +382,8 @@ fn recall_results_for_workspace(
         .collect()
 }
 
-/// Search primarily through generated thematic bridges, while preserving a
-/// bounded literal phrase path across the full declared document boundary.
+/// Search only through generated thematic bridges. Raw content, literal, and
+/// embedding fallback paths are intentionally absent from shipped product code.
 fn search_index(
     workspace: &ResolvedWorkspace,
     index: &SearchIndex,
@@ -416,7 +402,7 @@ fn search_index(
     match index.bridged {
         Bridged::Ready => {
             let response = index.catalyst_search_response(query, search_limit)?;
-            let catalyst_hits = response
+            let hits = response
                 .results
                 .into_iter()
                 .map(|hit| RecallHit {
@@ -426,80 +412,19 @@ fn search_index(
                     via_catalyst_id: hit.via_catalyst_id,
                     via_catalyst_text: hit.via_catalyst_text,
                 })
-                .collect::<Vec<_>>();
-            let exact_hits = if is_distinctive_phrase(query) {
-                index
-                    .exact_phrase_search(query, search_limit)?
-                    .into_iter()
-                    .filter(|hit| native_markdown_hit(workspace, &hit.path))
-                    .map(|hit| RecallHit {
-                        path: hit.path,
-                        score: hit.score,
-                        content: hit.content,
-                        via_catalyst_id: None,
-                        via_catalyst_text: None,
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            let exact_hits = filter_recall_hits(workspace, exact_hits, source_filter);
-            let catalyst_hits = filter_recall_hits(workspace, catalyst_hits, source_filter);
-            let hits = merge_exact_and_catalyst_hits(exact_hits, catalyst_hits);
+                .collect();
             debug_strategy("catalyst");
             Ok((
                 "ok",
                 "catalyst",
                 "catalyze",
-                hits,
+                filter_recall_hits(workspace, hits, source_filter),
                 response.top_contributing_catalysts,
             ))
         }
         Bridged::NoGenerator => anyhow::bail!(RECALL_UNAVAILABLE_MESSAGE),
         Bridged::NoEntities => Ok(("ok", "no_entities", "catalyze", Vec::new(), Vec::new())),
     }
-}
-
-fn is_distinctive_phrase(query: &str) -> bool {
-    let query = query.trim();
-    query.len() >= 12 && query.split_whitespace().count() >= 3
-}
-
-fn native_markdown_hit(workspace: &ResolvedWorkspace, document_ref: &str) -> bool {
-    source_name_for_document_ref(workspace, document_ref).is_some_and(|source| {
-        matches!(
-            workspace.config.bindings.get(&source),
-            Some(WorkspaceBinding::NativeMarkdown { .. })
-        )
-    })
-}
-
-fn merge_exact_and_catalyst_hits(
-    exact_hits: Vec<RecallHit>,
-    mut catalyst_hits: Vec<RecallHit>,
-) -> Vec<RecallHit> {
-    let mut exact_paths = BTreeSet::new();
-    let mut merged = Vec::new();
-    for exact in exact_hits {
-        if !exact_paths.insert(exact.path.clone()) {
-            continue;
-        }
-        if let Some(index) = catalyst_hits
-            .iter()
-            .position(|candidate| candidate.path == exact.path)
-        {
-            merged.push(catalyst_hits.remove(index));
-        } else {
-            merged.push(exact);
-        }
-    }
-    merged.extend(
-        catalyst_hits
-            .into_iter()
-            .filter(|hit| !exact_paths.contains(&hit.path)),
-    );
-    merged.truncate(RESULT_LIMIT);
-    merged
 }
 
 fn filter_recall_hits(
@@ -585,24 +510,6 @@ fn catalog_entry_for_document_ref(
                     });
                 }
             }
-            WorkspaceBinding::Granola { account, .. } => {
-                if document_ref_source_matches(
-                    document_ref,
-                    &granola_collection_namespace(account)?,
-                ) {
-                    let source_id = sqlite_document_ref_source_id(document_ref);
-                    return Ok(CatalogEntry {
-                        source: name.clone(),
-                        kind: binding.kind(),
-                        evidence: external_evidence_for_hit(
-                            workspace,
-                            "granola",
-                            account,
-                            source_id.as_deref(),
-                        )?,
-                    });
-                }
-            }
             WorkspaceBinding::Captures { .. } => {}
         }
     }
@@ -640,10 +547,6 @@ fn source_name_for_document_ref(
                 WorkspaceBinding::GoogleMeet { account } => document_ref_source_matches(
                     document_ref,
                     &meet_collection_namespace(account).ok()?,
-                ),
-                WorkspaceBinding::Granola { account, .. } => document_ref_source_matches(
-                    document_ref,
-                    &granola_collection_namespace(account).ok()?,
                 ),
                 WorkspaceBinding::Captures { .. } => false,
             };
@@ -702,7 +605,7 @@ fn lookup_external_href(
     let table = match connector_id {
         "email" => "thread_evidence",
         "gcal" => "calendar_event_evidence",
-        "google_meet" | "granola" => "external_document_evidence",
+        "google_meet" => "external_document_evidence",
         _ => return Ok(None),
     };
     let id_column = if connector_id == "email" {
@@ -1103,10 +1006,7 @@ fn index_freshness(corpus: &WorkspaceCorpus, index: &SearchIndex) -> Result<Evid
 fn source_kind_has_ledger_corpus(kind: SourceKind) -> bool {
     matches!(
         kind,
-        SourceKind::GoogleMail
-            | SourceKind::GoogleCalendar
-            | SourceKind::GoogleMeet
-            | SourceKind::Granola
+        SourceKind::GoogleMail | SourceKind::GoogleCalendar | SourceKind::GoogleMeet
     )
 }
 
@@ -1192,15 +1092,6 @@ fn materialization_freshness(
                     "google_meet",
                     account,
                     Some(Ok(GOOGLE_MEET_MATERIALIZATION_FINGERPRINT.to_string())),
-                    Ok(None),
-                ),
-                WorkspaceBinding::Granola {
-                    account,
-                    collection,
-                } => (
-                    "granola",
-                    account,
-                    Some(collection.materialization_fingerprint()),
                     Ok(None),
                 ),
                 _ => return None,
