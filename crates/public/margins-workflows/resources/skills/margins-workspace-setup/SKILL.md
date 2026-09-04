@@ -32,9 +32,6 @@ session, or draft a note as part of this workflow.
   list of changes. **Apply** commits only that plan.
 - **Init** and **sync** prepare recall. **Recall** proves that the declared Sources
   are useful and reachable.
-- Connected services, including Granola, are two-step: first authorize the
-  machine connection, then bind the account as a typed Workspace Source before
-  sync. A successful connection alone does not expand the Workspace boundary.
 
 All Margins state belongs under its own `workspaces/<id>/` state directory. Never
 create `.margins` inside a notes folder or rewrite the user's existing notes during
@@ -114,23 +111,6 @@ Source declarations define the full recall boundary. Scan examines the home so y
 can understand it; it does not silently add Sources. Do not run `init` or `sync`
 until the grounded review is settled, and do not run recall until after init and
 sync.
-
-If the user wants Granola in this Workspace, keep it on the same Source path
-rather than switching to file import:
-
-```bash
-margins connect status --service granola --json
-margins connect granola --account <account-email>
-margins --workspace practice source add granola \
-  --name granola --account <account-email> --time-range last_30_days
-margins --workspace practice source list --json
-```
-
-The status output should show the account as authorized before binding or sync.
-After binding, `sync`/reconcile fetches the connected account through the Granola
-connector. `margins import granola <export.json-or-csv>` is only for an offline
-export file the user already has; do not present it as the continuation for a
-successful OAuth/MCP connection.
 
 ## 4. Show the user an understanding, not scan output
 

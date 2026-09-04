@@ -15,6 +15,32 @@ use walkdir::{DirEntry, WalkDir};
 
 const MAX_DOCUMENT_BYTES: u64 = 2 * 1024 * 1024;
 const DEFAULT_RESULT_LIMIT: usize = 12;
+// Keep this portable baseline aligned with the official engine's built-in
+// discovery exclusions. The richer engine can index non-Markdown Sources too,
+// so an official runtime must still report its persisted index count directly.
+const DEFAULT_EXCLUDED_NAMES: &[&str] = &[
+    ".agents",
+    ".claude",
+    ".codex",
+    ".codex-work",
+    ".conversations",
+    ".enzyme",
+    ".enzyme-embeddings",
+    ".git",
+    ".hermes",
+    ".local",
+    ".margins",
+    ".obsidian",
+    ".pi",
+    ".trash",
+    "__pycache__",
+    "build",
+    "dist",
+    "enzyme-config.yaml",
+    "enzyme_guide.md",
+    "node_modules",
+    "target",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LocalRecallStatus {
@@ -160,9 +186,9 @@ fn discover_documents(
             .map(|folder| folder.trim().to_lowercase())
             .filter(|folder| !folder.is_empty())
             .chain(
-                [".git", ".margins", ".enzyme", "node_modules"]
-                    .into_iter()
-                    .map(str::to_string),
+                DEFAULT_EXCLUDED_NAMES
+                    .iter()
+                    .map(|name| (*name).to_string()),
             )
             .collect::<BTreeSet<_>>();
         for entry in WalkDir::new(root)
@@ -282,6 +308,8 @@ mod tests {
         let notes = temp.path().join("notes");
         std::fs::create_dir_all(notes.join("projects")).unwrap();
         std::fs::create_dir_all(notes.join("templates")).unwrap();
+        std::fs::create_dir_all(notes.join(".agents/runs")).unwrap();
+        std::fs::create_dir_all(notes.join(".trash")).unwrap();
         std::fs::write(
             notes.join("projects/atlas.md"),
             "# Atlas\nThe phosphorescent handoff preserves the decision boundary.\n",
@@ -290,6 +318,21 @@ mod tests {
         std::fs::write(
             notes.join("templates/meeting.md"),
             "phosphorescent handoff should stay excluded",
+        )
+        .unwrap();
+        std::fs::write(
+            notes.join(".agents/runs/transcript.md"),
+            "phosphorescent handoff should stay structurally excluded",
+        )
+        .unwrap();
+        std::fs::write(
+            notes.join(".trash/deleted.md"),
+            "phosphorescent handoff should stay structurally excluded",
+        )
+        .unwrap();
+        std::fs::write(
+            notes.join("ENZYME_GUIDE.md"),
+            "phosphorescent handoff should stay structurally excluded",
         )
         .unwrap();
         let mut workspace = create_workspace(&margins_home, "practice", None, &notes).unwrap();
@@ -306,6 +349,7 @@ mod tests {
             .document_ref
             .ends_with("projects/atlas.md"));
         assert_eq!(output.results[0].evidence.kind, "native_markdown");
+        assert_eq!(status(&workspace).unwrap().documents, 1);
     }
 
     #[test]

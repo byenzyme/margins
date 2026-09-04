@@ -625,39 +625,6 @@ impl IntegrationsStore {
         Ok(updated)
     }
 
-    /// Mark materialized Granola snapshots unavailable for refresh after their
-    /// machine credential is explicitly forgotten. This updates only existing
-    /// connector rows and preserves the last successful sync timestamp.
-    pub fn mark_granola_connection_needs_auth(&self, account: &str) -> Result<usize> {
-        let mut connection = self.connect()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .context("failed to begin Granola connection health transaction")?;
-        let updated = tx
-            .execute(
-                r#"
-                UPDATE connectors
-                SET health_status = 'needs-auth',
-                    health_detail_json = ?1,
-                    updated_at = ?2
-                WHERE account = ?3
-                  AND connector_id = 'granola'
-                "#,
-                params![
-                    serde_json::json!({
-                        "detail": "machine Granola connection was forgotten"
-                    })
-                    .to_string(),
-                    Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
-                    account
-                ],
-            )
-            .context("failed to mark Granola connector health needs-auth")?;
-        tx.commit()
-            .context("failed to commit Granola connection health transaction")?;
-        Ok(updated)
-    }
-
     pub fn health_report(&self, ctx: &ConnectorCtx) -> Result<HealthReport> {
         let connection = self.connect()?;
         let row: Option<(String, Option<String>, Option<String>)> = connection
@@ -3207,22 +3174,6 @@ mod tests {
         assert_eq!(
             store.health_report(&granola).unwrap().status,
             HealthStatus::Fresh
-        );
-        assert_eq!(
-            store.health_report(&unrelated).unwrap().status,
-            HealthStatus::Fresh
-        );
-
-        assert_eq!(
-            store.mark_granola_connection_needs_auth(account).unwrap(),
-            1
-        );
-        let report = store.health_report(&granola).unwrap();
-        assert_eq!(report.status, HealthStatus::NeedsAuth);
-        assert_eq!(report.last_successful_sync, last_successful);
-        assert_eq!(
-            report.detail.as_deref(),
-            Some("machine Granola connection was forgotten")
         );
         assert_eq!(
             store.health_report(&unrelated).unwrap().status,

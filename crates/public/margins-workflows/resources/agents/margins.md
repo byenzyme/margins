@@ -13,11 +13,9 @@ margins ls
 margins recent
 margins transcript <meeting-id>
 margins transcribe <audio-file> --name <session-name> --memo <memo.md> --speakers 1
+margins import granola <export.json-or-csv>
 margins connect status --service granola --json
 margins connect granola --headless --account <bound-account-email> --json
-margins --workspace <id> source add granola --name granola --account <bound-account-email> --time-range last_30_days
-margins --workspace <id> sync --json
-margins import granola <export.json-or-csv>  # offline export only, not the OAuth continuation
 margins recall "<query>"
 ```
 

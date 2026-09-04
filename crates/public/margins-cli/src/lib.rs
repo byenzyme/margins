@@ -193,7 +193,6 @@ fn run_inner(
                     backfill_days,
                     lookback_days,
                     lookahead_days,
-                    time_range,
                     json,
                 },
         }) => {
@@ -209,7 +208,6 @@ fn run_inner(
                 backfill_days,
                 lookback_days,
                 lookahead_days,
-                time_range,
                 json,
                 stdout,
                 stderr,

@@ -239,13 +239,6 @@ pub enum SourceKindArg {
     GoogleMail,
     GoogleCalendar,
     GoogleMeet,
-    Granola,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum GranolaTimeRangeArg {
-    #[value(name = "last_30_days")]
-    Last30Days,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -283,9 +276,6 @@ pub enum SourceCommand {
         /// Calendar future lookahead window in days (google-calendar only)
         #[arg(long)]
         lookahead_days: Option<u32>,
-        /// Granola bounded collection window (granola only)
-        #[arg(long)]
-        time_range: Option<GranolaTimeRangeArg>,
         /// Emit machine-readable output
         #[arg(long)]
         json: bool,

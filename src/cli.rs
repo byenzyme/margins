@@ -969,9 +969,14 @@ fn run_workspace_status(selector: Option<&str>) -> i32 {
                 return report_error(&format!("reading recall source freshness: {error:#}"))
             }
         };
+    let recall = match crate::recall::workspace_status_recall(&workspace) {
+        Ok(status) => status,
+        Err(error) => return report_error(&format!("reading recall index status: {error:#}")),
+    };
     match margins_cli::commands::workspace::render_status(
         &workspace,
         true,
+        recall,
         &source_refresh_staleness,
         &mut io::stdout(),
     ) {

@@ -70,24 +70,6 @@ fn standalone_connection_routes_pin_file_credentials_without_indirect_keychain_f
 }
 
 #[test]
-fn production_source_add_help_exposes_granola_workspace_source() {
-    let temp = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_margins-private"))
-        .args(["source", "add", "--help"])
-        .env_clear()
-        .env("HOME", temp.path())
-        .env("MARGINS_HOME", temp.path().join("margins-home"))
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    assert!(output.stderr.is_empty());
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("granola"), "{stdout}");
-    assert!(stdout.contains("last_30_days"), "{stdout}");
-}
-
-#[test]
 fn production_capture_preflights_and_opens_native_lanes_before_session_reservation() {
     let composition = source("src/cli.rs");
     let interactive = composition
@@ -999,10 +981,14 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
         .output()
         .unwrap();
     assert!(status.status.success());
-    let revision = serde_json::from_slice::<serde_json::Value>(&status.stdout).unwrap()["revision"]
-        .as_str()
+    let status_json = serde_json::from_slice::<serde_json::Value>(&status.stdout).unwrap();
+    let indexed_documents: i64 = rusqlite::Connection::open(workspace.recall_path())
         .unwrap()
-        .to_string();
+        .query_row("SELECT COUNT(*) FROM docs", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(status_json["recall"]["mode"], "indexed");
+    assert_eq!(status_json["recall"]["documents"], indexed_documents);
+    let revision = status_json["revision"].as_str().unwrap().to_string();
 
     let preview = Command::new(env!("CARGO_BIN_EXE_margins-private"))
         .args([

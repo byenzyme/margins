@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use margins_workflows::integrations::{EvidenceHandle, GoogleCalendarScope};
 use margins_workflows::workspace::{
-    calendar_collection_namespace, gmail_collection_namespace, granola_collection_namespace,
-    meet_collection_namespace, native_markdown_collection_namespace, ResolvedWorkspace, SourceKind,
-    SourceRole, WorkspaceBinding, WorkspaceEntity, WorkspaceEntityOptions,
+    calendar_collection_namespace, gmail_collection_namespace, meet_collection_namespace,
+    native_markdown_collection_namespace, ResolvedWorkspace, SourceKind, SourceRole,
+    WorkspaceBinding, WorkspaceEntity, WorkspaceEntityOptions,
 };
 use recall_engine::config::NotesRootConfig;
 use recall_engine::document::{DiscoveredFile, FileDiscovery};
@@ -211,23 +211,6 @@ pub(crate) fn prepare(
                     ),
                 );
             }
-            WorkspaceBinding::Granola { account, .. } => {
-                if !workspace.ledger_path().is_file() {
-                    continue;
-                }
-                let source_name = granola_collection_namespace(account)?;
-                sqlite_sources.insert(source_name.clone(), workspace.ledger_path());
-                sources.insert(
-                    source_name.clone(),
-                    external_document_sqlite_source(
-                        &workspace.ledger_path(),
-                        "granola",
-                        account,
-                        &source_name,
-                        None,
-                    ),
-                );
-            }
             _ => {}
         }
     }
@@ -243,7 +226,6 @@ pub(crate) fn prepare(
             WorkspaceBinding::Gmail { .. }
                 | WorkspaceBinding::GoogleCalendar { .. }
                 | WorkspaceBinding::GoogleMeet { .. }
-                | WorkspaceBinding::Granola { .. }
         )
     });
     if has_ledger_source && entity_policy.entities.is_empty() {
@@ -1017,10 +999,6 @@ fn external_document_ref(
             &meet_collection_namespace(account)?,
             id,
         )),
-        WorkspaceBinding::Granola { account, .. } => Ok(sqlite_exact_document_ref(
-            &granola_collection_namespace(account)?,
-            id,
-        )),
         _ => anyhow::bail!("binding {binding_name:?} has no external evidence document ref"),
     }
 }
@@ -1043,9 +1021,6 @@ fn binding_matches_external_document(
         WorkspaceBinding::GoogleMeet { account: declared } => {
             connector == "google_meet" && declared == account
         }
-        WorkspaceBinding::Granola {
-            account: declared, ..
-        } => connector == "granola" && declared == account,
         _ => false,
     }
 }

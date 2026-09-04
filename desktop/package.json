@@ -1,7 +1,7 @@
 {
   "name": "margins-desktop",
   "private": true,
-  "version": "0.4.9",
+  "version": "0.4.8",
   "type": "module",
   "scripts": {
     "test:native-coreml-rolling": "../scripts/cargo-lane disposable -- cargo test --manifest-path src-tauri/Cargo.toml native_coreml_rolling_wav_injector_exercises_finish_reuse_and_drop_rejection -- --ignored --nocapture",
