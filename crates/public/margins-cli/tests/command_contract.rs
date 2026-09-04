@@ -2028,6 +2028,8 @@ fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only()
     assert!(stdout.contains("Run these commands from the notes folder"));
     assert!(stdout.contains("cd \"/absolute/path/to/notes\""));
     assert!(stdout.contains("`recall.scan: true`"));
+    assert!(stdout.contains("scan as soon as the explicit named Workspace"));
+    assert!(stdout.contains("There is no `margins workspace scan` subcommand"));
     assert!(stdout.contains("Read the complete saved `scan.v2` result"));
     assert!(stdout.contains("Show the user an understanding, not scan output"));
     assert!(stdout.contains("The field names below are for your analysis"));
@@ -2037,16 +2039,16 @@ fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only()
     assert!(stdout.contains("Do not run recall before `margins init`"));
     assert!(stdout.contains("margins setup --only catalyst"));
     assert!(stdout.contains("If `actions` is empty"));
-    assert!(stdout.contains("ask for explicit consent"));
-    assert!(stdout.contains("it is not advance consent"));
-    assert!(stdout.contains("Never infer plan consent from the opening setup request"));
     assert!(stdout.contains("apply the saved plan unchanged"));
     assert!(stdout.contains("workspace plan"));
     assert!(stdout.contains("Never hand-edit plan JSON"));
-    assert!(stdout.contains("Only make settings the user consented to"));
+    assert!(stdout.contains("Do not ask for a second “apply this plan” confirmation"));
     assert!(stdout.contains("machine-level catalyst mode"));
     assert!(stdout.contains("not an exact-phrase boundary proof"));
     assert!(stdout.contains("contiguous, verbatim phrase"));
+    assert!(stdout.contains("one universal discovery question"));
+    assert!(stdout.contains("universal pause."));
+    assert!(stdout.contains("Do not ask the user to design `[policy].entities`"));
     assert!(stdout.contains("Never declare setup complete while"));
     assert!(stdout.contains("Use exactly the spellings surfaced by scan"));
     assert!(stdout.contains("folder:<path>"));
@@ -2094,24 +2096,21 @@ fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only()
         );
     }
     let normalized_guide = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(
-        normalized_guide.contains("Any fallback policy change requires a fresh desired config")
-    );
+    assert!(normalized_guide.contains("A fallback policy change after failure is not part"));
     assert!(normalized_guide.contains("Do not run unsupported discovery commands"));
     assert!(normalized_guide.contains("Do not provision a hosted lease at the start"));
     assert!(normalized_guide.contains("short-lived lease should begin as late as possible"));
     assert!(normalized_guide.contains("do not run `init` repeatedly"));
     assert!(normalized_guide.contains("earlier setup attempts as hypotheses"));
-    assert!(normalized_guide.contains("preserve that approved policy"));
-    assert!(
-        normalized_guide.contains("`live_lexical` status only confirms that an index exists")
-    );
+    assert!(normalized_guide.contains("preserve that policy"));
+    assert!(normalized_guide.contains("`live_lexical` status only confirms that an index exists"));
+    assert!(normalized_guide.contains("portable live Markdown coverage"));
+    assert!(normalized_guide.contains("Never relabel that number as “indexed documents.”"));
+    assert!(normalized_guide.contains("`mode = \"indexed\"` reports the persisted engine index"));
     assert!(normalized_guide.contains("`entity_curation_candidates[].spec`"));
     assert!(normalized_guide.contains("`entity_curation_candidates[].expansion`"));
-    assert!(
-        normalized_guide
-            .contains("`expands_automatically = true` means `expandable = true` is redundant")
-    );
+    assert!(normalized_guide
+        .contains("`expands_automatically = true` means `expandable = true` is redundant"));
     assert!(
         normalized_guide.contains("`mode = \"explicit_available\"` means real child pages exist")
     );
@@ -2120,6 +2119,14 @@ fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only()
     assert!(normalized_guide.contains("Leave an ambiguous entity without a profile"));
     assert!(normalized_guide.contains("one note per person is an optional practice"));
     assert!(normalized_guide.contains("Do not create, reorganize, or configure those notes"));
+    assert!(normalized_guide.contains("Do not confuse “nothing stable to configure yet”"));
+    assert!(normalized_guide.contains("offer at most two small future capture habits"));
+    assert!(normalized_guide.contains("name a question that habit would make answerable"));
+    assert!(normalized_guide.contains("This coaching is optional advice, not another question"));
+    assert!(normalized_guide.contains("Lead the final handoff with what the proof revealed"));
+    assert!(normalized_guide.contains("Do not merely report that recall returned real notes"));
+    assert!(normalized_guide.contains("setup receipt"));
+    assert!(normalized_guide.contains("revision hashes, similarity scores"));
     assert!(stdout.contains("Do not begin connected-note distillation as part of setup"));
     let declaration = stdout.find("margins workspace new practice").unwrap();
     let scan = stdout.find("margins --workspace practice scan").unwrap();
@@ -2229,7 +2236,7 @@ fn public_capabilities_report_only_supported_workflows() {
 }
 
 #[test]
-fn guided_onboarding_ends_setup_before_distillation() {
+fn guided_onboarding_routes_without_duplicating_setup_protocol() {
     let temp = tempfile::tempdir().unwrap();
     let services = services(temp.path());
 
@@ -2237,27 +2244,32 @@ fn guided_onboarding_ends_setup_before_distillation() {
         invoke(&services, temp.path(), &["margins", "guide", "onboarding"]);
 
     assert!(result.is_ok(), "{stderr}");
-    assert!(stdout.contains("Setup ends when"));
-    assert!(stdout.contains("Connected-note distillation is a separate workflow"));
-    assert!(stdout.contains("from that folder"));
-    assert!(stdout.contains("complete `scan.v2` result"));
-    let normalized_onboarding = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(normalized_onboarding.contains("coverage entities, curation candidates"));
-    assert!(stdout.contains("If the plan has no actions"));
-    assert!(stdout.contains("skip both consent and apply"));
-    assert!(normalized_onboarding.contains("show its actions, obtain explicit consent"));
-    assert!(stdout.contains("apply the saved plan unchanged"));
-    assert!(stdout.contains("evidence—not as a script"));
-    assert!(stdout.contains("`current_config.config_path`"));
-    let declaration = stdout.find("3. Otherwise create").unwrap();
-    let scan = stdout.find("4. When `recall.scan: true`").unwrap();
-    let initialize = stdout.find("5. Run `init`").unwrap();
-    assert!(declaration < scan && scan < initialize);
-    assert!(!stdout.contains("transcribe"));
-    assert!(!stdout.contains("audio"));
-    assert!(!stdout.contains("fallback"));
-    assert!(!stdout.contains("official composition"));
-    assert!(!stdout.contains("private reveal"));
+    assert_eq!(stdout, margins_workflows::resources::MARGINS_GUIDED_ONBOARDING);
+    let normalized = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(stdout.contains("`margins guide workspace-setup`"));
+    assert!(normalized.contains("sole source of truth for setup"));
+    assert!(stdout.contains("Setup and distillation are separate"));
+    assert!(
+        normalized.contains("Speak about their notes, work, and questions in ordinary language")
+    );
+    assert!(normalized.contains("End with the useful thing Margins surfaced"));
+    assert!(normalized.contains("setup result brief and secondary"));
+    assert!(stdout.split_whitespace().count() < 300);
+    for duplicated_detail in [
+        "scan.v2",
+        "workspace plan",
+        "workspace apply",
+        "current_config",
+        "catalyst",
+        "profile =",
+        "margins init",
+        "margins sync",
+    ] {
+        assert!(
+            !stdout.contains(duplicated_detail),
+            "onboarding duplicated setup detail: {duplicated_detail}"
+        );
+    }
 }
 
 #[test]

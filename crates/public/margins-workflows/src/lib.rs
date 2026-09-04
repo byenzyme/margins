@@ -23,9 +23,8 @@ pub mod resources {
     /// printed by `margins guide workspace-setup`.
     pub const MARGINS_WORKSPACE_SETUP_GUIDE: &str =
         include_str!("../resources/skills/margins-workspace-setup/SKILL.md");
-    /// The agent-orchestrated first-run experience printed by
-    /// `margins guide onboarding`: install/authorize sources with the user,
-    /// choose a deliberately small first import, and prove the context plane.
+    /// The plain-language first-run router printed by `margins guide onboarding`.
+    /// The canonical setup procedure remains `MARGINS_WORKSPACE_SETUP_GUIDE`.
     pub const MARGINS_GUIDED_ONBOARDING: &str =
         include_str!("../resources/skills/margins-guided-onboarding/SKILL.md");
 }
