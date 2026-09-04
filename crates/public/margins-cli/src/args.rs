@@ -302,7 +302,7 @@ pub enum ConnectCommand {
         /// Optional expected Google account email safety guard
         #[arg(long)]
         account: Option<String>,
-        /// Headless/SSH mode: print consent URL to stderr and store in an owner-only 0600 file
+        /// Headless/SSH presentation: print the consent URL to stderr (CLI credentials always use an owner-only 0600 file)
         #[arg(long)]
         headless: bool,
         /// Emit machine-readable status
@@ -314,7 +314,7 @@ pub enum ConnectCommand {
         /// Optional expected Granola account email safety guard
         #[arg(long)]
         account: Option<String>,
-        /// Headless/SSH mode: use PKCE with a private callback prompt and 0600 storage
+        /// Headless/SSH presentation: use PKCE with a private callback prompt (CLI credentials always use an owner-only 0600 file)
         #[arg(long)]
         headless: bool,
         /// Emit machine-readable status

@@ -281,11 +281,24 @@ class RepositoryPolicyTests(unittest.TestCase):
             "`entity_curation_candidates`",
             "`available_profiles`",
             "`current_config.config_path`",
+            "`representative_samples`",
+            "`entity_curation_candidates[].spec`",
+            "`entity_curation_candidates[].expansion`",
+            "Never open, cat, print, or summarize credential bundles",
+            "Use only redacted Margins product status",
+            "Do not run recall before `margins init`",
             "ask for explicit consent",
             "apply the saved plan unchanged",
+            "Only make settings the user consented to",
+            "Never declare setup complete while",
             "Do not begin connected-note",
         ):
             self.assertIn(required, setup)
+        normalized_setup = " ".join(setup.split())
+        self.assertIn("Do not run unsupported discovery commands", normalized_setup)
+        self.assertIn(
+            "Any fallback policy change requires a fresh desired config", normalized_setup
+        )
         for profile in (
             "relational",
             "operational",
@@ -298,7 +311,6 @@ class RepositoryPolicyTests(unittest.TestCase):
             self.assertIn(f"`{profile}`", setup)
         for forbidden in (
             "margins transcribe",
-            "fallback",
             "official composition",
             "private reveal",
             "assisted proposal",
@@ -356,6 +368,8 @@ class RepositoryPolicyTests(unittest.TestCase):
                 "selected CLI composition",
                 "selected Margins recall composition",
             ):
+                if runtime_skill is setup and boundary_term == "fallback":
+                    continue
                 self.assertNotIn(boundary_term, runtime_skill)
         for boundary_explanation in (
             "product binary",

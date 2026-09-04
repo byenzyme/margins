@@ -79,6 +79,10 @@ pub enum GranolaNativeError {
         path: PathBuf,
         mode: u32,
     },
+    CredentialBackendMismatch {
+        requested: GranolaCredentialBackendKind,
+        persisted: GranolaCredentialBackendKind,
+    },
     CredentialsUnavailable(String),
     BrowserUnavailable,
     OAuthTimedOut,
@@ -98,6 +102,7 @@ impl GranolaNativeError {
         match self {
             Self::AccountMismatch { .. } => "granola_account_mismatch",
             Self::StoragePermission { .. } => "granola_storage_permission_insecure",
+            Self::CredentialBackendMismatch { .. } => "granola_credential_backend_mismatch",
             Self::CredentialsUnavailable(_) => "granola_credentials_unavailable",
             Self::BrowserUnavailable => "granola_browser_unavailable",
             Self::OAuthTimedOut => "granola_oauth_timed_out",
@@ -123,6 +128,15 @@ impl std::fmt::Display for GranolaNativeError {
             Self::StoragePermission { .. } => {
                 formatter.write_str("Granola file credential store has insecure permissions")
             }
+            Self::CredentialBackendMismatch {
+                requested,
+                persisted,
+            } => write!(
+                formatter,
+                "Granola credential storage owner mismatch (requested {}, persisted {})",
+                requested.as_str(),
+                persisted.as_str()
+            ),
             Self::CredentialsUnavailable(_) => {
                 formatter.write_str("Granola credentials unavailable")
             }
@@ -152,6 +166,9 @@ impl GranolaNativeError {
             }
             Self::BrowserUnavailable => Some(("browser_launch", "browser_unavailable")),
             Self::StoragePermission { .. } => Some(("credential_commit", "insecure_permissions")),
+            Self::CredentialBackendMismatch { .. } => {
+                Some(("credential_validation", "backend_mismatch"))
+            }
             Self::Mcp { stage, reason, .. } => Some((*stage, *reason)),
         }
     }
@@ -296,6 +313,19 @@ impl GranolaAccountStore {
         Ok(Some(metadata))
     }
 
+    /// Check credential-store ownership using account metadata only.
+    ///
+    /// A historical `os_keyring` record does not say whether an older CLI or
+    /// the desktop app created it. A File0600 caller must therefore refuse it:
+    /// migrating it would require crossing the Keychain boundary that this
+    /// preflight exists to protect.
+    pub fn preflight_backend_ownership(&self) -> Result<()> {
+        if let Some(metadata) = self.metadata()? {
+            self.ensure_backend_matches(&metadata)?;
+        }
+        Ok(())
+    }
+
     pub fn durable_connection_metadata(&self) -> Result<GranolaConnectionMetadata> {
         let metadata = self.metadata()?.ok_or_else(|| {
             GranolaNativeError::CredentialsUnavailable("missing account metadata".into())
@@ -307,6 +337,7 @@ impl GranolaAccountStore {
             }
             .into());
         }
+        self.ensure_backend_matches(&metadata)?;
         if metadata.schema_version != METADATA_SCHEMA {
             return Err(GranolaNativeError::CredentialsUnavailable(
                 "unsupported account metadata schema".into(),
@@ -328,12 +359,7 @@ impl GranolaAccountStore {
             )
             .into());
         }
-        let effective = Self {
-            account: self.account.clone(),
-            account_dir: self.account_dir.clone(),
-            backend: metadata.storage.clone(),
-        };
-        let token = effective.load_token()?.ok_or_else(|| {
+        let token = self.load_token()?.ok_or_else(|| {
             GranolaNativeError::CredentialsUnavailable("missing OAuth token cache".into())
         })?;
         if token.account != self.account || token.client_id != metadata.client_id {
@@ -363,26 +389,27 @@ impl GranolaAccountStore {
         scopes: &[String],
         token: StoredToken,
     ) -> Result<GranolaConnectionMetadata> {
-        let previous_metadata = self.metadata().ok().flatten();
-        let previous_store = previous_metadata.as_ref().map(|metadata| Self {
-            account: self.account.clone(),
-            account_dir: self.account_dir.clone(),
-            backend: metadata.storage.clone(),
-        });
-        let previous_token = previous_store
-            .as_ref()
-            .and_then(|store| store.load_token().ok().flatten());
-        let previous_metadata_bytes = std::fs::read(self.metadata_path()).ok();
+        let previous_metadata = self.metadata()?;
+        if let Some(metadata) = previous_metadata.as_ref() {
+            self.ensure_backend_matches(metadata)?;
+        }
+        let previous_token = self.load_token()?;
+        let previous_metadata_bytes = if self.metadata_path().exists() {
+            Some(std::fs::read(self.metadata_path()).with_context(|| {
+                format!(
+                    "snapshotting Granola connection metadata at {}",
+                    self.metadata_path().display()
+                )
+            })?)
+        } else {
+            None
+        };
         if let Some(root) = self.account_dir.parent() {
             ensure_private_dir_chain(root)?;
         }
         ensure_private_dir_chain(&self.account_dir)?;
         if let Err(error) = self.store_token(&token) {
-            self.rollback_commit(
-                previous_store.as_ref(),
-                previous_token.as_ref(),
-                previous_metadata_bytes.as_deref(),
-            );
+            self.rollback_commit(previous_token.as_ref(), previous_metadata_bytes.as_deref());
             return Err(error);
         }
         let metadata = GranolaConnectionMetadata {
@@ -394,38 +421,24 @@ impl GranolaAccountStore {
             connected_at: Utc::now(),
         };
         if let Err(error) = write_private_json(&self.metadata_path(), &metadata) {
-            self.rollback_commit(
-                previous_store.as_ref(),
-                previous_token.as_ref(),
-                previous_metadata_bytes.as_deref(),
-            );
+            self.rollback_commit(previous_token.as_ref(), previous_metadata_bytes.as_deref());
             return Err(error);
         }
         if let Err(error) = self.durable_connection_metadata() {
-            self.rollback_commit(
-                previous_store.as_ref(),
-                previous_token.as_ref(),
-                previous_metadata_bytes.as_deref(),
-            );
+            self.rollback_commit(previous_token.as_ref(), previous_metadata_bytes.as_deref());
             return Err(error);
-        }
-        if let Some(previous_store) = previous_store {
-            if previous_store.backend != self.backend {
-                let _ = previous_store.delete_token();
-            }
         }
         Ok(metadata)
     }
 
     fn rollback_commit(
         &self,
-        previous_store: Option<&Self>,
         previous_token: Option<&StoredToken>,
         previous_metadata: Option<&[u8]>,
     ) {
         let _ = self.delete_token();
-        if let (Some(store), Some(token)) = (previous_store, previous_token) {
-            let _ = store.store_token(token);
+        if let Some(token) = previous_token {
+            let _ = self.store_token(token);
         }
         if let Some(bytes) = previous_metadata {
             let _ = write_private_bytes(&self.metadata_path(), bytes);
@@ -435,18 +448,10 @@ impl GranolaAccountStore {
     }
 
     pub fn forget(&self) -> Result<()> {
-        let backend = self
-            .metadata()
-            .ok()
-            .flatten()
-            .map(|metadata| metadata.storage)
-            .unwrap_or_else(|| self.backend.clone());
-        Self {
-            account: self.account.clone(),
-            account_dir: self.account_dir.clone(),
-            backend,
+        if let Some(metadata) = self.metadata()? {
+            self.ensure_backend_matches(&metadata)?;
         }
-        .delete_token()?;
+        self.delete_token()?;
         if self.account_dir.exists() {
             std::fs::remove_dir_all(&self.account_dir).with_context(|| {
                 format!(
@@ -477,12 +482,8 @@ impl GranolaAccountStore {
         metadata: &GranolaConnectionMetadata,
         token_endpoint: impl FnOnce() -> Result<String>,
     ) -> Result<String> {
-        let effective = Self {
-            account: self.account.clone(),
-            account_dir: self.account_dir.clone(),
-            backend: metadata.storage.clone(),
-        };
-        let mut token = effective.load_token()?.ok_or_else(|| {
+        self.ensure_backend_matches(metadata)?;
+        let mut token = self.load_token()?.ok_or_else(|| {
             GranolaNativeError::CredentialsUnavailable("missing OAuth token cache".into())
         })?;
         if token.access_is_usable() {
@@ -529,8 +530,19 @@ impl GranolaAccountStore {
             token.refresh_token = refresh;
         }
         token.expires_at = expires_at;
-        effective.store_token(&token)?;
+        self.store_token(&token)?;
         Ok(token.access_token)
+    }
+
+    fn ensure_backend_matches(&self, metadata: &GranolaConnectionMetadata) -> Result<()> {
+        if metadata.storage != self.backend {
+            return Err(GranolaNativeError::CredentialBackendMismatch {
+                requested: self.backend.clone(),
+                persisted: metadata.storage.clone(),
+            }
+            .into());
+        }
+        Ok(())
     }
 
     fn metadata_path(&self) -> PathBuf {
@@ -971,6 +983,10 @@ pub fn connect_granola_account(
     mode: GranolaOAuthMode,
     presenter: &dyn GranolaOAuthPresenter,
 ) -> Result<GranolaConnectionReady> {
+    if let Some(account) = expected_account {
+        GranolaAccountStore::new_with_backend(margins_home, account, backend.clone())?
+            .preflight_backend_ownership()?;
+    }
     let endpoints = discover_auth_endpoints()?;
     let client = oauth_http_client().map_err(|_| GranolaNativeError::OAuthStage {
         stage: "discovery",
@@ -1108,8 +1124,12 @@ fn commit_verified_connection(
     token: StoredToken,
     mcp_endpoint: &str,
 ) -> Result<GranolaConnectionReady> {
-    verify_mcp_access(&token.access_token, mcp_endpoint, account)?;
     let store = GranolaAccountStore::new_with_backend(margins_home, account, backend.clone())?;
+    // With no expected account, the OAuth identity is unknowable until after
+    // consent and userinfo. This is the earliest safe ownership check, and it
+    // still runs before the MCP capability probe.
+    store.preflight_backend_ownership()?;
+    verify_mcp_access(&token.access_token, mcp_endpoint, account)?;
     store.commit(client_id, scopes, token)?;
     Ok(GranolaConnectionReady {
         account: account.to_string(),
@@ -1384,10 +1404,11 @@ pub struct GranolaMcpImportBatch {
 pub fn fetch_granola_import_batch(
     margins_home: &Path,
     account: &str,
+    backend: GranolaCredentialBackendKind,
     progress: &(dyn Fn(&str, usize, usize) + Send + Sync),
 ) -> Result<GranolaMcpImportBatch> {
     let account = normalize_granola_account(account)?;
-    let store = GranolaAccountStore::new(margins_home, &account)?;
+    let store = GranolaAccountStore::new_with_backend(margins_home, &account, backend)?;
     let fetched = store.ensure_access_token().and_then(|access_token| {
         fetch_meetings(
             &access_token,
@@ -2309,6 +2330,18 @@ fn ensure_private_dir_chain(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    struct PanicPresenter;
+
+    impl GranolaOAuthPresenter for PanicPresenter {
+        fn present_authorization_url(
+            &self,
+            _url: &str,
+            _need_callback: bool,
+        ) -> std::result::Result<String, String> {
+            panic!("backend ownership preflight must run before OAuth presentation")
+        }
+    }
+
     fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
         let mut bytes = Vec::new();
         let mut buffer = [0u8; 4096];
@@ -2425,6 +2458,162 @@ mod tests {
     }
 
     #[test]
+    fn ownership_boundary_rejects_other_owner_before_oauth_token_access_or_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let desktop = GranolaAccountStore::new_with_backend(
+            temp.path(),
+            "owner@example.com",
+            GranolaCredentialBackendKind::OsKeyring,
+        )
+        .unwrap();
+        ensure_private_dir_chain(desktop.account_dir().parent().unwrap()).unwrap();
+        ensure_private_dir_chain(desktop.account_dir()).unwrap();
+        write_private_json(
+            &desktop.metadata_path(),
+            &GranolaConnectionMetadata {
+                schema_version: METADATA_SCHEMA.into(),
+                account: "owner@example.com".into(),
+                storage: GranolaCredentialBackendKind::OsKeyring,
+                client_id: "desktop-client".into(),
+                scopes: REQUIRED_SCOPES
+                    .iter()
+                    .map(|scope| (*scope).to_string())
+                    .collect(),
+                connected_at: Utc::now(),
+            },
+        )
+        .unwrap();
+        let metadata_before = std::fs::read(desktop.metadata_path()).unwrap();
+
+        let cli = GranolaAccountStore::new_with_backend(
+            temp.path(),
+            "owner@example.com",
+            GranolaCredentialBackendKind::File0600,
+        )
+        .unwrap();
+        let pre_oauth = connect_granola_account(
+            temp.path(),
+            Some("owner@example.com"),
+            GranolaCredentialBackendKind::File0600,
+            GranolaOAuthMode::BrowserLoopback,
+            &PanicPresenter,
+        )
+        .unwrap_err();
+        assert_eq!(
+            pre_oauth
+                .downcast_ref::<GranolaNativeError>()
+                .map(GranolaNativeError::code),
+            Some("granola_credential_backend_mismatch")
+        );
+        for error in [
+            cli.durable_connection_metadata().unwrap_err(),
+            cli.forget().unwrap_err(),
+        ] {
+            assert_eq!(
+                error
+                    .downcast_ref::<GranolaNativeError>()
+                    .map(GranolaNativeError::code),
+                Some("granola_credential_backend_mismatch")
+            );
+            assert!(!format!("{error:#}").contains("owner@example.com"));
+        }
+        assert_eq!(
+            std::fs::read(desktop.metadata_path()).unwrap(),
+            metadata_before
+        );
+        assert!(!cli.token_path().exists());
+
+        let known_identity = commit_verified_connection(
+            temp.path(),
+            "owner@example.com",
+            GranolaCredentialBackendKind::File0600,
+            "cli-client",
+            &REQUIRED_SCOPES
+                .iter()
+                .map(|scope| (*scope).to_string())
+                .collect::<Vec<_>>(),
+            StoredToken {
+                schema_version: STORAGE_SCHEMA.into(),
+                account: "owner@example.com".into(),
+                client_id: "cli-client".into(),
+                access_token: "new-access".into(),
+                refresh_token: "new-refresh".into(),
+                expires_at: None,
+            },
+            "http://127.0.0.1:1/mcp",
+        )
+        .unwrap_err();
+        assert_eq!(
+            known_identity
+                .downcast_ref::<GranolaNativeError>()
+                .map(GranolaNativeError::code),
+            Some("granola_credential_backend_mismatch")
+        );
+
+        let error = cli
+            .commit(
+                "cli-client",
+                &REQUIRED_SCOPES
+                    .iter()
+                    .map(|scope| (*scope).to_string())
+                    .collect::<Vec<_>>(),
+                StoredToken {
+                    schema_version: STORAGE_SCHEMA.into(),
+                    account: "owner@example.com".into(),
+                    client_id: "cli-client".into(),
+                    access_token: "new-access".into(),
+                    refresh_token: "new-refresh".into(),
+                    expires_at: None,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<GranolaNativeError>()
+                .map(GranolaNativeError::code),
+            Some("granola_credential_backend_mismatch")
+        );
+        assert_eq!(
+            std::fs::read(desktop.metadata_path()).unwrap(),
+            metadata_before
+        );
+        assert!(!cli.token_path().exists());
+    }
+
+    #[test]
+    fn ownership_boundary_propagates_prior_token_snapshot_errors_before_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = committed_file_store(temp.path(), None);
+        write_private_bytes(&store.token_path(), b"not-json").unwrap();
+        let metadata_before = std::fs::read(store.metadata_path()).unwrap();
+        let token_before = std::fs::read(store.token_path()).unwrap();
+
+        let error = store
+            .commit(
+                "new-client",
+                &REQUIRED_SCOPES
+                    .iter()
+                    .map(|scope| (*scope).to_string())
+                    .collect::<Vec<_>>(),
+                StoredToken {
+                    schema_version: STORAGE_SCHEMA.into(),
+                    account: "owner@example.com".into(),
+                    client_id: "new-client".into(),
+                    access_token: "new-access".into(),
+                    refresh_token: "new-refresh".into(),
+                    expires_at: None,
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("parsing Granola token cache"));
+        assert_eq!(
+            std::fs::read(store.metadata_path()).unwrap(),
+            metadata_before
+        );
+        assert_eq!(std::fs::read(store.token_path()).unwrap(), token_before);
+    }
+
+    #[test]
     fn file_connection_requires_private_permissions_and_coherent_identity() {
         let temp = tempfile::tempdir().unwrap();
         let store = GranolaAccountStore::new_with_backend(
@@ -2532,7 +2721,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_status_refreshes_and_atomically_persists_a_usable_token() {
+    fn expired_access_refreshes_and_atomically_persists_a_usable_token() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
         let server = std::thread::spawn(move || {
@@ -2576,7 +2765,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_status_invalid_grant_invalidates_machine_credentials() {
+    fn expired_access_invalid_grant_invalidates_machine_credentials() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
         let server = std::thread::spawn(move || {
@@ -2604,7 +2793,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_status_transport_failure_is_retryable_and_preserves_credentials() {
+    fn expired_access_transport_failure_is_retryable_and_preserves_credentials() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
         drop(listener);
@@ -2624,7 +2813,7 @@ mod tests {
     }
 
     #[test]
-    fn unexpired_status_never_resolves_or_calls_a_refresh_endpoint() {
+    fn unexpired_access_never_resolves_or_calls_a_refresh_endpoint() {
         let home = tempfile::tempdir().unwrap();
         let store =
             committed_file_store(home.path(), Some(Utc::now() + chrono::Duration::hours(1)));

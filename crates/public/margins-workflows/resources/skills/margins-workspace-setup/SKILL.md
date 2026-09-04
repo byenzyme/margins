@@ -37,6 +37,11 @@ All Margins state belongs under its own `workspaces/<id>/` state directory. Neve
 create `.margins` inside a notes folder or rewrite the user's existing notes during
 setup.
 
+Never open, cat, print, or summarize credential bundles, auth files, Keychain
+items, shell history, dotenv contents, token stores, cookie stores, or environment
+variable values during setup. Use only redacted Margins product status and
+capability reports when checking authorization or connection state.
+
 ## 1. Start with the practice
 
 Ask which folder holds the notes the user thinks in. Ask whether other folders—such
@@ -52,6 +57,21 @@ Then check the available capabilities:
 ```bash
 margins capabilities
 ```
+
+`margins capabilities` is supported and should stay in this workflow. Do not run
+unsupported discovery commands; use only commands documented in this guide or
+confirmed by `margins capabilities`, and treat redacted product status as the
+boundary for auth-related checks.
+
+Use the redacted `catalyst` object only as a readiness signal. Do not provision a
+hosted lease at the start of a grounded review: the interpretation and consent
+conversation may take time, and a short-lived lease should begin as late as
+possible. If catalyst setup is needed, do it immediately before `init` as described
+below.
+
+Treat memories or transcripts from earlier setup attempts as hypotheses, never as
+evidence that the installed build still has the same behavior. Establish current
+behavior from this Workspace's scan, plan, init, sync, and recall results.
 
 If the report includes `recall.scan: true`, use the named Workspace and grounded
 review path. Also use that path when the practice has more than one Source. For one
@@ -69,6 +89,7 @@ margins recall "an exact phrase from these notes"
 margins workspace status --json
 ```
 
+Do not run recall before `margins init` has completed for this Workspace.
 An exact-phrase result pointing to an existing note proves that the folder is
 inside the recall boundary. It does not prove a broader interpretation of the
 practice. Report that distinction plainly.
@@ -88,7 +109,8 @@ margins --workspace practice scan > /tmp/margins-workspace-scan.json
 
 Source declarations define the full recall boundary. Scan examines the home so you
 can understand it; it does not silently add Sources. Do not run `init` or `sync`
-until the grounded review is settled.
+until the grounded review is settled, and do not run recall until after init and
+sync.
 
 ## 4. Show the user an understanding, not scan output
 
@@ -114,6 +136,12 @@ match how you work, and what did it miss?” Reflect corrections back in the use
 terms before deriving settings. A factual correction is not consent to change the
 Workspace.
 
+The user's opening request to “set up Margins,” “follow this guide end to end,” or
+otherwise complete setup authorizes this review workflow; it is not advance consent
+to settings you have not shown them yet. Pause here for their answer. Do not prepare,
+plan, or apply exclusions, attention, profiles, expansion, or Source changes in the
+same turn as the opening request.
+
 A healthy Workspace may need no setting change. It should still receive a rich
 interpretation and a real recall proof.
 
@@ -131,6 +159,16 @@ Explicit entity curation is optional. Leave it automatic when the evidence is
 uncertain or the user wants Margins to keep adapting. Never turn every scan
 candidate into configuration, invent an entity, or configure a structure that does
 not exist.
+
+Before proposing any explicit entity, check and be ready to cite the exact scan
+spec from `entity_curation_candidates[].spec`, the candidate's
+`representative_samples`, and the structural expansion evidence in
+`entity_curation_candidates[].expansion`. For older scans without the expansion
+object, inspect `folder_page_entities` and `folder_stats` together, but do not
+force the user or a later agent to make that join when the candidate already has
+self-contained expansion evidence. If the user requested a specific curation and
+the evidence does not support it, say so and keep the request unresolved rather
+than declaring setup complete.
 
 When a setting is needed, read and copy the complete config at
 `current_config.config_path`. Do not reconstruct it from the scan summary. Change
@@ -159,13 +197,47 @@ If the user corrects the understanding after seeing a plan, return to the comple
 desired config, change only that correction, and run `workspace plan --desired`
 again. Show the fresh plan before applying it. Never hand-edit plan JSON.
 
+Only make settings the user consented to after seeing the current plan. Any
+fallback policy change requires a fresh desired config, a fresh plan, and fresh
+consent before apply.
+
+Never infer plan consent from the opening setup request, the instruction to follow
+this guide, or permission to work autonomously. Consent must be a later user reply
+to the concrete consequences of the current plan.
+
 If a correction changes only how the user describes the practice, keep it in the
 conversation and let it shape the recall proof. Do not manufacture a setting for
 something the Workspace cannot represent.
 
 ## 6. Initialize and prove the setup
 
-Once the review is settled:
+Once the review and any consented plan are settled, check the redacted catalyst
+status from `margins capabilities` again. If it reports `usable = false`, run this
+once before `init`:
+
+```bash
+margins setup --only catalyst
+```
+
+This is the provisioning boundary: it may mint or refresh a short-lived hosted
+lease, or prepare the configured local fallback. Never inspect its credential
+files to diagnose it. If setup still reports no usable catalyst, stop and report
+that readiness failure; do not run `init` repeatedly and do not install a different
+fallback policy without the user's consent.
+
+Provisioning can also persist a machine-level catalyst mode outside the Workspace.
+If you run `margins setup`, say so in the final state-change summary. Do not claim
+that only the Workspace state changed when setup created or changed machine-level
+Margins configuration.
+
+If `init` fails after an approved plan, preserve that approved policy while you
+report and diagnose the failure. Do not apply automatic attention, remove a
+profile, or try another policy as a diagnostic shortcut. Any such fallback is a
+new material setting: show a fresh plan and wait for fresh consent. A
+`live_lexical` status only confirms that an index exists; it does not establish
+that the recall command is usable when catalyst readiness is still pending.
+
+Then initialize and prove recall in this order:
 
 ```bash
 margins --workspace practice init
@@ -176,17 +248,24 @@ margins --workspace practice recall "<distinctive phrase from research>" --sourc
 
 When possible, test both claims:
 
-- A distinctive phrase proves that a declared Source is reachable.
+- A distinctive phrase proves that a declared Source is reachable. Copy one
+  contiguous, verbatim phrase of roughly 5–10 words from the body of a scan-cited
+  note; do not substitute a title, filename, or bag of related keywords.
 - A question from the confirmed account tests whether Margins can support the
   understanding you presented.
 
 Verify that each result cites a real supporting note. If recall contradicts the
-account, revisit the interpretation rather than declaring success.
+account, revisit the interpretation rather than declaring success. A nearby semantic
+result is not an exact-phrase boundary proof: if the distinctive phrase does not
+retrieve the note containing it, report that proof as incomplete instead of
+silently substituting a different query or describing semantic recall as equivalent.
 
 Report the Workspace id and state path, its home and reference Sources, any approved
 attention or exclusion settings, the `init` and `sync` results, and at least one
 source-backed recall result. Restate what the user can expect Margins to remember
-and confirm that their notes were not modified.
+and confirm that their notes were not modified. Never declare setup complete while
+a requested, supported curation decision remains unreviewed, unsupported by scan
+evidence, or unconsented.
 
 Do not begin connected-note distillation as part of setup.
 
@@ -200,7 +279,7 @@ derive from them, not the names themselves.
 | `schema_version`, `scan_id`, `vault_path`, `generated_at`, `status`, `files` | Which scan you are reading and the home it describes. |
 | `instructions`, `summary` | The scan's own cautions and the overall size, age, and shape of the material. |
 | `coverage_entities` | A small set chosen to cover distinct parts of the notes, so a large folder does not crowd out a smaller but meaningful area. Start here for breadth. |
-| `entity_curation_candidates` | Existing folders that may deserve stable attention, with representative samples and page structure. Use these to investigate, not to auto-configure. |
+| `entity_curation_candidates` | Existing folders that may deserve stable attention, with `representative_samples`, exact `spec` values, and self-contained `expansion` evidence when available. Use these to investigate, not to auto-configure. |
 | `top_entities`, `top_folders`, `top_tags`, `top_links` | Frequent or prominent threads. Compare them with coverage evidence; frequency alone does not establish importance. |
 | `entity_samples`, `sample_files` | Concrete excerpts and files that reveal what a candidate means in practice. |
 | `folder_stats`, `folder_page_entities`, `folder_children`, `tag_children` | How the material is organized, whether a folder contains durable linked pages, and whether parent/child choices would duplicate attention. |
@@ -253,8 +332,14 @@ Leave an ambiguous entity without a profile.
 
 Use `expandable = true` only for a folder whose `folder_page_entities` and
 `folder_stats` show real child pages that the user wants treated as separate
-threads. Dense linked folders may expand automatically. Never persist the child
-links themselves merely because they live in an expandable folder.
+threads. Prefer `entity_curation_candidates[].expansion` when present:
+`mode = "automatic"` or `expands_automatically = true` means `expandable = true`
+is redundant in config; `mode = "explicit_available"` means real child pages
+exist below the automatic threshold and `expandable = true` is available only if
+the user wants those child pages treated as separate threads.
+`mode = "not_applicable"` means there is no supported folder expansion to
+configure. Never persist the child links themselves merely because they live in
+an expandable folder.
 
 For a meeting-oriented practice, durable person or relationship notes can make
 preparation and follow-up more continuous. If that structure already exists and

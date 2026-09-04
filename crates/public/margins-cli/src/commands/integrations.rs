@@ -4,10 +4,11 @@ use crate::error::CliError;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use margins_workflows::integrations::{
-    Connector, ConnectorCtx, GoogleCalendarConnector, GoogleCalendarScope, GoogleEmailConnector,
-    GoogleMeetConnector, GoogleTokenProvider, HealthReport, HealthStatus, IntegrationsStore,
-    NativeGoogleClient, ReconcileResult, EMAIL_CONNECTOR_ID, GOOGLE_CALENDAR_CONNECTOR_ID,
-    GOOGLE_MEET_CONNECTOR_ID, GOOGLE_MEET_MATERIALIZATION_FINGERPRINT,
+    Connector, ConnectorCtx, GoogleCalendarConnector, GoogleCalendarScope,
+    GoogleCredentialBackendKind, GoogleEmailConnector, GoogleMeetConnector, GoogleTokenProvider,
+    HealthReport, HealthStatus, IntegrationsStore, NativeGoogleClient, ReconcileResult,
+    EMAIL_CONNECTOR_ID, GOOGLE_CALENDAR_CONNECTOR_ID, GOOGLE_MEET_CONNECTOR_ID,
+    GOOGLE_MEET_MATERIALIZATION_FINGERPRINT,
 };
 use margins_workflows::workspace::{
     resolve_state_dir, validate_mutation_request_id, workspace_revision, WorkspaceBinding,
@@ -645,8 +646,12 @@ fn reconcile_one(
                 .parent()
                 .and_then(Path::parent)
                 .context("workspace state directory has no parent")?;
-            let token_provider =
-                GoogleTokenProvider::new(margins_home, source.account(), credential)?;
+            let token_provider = GoogleTokenProvider::new_with_backend(
+                margins_home,
+                source.account(),
+                credential,
+                GoogleCredentialBackendKind::File0600,
+            )?;
             NativeGoogleClient::new(token_provider)
         }
         GoogleReconcileTransport::NativeClient(native) => (*native).clone(),

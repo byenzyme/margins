@@ -33,11 +33,7 @@ pub fn granola(
         return Err(granola_native_error(anyhow::Error::new(error)));
     }
     stderr.flush().map_err(granola_io_error)?;
-    let backend = if headless {
-        GranolaCredentialBackendKind::File0600
-    } else {
-        GranolaCredentialBackendKind::OsKeyring
-    };
+    let backend = granola_cli_credential_backend();
     let mode = granola_oauth_mode_for_connect(headless);
     let presenter = GranolaCliPresenter { headless };
     let ready = connect_granola_account(margins_home, expected_account, backend, mode, &presenter)
@@ -72,6 +68,10 @@ fn granola_oauth_mode_for_connect(headless: bool) -> GranolaOAuthMode {
     } else {
         GranolaOAuthMode::BrowserLoopback
     }
+}
+
+fn granola_cli_credential_backend() -> GranolaCredentialBackendKind {
+    GranolaCredentialBackendKind::File0600
 }
 
 #[cfg(debug_assertions)]
@@ -181,13 +181,13 @@ pub fn google(
         (
             google_oauth_mode_for_connect(headless),
             Arc::new(HeadlessPresenter),
-            google_storage_for_connect(headless),
+            google_cli_credential_backend(),
         )
     } else {
         (
             google_oauth_mode_for_connect(headless),
             Arc::new(BrowserPresenter),
-            google_storage_for_connect(headless),
+            google_cli_credential_backend(),
         )
     };
     let ready = connect_google_account(
@@ -268,14 +268,6 @@ fn prompt_headless_callback() -> Result<String, CliError> {
         .map_err(|error| CliError::new("google_oauth_failed", error))
 }
 
-fn google_storage_for_connect(headless: bool) -> GoogleCredentialBackendKind {
-    if headless {
-        GoogleCredentialBackendKind::File0600
-    } else {
-        GoogleCredentialBackendKind::OsKeyring
-    }
-}
-
 fn google_oauth_mode_for_connect(headless: bool) -> GoogleOAuthMode {
     if headless {
         GoogleOAuthMode::HeadlessLoopback {
@@ -284,6 +276,10 @@ fn google_oauth_mode_for_connect(headless: bool) -> GoogleOAuthMode {
     } else {
         GoogleOAuthMode::BrowserLoopback
     }
+}
+
+fn google_cli_credential_backend() -> GoogleCredentialBackendKind {
+    GoogleCredentialBackendKind::File0600
 }
 
 fn headless_prompt_timeout() -> std::time::Duration {
@@ -368,7 +364,12 @@ pub fn status(
     }
     let mut connections = Vec::new();
     for account in names {
-        let store = GoogleAccountStore::new(margins_home, &account).map_err(native_error)?;
+        let store = GoogleAccountStore::new_with_backend(
+            margins_home,
+            &account,
+            google_cli_credential_backend(),
+        )
+        .map_err(native_error)?;
         let durable = store.durable_connection_metadata(REQUIRED_GOOGLE_SCOPES);
         let (connected, metadata, reason, detail) = match durable {
             Ok(metadata) => (true, Some(metadata), None, None),
@@ -381,7 +382,11 @@ pub fn status(
                     false,
                     store.metadata().ok().flatten(),
                     Some(reason),
-                    Some(redact_secret_text(&format!("{error:#}"))),
+                    Some(
+                        native
+                            .map(native_user_message)
+                            .unwrap_or_else(|| redact_secret_text(&format!("{error:#}"))),
+                    ),
                 )
             }
         };
@@ -438,7 +443,7 @@ pub fn granola_status(
     output: &mut dyn Write,
 ) -> Result<(), CliError> {
     granola_status_with(margins_home, json_output, output, |store| {
-        store.usable_connection_metadata()
+        store.durable_connection_metadata()
     })
 }
 
@@ -453,13 +458,21 @@ fn granola_status_with(
     names.dedup();
     let mut connections = Vec::new();
     for account in names {
-        let store =
-            GranolaAccountStore::new(margins_home, &account).map_err(granola_native_error)?;
+        let store = GranolaAccountStore::new_with_backend(
+            margins_home,
+            &account,
+            granola_cli_credential_backend(),
+        )
+        .map_err(granola_native_error)?;
         let usable = validate(&store);
-        let (authorized, metadata, code, stage, reason, retryable) = match usable {
-            Ok(metadata) => (true, Some(metadata), None, None, None, false),
+        let (authorized, metadata, code, stage, reason, retryable, detail) = match usable {
+            Ok(metadata) => (true, Some(metadata), None, None, None, false, None),
             Err(error) => {
                 let failure = granola_failure_info(&error);
+                let detail = error
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<GranolaNativeError>())
+                    .map(granola_user_message);
                 (
                     false,
                     store.metadata().ok().flatten(),
@@ -471,6 +484,7 @@ fn granola_status_with(
                     failure.map(|failure| failure.stage),
                     failure.map(|failure| failure.reason),
                     failure.is_some_and(|failure| failure.retryable),
+                    detail,
                 )
             }
         };
@@ -483,6 +497,7 @@ fn granola_status_with(
             "stage": stage,
             "reason": reason,
             "retryable": retryable,
+            "detail": detail,
             "access": if authorized { json!(["meetings", "participants", "notes", "transcripts"]) } else { json!([]) },
         }));
     }
@@ -532,9 +547,13 @@ pub fn forget(
     let home =
         workspace::google_account_dir(margins_home, &account).map_err(CliError::from_anyhow)?;
     if home.exists() {
-        GoogleAccountStore::new(margins_home, &account)
-            .and_then(|store| store.forget())
-            .map_err(native_error)?;
+        GoogleAccountStore::new_with_backend(
+            margins_home,
+            &account,
+            google_cli_credential_backend(),
+        )
+        .and_then(|store| store.forget())
+        .map_err(native_error)?;
     }
     mark_retained_workspaces_needs_auth(margins_home, &account, &retained_workspaces)?;
     if json_output {
@@ -552,7 +571,12 @@ pub fn forget_granola(
     output: &mut dyn Write,
 ) -> Result<(), CliError> {
     let account = workspace::normalize_granola_account(account).map_err(CliError::from_anyhow)?;
-    let store = GranolaAccountStore::new(margins_home, &account).map_err(granola_native_error)?;
+    let store = GranolaAccountStore::new_with_backend(
+        margins_home,
+        &account,
+        granola_cli_credential_backend(),
+    )
+    .map_err(granola_native_error)?;
     store.forget().map_err(granola_native_error)?;
     if json_output {
         writeln!(
@@ -611,8 +635,11 @@ fn granola_user_message(error: &GranolaNativeError) -> String {
         GranolaNativeError::StoragePermission { .. } => {
             "Granola credential file storage has unsafe permissions. Restrict it to owner read/write, then reconnect.".to_string()
         }
+        GranolaNativeError::CredentialBackendMismatch { .. } => {
+            "This is a legacy or desktop-managed Granola Keychain connection. One account cannot be owned by both Keychain and the CLI because its metadata records a single backend. On macOS, use Keychain Access to delete the matching `margins.granola` item, then move the non-secret account metadata directory at `$MARGINS_HOME/granola/<account>/` aside as a backup before running `margins connect granola` again. The CLI did not access or modify its credentials.".to_string()
+        }
         GranolaNativeError::CredentialsUnavailable(_) => {
-            "Secure Granola credentials are unavailable. Run `margins connect granola` again, or use `--headless` in an isolated headless terminal.".to_string()
+            "The CLI's private Granola credential file is unavailable. Run `margins connect granola` again; use `--headless` only when browser presentation requires it.".to_string()
         }
         GranolaNativeError::BrowserUnavailable => {
             "A browser could not be opened. Run `margins connect granola --headless` to use the private callback prompt.".to_string()
@@ -660,8 +687,11 @@ fn native_user_message(error: &GoogleNativeError) -> String {
         GoogleNativeError::StoragePermission { .. } => {
             "Google credential file storage has unsafe permissions. Restrict it to owner read/write, then run `margins connect google` again.".to_string()
         }
+        GoogleNativeError::CredentialBackendMismatch { .. } => {
+            "This is a legacy or desktop-managed Google Keychain connection. One account cannot be owned by both Keychain and the CLI because its metadata records a single backend. On macOS, use Keychain Access to delete the matching `margins.google` item, then move the non-secret account metadata directory at `$MARGINS_HOME/google/<account>/` aside as a backup before running `margins connect google` again. The CLI did not access or modify its credentials.".to_string()
+        }
         GoogleNativeError::CredentialsUnavailable(_) => {
-            "Secure Google credential storage is unavailable in this session. Use your normal desktop login, or run `margins connect google --headless` from an isolated headless terminal.".to_string()
+            "The CLI's private Google credential file is unavailable. Run `margins connect google` again; use `--headless` only when browser presentation requires it.".to_string()
         }
         GoogleNativeError::Quota { .. } => {
             "Google temporarily rejected requests because of quota or rate limits. Wait and run the command again.".to_string()
@@ -871,14 +901,14 @@ mod tests {
     }
 
     #[test]
-    fn connect_mode_selects_public_storage_contract() {
+    fn cli_storage_is_file_owned_in_browser_and_headless_modes() {
         assert_eq!(
-            google_storage_for_connect(false),
-            GoogleCredentialBackendKind::OsKeyring
+            google_cli_credential_backend(),
+            GoogleCredentialBackendKind::File0600
         );
         assert_eq!(
-            google_storage_for_connect(true),
-            GoogleCredentialBackendKind::File0600
+            granola_cli_credential_backend(),
+            GranolaCredentialBackendKind::File0600
         );
         assert!(matches!(
             google_oauth_mode_for_connect(false),
@@ -895,6 +925,102 @@ mod tests {
     }
 
     #[test]
+    fn backend_mismatch_copy_is_honest_and_names_manual_recovery() {
+        let google = native_user_message(&GoogleNativeError::CredentialBackendMismatch {
+            requested: GoogleCredentialBackendKind::File0600,
+            persisted: GoogleCredentialBackendKind::OsKeyring,
+        });
+        let granola = granola_user_message(&GranolaNativeError::CredentialBackendMismatch {
+            requested: GranolaCredentialBackendKind::File0600,
+            persisted: GranolaCredentialBackendKind::OsKeyring,
+        });
+        for (message, service, path) in [
+            (google, "margins.google", "$MARGINS_HOME/google/<account>/"),
+            (
+                granola,
+                "margins.granola",
+                "$MARGINS_HOME/granola/<account>/",
+            ),
+        ] {
+            assert!(message.contains("legacy or desktop-managed"));
+            assert!(message.contains("cannot be owned by both Keychain and the CLI"));
+            assert!(message.contains("Keychain Access"));
+            assert!(message.contains(service));
+            assert!(message.contains(path));
+            assert!(message.contains("move the non-secret account metadata directory"));
+            assert!(message.contains("aside as a backup"));
+            assert!(message.contains("CLI did not access or modify"));
+            assert!(!message.contains("belongs to the desktop app"));
+            assert!(!message.contains("Open Margins desktop"));
+        }
+    }
+
+    #[test]
+    fn backend_mismatch_status_includes_safe_manual_recovery() {
+        let google_home = tempfile::tempdir().unwrap();
+        let google_account = google_home.path().join("google/owner@example.com");
+        std::fs::create_dir_all(&google_account).unwrap();
+        std::fs::write(
+            google_account.join("account.json"),
+            serde_json::to_vec(&json!({
+                "schema_version": "margins.google-account.v1",
+                "account": "owner@example.com",
+                "storage": "os_keyring",
+                "scopes": REQUIRED_GOOGLE_SCOPES,
+                "connected_at": "2026-08-20T17:00:00Z"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut google_output = Vec::new();
+        status(google_home.path(), true, &mut google_output).unwrap();
+        let google: Value = serde_json::from_slice(&google_output).unwrap();
+
+        let granola_home = tempfile::tempdir().unwrap();
+        write_granola_status_fixture(
+            granola_home.path(),
+            chrono::Utc::now() + chrono::Duration::hours(1),
+        );
+        let granola_metadata = granola_home
+            .path()
+            .join("granola/owner@example.com/account.json");
+        let mut value: Value =
+            serde_json::from_slice(&std::fs::read(&granola_metadata).unwrap()).unwrap();
+        value["storage"] = Value::String("os_keyring".into());
+        std::fs::write(&granola_metadata, serde_json::to_vec(&value).unwrap()).unwrap();
+        let mut granola_output = Vec::new();
+        granola_status(granola_home.path(), true, &mut granola_output).unwrap();
+        let granola: Value = serde_json::from_slice(&granola_output).unwrap();
+
+        for (row, code) in [
+            (
+                &google["connections"][0],
+                "google_credential_backend_mismatch",
+            ),
+            (
+                &granola["connections"][0],
+                "granola_credential_backend_mismatch",
+            ),
+        ] {
+            assert_eq!(
+                row[if code.starts_with("google") {
+                    "reason"
+                } else {
+                    "code"
+                }],
+                code
+            );
+            let detail = row["detail"].as_str().unwrap();
+            assert!(detail.contains("legacy or desktop-managed"));
+            assert!(detail.contains("Keychain Access"));
+            assert!(detail.contains("$MARGINS_HOME/"));
+            assert!(detail.contains("<account>"));
+            assert!(detail.contains("CLI did not access or modify"));
+            assert!(!detail.contains("owner@example.com"));
+        }
+    }
+
+    #[test]
     fn granola_status_unexpired_token_is_authorized_without_network() {
         let temp = tempfile::tempdir().unwrap();
         write_granola_status_fixture(temp.path(), chrono::Utc::now() + chrono::Duration::hours(1));
@@ -906,63 +1032,25 @@ mod tests {
     }
 
     #[test]
-    fn granola_status_expired_token_reports_authorized_after_refresh_success() {
+    fn granola_status_expired_token_is_read_only() {
         let temp = tempfile::tempdir().unwrap();
         write_granola_status_fixture(temp.path(), chrono::Utc::now() - chrono::Duration::hours(1));
+        let account = temp.path().join("granola/owner@example.com");
+        let token_before = std::fs::read(account.join("token-cache.json")).unwrap();
+        let metadata_before = std::fs::read(account.join("account.json")).unwrap();
         let mut output = Vec::new();
-        granola_status_with(temp.path(), true, &mut output, |store| {
-            Ok(store.metadata()?.unwrap())
-        })
-        .unwrap();
+        granola_status(temp.path(), true, &mut output).unwrap();
         let value: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(value["connections"][0]["authorized"], true);
         assert_eq!(value["connections"][0]["status"], "authorized");
-    }
-
-    #[test]
-    fn granola_status_expired_invalid_grant_invalidates_and_needs_auth() {
-        let temp = tempfile::tempdir().unwrap();
-        write_granola_status_fixture(temp.path(), chrono::Utc::now() - chrono::Duration::hours(1));
-        let mut output = Vec::new();
-        granola_status_with(temp.path(), true, &mut output, |store| {
-            store.forget()?;
-            Err(anyhow::Error::new(GranolaNativeError::OAuthStage {
-                stage: "refresh",
-                reason: "invalid_grant",
-            }))
-        })
-        .unwrap();
-        let value: Value = serde_json::from_slice(&output).unwrap();
-        let row = &value["connections"][0];
-        assert_eq!(row["authorized"], false);
-        assert_eq!(row["status"], "needs_attention");
-        assert_eq!(row["code"], "granola_oauth_refresh_failed");
-        assert_eq!(row["stage"], "refresh");
-        assert_eq!(row["reason"], "invalid_grant");
-        assert_eq!(row["retryable"], false);
-        assert!(!temp.path().join("granola/owner@example.com").exists());
-    }
-
-    #[test]
-    fn granola_status_expired_transport_failure_is_retryable_not_authorized() {
-        let temp = tempfile::tempdir().unwrap();
-        write_granola_status_fixture(temp.path(), chrono::Utc::now() - chrono::Duration::hours(1));
-        let mut output = Vec::new();
-        granola_status_with(temp.path(), true, &mut output, |_| {
-            Err(anyhow::Error::new(GranolaNativeError::OAuthStage {
-                stage: "refresh",
-                reason: "transport",
-            }))
-        })
-        .unwrap();
-        let value: Value = serde_json::from_slice(&output).unwrap();
-        let row = &value["connections"][0];
-        assert_eq!(row["authorized"], false);
-        assert_eq!(row["status"], "needs_attention");
-        assert_eq!(row["stage"], "refresh");
-        assert_eq!(row["reason"], "transport");
-        assert_eq!(row["retryable"], true);
-        assert!(temp.path().join("granola/owner@example.com").exists());
+        assert_eq!(
+            std::fs::read(account.join("token-cache.json")).unwrap(),
+            token_before
+        );
+        assert_eq!(
+            std::fs::read(account.join("account.json")).unwrap(),
+            metadata_before
+        );
     }
 
     fn add_work_google_sources(workspace: &mut workspace::ResolvedWorkspace, account: &str) {

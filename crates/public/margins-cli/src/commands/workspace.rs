@@ -9,7 +9,7 @@ use margins_workflows::workspace::{
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Serialize)]
 struct PublicWorkspaceView<'a> {
@@ -100,11 +100,111 @@ pub fn plan(
             format!("invalid desired workspace config: {error}"),
         )
     })?;
+    validate_desired_home_folder_entities(&desired)?;
     let plan = workspace::plan_workspace_config(&workspace.config, desired)
         .map_err(CliError::from_anyhow)?;
     serde_json::to_writer_pretty(&mut *stdout, &plan)
         .map_err(|error| CliError::new("output_failed", error.to_string()))?;
     writeln!(stdout).map_err(|error| CliError::new("output_failed", error.to_string()))
+}
+
+/// Scan emits unscoped `folder:<path>` specs for the Workspace home. Refuse a
+/// plan that cannot resolve one of those specs before the user reviews and
+/// consents to a policy that would fail later during init.
+fn validate_desired_home_folder_entities(desired: &WorkspaceConfig) -> Result<(), CliError> {
+    let home = desired
+        .bindings
+        .values()
+        .find_map(|binding| match binding {
+            WorkspaceBinding::NativeMarkdown {
+                path,
+                role: SourceRole::Home,
+            } => Some(path.as_path()),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            CliError::new(
+                "workspace_desired_invalid",
+                "desired workspace must declare one home notes source",
+            )
+        })?;
+
+    for configured in &desired.policy.entities {
+        for (entity_ref, _) in configured.entries() {
+            let Some(folder) = strip_ascii_case_prefix(entity_ref.trim(), "folder:") else {
+                continue;
+            };
+            if resolve_scan_folder(home, folder)?.is_none() {
+                return Err(CliError::new(
+                    "workspace_desired_invalid",
+                    format!(
+                        "configured entity {entity_ref:?} does not resolve to a folder in the Workspace home"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn strip_ascii_case_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    value
+        .get(..prefix.len())
+        .filter(|candidate| candidate.eq_ignore_ascii_case(prefix))
+        .map(|_| &value[prefix.len()..])
+}
+
+fn resolve_scan_folder(home: &Path, relative: &str) -> Result<Option<PathBuf>, CliError> {
+    let relative = relative.trim();
+    if relative == "." {
+        return Ok(home.is_dir().then(|| home.to_path_buf()));
+    }
+    let components = Path::new(relative).components().collect::<Vec<_>>();
+    if components.is_empty()
+        || components
+            .iter()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(CliError::new(
+            "workspace_desired_invalid",
+            format!("folder entity path must be relative to the Workspace home: {relative:?}"),
+        ));
+    }
+
+    let mut current = home.to_path_buf();
+    for component in components {
+        let wanted = component.as_os_str().to_string_lossy();
+        let entries = std::fs::read_dir(&current).map_err(|error| {
+            CliError::new(
+                "workspace_desired_invalid",
+                format!(
+                    "could not inspect Workspace home folder {}: {error}",
+                    current.display()
+                ),
+            )
+        })?;
+        let mut matches = entries
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&wanted)
+            })
+            .filter(|entry| entry.path().is_dir())
+            .map(|entry| entry.path());
+        let Some(next) = matches.next() else {
+            return Ok(None);
+        };
+        if matches.next().is_some() {
+            return Err(CliError::new(
+                "workspace_desired_invalid",
+                format!("folder entity path {relative:?} is ambiguous under the Workspace home"),
+            ));
+        }
+        current = next;
+    }
+    Ok(Some(current))
 }
 
 pub fn apply(
@@ -481,5 +581,71 @@ fn source_role(role: SourceRoleArg) -> SourceRole {
     match role {
         SourceRoleArg::Home => SourceRole::Home,
         SourceRoleArg::Reference => SourceRole::Reference,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use margins_workflows::workspace::{RetentionPolicy, WorkspaceEntity, WorkspacePolicy};
+    use tempfile::TempDir;
+
+    fn desired_with_folder(home: &Path, folder: &str) -> WorkspaceConfig {
+        WorkspaceConfig {
+            id: "fixture".to_string(),
+            name: None,
+            policy: WorkspacePolicy {
+                entities: vec![WorkspaceEntity::simple(format!("folder:{folder}"))],
+                ..WorkspacePolicy::default()
+            },
+            retention: RetentionPolicy::default(),
+            bindings: BTreeMap::from([(
+                "home".to_string(),
+                WorkspaceBinding::NativeMarkdown {
+                    path: home.to_path_buf(),
+                    role: SourceRole::Home,
+                },
+            )]),
+        }
+    }
+
+    #[test]
+    fn desired_scan_folder_resolves_case_insensitively_within_home() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir(temp.path().join("People")).unwrap();
+        let desired = desired_with_folder(temp.path(), "people");
+
+        validate_desired_home_folder_entities(&desired).unwrap();
+    }
+
+    #[test]
+    fn desired_scan_folder_must_exist_in_home() {
+        let home = TempDir::new().unwrap();
+        let reference = TempDir::new().unwrap();
+        std::fs::create_dir(reference.path().join("people")).unwrap();
+        let mut desired = desired_with_folder(home.path(), "people");
+        desired.bindings.insert(
+            "reference".to_string(),
+            WorkspaceBinding::NativeMarkdown {
+                path: reference.path().to_path_buf(),
+                role: SourceRole::Reference,
+            },
+        );
+
+        let error = validate_desired_home_folder_entities(&desired).unwrap_err();
+
+        assert_eq!(error.code(), "workspace_desired_invalid");
+        assert!(error.to_string().contains("does not resolve to a folder"));
+    }
+
+    #[test]
+    fn desired_scan_folder_rejects_parent_traversal() {
+        let home = TempDir::new().unwrap();
+        let desired = desired_with_folder(home.path(), "../people");
+
+        let error = validate_desired_home_folder_entities(&desired).unwrap_err();
+
+        assert_eq!(error.code(), "workspace_desired_invalid");
+        assert!(error.to_string().contains("must be relative"));
     }
 }

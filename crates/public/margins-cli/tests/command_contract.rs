@@ -2032,11 +2032,22 @@ fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only()
     assert!(stdout.contains("Show the user an understanding, not scan output"));
     assert!(stdout.contains("The field names below are for your analysis"));
     assert!(stdout.contains("match how you work, and what did it miss?"));
+    assert!(stdout.contains("Never open, cat, print, or summarize credential bundles"));
+    assert!(stdout.contains("Use only redacted Margins product status"));
+    assert!(stdout.contains("Do not run recall before `margins init`"));
+    assert!(stdout.contains("margins setup --only catalyst"));
     assert!(stdout.contains("If `actions` is empty"));
     assert!(stdout.contains("ask for explicit consent"));
+    assert!(stdout.contains("it is not advance consent"));
+    assert!(stdout.contains("Never infer plan consent from the opening setup request"));
     assert!(stdout.contains("apply the saved plan unchanged"));
     assert!(stdout.contains("workspace plan"));
     assert!(stdout.contains("Never hand-edit plan JSON"));
+    assert!(stdout.contains("Only make settings the user consented to"));
+    assert!(stdout.contains("machine-level catalyst mode"));
+    assert!(stdout.contains("not an exact-phrase boundary proof"));
+    assert!(stdout.contains("contiguous, verbatim phrase"));
+    assert!(stdout.contains("Never declare setup complete while"));
     assert!(stdout.contains("Use exactly the spellings surfaced by scan"));
     assert!(stdout.contains("folder:<path>"));
     assert!(stdout.contains("`[policy].entities`"));
@@ -2052,6 +2063,7 @@ fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only()
         "top_tags",
         "top_links",
         "entity_samples",
+        "representative_samples",
         "sample_files",
         "folder_stats",
         "folder_page_entities",
@@ -2082,6 +2094,27 @@ fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only()
         );
     }
     let normalized_guide = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        normalized_guide.contains("Any fallback policy change requires a fresh desired config")
+    );
+    assert!(normalized_guide.contains("Do not run unsupported discovery commands"));
+    assert!(normalized_guide.contains("Do not provision a hosted lease at the start"));
+    assert!(normalized_guide.contains("short-lived lease should begin as late as possible"));
+    assert!(normalized_guide.contains("do not run `init` repeatedly"));
+    assert!(normalized_guide.contains("earlier setup attempts as hypotheses"));
+    assert!(normalized_guide.contains("preserve that approved policy"));
+    assert!(
+        normalized_guide.contains("`live_lexical` status only confirms that an index exists")
+    );
+    assert!(normalized_guide.contains("`entity_curation_candidates[].spec`"));
+    assert!(normalized_guide.contains("`entity_curation_candidates[].expansion`"));
+    assert!(
+        normalized_guide
+            .contains("`expands_automatically = true` means `expandable = true` is redundant")
+    );
+    assert!(
+        normalized_guide.contains("`mode = \"explicit_available\"` means real child pages exist")
+    );
     assert!(normalized_guide.contains("frequency alone does not establish importance"));
     assert!(normalized_guide.contains("not a weight or an importance score"));
     assert!(normalized_guide.contains("Leave an ambiguous entity without a profile"));
@@ -2112,7 +2145,6 @@ fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only()
     assert!(!stdout.contains("workspace propose"));
     assert!(!stdout.contains("--if-revision"));
     assert!(!stdout.contains("--request-id"));
-    assert!(!stdout.contains("fallback"));
     assert!(!stdout.contains("official composition"));
     assert!(!stdout.contains("private reveal"));
     assert!(!temp.path().join(".margins").exists());

@@ -91,6 +91,10 @@ pub enum GoogleNativeError {
         path: PathBuf,
         mode: u32,
     },
+    CredentialBackendMismatch {
+        requested: GoogleCredentialBackendKind,
+        persisted: GoogleCredentialBackendKind,
+    },
     CredentialsUnavailable(String),
     Quota {
         status: u16,
@@ -109,6 +113,7 @@ impl GoogleNativeError {
             Self::AccountMismatch { .. } => "google_account_mismatch",
             Self::ScopeMismatch { .. } => "google_scope_mismatch",
             Self::StoragePermission { .. } => "google_storage_permission_insecure",
+            Self::CredentialBackendMismatch { .. } => "google_credential_backend_mismatch",
             Self::CredentialsUnavailable(_) => "google_credentials_unavailable",
             Self::Quota { .. } => "google_quota_retry_exhausted",
             Self::Http { .. } => "google_http_failed",
@@ -135,6 +140,15 @@ impl std::fmt::Display for GoogleNativeError {
                 formatter,
                 "Google file credential store has insecure permissions at {}: mode {mode:o}",
                 path.display()
+            ),
+            Self::CredentialBackendMismatch {
+                requested,
+                persisted,
+            } => write!(
+                formatter,
+                "Google credential storage owner mismatch (requested {}, persisted {})",
+                requested.as_str(),
+                persisted.as_str()
             ),
             Self::CredentialsUnavailable(detail) => {
                 write!(formatter, "Google credentials unavailable: {detail}")
@@ -261,6 +275,16 @@ impl GoogleAccountStore {
         Ok(Some(metadata))
     }
 
+    /// Check credential-store ownership using account metadata only.
+    ///
+    /// A historical `os_keyring` record does not say whether an older CLI or
+    /// the desktop app created it. A File0600 caller must therefore refuse it:
+    /// migrating it would require crossing the Keychain boundary that this
+    /// preflight exists to protect.
+    pub fn preflight_backend_ownership(&self) -> Result<()> {
+        self.ensure_backend_ownership()
+    }
+
     pub fn durable_connection_metadata(&self, scopes: &[&str]) -> Result<GoogleConnectionMetadata> {
         let metadata = self.metadata()?.ok_or_else(|| {
             GoogleNativeError::CredentialsUnavailable("missing Google account metadata".into())
@@ -272,15 +296,12 @@ impl GoogleAccountStore {
             }
             .into());
         }
+        self.ensure_backend_matches(&metadata)?;
         let missing = missing_scopes(&metadata.scopes, scopes);
         if !missing.is_empty() {
             return Err(GoogleNativeError::ScopeMismatch { missing }.into());
         }
-        let storage = MarginsTokenStorage {
-            account: self.account.clone(),
-            account_dir: self.account_dir.clone(),
-            backend: metadata.storage.clone(),
-        };
+        let storage = self.token_storage();
         let token = storage.cached_token_for(scopes)?.ok_or_else(|| {
             GoogleNativeError::CredentialsUnavailable(
                 "no stored Google token covers the required scopes".into(),
@@ -291,6 +312,7 @@ impl GoogleAccountStore {
     }
 
     pub fn write_metadata(&self, scopes: &[&str]) -> Result<GoogleConnectionMetadata> {
+        self.ensure_backend_ownership()?;
         ensure_private_dir_chain(&self.account_dir)?;
         let metadata = GoogleConnectionMetadata {
             schema_version: METADATA_SCHEMA.to_string(),
@@ -304,17 +326,8 @@ impl GoogleAccountStore {
     }
 
     pub fn forget(&self) -> Result<()> {
-        let storage = self
-            .metadata()
-            .ok()
-            .flatten()
-            .map(|metadata| MarginsTokenStorage {
-                account: self.account.clone(),
-                account_dir: self.account_dir.clone(),
-                backend: metadata.storage,
-            })
-            .unwrap_or_else(|| self.token_storage());
-        storage.delete()?;
+        self.ensure_backend_ownership()?;
+        self.token_storage().delete()?;
         if self.account_dir.exists() {
             std::fs::remove_dir_all(&self.account_dir).with_context(|| {
                 format!(
@@ -328,6 +341,24 @@ impl GoogleAccountStore {
 
     fn metadata_path(&self) -> PathBuf {
         self.account_dir.join(METADATA_FILE_NAME)
+    }
+
+    fn ensure_backend_ownership(&self) -> Result<()> {
+        if let Some(metadata) = self.metadata()? {
+            self.ensure_backend_matches(&metadata)?;
+        }
+        Ok(())
+    }
+
+    fn ensure_backend_matches(&self, metadata: &GoogleConnectionMetadata) -> Result<()> {
+        if metadata.storage != self.backend {
+            return Err(GoogleNativeError::CredentialBackendMismatch {
+                requested: self.backend.clone(),
+                persisted: metadata.storage.clone(),
+            }
+            .into());
+        }
+        Ok(())
     }
 }
 
@@ -395,6 +426,24 @@ fn ensure_refreshable_token(token: &StoredOAuthToken) -> Result<()> {
 }
 
 impl MarginsTokenStorage {
+    fn snapshot_envelope(&self) -> Result<Option<StoredTokenEnvelope>> {
+        if self.backend == GoogleCredentialBackendKind::File0600 && !self.file_path().exists() {
+            return Ok(None);
+        }
+        match self.load_envelope() {
+            Ok(envelope) => Ok(Some(envelope)),
+            Err(error)
+                if self.backend == GoogleCredentialBackendKind::OsKeyring
+                    && ["no entry", "not found"].iter().any(|needle| {
+                        format!("{error:#}").to_ascii_lowercase().contains(needle)
+                    }) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     fn store_token_for(&self, scopes: &[&str], token: StoredOAuthToken) -> Result<()> {
         let mut envelope = self
             .load_envelope()
@@ -676,14 +725,22 @@ pub fn connect_google_account(
     mode: GoogleOAuthMode,
     presenter: Arc<dyn GoogleOAuthPresenter>,
 ) -> Result<GoogleConnectionReady> {
+    if let Some(account) = expected_account {
+        GoogleAccountStore::new_with_backend(margins_home, account, backend.clone())?
+            .preflight_backend_ownership()?;
+    }
     let staged_storage = StagedTokenStorage::default();
     let token = run_installed_oauth(credential_json, mode, presenter)?;
     let access_token = token.access_token.clone();
     staged_storage.set(REQUIRED_GOOGLE_SCOPES, token)?;
     let client = NativeGoogleClient::with_access_token(access_token);
-    let ready = client.verify_connection(expected_account, backend)?;
-    let store =
-        GoogleAccountStore::new_with_backend(margins_home, &ready.account, ready.storage.clone())?;
+    let account = client.verified_account(expected_account)?;
+    let store = GoogleAccountStore::new_with_backend(margins_home, &account, backend.clone())?;
+    // With no expected account, the OAuth identity is unknowable until after
+    // consent and the read-only profile lookup. This is the earliest safe
+    // ownership check, and it still runs before the remaining capability probes.
+    store.preflight_backend_ownership()?;
+    let ready = client.verify_capabilities(account, backend)?;
     commit_verified_google_connection(&store, &ready, &staged_storage)
 }
 
@@ -712,10 +769,33 @@ fn commit_verified_google_connection(
             )
         })?;
     ensure_refreshable_token(&token)?;
-    store
-        .token_storage()
-        .store_token_for(REQUIRED_GOOGLE_SCOPES, token)?;
-    store.write_metadata(REQUIRED_GOOGLE_SCOPES)?;
+    store.ensure_backend_ownership()?;
+    let storage = store.token_storage();
+    let previous_tokens = storage.snapshot_envelope()?;
+    let previous_metadata = if store.metadata_path().exists() {
+        Some(std::fs::read(store.metadata_path()).with_context(|| {
+            format!(
+                "failed to snapshot Google connection metadata {}",
+                store.metadata_path().display()
+            )
+        })?)
+    } else {
+        None
+    };
+    storage.store_token_for(REQUIRED_GOOGLE_SCOPES, token)?;
+    if let Err(error) = store.write_metadata(REQUIRED_GOOGLE_SCOPES) {
+        if let Some(previous_tokens) = previous_tokens.as_ref() {
+            let _ = storage.store_envelope(previous_tokens);
+        } else {
+            let _ = storage.delete();
+        }
+        if let Some(previous_metadata) = previous_metadata.as_deref() {
+            let _ = write_private_bytes(&store.metadata_path(), previous_metadata);
+        } else {
+            let _ = std::fs::remove_file(store.metadata_path());
+        }
+        return Err(error);
+    }
     Ok(ready.clone())
 }
 
@@ -1059,24 +1139,44 @@ pub struct GoogleTokenProvider {
     margins_home: PathBuf,
     account: String,
     credential_json: Vec<u8>,
+    backend: GoogleCredentialBackendKind,
 }
 
 impl GoogleTokenProvider {
     pub fn new(margins_home: &Path, account: &str, credential_json: &[u8]) -> Result<Self> {
+        Self::new_with_backend(
+            margins_home,
+            account,
+            credential_json,
+            GoogleCredentialBackendKind::OsKeyring,
+        )
+    }
+
+    pub fn new_with_backend(
+        margins_home: &Path,
+        account: &str,
+        credential_json: &[u8],
+        backend: GoogleCredentialBackendKind,
+    ) -> Result<Self> {
         Ok(Self {
             margins_home: margins_home.to_path_buf(),
             account: normalize_google_account(account)?,
             credential_json: credential_json.to_vec(),
+            backend,
         })
     }
 
     fn access_token(&self, scopes: &[&str]) -> Result<StoredOAuthToken> {
-        let store = GoogleAccountStore::new(&self.margins_home, &self.account)?;
-        let metadata = store.durable_connection_metadata(scopes)?;
+        let store = GoogleAccountStore::new_with_backend(
+            &self.margins_home,
+            &self.account,
+            self.backend.clone(),
+        )?;
+        store.durable_connection_metadata(scopes)?;
         let storage = MarginsTokenStorage {
             account: self.account.clone(),
             account_dir: store.account_dir.clone(),
-            backend: metadata.storage,
+            backend: self.backend.clone(),
         };
         let cached = storage.cached_token_for(scopes)?.ok_or_else(|| {
             GoogleNativeError::CredentialsUnavailable(
@@ -1187,6 +1287,11 @@ impl NativeGoogleClient {
         expected_account: Option<&str>,
         storage: GoogleCredentialBackendKind,
     ) -> Result<GoogleConnectionReady> {
+        let actual = self.verified_account(expected_account)?;
+        self.verify_capabilities(actual, storage)
+    }
+
+    fn verified_account(&self, expected_account: Option<&str>) -> Result<String> {
         let profile = self
             .get_json(
                 GMAIL_READONLY_SCOPE,
@@ -1208,6 +1313,14 @@ impl NativeGoogleClient {
 
         let actual = normalize_google_account(&actual)?;
 
+        Ok(actual)
+    }
+
+    fn verify_capabilities(
+        &self,
+        actual: String,
+        storage: GoogleCredentialBackendKind,
+    ) -> Result<GoogleConnectionReady> {
         self.get_json(
             CALENDAR_READONLY_SCOPE,
             &format!("{}/v3/calendars/primary/events", self.calendar_base),
@@ -2913,7 +3026,7 @@ mod tests {
     }
 
     #[test]
-    fn token_provider_uses_committed_metadata_storage_backend() {
+    fn token_provider_uses_caller_selected_storage_backend() {
         let temp = tempfile::tempdir().unwrap();
         let store = GoogleAccountStore::new_with_backend(
             temp.path(),
@@ -2933,12 +3046,152 @@ mod tests {
                 },
             )
             .unwrap();
-        let provider =
-            GoogleTokenProvider::new(temp.path(), "owner@example.com", &oauth_fixture_secret())
-                .unwrap();
+        let provider = GoogleTokenProvider::new_with_backend(
+            temp.path(),
+            "owner@example.com",
+            &oauth_fixture_secret(),
+            GoogleCredentialBackendKind::File0600,
+        )
+        .unwrap();
         assert_eq!(
             provider.bearer_token(&[GMAIL_READONLY_SCOPE]).unwrap(),
             "secret-access"
+        );
+    }
+
+    #[test]
+    fn ownership_boundary_rejects_other_owner_before_oauth_token_access_or_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let desktop = GoogleAccountStore::new_with_backend(
+            temp.path(),
+            "owner@example.com",
+            GoogleCredentialBackendKind::OsKeyring,
+        )
+        .unwrap();
+        desktop.write_metadata(REQUIRED_GOOGLE_SCOPES).unwrap();
+        let metadata_before = std::fs::read(desktop.metadata_path()).unwrap();
+
+        let cli = GoogleAccountStore::new_with_backend(
+            temp.path(),
+            "owner@example.com",
+            GoogleCredentialBackendKind::File0600,
+        )
+        .unwrap();
+        let pre_oauth = connect_google_account(
+            temp.path(),
+            Some("owner@example.com"),
+            GoogleCredentialBackendKind::File0600,
+            b"not-an-oauth-credential",
+            GoogleOAuthMode::BrowserLoopback,
+            Arc::new(NoopPresenter),
+        )
+        .unwrap_err();
+        assert_eq!(
+            pre_oauth
+                .downcast_ref::<GoogleNativeError>()
+                .map(GoogleNativeError::code),
+            Some("google_credential_backend_mismatch")
+        );
+        for error in [
+            cli.durable_connection_metadata(REQUIRED_GOOGLE_SCOPES)
+                .unwrap_err(),
+            cli.forget().unwrap_err(),
+        ] {
+            assert_eq!(
+                error
+                    .downcast_ref::<GoogleNativeError>()
+                    .map(GoogleNativeError::code),
+                Some("google_credential_backend_mismatch")
+            );
+            assert!(!format!("{error:#}").contains("owner@example.com"));
+        }
+        assert_eq!(
+            std::fs::read(desktop.metadata_path()).unwrap(),
+            metadata_before
+        );
+        assert!(!cli.token_storage().file_path().exists());
+
+        let staged = StagedTokenStorage::default();
+        staged
+            .set(
+                REQUIRED_GOOGLE_SCOPES,
+                StoredOAuthToken {
+                    access_token: "new-access".into(),
+                    refresh_token: Some("new-refresh".into()),
+                    expires_at: None,
+                },
+            )
+            .unwrap();
+        let ready = GoogleConnectionReady {
+            account: "owner@example.com".into(),
+            storage: GoogleCredentialBackendKind::File0600,
+            scopes: REQUIRED_GOOGLE_SCOPES
+                .iter()
+                .map(|scope| (*scope).into())
+                .collect(),
+            access: vec!["gmail", "calendar", "drive", "docs", "meet"],
+            read_only: true,
+        };
+        let error = commit_verified_google_connection(&cli, &ready, &staged).unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<GoogleNativeError>()
+                .map(GoogleNativeError::code),
+            Some("google_credential_backend_mismatch")
+        );
+        assert_eq!(
+            std::fs::read(desktop.metadata_path()).unwrap(),
+            metadata_before
+        );
+        assert!(!cli.token_storage().file_path().exists());
+    }
+
+    #[test]
+    fn ownership_boundary_propagates_prior_token_snapshot_errors_before_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = GoogleAccountStore::new_with_backend(
+            temp.path(),
+            "owner@example.com",
+            GoogleCredentialBackendKind::File0600,
+        )
+        .unwrap();
+        store.write_metadata(REQUIRED_GOOGLE_SCOPES).unwrap();
+        write_private_bytes(&store.token_storage().file_path(), b"not-json").unwrap();
+        let metadata_before = std::fs::read(store.metadata_path()).unwrap();
+        let token_before = std::fs::read(store.token_storage().file_path()).unwrap();
+        let staged = StagedTokenStorage::default();
+        staged
+            .set(
+                REQUIRED_GOOGLE_SCOPES,
+                StoredOAuthToken {
+                    access_token: "new-access".into(),
+                    refresh_token: Some("new-refresh".into()),
+                    expires_at: None,
+                },
+            )
+            .unwrap();
+        let ready = GoogleConnectionReady {
+            account: "owner@example.com".into(),
+            storage: GoogleCredentialBackendKind::File0600,
+            scopes: REQUIRED_GOOGLE_SCOPES
+                .iter()
+                .map(|scope| (*scope).into())
+                .collect(),
+            access: vec!["gmail", "calendar", "drive", "docs", "meet"],
+            read_only: true,
+        };
+
+        let error = commit_verified_google_connection(&store, &ready, &staged).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("failed to parse Google token store"));
+        assert_eq!(
+            std::fs::read(store.metadata_path()).unwrap(),
+            metadata_before
+        );
+        assert_eq!(
+            std::fs::read(store.token_storage().file_path()).unwrap(),
+            token_before
         );
     }
 
@@ -3497,10 +3750,11 @@ mod tests {
             )
             .unwrap();
         store.write_metadata(REQUIRED_GOOGLE_SCOPES).unwrap();
-        let provider = GoogleTokenProvider::new(
+        let provider = GoogleTokenProvider::new_with_backend(
             temp.path(),
             "owner@example.com",
             &oauth_fixture_secret_with_token_uri(&token_server.base_url),
+            GoogleCredentialBackendKind::File0600,
         )
         .unwrap();
         assert_eq!(

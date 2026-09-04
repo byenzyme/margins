@@ -36,15 +36,10 @@ impl CatalystStatus {
     }
 }
 
-/// Report the setup-selected generator without resolving credentials. Explicit
-/// environment credentials retain their documented precedence.
+/// Report the setup-selected generator without resolving credentials,
+/// discovering ambient provider environment, contacting the broker, or changing
+/// setup.
 pub fn selected_status(margins_home: &Path) -> CatalystStatus {
-    if std::env::var_os("OPENAI_API_KEY").is_some()
-        || std::env::var_os("OPENROUTER_API_KEY").is_some()
-    {
-        return CatalystStatus::new(CatalystMode::Hosted, "explicit_env");
-    }
-
     let config = match std::fs::read_to_string(margins_home.join("config.toml")) {
         Ok(contents) => match contents.parse::<toml::Value>() {
             Ok(config) => config,
@@ -202,14 +197,14 @@ mod tests {
     }
 
     #[test]
-    fn explicit_environment_key_has_visible_precedence() {
+    fn ambient_environment_keys_are_ignored_by_setup_selected_status() {
         let _guard = ENV_LOCK.lock().unwrap();
         let _env = EnvRestore::without_explicit_keys();
         let home = tempfile::tempdir().unwrap();
         std::env::set_var("OPENROUTER_API_KEY", "fixture-key");
         assert_eq!(
             selected_status(home.path()),
-            CatalystStatus::new(CatalystMode::Hosted, "explicit_env")
+            CatalystStatus::new(CatalystMode::None, "setup_required")
         );
     }
 }
