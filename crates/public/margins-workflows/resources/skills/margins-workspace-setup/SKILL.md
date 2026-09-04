@@ -18,6 +18,13 @@ Be a reflective guide, not a configuration specialist. Talk to the user in the
 language of their work. Configuration and command output are supporting evidence,
 not the subject of the conversation.
 
+The assembled guide ends with the shared **Knowledge Practice Review Contract**.
+Use it as the authority for interpreting evidence, recognizing continuity, coaching
+sparse handles, and leading the handoff with a source-backed insight. This Margins
+adapter remains authoritative for commands, Workspace and Source boundaries,
+configuration, authorization, state changes, and verification. The shared contract
+grants no additional write or mutation authority.
+
 Setup is not connected-note distillation. Do not transcribe a meeting, process a
 session, or draft a note as part of this workflow.
 
@@ -135,21 +142,14 @@ you consider its coverage, candidates, representative files, structure, metadata
 existing settings, and catalyst profiles together. Do not reduce the scan to its
 top-ranked folders or copy its candidates mechanically.
 
-Form a short account of:
+Form the recognizable account by following the shared review contract. In this
+adapter, `coverage_entities` helps preserve breadth and
+`entity_curation_candidates` supplies exact configurable candidates, but neither is
+a conclusion. If evidence remains sparse, contradictory, or abstract, inspect only
+a bounded set of scan-cited files.
 
-- what this practice appears to be and where its history accumulates;
-- which projects, subjects, or relationships seem to continue across notes;
-- which material looks incidental or structural; and
-- one or two consequential questions Margins may be able to answer.
-
-If the evidence is sparse, contradictory, or too abstract, read a bounded set of
-the files referenced by the scan. Use note content and patterns of use—not folder
-names alone—to infer what something means.
-
-Present this account in ordinary language. Cite recognizable folders, notes, and
-connections, but do not narrate schema fields or ranking mechanics. Ask: “Does this
-match how you work, and what did it miss?” Reflect corrections back in the user's
-terms before deriving settings.
+Present the account before settings, then ask: “Does this match how you work, and what did it miss?”
+Reflect corrections back in the user's terms before deriving settings.
 
 This recognition pause is the one universal discovery question in grounded setup.
 Do not append a separate menu about continuity, attention, profiles, expansion, or
@@ -163,8 +163,8 @@ here for their answer so corrections can shape those settings. Do not prepare, p
 or apply exclusions, attention, profiles, expansion, or Source changes before this
 recognition pause is settled.
 
-A healthy Workspace may need no setting change. It should still receive a rich
-interpretation and a real recall proof.
+A healthy Workspace may need no setting change. Apply the shared contract's healthy
+practice rule and still provide a rich interpretation and real recall proof.
 
 ## 5. Persist only consequences the user recognizes
 
@@ -244,25 +244,12 @@ something the Workspace cannot represent.
 
 ### When useful structure is missing
 
-Do not confuse “nothing stable to configure yet” with “nothing useful to offer.”
-When the notes contain continuing work or relationships but few durable handles,
-keep attention adaptive and finish setup normally. At the close, offer at most two
-small future capture habits supported by the evidence. For each habit:
-
-- name the real thread or material in the user's language;
-- explain briefly what Margins cannot follow reliably yet;
-- suggest the smallest future-only habit that would create continuity; and
-- name a question that habit would make answerable.
-
-Useful handles can be a date on new notes, one stable name or wikilink for a
-recurring person or subject, one home or dated running log for a continuing thread,
-or a short Markdown note that preserves the decision trapped in another format.
-Do not prescribe a generic folder taxonomy or imply that tidiness improves recall.
-
-This coaching is optional advice, not another question, setup gate, or permission
-to restructure the vault. Do not create folders, move or rewrite existing notes,
-or invent tags and links during setup. If the user explicitly wants help
-reorganizing their practice, offer that as a separate, scoped follow-up.
+Use the shared review contract's sparse-handle coaching. In Margins, leave attention
+adaptive, finish setup normally, and treat any future-capture habit as optional
+advice—not another question, setup gate, or permission to restructure the vault.
+Do not create folders, move or rewrite existing notes, or invent tags and links
+during setup. If the user explicitly wants help reorganizing their practice, offer
+that as a separate, scoped follow-up.
 
 ## 6. Initialize and prove the setup
 
@@ -321,20 +308,13 @@ result is not an exact-phrase boundary proof: if the distinctive phrase does not
 retrieve the note containing it, report that proof as incomplete instead of
 silently substituting a different query or describing semantic recall as equivalent.
 
-Lead the final handoff with what the proof revealed, not the setup machinery. Answer
-the confirmed account question in two to four plain-language sentences grounded in
-the returned excerpts, cite the supporting notes, and name the useful pattern,
-change, tension, or connection. Do not merely report that recall returned real
-notes. If the evidence does not support an honest insight, say so and offer a
-narrower next question rather than fabricating one.
-
-Then state what this demonstrates Margins can now help with and give one natural
-next question. Follow with a compact, secondary setup receipt: the Workspace and
-its read/write boundary, settings translated into the user's language, whether
-machine-level catalyst setup changed, whether `init` and `sync` succeeded, and
-confirmation that notes were not modified. Exact state paths, revision hashes,
-similarity scores, profile names, and other implementation details are optional;
-include them only when the user asks or they explain a consequential limitation.
+Use the shared review contract's insight-first handoff. Its operational receipt is,
+for Margins: the Workspace and read/write boundary, settings translated into the
+user's language, whether machine-level catalyst setup changed, whether `init` and
+`sync` succeeded, and confirmation that notes were not modified. Exact state paths,
+revision hashes, similarity scores, profile names, and other implementation details
+are optional; include them only when the user asks or they explain a consequential
+limitation.
 Never declare setup complete while a requested, supported curation decision remains
 unreviewed, unsupported by scan evidence, unresolved, or outside the recognized
 account.

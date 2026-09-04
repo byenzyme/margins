@@ -2018,8 +2018,9 @@ fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only()
     assert!(result.is_ok(), "{stderr}");
     assert_eq!(
         stdout,
-        margins_workflows::resources::MARGINS_WORKSPACE_SETUP_GUIDE
+        margins_workflows::resources::margins_workspace_setup_guide()
     );
+    assert!(stdout.contains("# Knowledge Practice Review Contract"));
     assert!(stdout.contains("margins workspace new practice"));
     assert!(stdout.contains("margins init"));
     assert!(stdout.contains("margins sync --json"));
@@ -2119,13 +2120,12 @@ fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only()
     assert!(normalized_guide.contains("Leave an ambiguous entity without a profile"));
     assert!(normalized_guide.contains("one note per person is an optional practice"));
     assert!(normalized_guide.contains("Do not create, reorganize, or configure those notes"));
-    assert!(normalized_guide.contains("Do not confuse “nothing stable to configure yet”"));
-    assert!(normalized_guide.contains("offer at most two small future capture habits"));
-    assert!(normalized_guide.contains("name a question that habit would make answerable"));
-    assert!(normalized_guide.contains("This coaching is optional advice, not another question"));
+    assert!(normalized_guide.contains("at most two future capture habits"));
+    assert!(normalized_guide.contains("name the question that habit would make answerable"));
+    assert!(normalized_guide.contains("Do not prescribe a generic folder taxonomy"));
     assert!(normalized_guide.contains("Lead the final handoff with what the proof revealed"));
-    assert!(normalized_guide.contains("Do not merely report that recall returned real notes"));
-    assert!(normalized_guide.contains("setup receipt"));
+    assert!(normalized_guide.contains("Do not mistake a successful command"));
+    assert!(normalized_guide.contains("operational receipt"));
     assert!(normalized_guide.contains("revision hashes, similarity scores"));
     assert!(stdout.contains("Do not begin connected-note distillation as part of setup"));
     let declaration = stdout.find("margins workspace new practice").unwrap();
@@ -2244,7 +2244,10 @@ fn guided_onboarding_routes_without_duplicating_setup_protocol() {
         invoke(&services, temp.path(), &["margins", "guide", "onboarding"]);
 
     assert!(result.is_ok(), "{stderr}");
-    assert_eq!(stdout, margins_workflows::resources::MARGINS_GUIDED_ONBOARDING);
+    assert_eq!(
+        stdout,
+        margins_workflows::resources::MARGINS_GUIDED_ONBOARDING
+    );
     let normalized = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(stdout.contains("`margins guide workspace-setup`"));
     assert!(normalized.contains("sole source of truth for setup"));
