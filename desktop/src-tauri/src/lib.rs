@@ -337,20 +337,7 @@ impl Drop for DistillCancelGuard {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-struct MemoLine {
-    pub(crate) text: String,
-    pub(crate) created_secs: f64,
-    pub(crate) edited_secs: Option<f64>,
-    #[serde(default)]
-    pub(crate) draft_started_secs: Option<f64>,
-    #[serde(default)]
-    pub(crate) audio_pending_at_mark: bool,
-    /// null = timed (clock was running); 0 = prep block; N = pause block after segment N.
-    /// When non-null, created_secs is NOT a timeline mark.
-    #[serde(default)]
-    pub(crate) block_ordinal: Option<u32>,
-}
+type MemoLine = margins::core::TimedMemoLine;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct BackchannelSuggestionEvent {

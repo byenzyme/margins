@@ -152,7 +152,6 @@ POST /v1/live/start
 POST /v1/live/pause
 POST /v1/live/resume
 POST /v1/live/stop
-POST /v1/live/memo
 POST /v1/live/notepad
 ```
 
@@ -167,7 +166,7 @@ lives in `margins-live-runtime`. A snapshot contains:
 It contains no raw audio, local file paths, credentials, note history, bb thread
 IDs, or distillation state.
 
-Start, pause, resume, stop, append-memo, and notepad-update requests carry an operation ID. Operations
+Start, pause, resume, stop, and notepad-update requests carry an operation ID. Operations
 that address a meeting also carry the session ID and may carry the generation
 last seen by the plugin. Margins rejects requests aimed at a different or newer
 recording. Successful operations return the latest snapshot, so the panel does
@@ -180,6 +179,12 @@ lines keep the surviving line's anchor, and new lines use the current recording
 time. Lines added while paused keep Margins' existing pause-block meaning. A
 stale revision is rejected so another bb window cannot be overwritten silently.
 None of these times are drawn in the bb panel.
+
+`TimedMemoDocument` in `margins-core` owns those rules, the durable line shape,
+plain-text reconciliation, revision, and Markdown parse/export. The terminal
+notepad uses the same document for character edits, line splits, and joins. The
+bb plugin does not recreate timestamp behavior in TypeScript; it only sends
+plain text and renders the snapshot Margins returns.
 
 ## Thread attachment
 
@@ -286,7 +291,8 @@ The vertical slice is ready when:
   host RPC, discovery/auth requests, pinned release checks, and runtime start;
 - Rust tests cover the public JSON shapes, auth, route behavior, recent-line
   limits, operation replay, generation/revision checks, discovery permissions,
-  and Margins-owned notepad timing;
+  and shared terminal/bb notepad timing;
+- a Rust-emitted golden V1 fixture is accepted by the plugin's Zod schemas;
 - portable Margins tests pass without native audio or macOS frameworks;
 - no plugin test installs or reloads the live bb instance;
 - the runtime trait compiles independently of Tauri and native audio; and

@@ -112,7 +112,12 @@ pub fn run_tui(
     )?;
 
     // Auto-save on exit
-    if app.lines.iter().any(|l| !l.trim().is_empty()) {
+    if app
+        .memo
+        .lines()
+        .iter()
+        .any(|line| !line.text.trim().is_empty())
+    {
         app.save()?;
         let count = app.export().lines().count();
         eprintln!("Saved {} lines to {}", count, app.output_path);
@@ -340,7 +345,7 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
 
     // Build visible lines
     let mut display_lines: Vec<Line> = Vec::new();
-    let end = (app.scroll + visible_lines).min(app.lines.len());
+    let end = (app.scroll + visible_lines).min(app.memo.len());
 
     for i in app.scroll..end {
         let (gutter, edited) = app.gutter_label(i);
@@ -361,7 +366,7 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
 
         display_lines.push(Line::from(vec![
             Span::styled(gutter, gutter_style),
-            Span::styled(&app.lines[i], text_style),
+            Span::styled(&app.memo.line(i).unwrap().text, text_style),
         ]));
     }
 
@@ -415,7 +420,7 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
         format!(
             " {} | {} lines | mic {} spk {} |{}  ^D device  ^S save  ^C quit",
             time,
-            app.lines.len(),
+            app.memo.len(),
             level_meter(mic_peak, 8),
             level_meter(spk_peak, 8),
             warnings,

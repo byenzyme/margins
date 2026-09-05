@@ -15,6 +15,8 @@
 > is also superseded. The panel now presents one editable notepad. It sends
 > plain text with an opaque revision; the runtime, not bb, reconciles that text
 > with the complete timestamped memo and rejects stale replacement attempts.
+> The reconciliation, timestamp, editing, revision, and Markdown rules now live
+> in `margins-core::TimedMemoDocument` and are shared with the terminal UI.
 
 This audit treats `desktop/BB_LIVE_MARGINS_PLUGIN_SPEC.md` as the fixed product
 boundary. It is report-only: no plugin/runtime implementation is proposed beyond

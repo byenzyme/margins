@@ -204,7 +204,6 @@ pub struct DesktopLiveEndpointsV1 {
     pub pause: String,
     pub resume: String,
     pub stop: String,
-    pub append_memo: String,
     pub update_notepad: String,
 }
 
@@ -313,30 +312,6 @@ impl DesktopLiveSessionRequestV1 {
             validate_json_integer("expected_generation", generation)?;
         }
         Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DesktopLiveAppendMemoRequestV1 {
-    pub operation_id: LiveOperationId,
-    pub session_id: SessionId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_generation: Option<u64>,
-    pub text: String,
-}
-
-impl DesktopLiveAppendMemoRequestV1 {
-    pub fn validate(&self) -> Result<(), ValidationErrorV1> {
-        validate_id("operation_id", self.operation_id.as_ref())?;
-        validate_id("session_id", self.session_id.as_ref())?;
-        if let Some(generation) = self.expected_generation {
-            validate_json_integer("expected_generation", generation)?;
-        }
-        if self.text.trim().is_empty() {
-            Err(invalid("text", "must not be empty"))
-        } else {
-            Ok(())
-        }
     }
 }
 

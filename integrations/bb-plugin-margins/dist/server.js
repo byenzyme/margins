@@ -18951,6 +18951,28 @@ var liveMemoLineSchema = external_exports.object({
   at_ms: external_exports.number().int().nonnegative().nullable().optional(),
   text: external_exports.string()
 }).strict();
+var desktopLiveEndpointsSchema = external_exports.object({
+  snapshot: external_exports.string().startsWith("/"),
+  start: external_exports.string().startsWith("/"),
+  pause: external_exports.string().startsWith("/"),
+  resume: external_exports.string().startsWith("/"),
+  stop: external_exports.string().startsWith("/"),
+  update_notepad: external_exports.string().startsWith("/")
+}).strict();
+var desktopLiveDiscoverySchema = external_exports.object({
+  protocol_version: external_exports.literal(1),
+  runtime: external_exports.enum(["margins_desktop", "margins_cli"]),
+  profile: external_exports.string().min(1),
+  pid: external_exports.number().int().nonnegative(),
+  base_url: external_exports.string().url(),
+  token: external_exports.string().min(1),
+  permissions: external_exports.object({
+    loopback_only: external_exports.literal(true),
+    private_file: external_exports.literal(true)
+  }).strict(),
+  endpoints: desktopLiveEndpointsSchema,
+  generated_at_unix_ms: external_exports.number().int().nonnegative()
+}).strict();
 var liveSnapshotSchema = external_exports.object({
   protocol_version: external_exports.literal(1),
   server_unix_ms: external_exports.number().int().nonnegative(),
@@ -18959,6 +18981,20 @@ var liveSnapshotSchema = external_exports.object({
   rolling_transcript: external_exports.array(liveTranscriptSchema).max(80).default([]),
   memo_lines: external_exports.array(liveMemoLineSchema).max(1e3).default([]),
   notepad_revision: external_exports.string().min(1)
+}).strict();
+var desktopLiveStartRequestSchema = external_exports.object({
+  operation_id: external_exports.string().min(1),
+  name: external_exports.string().trim().min(1),
+  project_id: external_exports.string().min(1).optional()
+}).strict();
+var desktopLiveSessionRequestSchema = external_exports.object({
+  operation_id: external_exports.string().min(1),
+  session_id: external_exports.string().min(1),
+  expected_generation: external_exports.number().int().nonnegative().optional()
+}).strict();
+var desktopLiveNotepadRequestSchema = desktopLiveSessionRequestSchema.extend({
+  expected_notepad_revision: external_exports.string().min(1),
+  text: external_exports.string()
 }).strict();
 var liveErrorSchema = external_exports.object({
   code: external_exports.string().min(1),
@@ -18980,9 +19016,6 @@ var hostSessionMutationInputSchema = external_exports.object({
   operationId: external_exports.string().min(1),
   sessionId: external_exports.string().min(1),
   expectedGeneration: external_exports.number().int().nonnegative().nullable()
-}).strict();
-var hostAppendMemoInputSchema = hostSessionMutationInputSchema.extend({
-  text: external_exports.string().trim().min(1).max(4096)
 }).strict();
 var hostUpdateNotepadInputSchema = hostSessionMutationInputSchema.extend({
   expectedNotepadRevision: external_exports.string().min(1),
@@ -19010,7 +19043,6 @@ var hostSignals = {
         "pause",
         "resume",
         "stop",
-        "memo",
         "notepad"
       ])
     }).strict()
@@ -19039,10 +19071,6 @@ var marginsHostContract = defineRpcContract({
   },
   stop: {
     input: hostSessionMutationInputSchema,
-    output: hostOperationResultSchema
-  },
-  appendMemo: {
-    input: hostAppendMemoInputSchema,
     output: hostOperationResultSchema
   },
   updateNotepad: {

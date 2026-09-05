@@ -102,6 +102,36 @@ export const liveMemoLineSchema = z
   })
   .strict();
 
+export const desktopLiveEndpointsSchema = z
+  .object({
+    snapshot: z.string().startsWith("/"),
+    start: z.string().startsWith("/"),
+    pause: z.string().startsWith("/"),
+    resume: z.string().startsWith("/"),
+    stop: z.string().startsWith("/"),
+    update_notepad: z.string().startsWith("/"),
+  })
+  .strict();
+
+export const desktopLiveDiscoverySchema = z
+  .object({
+    protocol_version: z.literal(1),
+    runtime: z.enum(["margins_desktop", "margins_cli"]),
+    profile: z.string().min(1),
+    pid: z.number().int().nonnegative(),
+    base_url: z.string().url(),
+    token: z.string().min(1),
+    permissions: z
+      .object({
+        loopback_only: z.literal(true),
+        private_file: z.literal(true),
+      })
+      .strict(),
+    endpoints: desktopLiveEndpointsSchema,
+    generated_at_unix_ms: z.number().int().nonnegative(),
+  })
+  .strict();
+
 export const liveSnapshotSchema = z
   .object({
     protocol_version: z.literal(1),
@@ -111,6 +141,29 @@ export const liveSnapshotSchema = z
     rolling_transcript: z.array(liveTranscriptSchema).max(80).default([]),
     memo_lines: z.array(liveMemoLineSchema).max(1000).default([]),
     notepad_revision: z.string().min(1),
+  })
+  .strict();
+
+export const desktopLiveStartRequestSchema = z
+  .object({
+    operation_id: z.string().min(1),
+    name: z.string().trim().min(1),
+    project_id: z.string().min(1).optional(),
+  })
+  .strict();
+
+export const desktopLiveSessionRequestSchema = z
+  .object({
+    operation_id: z.string().min(1),
+    session_id: z.string().min(1),
+    expected_generation: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+
+export const desktopLiveNotepadRequestSchema = desktopLiveSessionRequestSchema
+  .extend({
+    expected_notepad_revision: z.string().min(1),
+    text: z.string(),
   })
   .strict();
 
@@ -144,12 +197,6 @@ export const hostSessionMutationInputSchema = z
     operationId: z.string().min(1),
     sessionId: z.string().min(1),
     expectedGeneration: z.number().int().nonnegative().nullable(),
-  })
-  .strict();
-
-export const hostAppendMemoInputSchema = hostSessionMutationInputSchema
-  .extend({
-    text: z.string().trim().min(1).max(4096),
   })
   .strict();
 
@@ -188,7 +235,6 @@ export const hostSignals = {
           "pause",
           "resume",
           "stop",
-          "memo",
           "notepad",
         ]),
       })
@@ -219,10 +265,6 @@ export const marginsHostContract = defineRpcContract({
   },
   stop: {
     input: hostSessionMutationInputSchema,
-    output: hostOperationResultSchema,
-  },
-  appendMemo: {
-    input: hostAppendMemoInputSchema,
     output: hostOperationResultSchema,
   },
   updateNotepad: {

@@ -55,7 +55,6 @@ POST /v1/live/start
 POST /v1/live/pause
 POST /v1/live/resume
 POST /v1/live/stop
-POST /v1/live/memo
 POST /v1/live/notepad
 ```
 
@@ -71,6 +70,10 @@ The HTTP server itself calls the transport-neutral `LiveRuntime` seam in
 background process which uses the existing native Margins recorder without
 opening a desktop window. The desktop app can still serve the same contract as
 a compatibility adapter.
+
+Notepad timing and Markdown persistence live in `margins-core`'s
+`TimedMemoDocument`, shared with the terminal UI. This plugin sends plain text;
+it does not calculate or display timestamps.
 
 The first release target is Apple Silicon macOS. Until that release exists,
 preparation reports that an update is needed instead of falling back to

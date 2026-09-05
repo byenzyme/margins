@@ -20,7 +20,6 @@ function transport(): MarginsLiveTransport {
       ...ok("finalizing"),
       stopped_session_id: "customer-call",
     })),
-    appendMemo: vi.fn(async () => ok("recording")),
     updateNotepad: vi.fn(async () => ok("recording")),
   };
 }

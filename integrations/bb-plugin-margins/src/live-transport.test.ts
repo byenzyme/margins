@@ -28,7 +28,6 @@ describe("Margins live HTTP transport", () => {
             pause: "/v1/live/pause",
             resume: "/v1/live/resume",
             stop: "/v1/live/stop",
-            append_memo: "/v1/live/memo",
             update_notepad: "/v1/live/notepad",
           },
         }),
@@ -68,7 +67,6 @@ describe("Margins live HTTP transport", () => {
             pause: "/v1/live/pause",
             resume: "/v1/live/resume",
             stop: "/v1/live/stop",
-            append_memo: "/v1/live/memo",
             update_notepad: "/v1/live/notepad",
           },
         }),
@@ -104,7 +102,6 @@ describe("Margins live HTTP transport", () => {
           pause: "/v1/live/pause",
           resume: "/v1/live/resume",
           stop: "/v1/live/stop",
-          append_memo: "/v1/live/memo",
           update_notepad: "/v1/live/notepad",
         },
       }),
@@ -218,6 +215,27 @@ describe("Margins live HTTP transport", () => {
         message: "No active Margins recording.",
         retryable: false,
         state: "ready",
+      },
+    });
+  });
+
+  it("rejects a successful response that does not match the Rust live contract", async () => {
+    const transport = createHttpMarginsLiveTransport({
+      env: {
+        MARGINS_LIVE_API_URL: "http://127.0.0.1:49152",
+        MARGINS_LIVE_API_TOKEN: "secret-token",
+      },
+      fetchImpl: vi.fn(async () => jsonResponse({ protocol_version: 2 })) as unknown as typeof fetch,
+      readFile: vi.fn(async () => {
+        throw new Error("no discovery");
+      }),
+    });
+
+    await expect(transport.readSnapshot({ sessionId: "current" })).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: "contract_mismatch",
+        state: "runtime_error",
       },
     });
   });

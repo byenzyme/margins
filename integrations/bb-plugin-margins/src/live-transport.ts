@@ -1,7 +1,11 @@
 import { readFile as defaultReadFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
-import type { HostOperationResult, LiveError, LiveSnapshot } from "./contracts.js";
+import {
+  liveSnapshotSchema,
+  type HostOperationResult,
+  type LiveError,
+} from "./contracts.js";
 import { createRuntimeManager, type RuntimeStartResult } from "./runtime-manager.js";
 
 export interface MarginsLiveTransport {
@@ -20,7 +24,6 @@ export interface MarginsLiveTransport {
   pause(input: SessionOperationInput): Promise<HostOperationResult>;
   resume(input: SessionOperationInput): Promise<HostOperationResult>;
   stop(input: SessionOperationInput): Promise<HostOperationResult>;
-  appendMemo(input: SessionOperationInput & { text: string }): Promise<HostOperationResult>;
   updateNotepad(
     input: SessionOperationInput & { expectedNotepadRevision: string; text: string },
   ): Promise<HostOperationResult>;
@@ -52,7 +55,6 @@ interface DesktopLiveDiscoveryV1 {
     pause: string;
     resume: string;
     stop: string;
-    append_memo: string;
     update_notepad: string;
   };
 }
@@ -64,7 +66,6 @@ const FALLBACK_ENDPOINTS = {
   pause: "/v1/live/pause",
   resume: "/v1/live/resume",
   stop: "/v1/live/stop",
-  append_memo: "/v1/live/memo",
   update_notepad: "/v1/live/notepad",
 };
 const INSTALL_URL = "https://github.com/byenzyme/margins/releases";
@@ -252,13 +253,20 @@ function mapStatusError(status: number, raw: unknown): HostOperationResult {
 function mutationResult(raw: unknown): HostOperationResult {
   if (typeof raw === "object" && raw !== null && "snapshot" in raw) {
     const response = raw as {
-      snapshot: LiveSnapshot;
+      snapshot: unknown;
       idempotent_replay?: unknown;
       stopped_session_id?: unknown;
     };
+    const parsed = liveSnapshotSchema.safeParse(response.snapshot);
+    if (!parsed.success) {
+      return resultError("contract_mismatch", "Margins returned an unfamiliar live state.", false, {
+        state: "runtime_error",
+        installUrl: INSTALL_URL,
+      });
+    }
     return {
       ok: true,
-      snapshot: response.snapshot,
+      snapshot: parsed.data,
       idempotent_replay:
         typeof response.idempotent_replay === "boolean" ? response.idempotent_replay : undefined,
       stopped_session_id:
@@ -269,9 +277,16 @@ function mutationResult(raw: unknown): HostOperationResult {
             : undefined,
     };
   }
+  const parsed = liveSnapshotSchema.safeParse(raw);
+  if (!parsed.success) {
+    return resultError("contract_mismatch", "Margins returned an unfamiliar live state.", false, {
+      state: "runtime_error",
+      installUrl: INSTALL_URL,
+    });
+  }
   return {
     ok: true,
-    snapshot: raw as LiveSnapshot,
+    snapshot: parsed.data,
   };
 }
 
@@ -402,16 +417,6 @@ export function createHttpMarginsLiveTransport(
         ...(input.expectedGeneration === null
           ? {}
           : { expected_generation: input.expectedGeneration }),
-      });
-    },
-    appendMemo(input) {
-      return call("POST", input, "append_memo", {
-        operation_id: input.operationId,
-        session_id: input.sessionId,
-        ...(input.expectedGeneration === null
-          ? {}
-          : { expected_generation: input.expectedGeneration }),
-        text: input.text,
       });
     },
     updateNotepad(input) {

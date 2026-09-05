@@ -32826,6 +32826,28 @@ var liveMemoLineSchema = external_exports2.object({
   at_ms: external_exports2.number().int().nonnegative().nullable().optional(),
   text: external_exports2.string()
 }).strict();
+var desktopLiveEndpointsSchema = external_exports2.object({
+  snapshot: external_exports2.string().startsWith("/"),
+  start: external_exports2.string().startsWith("/"),
+  pause: external_exports2.string().startsWith("/"),
+  resume: external_exports2.string().startsWith("/"),
+  stop: external_exports2.string().startsWith("/"),
+  update_notepad: external_exports2.string().startsWith("/")
+}).strict();
+var desktopLiveDiscoverySchema = external_exports2.object({
+  protocol_version: external_exports2.literal(1),
+  runtime: external_exports2.enum(["margins_desktop", "margins_cli"]),
+  profile: external_exports2.string().min(1),
+  pid: external_exports2.number().int().nonnegative(),
+  base_url: external_exports2.string().url(),
+  token: external_exports2.string().min(1),
+  permissions: external_exports2.object({
+    loopback_only: external_exports2.literal(true),
+    private_file: external_exports2.literal(true)
+  }).strict(),
+  endpoints: desktopLiveEndpointsSchema,
+  generated_at_unix_ms: external_exports2.number().int().nonnegative()
+}).strict();
 var liveSnapshotSchema = external_exports2.object({
   protocol_version: external_exports2.literal(1),
   server_unix_ms: external_exports2.number().int().nonnegative(),
@@ -32834,6 +32856,20 @@ var liveSnapshotSchema = external_exports2.object({
   rolling_transcript: external_exports2.array(liveTranscriptSchema).max(80).default([]),
   memo_lines: external_exports2.array(liveMemoLineSchema).max(1e3).default([]),
   notepad_revision: external_exports2.string().min(1)
+}).strict();
+var desktopLiveStartRequestSchema = external_exports2.object({
+  operation_id: external_exports2.string().min(1),
+  name: external_exports2.string().trim().min(1),
+  project_id: external_exports2.string().min(1).optional()
+}).strict();
+var desktopLiveSessionRequestSchema = external_exports2.object({
+  operation_id: external_exports2.string().min(1),
+  session_id: external_exports2.string().min(1),
+  expected_generation: external_exports2.number().int().nonnegative().optional()
+}).strict();
+var desktopLiveNotepadRequestSchema = desktopLiveSessionRequestSchema.extend({
+  expected_notepad_revision: external_exports2.string().min(1),
+  text: external_exports2.string()
 }).strict();
 var liveErrorSchema = external_exports2.object({
   code: external_exports2.string().min(1),
@@ -32855,9 +32891,6 @@ var hostSessionMutationInputSchema = external_exports2.object({
   operationId: external_exports2.string().min(1),
   sessionId: external_exports2.string().min(1),
   expectedGeneration: external_exports2.number().int().nonnegative().nullable()
-}).strict();
-var hostAppendMemoInputSchema = hostSessionMutationInputSchema.extend({
-  text: external_exports2.string().trim().min(1).max(4096)
 }).strict();
 var hostUpdateNotepadInputSchema = hostSessionMutationInputSchema.extend({
   expectedNotepadRevision: external_exports2.string().min(1),
@@ -32885,7 +32918,6 @@ var hostSignals = {
         "pause",
         "resume",
         "stop",
-        "memo",
         "notepad"
       ])
     }).strict()
@@ -32914,10 +32946,6 @@ var marginsHostContract = defineRpcContract2({
   },
   stop: {
     input: hostSessionMutationInputSchema,
-    output: hostOperationResultSchema
-  },
-  appendMemo: {
-    input: hostAppendMemoInputSchema,
     output: hostOperationResultSchema
   },
   updateNotepad: {
@@ -33257,7 +33285,6 @@ var FALLBACK_ENDPOINTS = {
   pause: "/v1/live/pause",
   resume: "/v1/live/resume",
   stop: "/v1/live/stop",
-  append_memo: "/v1/live/memo",
   update_notepad: "/v1/live/notepad"
 };
 var INSTALL_URL = "https://github.com/byenzyme/margins/releases";
@@ -33407,16 +33434,30 @@ function mapStatusError(status, raw) {
 function mutationResult(raw) {
   if (typeof raw === "object" && raw !== null && "snapshot" in raw) {
     const response = raw;
+    const parsed2 = liveSnapshotSchema.safeParse(response.snapshot);
+    if (!parsed2.success) {
+      return resultError("contract_mismatch", "Margins returned an unfamiliar live state.", false, {
+        state: "runtime_error",
+        installUrl: INSTALL_URL
+      });
+    }
     return {
       ok: true,
-      snapshot: response.snapshot,
+      snapshot: parsed2.data,
       idempotent_replay: typeof response.idempotent_replay === "boolean" ? response.idempotent_replay : void 0,
       stopped_session_id: typeof response.stopped_session_id === "string" ? response.stopped_session_id : response.stopped_session_id === null ? null : void 0
     };
   }
+  const parsed = liveSnapshotSchema.safeParse(raw);
+  if (!parsed.success) {
+    return resultError("contract_mismatch", "Margins returned an unfamiliar live state.", false, {
+      state: "runtime_error",
+      installUrl: INSTALL_URL
+    });
+  }
   return {
     ok: true,
-    snapshot: raw
+    snapshot: parsed.data
   };
 }
 function createHttpMarginsLiveTransport(options = {}) {
@@ -33526,14 +33567,6 @@ function createHttpMarginsLiveTransport(options = {}) {
         ...input2.expectedGeneration === null ? {} : { expected_generation: input2.expectedGeneration }
       });
     },
-    appendMemo(input2) {
-      return call("POST", input2, "append_memo", {
-        operation_id: input2.operationId,
-        session_id: input2.sessionId,
-        ...input2.expectedGeneration === null ? {} : { expected_generation: input2.expectedGeneration },
-        text: input2.text
-      });
-    },
     updateNotepad(input2) {
       return call("POST", input2, "update_notepad", {
         operation_id: input2.operationId,
@@ -33602,14 +33635,6 @@ function createMarginsHostEntry({ transport }) {
           signal: context.signal
         });
         await emitChanged(context, "stop", result);
-        return result;
-      },
-      async appendMemo(input2, context) {
-        const result = await transport.appendMemo({
-          ...input2,
-          signal: context.signal
-        });
-        await emitChanged(context, "memo", result);
         return result;
       },
       async updateNotepad(input2, context) {

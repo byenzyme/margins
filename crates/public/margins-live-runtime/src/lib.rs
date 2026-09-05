@@ -7,9 +7,9 @@
 #![forbid(unsafe_code)]
 
 use margins_meeting_protocol::{
-    DesktopLiveAppendMemoRequestV1, DesktopLiveErrorV1, DesktopLiveMutationResponseV1,
-    DesktopLiveSessionRequestV1, DesktopLiveSnapshotV1, DesktopLiveStartRequestV1,
-    DesktopLiveUpdateNotepadRequestV1, LiveOperationId, ValidationErrorV1,
+    DesktopLiveErrorV1, DesktopLiveMutationResponseV1, DesktopLiveSessionRequestV1,
+    DesktopLiveSnapshotV1, DesktopLiveStartRequestV1, DesktopLiveUpdateNotepadRequestV1,
+    LiveOperationId, ValidationErrorV1,
 };
 use std::{future::Future, pin::Pin};
 
@@ -20,7 +20,6 @@ pub type LiveMutationResponseV1 = DesktopLiveMutationResponseV1;
 pub type LiveErrorV1 = DesktopLiveErrorV1;
 pub type LiveStartRequestV1 = DesktopLiveStartRequestV1;
 pub type LiveSessionRequestV1 = DesktopLiveSessionRequestV1;
-pub type LiveAppendMemoRequestV1 = DesktopLiveAppendMemoRequestV1;
 pub type LiveUpdateNotepadRequestV1 = DesktopLiveUpdateNotepadRequestV1;
 
 /// One state-changing request to the process that owns the active meeting.
@@ -30,7 +29,6 @@ pub enum LiveRuntimeCommandV1 {
     Pause(LiveSessionRequestV1),
     Resume(LiveSessionRequestV1),
     Stop(LiveSessionRequestV1),
-    AppendMemo(LiveAppendMemoRequestV1),
     UpdateNotepad(LiveUpdateNotepadRequestV1),
 }
 
@@ -41,7 +39,6 @@ impl LiveRuntimeCommandV1 {
             Self::Pause(request) | Self::Resume(request) | Self::Stop(request) => {
                 &request.operation_id
             }
-            Self::AppendMemo(request) => &request.operation_id,
             Self::UpdateNotepad(request) => &request.operation_id,
         }
     }
@@ -52,7 +49,6 @@ impl LiveRuntimeCommandV1 {
             Self::Pause(request) | Self::Resume(request) | Self::Stop(request) => {
                 request.validate()
             }
-            Self::AppendMemo(request) => request.validate(),
             Self::UpdateNotepad(request) => request.validate(),
         }
     }

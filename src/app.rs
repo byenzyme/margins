@@ -1,10 +1,10 @@
 use chrono::{DateTime, Local};
+use margins_core::{MemoMoment, TimedMemoDocument};
 use ratatui::layout::Rect;
 use std::io;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8};
 use std::sync::Arc;
 
-use crate::parser::ParsedLine;
 use crate::text_helpers::*;
 
 pub const GUTTER_WIDTH: u16 = 9;
@@ -20,16 +20,7 @@ pub enum AppMode {
 }
 
 pub struct App {
-    pub lines: Vec<String>,
-    /// The alignment timestamp for each line. A line receives this when it is
-    /// committed (normally by pressing Enter), not when the blank line is
-    /// created.
-    pub created_at: Vec<DateTime<Local>>,
-    pub edited_at: Vec<Option<DateTime<Local>>>,
-    pub committed: Vec<bool>,
-    /// A line is "settled" once the cursor has left it.
-    /// Only settled lines get edited_at timestamps on modification.
-    pub settled: Vec<bool>,
+    pub memo: TimedMemoDocument,
     pub cursor_line: usize,
     pub cursor_col: usize,
     pub scroll: usize,
@@ -54,11 +45,7 @@ pub struct App {
 impl App {
     pub fn new(output_path: String, start_time: DateTime<Local>, mic_name: String) -> Self {
         Self {
-            lines: vec![String::new()],
-            created_at: vec![start_time],
-            edited_at: vec![None],
-            committed: vec![false],
-            settled: vec![false],
+            memo: TimedMemoDocument::new(MemoMoment::recording(0.0)),
             cursor_line: 0,
             cursor_col: 0,
             scroll: 0,
@@ -82,42 +69,20 @@ impl App {
     }
 
     /// Reconstruct App state from parsed markdown lines (for --resume).
-    pub fn from_parsed(
-        parsed: Vec<ParsedLine>,
+    pub fn from_memo(
+        parsed: TimedMemoDocument,
         output_path: String,
         start_time: DateTime<Local>,
         mic_name: String,
     ) -> Self {
-        let mut lines = Vec::new();
-        let mut created_at = Vec::new();
-        let mut edited_at = Vec::new();
-        let mut committed = Vec::new();
-        let mut settled = Vec::new();
-
-        for p in parsed {
-            lines.push(p.text);
-            created_at.push(p.created_at);
-            edited_at.push(p.edited_at);
-            committed.push(true);
-            settled.push(true); // All resumed lines are settled
-        }
-
-        // Append an empty line for the user to continue typing. It is not
-        // timestamped until committed.
-        lines.push(String::new());
-        created_at.push(start_time);
-        edited_at.push(None);
-        committed.push(false);
-        settled.push(false);
-
-        let cursor_line = lines.len() - 1;
+        let memo = TimedMemoDocument::resume(
+            parsed.into_lines(),
+            MemoMoment::recording(elapsed_between(start_time, Local::now())),
+        );
+        let cursor_line = memo.len() - 1;
 
         Self {
-            lines,
-            created_at,
-            edited_at,
-            committed,
-            settled,
+            memo,
             cursor_line,
             cursor_col: 0,
             scroll: cursor_line.saturating_sub(10),
@@ -145,58 +110,38 @@ impl App {
     }
 
     pub fn mark_edited_at(&mut self, line: usize, ts: DateTime<Local>) {
-        if line < self.settled.len() && self.committed[line] && self.settled[line] {
-            self.edited_at[line] = Some(ts);
-            self.settled[line] = false;
-        }
+        self.memo.mark_edited(line, self.moment(ts));
     }
 
     pub fn commit_line_at(&mut self, line: usize, ts: DateTime<Local>) {
-        if line < self.committed.len()
-            && !self.committed[line]
-            && !self.lines[line].trim().is_empty()
-        {
-            self.created_at[line] = ts;
-            self.committed[line] = true;
-        }
+        self.memo.commit_line(line, self.moment(ts));
     }
 
     pub fn commit_uncommitted_at(&mut self, ts: DateTime<Local>) {
-        for i in 0..self.lines.len() {
-            self.commit_line_at(i, ts);
-        }
+        self.memo.commit_all(self.moment(ts));
     }
 
     /// Mark the old line as settled when cursor moves to a different line.
     pub fn settle_on_move(&mut self, old_line: usize) {
-        if old_line < self.settled.len() {
-            self.settled[old_line] = true;
-        }
+        self.memo.settle(old_line);
     }
 
     pub fn elapsed_secs(&self) -> i64 {
         (Local::now() - self.start_time).num_seconds()
     }
 
-    pub fn format_time(&self, ts: &DateTime<Local>) -> String {
-        let elapsed = (*ts - self.start_time).num_seconds().max(0);
-        let h = elapsed / 3600;
-        let m = (elapsed % 3600) / 60;
-        let s = elapsed % 60;
-        if h > 0 {
-            format!("{:02}:{:02}:{:02}", h, m, s)
-        } else {
-            format!("{:02}:{:02}", m, s)
-        }
+    fn moment(&self, ts: DateTime<Local>) -> MemoMoment {
+        MemoMoment::recording(elapsed_between(self.start_time, ts))
     }
 
-    pub fn display_ts(&self, i: usize) -> Option<(&DateTime<Local>, bool)> {
-        if !self.committed[i] {
+    pub fn display_ts(&self, i: usize) -> Option<(f64, bool)> {
+        if !self.memo.is_committed(i) {
             return None;
         }
-        match self.edited_at[i] {
-            Some(ref et) => Some((et, true)),
-            None => Some((&self.created_at[i], false)),
+        let line = self.memo.line(i)?;
+        match line.edited_secs {
+            Some(edited) => Some((edited, true)),
+            None => Some((line.created_secs, false)),
         }
     }
 
@@ -206,20 +151,20 @@ impl App {
         let Some((ts, edited)) = self.display_ts(i) else {
             return (" ".repeat(GUTTER_WIDTH as usize), false);
         };
-        if self.lines[i].trim().is_empty() {
+        if self.memo.line(i).unwrap().text.trim().is_empty() {
             return (" ".repeat(GUTTER_WIDTH as usize), false);
         }
 
         // Collapse if same second + same edit status as previous committed line.
         if i > 0 {
             if let Some((prev_ts, prev_edited)) = self.display_ts(i - 1) {
-                if (*ts - *prev_ts).num_seconds().abs() == 0 && edited == prev_edited {
+                if (ts as i64 - prev_ts as i64).abs() == 0 && edited == prev_edited {
                     return (" ".repeat(GUTTER_WIDTH as usize), edited);
                 }
             }
         }
 
-        let time_str = self.format_time(ts);
+        let time_str = margins_core::format_elapsed(ts);
         let prefix = if edited { "~" } else { " " };
         (
             format!("{}{:<w$}", prefix, time_str, w = GUTTER_WIDTH as usize - 1),
@@ -230,9 +175,10 @@ impl App {
     // --- Editing ---
 
     pub fn insert_char(&mut self, c: char) {
-        self.lines[self.cursor_line].insert(self.cursor_col, c);
+        let moment = self.moment(Local::now());
+        self.memo
+            .insert_char(self.cursor_line, self.cursor_col, c, moment);
         self.cursor_col += c.len_utf8();
-        self.mark_edited(self.cursor_line);
     }
 
     pub fn enter(&mut self) {
@@ -241,55 +187,44 @@ impl App {
 
     pub fn enter_at(&mut self, ts: DateTime<Local>) {
         let old_line = self.cursor_line;
-        let rest = self.lines[self.cursor_line].split_off(self.cursor_col);
-        if !rest.is_empty() && self.cursor_col > 0 {
-            self.mark_edited_at(self.cursor_line, ts);
-        }
-        self.commit_line_at(old_line, ts);
-        self.settle_on_move(old_line);
+        self.memo
+            .split_line(self.cursor_line, self.cursor_col, self.moment(ts));
         self.cursor_line += 1;
         self.cursor_col = 0;
-        self.lines.insert(self.cursor_line, rest);
-        self.created_at.insert(self.cursor_line, ts);
-        self.edited_at.insert(self.cursor_line, None);
-        self.committed.insert(self.cursor_line, false);
-        self.settled.insert(self.cursor_line, false);
+        self.settle_on_move(old_line);
     }
 
     pub fn backspace(&mut self) {
         if self.cursor_col > 0 {
-            let prev = prev_char_boundary(&self.lines[self.cursor_line], self.cursor_col);
-            self.lines[self.cursor_line].replace_range(prev..self.cursor_col, "");
+            let prev = prev_char_boundary(
+                &self.memo.line(self.cursor_line).unwrap().text,
+                self.cursor_col,
+            );
+            let moment = self.moment(Local::now());
+            self.memo
+                .delete_range(self.cursor_line, prev..self.cursor_col, moment);
             self.cursor_col = prev;
-            self.mark_edited(self.cursor_line);
         } else if self.cursor_line > 0 {
-            let old_line = self.cursor_line;
-            let current = self.lines.remove(self.cursor_line);
-            self.created_at.remove(self.cursor_line);
-            self.edited_at.remove(self.cursor_line);
-            self.committed.remove(self.cursor_line);
-            self.settled.remove(self.cursor_line);
-            self.settle_on_move(old_line.min(self.lines.len().saturating_sub(1)));
+            let moment = self.moment(Local::now());
+            let join = self
+                .memo
+                .join_with_previous(self.cursor_line, moment)
+                .expect("cursor has a preceding line");
             self.cursor_line -= 1;
-            self.cursor_col = self.lines[self.cursor_line].len();
-            self.lines[self.cursor_line].push_str(&current);
-            self.mark_edited(self.cursor_line);
+            self.cursor_col = join;
         }
     }
 
     pub fn delete(&mut self) {
-        if self.cursor_col < self.lines[self.cursor_line].len() {
-            let next = next_char_boundary(&self.lines[self.cursor_line], self.cursor_col);
-            self.lines[self.cursor_line].replace_range(self.cursor_col..next, "");
-            self.mark_edited(self.cursor_line);
-        } else if self.cursor_line + 1 < self.lines.len() {
-            let next_line = self.lines.remove(self.cursor_line + 1);
-            self.created_at.remove(self.cursor_line + 1);
-            self.edited_at.remove(self.cursor_line + 1);
-            self.committed.remove(self.cursor_line + 1);
-            self.settled.remove(self.cursor_line + 1);
-            self.lines[self.cursor_line].push_str(&next_line);
-            self.mark_edited(self.cursor_line);
+        let line = &self.memo.line(self.cursor_line).unwrap().text;
+        if self.cursor_col < line.len() {
+            let next = next_char_boundary(line, self.cursor_col);
+            let moment = self.moment(Local::now());
+            self.memo
+                .delete_range(self.cursor_line, self.cursor_col..next, moment);
+        } else if self.cursor_line + 1 < self.memo.len() {
+            let moment = self.moment(Local::now());
+            self.memo.join_with_next(self.cursor_line, moment);
         }
     }
 
@@ -298,48 +233,61 @@ impl App {
             self.backspace();
             return;
         }
-        let boundary = prev_word_boundary(&self.lines[self.cursor_line], self.cursor_col);
-        self.lines[self.cursor_line].replace_range(boundary..self.cursor_col, "");
+        let boundary = prev_word_boundary(
+            &self.memo.line(self.cursor_line).unwrap().text,
+            self.cursor_col,
+        );
+        let moment = self.moment(Local::now());
+        self.memo
+            .delete_range(self.cursor_line, boundary..self.cursor_col, moment);
         self.cursor_col = boundary;
-        self.mark_edited(self.cursor_line);
     }
 
     pub fn delete_to_line_start(&mut self) {
         if self.cursor_col == 0 {
             return;
         }
-        self.lines[self.cursor_line].replace_range(..self.cursor_col, "");
+        let moment = self.moment(Local::now());
+        self.memo
+            .delete_range(self.cursor_line, 0..self.cursor_col, moment);
         self.cursor_col = 0;
-        self.mark_edited(self.cursor_line);
     }
 
     pub fn delete_word_forward(&mut self) {
-        if self.cursor_col >= self.lines[self.cursor_line].len() {
+        if self.cursor_col >= self.memo.line(self.cursor_line).unwrap().text.len() {
             self.delete();
             return;
         }
-        let boundary = next_word_boundary(&self.lines[self.cursor_line], self.cursor_col);
-        self.lines[self.cursor_line].replace_range(self.cursor_col..boundary, "");
-        self.mark_edited(self.cursor_line);
+        let boundary = next_word_boundary(
+            &self.memo.line(self.cursor_line).unwrap().text,
+            self.cursor_col,
+        );
+        let moment = self.moment(Local::now());
+        self.memo
+            .delete_range(self.cursor_line, self.cursor_col..boundary, moment);
     }
 
     // --- Navigation ---
 
     pub fn move_left(&mut self) {
         if self.cursor_col > 0 {
-            self.cursor_col = prev_char_boundary(&self.lines[self.cursor_line], self.cursor_col);
+            self.cursor_col = prev_char_boundary(
+                &self.memo.line(self.cursor_line).unwrap().text,
+                self.cursor_col,
+            );
         } else if self.cursor_line > 0 {
             let old = self.cursor_line;
             self.cursor_line -= 1;
-            self.cursor_col = self.lines[self.cursor_line].len();
+            self.cursor_col = self.memo.line(self.cursor_line).unwrap().text.len();
             self.settle_on_move(old);
         }
     }
 
     pub fn move_right(&mut self) {
-        if self.cursor_col < self.lines[self.cursor_line].len() {
-            self.cursor_col = next_char_boundary(&self.lines[self.cursor_line], self.cursor_col);
-        } else if self.cursor_line + 1 < self.lines.len() {
+        let line = &self.memo.line(self.cursor_line).unwrap().text;
+        if self.cursor_col < line.len() {
+            self.cursor_col = next_char_boundary(line, self.cursor_col);
+        } else if self.cursor_line + 1 < self.memo.len() {
             let old = self.cursor_line;
             self.cursor_line += 1;
             self.cursor_col = 0;
@@ -357,7 +305,7 @@ impl App {
     }
 
     pub fn move_down(&mut self) {
-        if self.cursor_line + 1 < self.lines.len() {
+        if self.cursor_line + 1 < self.memo.len() {
             let old = self.cursor_line;
             self.cursor_line += 1;
             self.snap_cursor_to_line();
@@ -370,17 +318,21 @@ impl App {
             if self.cursor_line > 0 {
                 let old = self.cursor_line;
                 self.cursor_line -= 1;
-                self.cursor_col = self.lines[self.cursor_line].len();
+                self.cursor_col = self.memo.line(self.cursor_line).unwrap().text.len();
                 self.settle_on_move(old);
             }
             return;
         }
-        self.cursor_col = prev_word_boundary(&self.lines[self.cursor_line], self.cursor_col);
+        self.cursor_col = prev_word_boundary(
+            &self.memo.line(self.cursor_line).unwrap().text,
+            self.cursor_col,
+        );
     }
 
     pub fn move_word_right(&mut self) {
-        if self.cursor_col >= self.lines[self.cursor_line].len() {
-            if self.cursor_line + 1 < self.lines.len() {
+        let line = &self.memo.line(self.cursor_line).unwrap().text;
+        if self.cursor_col >= line.len() {
+            if self.cursor_line + 1 < self.memo.len() {
                 let old = self.cursor_line;
                 self.cursor_line += 1;
                 self.cursor_col = 0;
@@ -388,7 +340,7 @@ impl App {
             }
             return;
         }
-        self.cursor_col = next_word_end(&self.lines[self.cursor_line], self.cursor_col);
+        self.cursor_col = next_word_end(line, self.cursor_col);
     }
 
     pub fn home(&mut self) {
@@ -396,16 +348,22 @@ impl App {
     }
 
     pub fn end(&mut self) {
-        self.cursor_col = self.lines[self.cursor_line].len();
+        self.cursor_col = self.memo.line(self.cursor_line).unwrap().text.len();
     }
 
     pub fn snap_cursor_to_line(&mut self) {
-        let len = self.lines[self.cursor_line].len();
+        let len = self.memo.line(self.cursor_line).unwrap().text.len();
         if self.cursor_col > len {
             self.cursor_col = len;
         }
         // Snap to char boundary
-        while self.cursor_col > 0 && !self.lines[self.cursor_line].is_char_boundary(self.cursor_col)
+        while self.cursor_col > 0
+            && !self
+                .memo
+                .line(self.cursor_line)
+                .unwrap()
+                .text
+                .is_char_boundary(self.cursor_col)
         {
             self.cursor_col -= 1;
         }
@@ -438,10 +396,10 @@ impl App {
         let click_line = (row - area.y - border) as usize + self.scroll;
         let click_col = (col - area.x - border - GUTTER_WIDTH) as usize;
 
-        if click_line < self.lines.len() {
+        if click_line < self.memo.len() {
             let old = self.cursor_line;
             self.cursor_line = click_line;
-            self.cursor_col = click_col.min(self.lines[self.cursor_line].len());
+            self.cursor_col = click_col.min(self.memo.line(self.cursor_line).unwrap().text.len());
             self.snap_cursor_to_line();
             if old != self.cursor_line {
                 self.settle_on_move(old);
@@ -452,23 +410,7 @@ impl App {
     // --- Export ---
 
     pub fn export(&self) -> String {
-        let mut out = String::new();
-        for (i, line) in self.lines.iter().enumerate() {
-            if line.trim().is_empty() || !self.committed[i] {
-                continue;
-            }
-            let created = self.format_time(&self.created_at[i]);
-            match self.edited_at[i] {
-                Some(ref et) => {
-                    let edited = self.format_time(et);
-                    out.push_str(&format!("[{} ~{}] {}\n", created, edited, line));
-                }
-                None => {
-                    out.push_str(&format!("[{}] {}\n", created, line));
-                }
-            }
-        }
-        out
+        self.memo.export_markdown()
     }
 
     pub fn save(&mut self) -> io::Result<()> {
@@ -479,6 +421,10 @@ impl App {
         self.message = Some(format!("Saved {} lines to {}", count, self.output_path));
         Ok(())
     }
+}
+
+fn elapsed_between(start: DateTime<Local>, time: DateTime<Local>) -> f64 {
+    (time - start).num_milliseconds().max(0) as f64 / 1_000.0
 }
 
 #[cfg(test)]
@@ -521,9 +467,9 @@ mod tests {
         app.enter_at(start + chrono::Duration::seconds(120));
 
         assert_eq!(app.export(), "[01:05] first memo\n[02:00] second memo\n");
-        assert!(app.committed[0]);
-        assert!(app.committed[1]);
-        assert!(!app.committed[2]);
+        assert!(app.memo.is_committed(0));
+        assert!(app.memo.is_committed(1));
+        assert!(!app.memo.is_committed(2));
     }
 
     #[test]
@@ -549,7 +495,7 @@ mod tests {
         type_text(&mut app, "final memo");
         app.save().unwrap();
 
-        assert!(app.committed[0]);
+        assert!(app.memo.is_committed(0));
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.contains("final memo"));
         let _ = std::fs::remove_file(path);

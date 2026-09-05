@@ -18,7 +18,6 @@ async function emitChanged(
           | "pause"
           | "resume"
           | "stop"
-          | "memo"
           | "notepad";
       },
     ): Promise<void>;
@@ -30,7 +29,6 @@ async function emitChanged(
     | "pause"
     | "resume"
     | "stop"
-    | "memo"
     | "notepad",
   result: HostOperationResult,
 ) {
@@ -89,14 +87,6 @@ export function createMarginsHostEntry({ transport }: MarginsHostEntryDeps) {
           signal: context.signal,
         });
         await emitChanged(context, "stop", result);
-        return result;
-      },
-      async appendMemo(input, context) {
-        const result = await transport.appendMemo({
-          ...input,
-          signal: context.signal,
-        });
-        await emitChanged(context, "memo", result);
         return result;
       },
       async updateNotepad(input, context) {

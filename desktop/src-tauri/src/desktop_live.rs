@@ -1,11 +1,12 @@
 use crate::{recording, transcript_store, AppState, MemoLine};
+use margins::core::{MemoMoment, TimedMemoDocument, TimedMemoLine};
 #[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
 use margins_live_runtime::{LiveRuntime, LiveRuntimeCommandV1, LiveRuntimeFuture};
 #[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
 use margins_meeting_protocol::{
-    DesktopLiveAppendMemoRequestV1, DesktopLiveDiscoveryV1, DesktopLiveEndpointsV1,
-    DesktopLivePermissionsV1, DesktopLiveRuntimeV1, DesktopLiveSessionRequestV1,
-    DesktopLiveStartRequestV1, DesktopLiveUpdateNotepadRequestV1, DESKTOP_LIVE_API_PREFIX_V1,
+    DesktopLiveDiscoveryV1, DesktopLiveEndpointsV1, DesktopLivePermissionsV1, DesktopLiveRuntimeV1,
+    DesktopLiveSessionRequestV1, DesktopLiveStartRequestV1, DesktopLiveUpdateNotepadRequestV1,
+    DESKTOP_LIVE_API_PREFIX_V1,
 };
 use margins_meeting_protocol::{
     DesktopLiveErrorCodeV1, DesktopLiveErrorV1, DesktopLiveHealthV1, DesktopLiveMemoLineV1,
@@ -189,15 +190,6 @@ impl LiveRuntime for NativeLiveRuntime {
                         .map_err(classify_runtime_error)?;
                     mutation_response(&app_state, Some(SessionId(stopped)))
                 }
-                LiveRuntimeCommandV1::AppendMemo(request) => {
-                    append_memo_text(
-                        &app_state,
-                        request.session_id.as_ref(),
-                        request.expected_generation,
-                        request.text,
-                    )?;
-                    mutation_response(&app_state, None)
-                }
                 LiveRuntimeCommandV1::UpdateNotepad(request) => {
                     update_notepad_text(
                         &app_state,
@@ -302,7 +294,6 @@ fn build_router(state: LiveHttpState) -> axum::Router {
         .route("/v1/live/pause", post(pause_handler))
         .route("/v1/live/resume", post(resume_handler))
         .route("/v1/live/stop", post(stop_handler))
-        .route("/v1/live/memo", post(append_memo_handler))
         .route("/v1/live/notepad", post(update_notepad_handler))
         .with_state(state)
 }
@@ -323,14 +314,13 @@ fn bearer_value_matches(value: Option<&str>, expected: &str) -> bool {
 }
 
 #[cfg(test)]
-fn canonical_route_paths() -> [&'static str; 7] {
+fn canonical_route_paths() -> [&'static str; 6] {
     [
         "/v1/live/snapshot",
         "/v1/live/start",
         "/v1/live/pause",
         "/v1/live/resume",
         "/v1/live/stop",
-        "/v1/live/memo",
         "/v1/live/notepad",
     ]
 }
@@ -461,25 +451,6 @@ async fn stop_handler(
         &operation_id,
         &request,
         LiveRuntimeCommandV1::Stop(request.clone()),
-    )
-    .await
-}
-
-#[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
-async fn append_memo_handler(
-    axum::extract::State(state): axum::extract::State<LiveHttpState>,
-    headers: axum::http::HeaderMap,
-    axum::Json(request): axum::Json<DesktopLiveAppendMemoRequestV1>,
-) -> axum::response::Response {
-    if !check_bearer(&headers, &state.token) {
-        return unauthorized();
-    }
-    let operation_id = request.operation_id.clone();
-    mutate_with_replay(
-        &state,
-        &operation_id,
-        &request,
-        LiveRuntimeCommandV1::AppendMemo(request.clone()),
     )
     .await
 }
@@ -782,8 +753,12 @@ fn update_notepad_text(
             false,
         ));
     }
-    let visible_lines = visible_notepad_lines(&text);
-    if visible_lines.len() > MAX_NOTEPAD_LINES {
+    if text
+        .split('\n')
+        .filter(|line| !line.trim().is_empty())
+        .count()
+        > MAX_NOTEPAD_LINES
+    {
         return Err(live_error(
             DesktopLiveErrorCodeV1::BadRequest,
             "The notepad has too many lines.",
@@ -822,13 +797,10 @@ fn update_notepad_text(
     }
 
     let elapsed_secs = recording::recording_status_from_state(rec).elapsed_secs;
-    let lines = reconcile_notepad_lines(
-        &rec.memo_lines,
-        visible_lines,
-        elapsed_secs,
-        rec.paused,
-        rec.segment_index,
-    );
+    let moment = memo_moment(elapsed_secs, rec.paused, rec.segment_index);
+    let lines = TimedMemoDocument::from_committed(rec.memo_lines.clone())
+        .reconcile_plain_text(&text, moment)
+        .into_lines();
     crate::persist_live_memo(&rec.work_dir, &rec.session_name, &lines).map_err(|error| {
         live_error(
             DesktopLiveErrorCodeV1::Internal,
@@ -840,92 +812,8 @@ fn update_notepad_text(
     Ok(())
 }
 
-fn visible_notepad_lines(text: &str) -> Vec<String> {
-    text.split('\n')
-        .map(|line| line.strip_suffix('\r').unwrap_or(line))
-        .filter(|line| !line.trim().is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
-}
-
-/// Reconcile a plain-text editor with Margins' timestamped memo. Exact matches
-/// keep their anchors. Within each changed region, existing lines are edited
-/// in place before genuinely new lines are created at the current meeting time.
-/// This mirrors the TUI's Enter/edit/join behavior without exposing its gutter.
-fn reconcile_notepad_lines(
-    current: &[MemoLine],
-    next_text: Vec<String>,
-    elapsed_secs: f64,
-    paused: bool,
-    segment_index: i64,
-) -> Vec<MemoLine> {
-    let old_len = current.len();
-    let new_len = next_text.len();
-    let mut lcs = vec![vec![0usize; new_len + 1]; old_len + 1];
-    for old in (0..old_len).rev() {
-        for new in (0..new_len).rev() {
-            lcs[old][new] = if current[old].text == next_text[new] {
-                1 + lcs[old + 1][new + 1]
-            } else {
-                lcs[old + 1][new].max(lcs[old][new + 1])
-            };
-        }
-    }
-
-    let mut matches = Vec::new();
-    let (mut old, mut new) = (0usize, 0usize);
-    while old < old_len && new < new_len {
-        if current[old].text == next_text[new] {
-            matches.push((old, new));
-            old += 1;
-            new += 1;
-        } else if lcs[old + 1][new] >= lcs[old][new + 1] {
-            old += 1;
-        } else {
-            new += 1;
-        }
-    }
-
-    let mut out = Vec::with_capacity(new_len);
-    let (mut old_start, mut new_start) = (0usize, 0usize);
-    for (old_match, new_match) in matches.into_iter().chain([(old_len, new_len)]) {
-        let paired = (old_match - old_start).min(new_match - new_start);
-        for offset in 0..paired {
-            let mut line = current[old_start + offset].clone();
-            let replacement = &next_text[new_start + offset];
-            if line.text != *replacement {
-                line.text = replacement.clone();
-                line.edited_secs = Some(elapsed_secs);
-            }
-            out.push(line);
-        }
-        for replacement in &next_text[new_start + paired..new_match] {
-            out.push(memo_line(
-                replacement.clone(),
-                elapsed_secs,
-                paused,
-                segment_index,
-            ));
-        }
-        if old_match < old_len {
-            out.push(current[old_match].clone());
-        }
-        old_start = old_match.saturating_add(1);
-        new_start = new_match.saturating_add(1);
-    }
-    out
-}
-
 fn notepad_revision(lines: &[MemoLine]) -> String {
-    // FNV-1a is used only as an opaque optimistic-concurrency token. Include
-    // hidden metadata as well as text so every durable memo state is distinct.
-    let bytes = serde_json::to_vec(lines).unwrap_or_default();
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in bytes {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("v1-{hash:016x}")
+    TimedMemoDocument::from_committed(lines.to_vec()).revision()
 }
 
 pub(crate) fn append_active_memo_text(
@@ -937,14 +825,31 @@ pub(crate) fn append_active_memo_text(
 }
 
 fn memo_line(text: String, elapsed_secs: f64, paused: bool, segment_index: i64) -> MemoLine {
-    MemoLine {
-        text,
-        created_secs: elapsed_secs,
-        edited_secs: None,
-        draft_started_secs: None,
-        audio_pending_at_mark: false,
-        block_ordinal: paused.then(|| segment_index.saturating_add(1) as u32),
+    TimedMemoLine::at(text, memo_moment(elapsed_secs, paused, segment_index))
+}
+
+fn memo_moment(elapsed_secs: f64, paused: bool, segment_index: i64) -> MemoMoment {
+    if paused {
+        MemoMoment::paused(elapsed_secs, segment_index.saturating_add(1) as u32)
+    } else {
+        MemoMoment::recording(elapsed_secs)
     }
+}
+
+#[cfg(test)]
+fn reconcile_notepad_lines(
+    current: &[MemoLine],
+    next_text: Vec<String>,
+    elapsed_secs: f64,
+    paused: bool,
+    segment_index: i64,
+) -> Vec<MemoLine> {
+    TimedMemoDocument::from_committed(current.to_vec())
+        .reconcile_plain_text(
+            &next_text.join("\n"),
+            memo_moment(elapsed_secs, paused, segment_index),
+        )
+        .into_lines()
 }
 
 fn memo_session_ms(line: &MemoLine) -> Option<SessionMillis> {
@@ -1066,7 +971,6 @@ fn discovery_document(
             pause: format!("{DESKTOP_LIVE_API_PREFIX_V1}/pause"),
             resume: format!("{DESKTOP_LIVE_API_PREFIX_V1}/resume"),
             stop: format!("{DESKTOP_LIVE_API_PREFIX_V1}/stop"),
-            append_memo: format!("{DESKTOP_LIVE_API_PREFIX_V1}/memo"),
             update_notepad: format!("{DESKTOP_LIVE_API_PREFIX_V1}/notepad"),
         },
         generated_at_unix_ms: UnixMillis(unix_ms_now()),
@@ -1187,7 +1091,6 @@ mod tests {
                 "/v1/live/pause",
                 "/v1/live/resume",
                 "/v1/live/stop",
-                "/v1/live/memo",
                 "/v1/live/notepad"
             ]
         );

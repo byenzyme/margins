@@ -4,7 +4,8 @@
 and a surface that controls it, such as the bb plugin or a future CLI daemon.
 
 It defines two things: how to read the current bounded meeting state, and how
-to ask the process to start, pause, resume, stop, or add a memo. It does not
+to ask the process to start, pause, resume, stop, or replace the visible
+notepad against its last revision. It does not
 choose a transport, open a window, discover a process, install software, or
 implement audio capture. Those stay with the process and its adapters.
 
