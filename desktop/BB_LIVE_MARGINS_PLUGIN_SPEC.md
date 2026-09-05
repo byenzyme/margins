@@ -329,7 +329,8 @@ the unreleased `v0.4.9` download or native audio capture.
   recording-host ID in settings. A friendly connected-Mac picker is the clearest
   next bb UI improvement.
 - `margins-live` now composes the native recorder as a windowless background
-  process. The remaining product gate is a signed, notarized Apple Silicon
+  process and embeds its microphone and system-audio explanations in the
+  executable. The remaining product gate is a signed, notarized Apple Silicon
   release plus a native microphone/system-audio and permission smoke pass.
 - The live snapshot is intentionally recent and fixed-size. Browsing old
   meetings and creating connected notes remain Margins workflows, not plugin

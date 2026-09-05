@@ -107,6 +107,10 @@ jobs:
           --bin margins-live
           --target "${{ matrix.target }}"
 
+      - name: Verify the meeting runtime permission metadata
+        if: runner.os == 'macOS'
+        run: scripts/verify-margins-live-macos.sh "target/${{ matrix.target }}/release/margins-live"
+
       - name: Sign and notarize the macOS CLI
         if: runner.os == 'macOS'
         shell: bash
@@ -267,6 +271,7 @@ jobs:
           tar -xzf "$ARCHIVE" -C packaged-smoke
           scripts/smoke-official-cli.sh packaged-smoke/margins
           if [[ "$TARGET" == "aarch64-apple-darwin" ]]; then
+            scripts/verify-margins-live-macos.sh packaged-smoke/margins-live
             packaged-smoke/margins-live capabilities \
               | grep -Fq '"protocol_version":1'
           fi
