@@ -2155,6 +2155,7 @@ fn provision_recall(vault: &Path) -> Result<margins::recall::SearchHandle, Strin
         .map_err(|e| format!("recall provisioning failed: {e:#}"))
 }
 
+#[cfg(any(feature = "recall", feature = "live-runtime"))]
 fn resolve_recall_workspace(
     path: &Path,
 ) -> Result<margins_workflows::workspace::ResolvedWorkspace, String> {

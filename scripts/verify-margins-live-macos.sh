@@ -19,15 +19,20 @@ fi
 
 file "$binary" | grep -Fq 'Mach-O'
 
+info_plist="$(otool -P "$binary" | sed -n '/^<?xml /,$p')"
+plist_value() {
+  plutil -extract "$1" raw -o - - <<<"$info_plist"
+}
+
 for key in NSMicrophoneUsageDescription NSAudioCaptureUsageDescription; do
-  value="$(plutil -extract "$key" raw -o - "$binary")"
+  value="$(plist_value "$key")"
   if [[ -z "$value" ]]; then
     echo "margins-live has an empty $key" >&2
     exit 1
   fi
 done
 
-identifier="$(plutil -extract CFBundleIdentifier raw -o - "$binary")"
+identifier="$(plist_value CFBundleIdentifier)"
 if [[ "$identifier" != "com.byenzyme.margins.live" ]]; then
   echo "margins-live has an unexpected CFBundleIdentifier: $identifier" >&2
   exit 1
