@@ -308,7 +308,7 @@ fn check_bearer(headers: &axum::http::HeaderMap, expected: &str) -> bool {
     )
 }
 
-#[cfg(any(feature = "tauri-app", test))]
+#[cfg(any(feature = "tauri-app", feature = "live-runtime", test))]
 fn bearer_value_matches(value: Option<&str>, expected: &str) -> bool {
     value.is_some_and(|value| value == format!("Bearer {expected}"))
 }
