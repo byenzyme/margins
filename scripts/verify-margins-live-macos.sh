@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 1 ]]; then
-  echo "usage: $0 /path/to/margins-live" >&2
+if [[ $# -lt 1 || $# -gt 2 || ( $# -eq 2 && "$2" != "--signed" ) ]]; then
+  echo "usage: $0 /path/to/margins-live [--signed]" >&2
   exit 2
 fi
 
@@ -31,6 +31,14 @@ identifier="$(plutil -extract CFBundleIdentifier raw -o - "$binary")"
 if [[ "$identifier" != "com.byenzyme.margins.live" ]]; then
   echo "margins-live has an unexpected CFBundleIdentifier: $identifier" >&2
   exit 1
+fi
+
+if [[ "${2:-}" == "--signed" ]]; then
+  entitlements="$(codesign --display --entitlements :- "$binary" 2>/dev/null | tr -d '[:space:]')"
+  if [[ "$entitlements" != *'<key>com.apple.security.device.audio-input</key><true/>'* ]]; then
+    echo "margins-live is signed without the Hardened Runtime audio-input entitlement" >&2
+    exit 1
+  fi
 fi
 
 echo "margins-live contains its macOS audio permission descriptions"

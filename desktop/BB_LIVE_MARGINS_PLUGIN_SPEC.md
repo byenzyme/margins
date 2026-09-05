@@ -330,8 +330,10 @@ the unreleased `v0.4.9` download or native audio capture.
   next bb UI improvement.
 - `margins-live` now composes the native recorder as a windowless background
   process and embeds its microphone and system-audio explanations in the
-  executable. The remaining product gate is a signed, notarized Apple Silicon
-  release plus a native microphone/system-audio and permission smoke pass.
+  executable. Its release signature grants only the Hardened Runtime audio-input
+  access needed by Core Audio. The remaining product gate is a signed, notarized
+  Apple Silicon release plus a native microphone/system-audio and permission
+  smoke pass.
 - The live snapshot is intentionally recent and fixed-size. Browsing old
   meetings and creating connected notes remain Margins workflows, not plugin
   panel features.
