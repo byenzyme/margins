@@ -1,99 +1,62 @@
-# bb-plugin-margins
+# Margins for bb
 
-This is a small bb companion for Margins. It lets a bb thread talk to the local
-Margins runtime on the selected recording Mac.
+Margins adds a small recording panel and an editable meeting notepad to bb.
+The current bb window supplies the audio; the recording and notes are saved in
+the project’s primary folder under its existing `.margins` store.
 
-It does not read Margins database files, browse old meetings, or store transcript
-text in bb. Margins stays the owner of recording, audio permissions, the session
-clock, memo timestamps, transcript storage, and the live local API.
+## What works in this version
 
-The install shape is one deterministic **Start recording** action in bb. If the
-recorder is missing or stopped, the host worker prepares it as part of that
-intent: it downloads one named Margins release, checks the release digest before
-unpacking it, and keeps the windowless recorder in plugin-owned storage.
-The same archive contains the normal `margins` command. The plugin puts that
-command in `~/.local/bin` when the path is free or already belongs to this
-plugin; it never overwrites an unrelated command.
+- Browser and mobile microphone recording, labelled **Microphone only**.
+- One Start action: permission is requested before a project meeting exists.
+- Small pause/stop controls and one full, editable notepad.
+- Recording ownership survives panel close and thread navigation because a bb
+  content script, rather than the panel component, owns the browser stream.
+- A 25-second reconnect grace. After it expires, the project machine stops and
+  saves the audio it received.
+- Saved recordings are ordinary Margins sessions. The normal `margins` CLI
+  continues to own transcription, diarization, distillation, and retention.
+- **Make connected note** fills and focuses the bb composer without sending.
+- Bundled `watermark` and `workspace-setup` skills; no recording agent tool.
 
-## What appears in bb
+The panel does not show a live transcript, host picker, elapsed-time dashboard,
+meeting library, or processing controls. Plugin storage holds only routing and
+heartbeat facts. It never holds audio, transcript, or notepad bodies.
 
-- One thread side-panel action: **Margins live**.
-- One compact listening row with a small waveform and recording controls, plus one
-  continuously editable **Notepad**.
-- One `@Margins` mention provider when live meeting context is available.
-- Two bundled skills:
-  - `watermark` for live, transcript-grounded feedback.
-  - `workspace-setup` for optional Margins Workspace setup.
+## Installation shape
 
-There are no nav pages, history views, message actions, review actions, broad
-retrieval tools, or native agent tools in this MVP.
+On first Start, the plugin’s project-host worker installs one version-pinned,
+digest-verified Margins release when needed. That release contains:
 
-## How it connects
+- `margins`, the normal CLI;
+- `margins-server`, the project-side recording service;
+- `margins-live` on Apple silicon macOS, retained for the future Mac-local
+  capture bridge.
 
-The bb server resolves the current thread to its environment host, or uses the
-optional `marginsHostId` setting. Browser code never chooses arbitrary host ids.
-The server then calls this plugin's bb host worker on that explicit host.
+The service is launched with the bb project’s default source path as
+`MARGINS_WORK_DIR`, so it writes to `<project>/.margins`, never an environment
+worktree or the recording device’s personal Margins store. For local development,
+`MARGINS_PROJECT_SERVER_PATH` may point at an already-built `margins-server`.
 
-The host worker discovers Margins from the private discovery file written by the
-process that owns capture:
+## Honest current limits
 
-```text
-~/Library/Application Support/margins/desktop-live.v1.json
-```
+The installed bb SDK does not yet expose either:
 
-For non-default profiles, the directory name follows Margins' profile slug, for
-example `margins-first-run-test`. Tests and development can override discovery
-with `MARGINS_LIVE_DISCOVERY_FILE`. A direct development connection requires
-both `MARGINS_LIVE_API_URL` and `MARGINS_LIVE_API_TOKEN`; one is never combined
-with credentials from the private discovery file.
+1. a browser-window-local native audio capability, required to enable
+   microphone + computer audio on the Mac actually running the PWA; or
+2. an app-global, client-scoped status/control contribution, required to keep
+   recording controls visibly reachable while the side panel is closed.
 
-The host worker calls only the small local live API:
+The plugin therefore leaves Mac setup unavailable and does not pretend a thread
+host is the current Mac. Browser microphone capture can continue with the panel
+closed, but bb still needs the second SDK seam for a persistent return path.
 
-```text
-GET  /v1/live/snapshot
-POST /v1/live/start
-POST /v1/live/pause
-POST /v1/live/resume
-POST /v1/live/stop
-POST /v1/live/notepad
-```
-
-Those requests use the V1 JSON contract from `margins-meeting-protocol`:
-`protocol_version`, `operation_id`, `session_id`, `expected_generation`,
-`rolling_transcript`, `memo_lines`, and `notepad_revision`. The notepad update
-sends the complete visible text with the last revision it saw. Margins keeps
-line timestamps private, preserves them for unchanged lines, marks edited lines,
-and timestamps new lines against its own meeting clock. The legacy `DesktopLive*V1` type and
-filename names describe the first adapter, not a requirement for a desktop UI.
-The HTTP server itself calls the transport-neutral `LiveRuntime` seam in
-`margins-live-runtime`. The signed archive contains `margins-live`, a small
-background process which uses the existing native Margins recorder without
-opening a desktop window. The desktop app can still serve the same contract as
-a compatibility adapter.
-
-Notepad timing and Markdown persistence live in `margins-core`'s
-`TimedMemoDocument`, shared with the terminal UI. This plugin sends plain text;
-it does not calculate or display timestamps.
-
-The first release target is Apple Silicon macOS. Until that release exists,
-preparation reports that an update is needed instead of falling back to
-an unpinned download. Development can point `MARGINS_LIVE_RUNTIME_PATH` at a
-compatible runtime; it must answer `capabilities` with live protocol V1.
-The probe also requires `editable_notepad: true`, so an older append-only V1
-runtime is treated as needing an update instead of failing after the panel opens.
-
-## Storage
-
-Plugin storage holds only thread attachment pointers, a short-lived stopped-meeting
-handoff receipt, and preferences. A pointer
-contains the bb thread id, selected host id, Margins session id, attach time, and
-current generation. The receipt keeps the stopped session ID only long enough to
-survive refresh and offer **Make connected note**. It never stores transcript text, memo text, audio, file
-paths, credentials, participant names, or meeting history.
+`@Margins` is also withheld until the project recording service exposes a
+bounded live-context read. The control snapshot deliberately carries no rolling
+transcript.
 
 ## Development
 
-Run package commands only in this directory:
+Run inside this directory:
 
 ```bash
 npm install

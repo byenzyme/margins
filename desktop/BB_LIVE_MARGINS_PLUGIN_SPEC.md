@@ -1,342 +1,264 @@
-# Margins in bb: live meeting companion
+# Margins in bb: recording beside the work
 
-Status: plugin, CLI-owned recorder, and release packaging implemented; native
-macOS recording verification and release remain, 2026-09-04.
+Status: product and technical contract for the bb plugin, revised 2026-09-06.
 
-## The product idea
+## The promise
 
-Margins should be quietly present while a meeting is happening. A local
-Margins runtime owns listening, transcription, timing, and storage. bb is where
-the meeting can sit beside the work it is shaping.
+Margins gives a person one quiet place in bb to record a conversation and keep
+the notes they type while it is happening. The device running the current bb
+PWA supplies the audio. The stable folder behind the bb project owns the saved
+meeting.
 
-This is intentionally smaller than a meeting archive or knowledge system. A
-meeting starts as private, unfinished material: a rolling transcript and a few
-human marks. A bb thread is work: a question, investigation, decision, or change
-that may draw on that material. The plugin lets the user cross that boundary on
-purpose with `@Margins`; it does not turn every sentence into durable knowledge
-or every note into a task.
+The panel should answer five questions without exposing implementation:
 
-The intended everyday shape is a CLI-installed background runtime with bb as
-its visible control surface. The full Margins app may remain useful for deeper
-review and settings, but neither a full window nor a menu-bar app is required
-to keep a bb meeting alive.
+1. What will this device capture?
+2. Is recording ready, live, paused, or being saved?
+3. Where will the recording and notes be kept?
+4. Can I keep typing without managing timestamps?
+5. What is the one safe next action?
+
+The normal object language is **recording**, **notepad**, **transcript**, and
+**connected note**. Process, host, worker, binary, token, lease, database,
+entitlement, and session ID are implementation terms and do not appear in the
+ordinary interface.
 
 ## What the user sees
 
-The panel is ordered around five immediate needs: confidence that recording is
-on, explicit control over it, a place to catch a thought, a way to see what was
-saved, and a deliberate handoff into the thread. Everything else is supporting
-machinery.
+Margins contributes one thread-side panel. The compact top row contains a
+truthful source label and small start/pause/stop controls. The rest of the panel
+is one editable notepad. There is no live transcript wall, machine picker,
+elapsed-time dashboard, meeting library, or processing UI in this surface.
 
-The plugin contributes one thread-side panel called **Margins live**. It shows:
+The source label is literal:
 
-- one compact voice-style row that makes ready, listening, paused, and saving
-  states recognizable at a glance;
-- literal start, pause, resume, and stop controls;
-- one continuously editable **Notepad** that saves quietly as the user types; and
-- **Add @Margins**, which inserts `@Margins` into the thread composer without
-  sending the message.
+- **Microphone + computer audio** only after recording on this Mac has been
+  enabled and that capability is present in the current bb window.
+- **Microphone only** when the current browser supplies a microphone stream.
+- No source label that implies capture while capability is unknown.
 
-Host routing, elapsed time, transcript freshness, and raw transcript text stay
-out of the normal panel. They support the integration but are not things a user
-needs to monitor during a call. Relevant failures still appear where the
-waveform and controls normally sit.
+Audio and notes are saved to the bb project folder on its connected project
+machine. The first-use and live UI says this plainly. It never says that audio
+stays on the Mac or phone.
 
-There is no Margins navigation area, meeting history, review queue, message
-action, task importer, or general-purpose agent tool in this version.
+The notepad is a single plain-text editor. Newlines are the user's lightweight
+marks. Margins associates lines with the meeting clock and preserves those
+anchors without drawing timestamps in this panel. Typing is saved quietly;
+pause and stop flush the latest edit before changing recording state.
 
-On bb mobile, this same responsive plugin panel runs inside bb's native WebView
-shell. It still controls the Margins runtime on the thread's recording host;
-opening it on a phone does not move capture to the phone or request the phone's
-microphone. Visible controls stay compact, while coarse-pointer hit targets stay
-large enough to tap reliably.
-
-The target main button follows the current state:
-
-| State | Main action |
-| --- | --- |
-| Ready, including first use or a stopped/missing runtime | **Start recording** prepares what is needed and begins capture |
-| Preparing recording | No second action; show one truthful, non-animated stage |
-| Listening | **Pause** |
-| Paused | **Resume** |
-| Saving meeting | No action while the runtime finalizes |
-| Meeting saved | **Make connected note**, or quiet **Not now** |
-| Needs attention | **Try again** for the intended action, with one specific recovery |
-
-Runtime detection, installation, startup, and health checks are deterministic
-plugin behavior. An agent can explain or recover from an unusual setup problem,
-but it is not in the normal control loop. The optional conversation about which
-notes Margins may read and where it may write remains skill-led.
-
-## Process ownership
-
-There is one recorder and one clock: the running Margins runtime process.
+## User-visible states
 
 ```text
-bb panel or @Margins
-  -> bb plugin server
-  -> bb host worker on the chosen Mac
-  -> private loopback API in the running Margins runtime
-  -> capture, rolling transcription, memo, and session storage
+Checking
+  -> Needs setup (Mac only, until local native capture is actually available)
+  -> Ready — Microphone + computer audio
+  -> Ready — Microphone only
+  -> Getting ready
+  -> Recording <-> Paused
+  -> Saving
+  -> Saved
+
+Any connected operation may move to:
+  Recovering connection -> prior state
+  Recovering connection -> Saving -> Saved
+  Needs attention -> one truthful recovery
 ```
 
-The implementation has a transport-neutral `margins-live-runtime` port with
-`snapshot` and one small command enum. The loopback HTTP server depends on this
-port, not on Tauri. `margins-live` is the windowless runtime shipped beside the
-normal `margins` command; it delegates to the existing native recorder through
-`NativeLiveRuntime`. The desktop app uses that same adapter as a compatibility
-path, without becoming the architectural owner.
+State claims are conservative:
 
-The plugin never starts a second recorder, reads Margins database files, parses
-private transcript files, or calls raw Tauri command names. The browser never
-receives the local token and never chooses an arbitrary host for a request.
+- **Getting ready** begins immediately after Start and ends only after the
+  browser/native producer and project-side session both exist.
+- **Recording** means this bb window owns a live audio producer and the project
+  side has acknowledged the recording.
+- **Paused** means both producer and project state are paused.
+- **Saving** means capture has stopped locally and the project side is
+  finalizing what it received.
+- **Saved** means the existing Margins audio session is durable in the project.
+  A transcript may still be absent and is not promised here.
+- **Recovering connection** begins after acknowledgements or heartbeat fail. A
+  brief reconnect does not manufacture a second recording.
+- **Needs attention** says what could not happen, what is safe, and one next
+  step. An unsupported path has no retry button.
 
-The current thread environment's Mac is used by default. A recording Mac can be
-set explicitly when the thread's worktree lives elsewhere. All host calls carry
-an explicit bb host ID and fail closed if that host is offline.
+## First use on a Mac
 
-## Installing and starting Margins
+Before ordinary recording, the panel shows **Enable recording on this Mac**.
+It explains that Margins can hear the person through the microphone and a
+conversation playing on this Mac, starts only after the person presses Start,
+and stops and saves if this bb window stays disconnected.
 
-The target install is owned by the plugin's host worker:
+The setup action is deterministic. The UI does not expose or ask the user to
+manage a native component. Readiness is granted only after the current bb
+window proves it can reach the Mac-local capture capability and the operating
+system has granted the required audio access.
 
-- bb installs and distributes the JavaScript plugin and its host worker;
-- the host worker looks for live protocol V1 and targets one exact release;
-- one **Start recording** intent checks for a live meeting, and when needed
-  downloads the named release, checks the digest published by GitHub before
-  unpacking it, keeps `margins-live` in plugin-owned storage, starts it, begins
-  capture, and attaches the resulting meeting;
-- the archive's normal `margins` command is copied to `~/.local/bin` only when
-  that path is free or already managed by the plugin; and
-- Margins owns microphone/system-audio permissions, runtime updates, and its
-  private data.
+The current bb plugin SDK does not expose a browser-local native-service bridge
+or a stable identity for the physical device running the PWA. Therefore the
+plugin in this repository must not claim that Mac setup works merely because an
+enrolled Mac or the thread's environment host exists. Until bb provides that
+capability, the Mac state remains an honest setup-required/unavailable state.
 
-That preparation must be deterministic and consented by **Start recording**: no generated shell,
-no `curl | sh`, no unpinned latest-version lookup during execution, and no agent
-deciding where to put a binary. The plugin may use bb's normal confirmation and
-progress surfaces.
+The required bb seam is intentionally narrow:
 
-The first packaged target is Apple Silicon macOS. The plugin pins the intended
-first runtime release (`v0.4.9`). Before that release is published, setup says
-an update is needed; it never substitutes a floating latest release. Other
-platforms get an honest unsupported result until native capture is packaged for
-them.
-
-## The private local connection
-
-At startup, the process that owns capture binds an unused `127.0.0.1` port and
-writes `desktop-live.v1.json` inside its profile data directory. The file
-contains:
-
-- protocol version and profile name;
-- the process ID and loopback base URL;
-- a new random bearer token; and
-- the six supported route paths.
-
-The discovery file is written atomically with user-only permissions on Unix and
-removed when the runtime exits when possible. A restart replaces the port and
-token. The filename and `DesktopLive*V1` Rust type names are V1 compatibility
-names from the first adapter; they do not make the desktop app the architectural
-owner. This is separate from the hosted `margins-server` service.
-
-Development may override the discovery file path. A direct URL override is used
-only when a token override is also present, so a URL cannot borrow the token
-from the private discovery file.
-
-## Local live API
-
-The local capture process exposes only these routes:
-
-```text
-GET  /v1/live/snapshot
-POST /v1/live/start
-POST /v1/live/pause
-POST /v1/live/resume
-POST /v1/live/stop
-POST /v1/live/notepad
-```
-
-The wire types live in `margins-meeting-protocol`; the callable process seam
-lives in `margins-live-runtime`. A snapshot contains:
-
-- the current session ID, state, elapsed time, and generation;
-- capture phase, system-audio health, warnings, and transcript freshness;
-- at most 80 recent transcript lines / 20,000 characters; and
-- the complete visible notepad as memo lines, plus an opaque notepad revision.
-
-It contains no raw audio, local file paths, credentials, note history, bb thread
-IDs, or distillation state.
-
-Start, pause, resume, stop, and notepad-update requests carry an operation ID. Operations
-that address a meeting also carry the session ID and may carry the generation
-last seen by the plugin. Margins rejects requests aimed at a different or newer
-recording. Successful operations return the latest snapshot, so the panel does
-not have to guess what happened.
-
-The bb editor sends the full plain-text notepad and the revision it last read.
-It never sends timestamps. Margins reconciles that text with its timestamped
-memo: unchanged lines keep their anchors, changed lines get an edit time, joined
-lines keep the surviving line's anchor, and new lines use the current recording
-time. Lines added while paused keep Margins' existing pause-block meaning. A
-stale revision is rejected so another bb window cannot be overwritten silently.
-None of these times are drawn in the bb panel.
-
-`TimedMemoDocument` in `margins-core` owns those rules, the durable line shape,
-plain-text reconciliation, revision, and Markdown parse/export. The terminal
-notepad uses the same document for character edits, line splits, and joins. The
-bb plugin does not recreate timestamp behavior in TypeScript; it only sends
-plain text and renders the snapshot Margins returns.
-
-## Thread attachment
-
-Starting from a thread records a small pointer in plugin storage:
-
-```json
-{
-  "threadId": "thr_...",
-  "hostId": "host_...",
-  "meetingId": "2026-09-04-10-00-00",
-  "attachedAtUnixMs": 1788525600000,
-  "generation": 3
+```ts
+interface ClientAudioCapture {
+  probe(): Promise<{
+    platform: "macos";
+    ready: boolean;
+    sources: ["microphone", "system"];
+  }>;
+  enable(): Promise<void>;
+  start(input: { captureId: string }): Promise<ReadableStream<AudioFrame>>;
+  pause(): Promise<void>;
+  resume(): Promise<void>;
+  stop(): Promise<void>;
 }
 ```
 
-That pointer is routing information, not meeting content. bb does not store the
-transcript or memo bodies. If Start finds an already-running meeting, it attaches
-that meeting instead of starting a second one.
+It must be bound to the current PWA window/device, not resolved through a bb
+thread environment or chosen from enrolled hosts.
 
-Stop stores a separate, equally small handoff receipt containing the returned
-`stopped_session_id`, host ID, thread ID, and save time. The live attachment is
-then cleared. This receipt survives panel refreshes only so **Meeting saved** can
-preserve the handoff to the exact capture. The composer uses natural language
-about the meeting just recorded, and latest-session resolution finds it after
-the user sends; raw meeting IDs and slugs never appear in user-visible copy. The
-receipt contains no meeting content and is deleted by **Not now** or replaced
-when a later recording succeeds.
+## Browser and mobile recording
 
-## `@Margins` and the watermark skill
+In a secure context with `getUserMedia` and a supported `MediaRecorder`, the
+current bb window can record **Microphone only**. The browser asks for
+permission before a project session is allocated. Audio chunks are ordered,
+acknowledged, and forwarded to the Margins service on the project's primary
+source machine. A phone never claims to capture audio playing inside another
+app.
 
-`@Margins` is the one everyday way meeting material enters an agent turn.
+The frontend recording owner is a trusted bb plugin content script. That
+lifecycle is once per browser tab/window and survives thread navigation and
+panel unmount. React panel state is a view of that owner; mounting a panel does
+not create a recorder, and unmounting it does not imply that recording stopped.
 
-Mention search offers one item only when the attached meeting is Recording or
-Paused. It stays hidden while the runtime is still starting or finalizing. bb's
-mention API gives `resolve` only the chosen item ID, so the plugin encodes the
-thread, meeting, and recording-host identity into that opaque ID. When the
-message is sent, resolution reads a fresh snapshot from that exact host and
-meeting.
+The owner keeps a stable client/capture identity across a page refresh in the
+same tab. It sends a short heartbeat while active. The project-side lease gives
+a refresh or brief network blip 25 seconds to recover. After that, Margins
+stops and safely finalizes the audio chunks and notepad content already received.
 
-The injected context includes recent transcript lines, notes the user saved, capture
-health, and clear freshness language. It is limited to the current meeting and
-is visible to the agent, not copied into plugin storage.
+## Project storage
 
-The bundled `watermark` skill tells the agent how to answer from that context:
-lead with the useful read, stay short enough for a live conversation, say when
-the transcript is behind or still changing, and offer one good next move. It
-does not fetch data itself and is not a hidden tool.
+The plugin resolves the thread's `projectId`, calls `bb.sdk.projects.get`, and
+selects the one source with `isDefault: true`. That source's `hostId` and `path`
+are the capture destination. The environment worktree is never a fallback.
 
-There is no `margins_status`, `margins_get_context`, `margins_add_memo`,
-`margins_submit_receipt`, or `margins_watermark` agent tool in this version.
-Distillation remains a separate skill and workflow.
+```text
+current bb window
+  -> browser or Mac-local audio producer
+  -> authenticated bb plugin route
+  -> Margins service on project.sources[isDefault].hostId
+  -> project.sources[isDefault].path/.margins
+```
 
-## Optional notes setup
+The Margins service reuses the existing hosted capture implementation:
 
-The bundled `workspace-setup` skill is separate from live recording. It is used
-only when the user asks Margins to understand a notes practice. It follows
-`margins guide workspace-setup` and helps the user decide, in ordinary language:
+- MediaRecorder WebM/Opus chunks and ordered receipts;
+- capture ownership and recovery;
+- normal Margins session and segment records;
+- `.margins/recordings` audio materialization;
+- existing memo format and timing model;
+- existing finalization and later CLI transcription paths.
 
-- which notes Margins may search;
-- where an approved connected note may be written; and
-- how to prove setup by finding something already in those notes.
+The plugin database stores only client/capture routing and heartbeat state. It
+does not store audio, transcript, or notepad bodies. The capture Mac's normal
+Margins store is not used. Another bb client attached to the same project sees
+the same project sessions through the ordinary Margins store.
 
-It must not start processing the current meeting or draft a connected note as
-part of setup.
+Personal/projectless threads and projects without a stable default local-path
+source cannot start recording in this version; the UI names that limitation
+instead of selecting an unrelated machine or folder.
 
-## Realtime and failure behavior
+## The notepad and knowledge boundary
 
-Host signals and bb realtime messages mean only “something changed.” They do
-not carry transcript or memo content. The panel always refetches a snapshot and
-also polls while a meeting is active.
+The notepad is evidence attached to one saved recording. It is not automatically
+treated as durable knowledge, agent memory, a task list, or a conclusion. The
+existing Margins session format retains the notes and their hidden time anchors.
 
-Missing, stopped, and outdated runtime states are internal preparation details,
-not separate happy-path buttons. The panel distinguishes user-actionable failures:
+After recording, **Make connected note** may place a plain-language request in
+the bb composer and focus it. It does not send the message. The Margins
+distillation skill resolves the latest project meeting when the user eventually
+sends. Raw recording IDs never enter visible copy.
 
-- recording Mac offline;
-- unsupported capture platform;
-- plugin/runtime authentication failure;
-- microphone permission;
-- system-audio permission; and
-- another interruption that can be retried.
+This preserves the distinction:
 
-Each failure says what could not happen, whether a recording or already-saved
-notes are safe, and one next action. Before Pause, Stop, or Add `@Margins`, the
-panel first commits any dirty notepad revision so the action cannot outrun the
-500 ms background save.
+- a recording and notepad are what happened and what caught the user's attention;
+- a bb thread is work that may use that evidence;
+- a connected note is a later, reviewed act of knowledge-making.
 
-A missing runtime on one Mac does not disable the plugin everywhere.
+## `@Margins`
 
-## Runtime shell
+`@Margins` remains the deliberate way to add bounded meeting evidence to a bb
+message. It is offered only when a fresh, project-side live-context read exists.
+The control/status response deliberately contains no rolling transcript. Mention
+resolution performs a separate bounded context read at send time.
 
-The runtime has no required product UI of its own. It may show the smallest
-native permission prompt the operating system requires, but recording controls,
-the listening waveform, and the notepad belong in bb for this integration.
+If the project service has not produced live transcript context, the mention is
+not offered. Recording readiness is never inferred from mention availability.
+The bundled `watermark` skill interprets injected context; it is not an agent
+tool and it does not control recording.
 
-The earlier menu-bar implementation has been removed. The desktop process is a
-temporary composition adapter, not a commitment to a tray-resident Margins app.
+## Persistent status while the panel is closed
+
+The content-script lifecycle is sufficient to own browser capture across thread
+navigation. The installed SDK also allows a plugin to decorate one explicit
+thread row. Neither is a correct app-global recording control/status surface:
+the recording belongs to a browser window and project, not permanently to the
+thread where it began.
+
+The plugin therefore does not fabricate an always-visible global control. The
+remaining bb-core seam is a client-scoped status contribution with:
+
+- one state/icon visible on desktop and mobile while the panel is closed;
+- an activation callback that opens the owning project's Margins controls;
+- lifecycle tied to one PWA window, not one thread component;
+- support for recording, paused, saving, recovering, and needs-attention states.
+
+Until that exists, closing the panel is supported for capture continuity but
+the user must return to the thread/panel to see controls. This is an explicit
+product limitation, not represented as complete UX.
+
+## Installation and process boundaries
+
+The plugin may install a version-pinned Margins release on the project source
+machine as part of Start. The release contains the normal `margins` CLI and the
+project-side hosted capture service. Downloads are named, digest-verified, and
+never overwrite an unrelated command.
+
+This installation is implementation. UI stages say **Getting recording ready**
+and, when required, **Enable recording on this Mac**. They do not say install,
+helper, daemon, runtime, binary, signing, plist, TCC, token, or host worker.
+
+The already-built `margins-live` Mac executable and its permission metadata are
+retained as a possible implementation of the future client-local capture seam.
+It is no longer a valid project store or a bb host-routing target by itself.
+
+## Retention and processing
+
+This plugin creates ordinary Margins sessions and does not add another
+retention policy. The existing CLI owns transcription, retranscription,
+diarization, artifact formats, and cleanup. The plugin has no Retranscribe or
+speaker UI.
+
+The existing cleanup-policy implementation needs a separate audit: UI offers
+immediate, seven-day, and forever choices, while some deletion paths may not
+consult that policy. This plugin must not promise timed deletion until that
+core behavior is verified or fixed.
 
 ## Acceptance checks
 
-The vertical slice is ready when:
-
-- plugin app, server, and host bundles build with the current bb SDK;
-- plugin tests cover the panel, server routing/storage, mention resolution,
-  host RPC, discovery/auth requests, pinned release checks, and runtime start;
-- Rust tests cover the public JSON shapes, auth, route behavior, recent-line
-  limits, operation replay, generation/revision checks, discovery permissions,
-  and shared terminal/bb notepad timing;
-- a Rust-emitted golden V1 fixture is accepted by the plugin's Zod schemas;
-- portable Margins tests pass without native audio or macOS frameworks;
-- no plugin test installs or reloads the live bb instance;
-- the runtime trait compiles independently of Tauri and native audio; and
-- the remaining macOS pass verifies the `margins-live` binary, audio permission
-  flow, recording transitions, signing, and notarization without a menu-bar UI.
-
-## Verification on 2026-09-04
-
-The existing Margins setup path was exercised against the real headless backend
-and frontend with `agent-browser`. The **Agent setup** action installed the
-normal `margins` command into a hermetic home and produced the expected
-`margins guide workspace-setup` prompt without changing the developer's existing
-command.
-
-The plugin was installed into a separate bb development instance and exercised
-in real desktop and 390 px thread panels. One **Start recording** click moved
-immediately through **Preparing recording** to **Listening**. A fixture permission
-denial remained visible as **Needs attention** through realtime/refetch, retry
-reached Listening, and text entered immediately before Stop was stored before
-the stop request. Stop returned and persisted its session identity as **Meeting
-saved**. **Make connected note** placed an explicit-session request in the
-focused composer without sending it. Refresh preserved both the saved handoff
-and the unsent composer draft.
-
-A separate isolated run removed the direct development API and let the bb host
-worker start a compatible detached `margins-live` fixture. The worker checked
-the runtime capability, discovered its private V1 endpoint, and returned the
-panel to **Margins is ready**. This verifies process startup and discovery, not
-the unreleased `v0.4.9` download or native audio capture.
-
-## Deliberate limits and follow-ups
-
-- The first plugin uses the thread environment's Mac by default and accepts a
-  recording-host ID in settings. A friendly connected-Mac picker is the clearest
-  next bb UI improvement.
-- `margins-live` now composes the native recorder as a windowless background
-  process and embeds its microphone and system-audio explanations in the
-  executable. Its release signature grants only the Hardened Runtime audio-input
-  access needed by Core Audio. The remaining product gate is a signed, notarized
-  Apple Silicon release plus a native microphone/system-audio and permission
-  smoke pass.
-- The live snapshot is intentionally recent and fixed-size. Browsing old
-  meetings and creating connected notes remain Margins workflows, not plugin
-  panel features.
-- The companion plugin currently lives in this repository under
-  `integrations/bb-plugin-margins`; packaging and marketplace publication are
-  separate release work.
+- UI tests assert source and project-storage wording from a user's perspective.
+- Browser capability tests never call a source ready until permission and both
+  ends of capture exist.
+- Content-script tests prove panel unmount does not dispose capture and app
+  teardown does stop local tracks.
+- Server tests prove the default project source is used and environment
+  worktrees are ignored.
+- Lease tests prove reconnect inside 25 seconds resumes ownership and expiry
+  stops/finalizes once.
+- Host/service tests prove chunks remain ordered and existing session/memo
+  commands are used.
+- The control snapshot contains no transcript body.
+- Plugin storage tests prove no audio, transcript, or notepad text is persisted.
+- Build/typecheck/package pass against the installed bb SDK declarations.
+- A native Mac pass remains required before **Microphone + computer audio** can
+  ship as ready.

@@ -2,7 +2,7 @@
   "name": "bb-plugin-margins",
   "version": "0.1.0",
   "private": true,
-  "description": "Control a running Margins meeting from a bb thread.",
+  "description": "Record a meeting from bb into the project's Margins store.",
   "keywords": [
     "bb-plugin",
     "margins",
@@ -49,7 +49,7 @@
   },
   "bb": {
     "name": "Margins",
-    "description": "Control a running Margins meeting from a bb thread.",
+    "description": "Record a meeting from bb into the project's Margins store.",
     "branding": {
       "icon": "Mic"
     },

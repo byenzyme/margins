@@ -1,304 +1,146 @@
-# Margins in bb: first use and handoff UX
+# Margins in bb: first use, capture, and handoff
 
-Status: proposed implementation brief, 2026-09-04.
-
-This spec narrows first use to the intention the user already has: record this
-meeting. Runtime installation, startup, host routing, and readiness are
-supporting work. They must not become a setup product of their own.
-
-It also closes the current post-stop gap. Capture and distillation remain
-separate operations, but the user should be able to move from one to the other
-without learning Margins' internal lifecycle.
+Status: user-journey brief, revised 2026-09-06.
 
 ## User promise
 
-A meeting-rushed user can open **Margins live**, press **Start recording**,
-approve any required macOS prompt, and return attention to the meeting. When
-they stop, Margins says what is safe and offers one optional path to turn the
-latest capture into a connected note.
+A person about to join a meeting can open Margins in bb, understand exactly
+what this device will hear and where it will be saved, then start with one
+action. They can leave the panel or change threads without ending capture. If
+this bb window disappears long enough, Margins stops and saves what reached the
+project.
 
-The only privacy model needed in the capture path is:
+## The first screen
 
-> Audio and transcript stay on this Mac. Meeting context enters the thread only
-> when you add `@Margins`.
+The panel leads with the source and destination, then the action.
 
-The note-making boundary is disclosed later, at the point where it becomes
-relevant.
+For a browser or phone that can record:
 
-## Product boundaries
+> **Ready · Microphone only**
+> Recording and notes are saved in this bb project.
+> **Start**
 
-- Keep one thread-side panel. Do not add a setup wizard, nav page, menu-bar UI,
-  or permanent post-meeting dashboard.
-- Do not ask for a host, meeting name, workspace, note destination, model,
-  output format, or source selection on the happy capture path.
-- Default to the thread environment's connected Mac. Ask the user to choose a
-  recording Mac only after that default is unavailable or genuinely ambiguous.
-- Derive the meeting name from the thread as today.
-- Capture must not depend on note-making AI, a configured Workspace, or cloud
-  authentication.
-- Workspace setup and distillation remain separate contracts. They may feel
-  like one continuous user request, but setup must finish and be reviewed
-  before connected-note distillation begins.
-- Do not automatically send meeting material to an agent or model. `@Margins`
-  and **Make connected note** are explicit user actions.
+For a Mac that has not been enabled:
 
-## Canonical user-visible lifecycle
+> **Enable recording on this Mac**
+> Margins can hear you and conversations playing on this Mac. Recording starts
+> only when you press Start. If this bb window stays disconnected, Margins stops
+> and saves to this project.
 
-```text
-Ready
-  -> Preparing recording
-  -> Live <-> Paused
-  -> Saving meeting
-  -> Meeting saved
-  -> Ready
+No first-use screen mentions installation or process topology. If the current
+bb build cannot connect to Mac-local capture, it says setup is not available
+yet and offers no control that can only fail.
 
-Any failed transition -> Needs attention -> retry the intended action
-```
+## State and action flow
 
-Runtime states such as missing, installed, stopped, starting, and outdated are
-internal substates of **Preparing recording**. They should appear only when
-they explain real waiting or a recovery action.
+| State | What it means | Primary action |
+| --- | --- | --- |
+| Checking | Client and project capability are being read | none |
+| Needs setup | Mac capture is not yet enabled in this bb window | Enable recording on this Mac, only when supported |
+| Ready | The named source can start and the project destination exists | Start |
+| Getting ready | Permission, capture producer, or project session is not complete | none; Cancel only when real cancellation is supported |
+| Recording | Audio is flowing from this window and acknowledged by the project | Pause |
+| Paused | Audio production and project state are paused | Resume |
+| Recovering connection | The owner is inside the 25-second reconnect grace | none; keep the user's text |
+| Saving | Local capture has ended; received data is being finalized | none |
+| Saved | The existing Margins audio meeting is durable | Make connected note or Not now |
+| Needs attention | A specific transition failed | one truthful recovery, or none if unsupported |
 
-### 1. Ready
+Start acknowledges immediately with **Getting ready**, but it never claims
+recording until both ends exist. No spinner, fake waveform, percentage, or
+elapsed timer is required. A static waveform glyph may identify audio; only a
+real amplitude meter may move.
 
-The normal and first-run panel has one primary action:
+## During the meeting
 
-**Start recording**
+The recording controls stay small. The notepad owns most of the panel and keeps
+focus while status refreshes. Every visible line is editable. Newlines become
+quiet time anchors in the existing Margins memo model; timestamps are not shown.
 
-Before the first successful recording only, show the two-line privacy promise
-near the action. If the plugin knows it must install the local recorder, one
-short subordinate sentence may say:
+The latest notepad text is flushed before Pause, Stop, and Add `@Margins`.
+Conflicts preserve the local draft and ask the user to reload or retry; polling
+never replaces text under the cursor.
 
-> First use prepares a private recorder on this Mac.
+Collapsing the panel or opening another thread does not end capture because the
+bb-window content script, not the React panel, owns the audio stream. Closing or
+reloading the whole window stops local tracks. A reload using the same tab
+identity can reclaim the project-side capture inside the 25-second grace.
 
-Do not lead with **Install Margins** or **Start Margins**. Pressing **Start
-recording** is the intent that authorizes deterministic preparation. If a
-future download is large enough to require separate informed consent, disclose
-its size at this point without introducing configuration choices.
+## Disconnect
 
-### 2. Preparing recording
+The first missed heartbeat changes the owning client to **Recovering
+connection**. Already acknowledged audio and notes are safe on the project
+machine. If the connection returns inside 25 seconds, capture continues with
+the same identity and no duplicate meeting.
 
-The click must acknowledge immediately, before host/runtime work completes.
-Replace the primary action with a quiet non-interactive state such as:
+After the grace expires, the project side finalizes exactly once. A later client
+sees the saved meeting rather than a still-recording fiction. If finalization
+fails, the failure says that received audio is retained and gives one retry.
 
-- **Preparing recorder** while verifying/installing/starting the runtime;
-- **Waiting for microphone access** only after macOS permission is actually
-  requested; or
-- **Starting recording** after the runtime accepts the operation.
+## Stop and handoff
 
-Use truthful stages, not a percentage or an indefinitely spinning primary
-button. The stage may change as deterministic work advances. Preserve the
-user’s place and do not open another panel.
+Stop performs these observable steps:
 
-If the runtime snapshot itself says `starting`, every panel renders
-**Preparing recording** and keeps polling. It offers neither recording controls
-nor `@Margins` until the snapshot reaches Recording or Paused.
+1. flush the current notepad text;
+2. end the device audio producer and drain its acknowledged chunks;
+3. show **Saving** while the project creates the normal Margins audio session;
+4. show **Saved** only after that session is durable.
 
-Behind this transition the plugin may:
+The saved state says:
 
-1. resolve the thread's recording host;
-2. verify or install the pinned signed runtime;
-3. start it and wait for private discovery;
-4. request capture from that runtime; and
-5. attach the resulting meeting to the thread.
+> Recording and notes are saved in this bb project. A transcript may appear
+> after Margins processes the audio.
 
-If a prior recording is already live on the selected Mac, do not start a
-second one. Attach it and enter **Live**.
-
-### 3. Permission boundary
-
-The signed runtime owns macOS microphone and system-audio consent. The panel
-should prepare the user, while the operating system owns the actual prompt.
-
-Permission recovery must distinguish:
-
-- microphone access;
-- system-audio access;
-- plugin/runtime authentication;
-- unsupported capture capability; and
-- an offline recording Mac.
-
-Do not map all of these to **Microphone access needed**. Each failure names the
-blocked capability, says whether a recording was created, and provides one
-recommended action.
-
-An unsupported host has no retry control because retrying cannot change its
-capability. Its only recovery is to open the thread on an Apple silicon Mac.
-
-### 4. Live and Paused
-
-Use the compact waveform/control row and continuously editable notepad already
-implemented. Setup and privacy explanations disappear after recording starts.
-
-- The notepad remains the dominant surface.
-- The waveform is a compact state mark, not fabricated audio amplitude. Keep it
-  still unless the runtime later supplies a real level signal; state changes may
-  use one short acknowledgment that also respects reduced motion.
-- Margins assigns hidden meeting timestamps and saves after a short pause.
-- Before Pause, Stop, or `@Margins`, flush any dirty notepad text or make the
-  pending save part of that operation. A user must not lose the last sentence
-  by acting faster than the autosave timer.
-- **Add @Margins** continues to insert the current meeting into the composer;
-  it does not send.
-
-### 5. Saving meeting
-
-Stop is a transition, not an immediate return to Ready.
-
-1. Flush the current notepad revision.
-2. Ask the runtime to stop and finalize.
-3. Preserve the returned stopped meeting identity.
-4. Show what is already safe before mentioning remaining background work.
-
-If final transcription/alignment continues after audio capture stops, say so
-truthfully. Never imply the recording or notes were lost because later
-processing failed.
-
-### 6. Meeting saved
-
-Show this transient completion state after a successful stop:
-
-> **Meeting saved on this Mac**
->
-> Your recording and notes are safe. Margins can turn them into a connected
-> note when you are ready.
-
-Primary action: **Make connected note**
-
-Secondary action: **Not now** or a quiet route back to **Start recording**.
-
-This is not a history or review surface. Persist only enough stopped-meeting
-identity to survive a refresh and support the handoff. That identity remains
-internal: raw meeting IDs and slugs never appear in user-visible panel or
-composer copy. Once dismissed, or once a new recording begins, the panel can
-return to Ready.
-
-## Distillation handoff
-
-**Make connected note** should place a plain-language request in the current
-thread composer and focus it. The request refers naturally to the meeting the
-user just recorded; Margins' canonical latest-session-first flow resolves the
-actual session after the user sends it.
-
-The action does not silently start an agent turn. Sending remains the user's
-choice.
-
-Suggested intent, not required literal copy:
+**Make connected note** appends this natural request to the current composer
+and focuses it:
 
 > Turn the Margins meeting I just recorded into a connected note.
 
-### First note only: setup through doing
+It does not send. The later skill resolves the latest meeting in the project.
+Raw IDs, paths, and processing terms stay out of user-visible copy.
 
-If no reviewed Workspace exists, the setup skill performs read-only discovery
-after the user sends the note-making request. In the background it may scan the
-available notes, infer conventions, identify relevant prior notes, and propose
-the smallest read/write boundary.
+## Privacy and consent
 
-The user should review one compact proposal framed as outcomes:
+Required truthful statements:
 
-> Margins may search these notes and write connected meeting notes here.
+- capture starts only after Start;
+- the visible source label names what the current device can hear;
+- browser/mobile mode is microphone-only;
+- audio and notes are sent to and saved on the bb project's source machine;
+- meeting evidence enters an agent turn only after the user adds `@Margins` or
+  sends a connected-note request.
 
-The reviewed workspace plan is applied unchanged. Only then does the separate
-distillation workflow resolve the selected/latest meeting and make the note.
+Forbidden statements include “stays on this Mac” and any implication that a
+phone captures another app's internal audio.
 
-Subsequent meetings reuse that approved boundary without replaying onboarding.
+## Mobile
 
-### Note-making privacy boundary
+On supported mobile browsers the same panel says **Microphone only**. Controls
+remain visually small but have at least 40px coarse-pointer hit targets. The
+notepad remains the dominant surface. Background capture is bounded by browser
+and PWA lifecycle rules: the UI must not promise continued recording after the
+browser suspends or kills the page.
 
-At the first action that would send content to a note-making AI, disclose what
-will move and why. This belongs here, not before local recording:
+bb still needs an app-global client status/control contribution so a user can
+always find an active recording while the side panel is closed. Until then,
+capture continuity and control discoverability are separate: continuity can be
+implemented by the content script; global discoverability cannot be claimed.
 
-> To make the note, Margins sends the transcript, your notes, and selected
-> related-note excerpts to your chosen note-making AI.
+## Falsifiable UX claims
 
-Local capture must remain usable if the user declines or has not configured
-note-making AI.
+- A meeting-rushed browser user can identify source, destination, and Start in
+  under three seconds because they are the only top-row claims and action.
+  False if setup or architecture appears first.
+- An in-meeting user can keep typing through status refreshes because the
+  notepad dominates and polling preserves draft, selection, and focus. False if
+  text jumps or controls compete with the editor.
+- A privacy-conscious user can explain where audio goes because the panel says
+  it is saved to this bb project. False if any copy says it stays on the device.
+- A returning user can trust Saved because it is shown only after existing
+  Margins session finalization succeeds. False if Stop immediately collapses to
+  Ready or promises a transcript.
 
-## Deferred until needed
-
-Keep these out of first recording:
-
-- Workspace and vault configuration;
-- source folders and write destination;
-- recall proof;
-- note templates, frontmatter, tags, and people metadata;
-- model/provider sign-in for connected-note generation;
-- advanced audio devices and transcription model selection;
-- runtime version, install path, discovery endpoint, and host ID;
-- changing the recording Mac when the default works.
-
-Perform deterministic discovery, finalization, alignment, indexing, and
-readiness checks in the background. Ask only at a consent boundary, an
-ambiguous choice, or a failure that cannot be recovered safely.
-
-## Failure principles
-
-Every failure answers three questions:
-
-1. What could not happen?
-2. Was the recording/notepad preserved?
-3. What is the one recommended next action?
-
-Do not collapse unsupported platform, offline host, runtime authentication, and
-macOS audio permission into the same state. Keep technical detail behind an
-optional disclosure or plugin logs.
-
-## Acceptance claims
-
-1. **Meeting-rushed start**
-   - Claim: a first-time user can begin capture from the panel without choosing
-     configuration or understanding runtime installation.
-   - Pass evidence: one visible primary **Start recording** action; the first
-     click advances immediately into a truthful preparation state; success
-     reaches Live without a second plugin button.
-   - False if: the user must click **Install Margins**, **Start Margins**, pick a
-     host, or open Settings before a normal first capture.
-
-2. **Privacy comprehension**
-   - Claim: a privacy-conscious user can distinguish local capture from context
-     intentionally shared with bb/AI.
-   - Pass evidence: the two-line local/`@Margins` boundary is visible before
-     first capture, and the note-making AI boundary appears only at note-making.
-   - False if: copy merely says "private" or implies that local capture needs
-     cloud AI.
-
-3. **Attention preservation**
-   - Claim: installation/startup cannot steal the user's live moment.
-   - Pass evidence: immediate action acknowledgment, monotonic human stages,
-     no configuration decision, and no modal except the OS-owned permission
-     prompt.
-   - False if: a naked spinner persists, stages move backward without reason,
-     or the user is sent to another surface.
-
-4. **Notepad continuity**
-   - Claim: the final text typed before Pause, Stop, or `@Margins` survives and
-     is used by that action.
-   - Pass evidence: tests exercise actions before the debounce expires and the
-     resulting runtime snapshot/export contains the text.
-   - False if: those actions observe only the prior saved revision.
-
-5. **Post-stop continuity**
-   - Claim: after Stop, the user can tell the meeting is safe and can initiate
-     connected-note work without searching for it.
-   - Pass evidence: a durable-through-refresh Meeting saved state uses the
-     returned stopped meeting identity and offers Make connected note.
-   - False if: the panel immediately returns to generic Ready or restores a
-     live-only `@Margins` action.
-
-## Required verification
-
-- Update the product/technical spec so its state table and local API match the
-  implemented notepad and first-use flow.
-- Unit-test the single Start path across ready runtime, stopped runtime,
-  missing runtime, existing live meeting, permission denial, unsupported host,
-  and host offline.
-- Unit-test dirty-notepad Pause, Stop, and `@Margins` behavior before debounce.
-- Unit-test stopped identity and Meeting saved persistence through panel
-  refetch/realtime invalidation.
-- Exercise the complete isolated browser journey at desktop and phone width:
-  first open -> Start recording -> preparation -> permission/recovery fixture ->
-  Live -> type without waiting -> Stop -> Meeting saved -> Make connected note.
-- Capture screenshots or visible-text evidence for first Ready, preparation,
-  Live, Needs attention, and Meeting saved.
-- Review the evidence with the falsifiable claims above. Record at least one
-  risk or failure; do not let the implementation author self-certify taste.
+Known risk: while the current bb SDK can keep a content script alive across
+thread navigation, it cannot render a client-global recording status with a
+route back to controls. That gap must be solved in bb core before the closed-
+panel journey is complete.

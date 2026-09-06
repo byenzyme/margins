@@ -58,11 +58,11 @@ describe("Margins runtime manager", () => {
     ).toBeNull();
   });
 
-  it("supports only the native recording target shipped by the first release", () => {
+  it("selects native capture on Mac and project recording on Linux", () => {
     expect(runtimeManagerInternals.targetName("darwin", "arm64")).toBe(
       "aarch64-apple-darwin",
     );
-    expect(runtimeManagerInternals.targetName("linux", "x64")).toBeNull();
+    expect(runtimeManagerInternals.targetName("linux", "x64")).toBe("x86_64-unknown-linux-gnu");
     expect(runtimeManagerInternals.targetName("darwin", "x64")).toBeNull();
   });
 

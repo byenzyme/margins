@@ -1,82 +1,33 @@
 import { experimental_createHostEntryHarness } from "@get-bb/plugin-sdk/testing/host";
 import { describe, expect, it, vi } from "vitest";
 import { createMarginsHostEntry } from "./host-entry.js";
-import { desktopSnapshot } from "./fixtures.js";
-import type { MarginsLiveTransport } from "./live-transport.js";
-import type { HostOperationResult } from "./contracts.js";
+import type { ProjectMarginsTransport } from "./project-server.js";
 
-function transport(): MarginsLiveTransport {
-  const ok = (status: Parameters<typeof desktopSnapshot>[0]): HostOperationResult => ({
-    ok: true,
-    snapshot: desktopSnapshot(status),
-  });
-  return {
-    readSnapshot: vi.fn(async () => ok("recording")),
-    ensureRuntime: vi.fn(async () => ok("idle")),
-    start: vi.fn(async () => ok("recording")),
-    pause: vi.fn(async () => ok("paused")),
-    resume: vi.fn(async () => ok("recording")),
-    stop: vi.fn(async () => ({
-      ...ok("finalizing"),
-      stopped_session_id: "customer-call",
-    })),
-    updateNotepad: vi.fn(async () => ok("recording")),
-  };
-}
+const target = { projectId: "proj-1", hostId: "host-1", projectRoot: "/srv/project" };
+const snapshot = { recordingId: "rec-1", meetingId: "meeting-1", status: "recording" as const, elapsedMs: 4_000, notepad: { text: "", revision: "v1" }, transcriptAvailable: false };
 
-describe("Margins host entry", () => {
-  it("validates the host RPC contract and emits invalidation signals", async () => {
-    const fakeTransport = transport();
-    const harness = experimental_createHostEntryHarness(
-      createMarginsHostEntry({ transport: fakeTransport }),
-    );
-
-    await expect(
-      harness.experimental_call("start", {
-        operationId: "op-start",
-        name: "Customer call",
-      }),
-    ).resolves.toMatchObject({
-      ok: true,
-      snapshot: { session: { session_id: "customer-call", status: "recording" } },
-    });
-    await expect(
-      harness.experimental_call("pause", {
-        operationId: "op-pause",
-        sessionId: "customer-call",
-        expectedGeneration: 2,
-      }),
-    ).resolves.toMatchObject({
-      ok: true,
-      snapshot: { session: { status: "paused" } },
-    });
-    await expect(
-      harness.experimental_call("updateNotepad", {
-        operationId: "op-notepad",
-        sessionId: "customer-call",
-        expectedGeneration: 2,
-        expectedNotepadRevision: "v1-fixture",
-        text: "One\nTwo",
-      }),
-    ).resolves.toMatchObject({ ok: true });
-    await expect(
-      harness.experimental_call("stop", {
-        operationId: "op-stop",
-        sessionId: "customer-call",
-        expectedGeneration: 2,
-      }),
-    ).resolves.toMatchObject({ ok: true, stopped_session_id: "customer-call" });
-
-    expect(fakeTransport.start).toHaveBeenCalledWith(
-      expect.objectContaining({ operationId: "op-start" }),
-    );
+describe("Margins project host entry", () => {
+  it("routes capture to the explicit project root and emits project invalidations", async () => {
+    const transport = {
+      prepareProject: vi.fn(async () => ({ ok: true as const })),
+      start: vi.fn(async () => ({ ok: true as const, snapshot })),
+      read: vi.fn(async () => ({ ok: true as const, snapshot })),
+      mutate: vi.fn(async () => ({ ok: true as const, snapshot })),
+      stop: vi.fn(async () => ({ ok: true as const, snapshot: null })),
+      updateNotepad: vi.fn(async () => ({ ok: true as const, snapshot })),
+      upload: vi.fn(async () => ({ ok: true as const })),
+      dispose: vi.fn(async () => undefined),
+    } as unknown as ProjectMarginsTransport;
+    const harness = experimental_createHostEntryHarness(createMarginsHostEntry(transport));
+    await expect(harness.experimental_call("startBrowserCapture", { target, ownerId: "owner-1", name: "customer-call" })).resolves.toMatchObject({ ok: true, snapshot: { recordingId: "rec-1" } });
+    await expect(harness.experimental_call("pause", { target, recordingId: "rec-1", ownerId: "owner-1" })).resolves.toMatchObject({ ok: true });
+    expect(harness.experimental_getRetainedWorkerLeaseCount()).toBe(1);
+    expect(transport.start).toHaveBeenCalledWith(target, expect.any(String), "owner-1", "customer-call");
     expect(harness.experimental_getSignals()).toEqual([
-      { signal: "changed", payload: { reason: "start" } },
-      { signal: "changed", payload: { reason: "pause" } },
-      { signal: "changed", payload: { reason: "notepad" } },
-      { signal: "changed", payload: { reason: "stop" } },
+      { signal: "changed", payload: { projectId: "proj-1", reason: "start" } },
+      { signal: "changed", payload: { projectId: "proj-1", reason: "pause" } },
     ]);
-
     await harness.experimental_dispose();
+    expect(harness.experimental_getRetainedWorkerLeaseCount()).toBe(0);
   });
 });

@@ -42,12 +42,12 @@ interface RuntimeManagerOptions {
 
 function targetName(hostPlatform: NodeJS.Platform, arch: string) {
   if (hostPlatform === "darwin" && arch === "arm64") return "aarch64-apple-darwin";
+  if (hostPlatform === "linux" && arch === "x64") return "x86_64-unknown-linux-gnu";
+  if (hostPlatform === "linux" && arch === "arm64") return "aarch64-unknown-linux-gnu";
   return null;
 }
 
-function executableNames() {
-  return ["margins", "margins-live"] as const;
-}
+const RELEASE_EXECUTABLES = ["margins", "margins-live", "margins-server"] as const;
 
 async function isRegularExecutable(path: string) {
   try {
@@ -187,6 +187,7 @@ async function installRuntime(input: {
   cliBinDir: string;
   execFileImpl: typeof execFile;
   signal?: AbortSignal;
+  executables: readonly (typeof RELEASE_EXECUTABLES)[number][];
 }) {
   await mkdir(input.dataDir, { recursive: true });
   await mkdir(input.runtimeBinDir, { recursive: true });
@@ -199,7 +200,7 @@ async function installRuntime(input: {
     await input.execFileImpl("/usr/bin/tar", ["-xzf", archivePath, "-C", unpacked], {
       signal: input.signal,
     });
-    for (const name of executableNames()) {
+    for (const name of input.executables) {
       const source = join(unpacked, name);
       const stat = await lstat(source).catch(() => null);
       if (!stat?.isFile() || stat.isSymbolicLink()) {
@@ -273,6 +274,7 @@ export function createRuntimeManager(options: RuntimeManagerOptions = {}) {
           cliBinDir,
           execFileImpl,
           signal: input.signal,
+          executables: ["margins", "margins-live"],
         });
       }
 
@@ -280,6 +282,36 @@ export function createRuntimeManager(options: RuntimeManagerOptions = {}) {
       if (!(await hasLiveProtocol(selected, execFileImpl))) return "not_found";
       startDetached(selected, env, home, spawnImpl);
       return "started";
+    },
+    async ensureProjectServer(input: { dataDir: string; signal?: AbortSignal }): Promise<string> {
+      const configured = env.MARGINS_PROJECT_SERVER_PATH?.trim();
+      if (configured) {
+        if (!(await isRegularExecutable(configured))) {
+          throw new Error("The configured Margins recorder is not executable");
+        }
+        return configured;
+      }
+      const runtimeBinDir = join(input.dataDir, "runtime", `v${RUNTIME_RELEASE_VERSION}`);
+      const serverPath = join(runtimeBinDir, "margins-server");
+      if (await isRegularExecutable(serverPath)) return serverPath;
+      const target = targetName(hostPlatform, hostArch);
+      if (!target) throw new Error("Recording is not available on this project machine");
+      const expectedName = `margins-${RUNTIME_RELEASE_VERSION}-${target}.tar.gz`;
+      const archive = await downloadPinnedArchive(fetchImpl, expectedName, input.signal);
+      if (!archive) throw new Error(`Margins ${RUNTIME_RELEASE_VERSION} is not published for this project machine`);
+      await installRuntime({
+        archive,
+        dataDir: input.dataDir,
+        runtimeBinDir,
+        cliBinDir: env.MARGINS_CLI_BIN_DIR?.trim() || join(home, ".local", "bin"),
+        execFileImpl,
+        signal: input.signal,
+        executables: ["margins", "margins-server"],
+      });
+      if (!(await isRegularExecutable(serverPath))) {
+        throw new Error("The Margins recorder was not installed correctly");
+      }
+      return serverPath;
     },
   };
 }

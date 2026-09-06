@@ -18880,1056 +18880,490 @@ function date4(params) {
 }
 
 // src/contracts.ts
-var jsonValueSchema = external_exports.lazy(
-  () => external_exports.union([
-    external_exports.null(),
-    external_exports.boolean(),
-    external_exports.number().finite(),
-    external_exports.string(),
-    external_exports.array(jsonValueSchema),
-    external_exports.record(external_exports.string(), jsonValueSchema)
-  ])
-);
-var PANEL_STATE_SCHEMA = "margins.bb.live.panel.v1";
-var WATERMARK_CONTEXT_SCHEMA = "margins.watermark.context.v1";
-var pluginStateSchema = external_exports.enum([
-  "host_offline",
-  "unsupported_platform",
-  "runtime_error",
-  "runtime_auth_error",
-  "microphone_permission",
-  "system_audio_permission",
+var PANEL_STATE_SCHEMA = "margins.bb.recording.panel.v2";
+var CAPTURE_DISCONNECT_GRACE_MS = 25e3;
+var clientCapabilitiesSchema = external_exports.object({
+  clientId: external_exports.string().min(1),
+  platform: external_exports.enum(["macos", "mobile", "other"]),
+  secureContext: external_exports.boolean(),
+  browserMicrophone: external_exports.boolean(),
+  nativeMacCapture: external_exports.boolean()
+}).strict();
+var captureSourceSchema = external_exports.enum(["browser_microphone", "mac_system_and_microphone"]);
+var recordingStateSchema = external_exports.enum([
+  "needs_setup",
   "ready",
-  "preparing",
+  "getting_ready",
   "recording",
   "paused",
-  "finalizing",
-  "meeting_saved",
-  "recoverable_error"
+  "recovering",
+  "saving",
+  "saved",
+  "recording_elsewhere",
+  "needs_attention",
+  "unavailable"
 ]);
-var primaryActionSchema = external_exports.enum([
-  "start",
-  "pause",
-  "resume",
-  "refresh",
-  "none"
-]);
-var desktopLiveStatusSchema = external_exports.enum([
-  "idle",
-  "starting",
-  "recording",
-  "paused",
-  "finalizing",
-  "needs_attention"
-]);
-var desktopTranscriptFreshnessSchema = external_exports.object({
-  decoded_until_ms: external_exports.number().int().nonnegative(),
-  committed_until_ms: external_exports.number().int().nonnegative(),
-  updated_at_unix_ms: external_exports.number().int().nonnegative(),
-  age_ms: external_exports.number().int().nonnegative()
+var primaryActionSchema = external_exports.enum(["setup", "start", "pause", "resume", "retry", "none"]);
+var projectTargetSchema = external_exports.object({
+  projectId: external_exports.string().min(1),
+  hostId: external_exports.string().min(1),
+  projectRoot: external_exports.string().min(1)
 }).strict();
-var liveSessionRefSchema = external_exports.object({
-  session_id: external_exports.string().min(1),
-  status: desktopLiveStatusSchema,
-  elapsed_ms: external_exports.number().int().nonnegative(),
-  generation: external_exports.number().int().nonnegative()
+var notepadSchema = external_exports.object({ text: external_exports.string(), revision: external_exports.string().min(1) }).strict();
+var hostCaptureSnapshotSchema = external_exports.object({
+  recordingId: external_exports.string().min(1),
+  meetingId: external_exports.string().min(1),
+  status: external_exports.enum(["recording", "paused", "saving"]),
+  elapsedMs: external_exports.number().int().nonnegative(),
+  notepad: notepadSchema,
+  transcriptAvailable: external_exports.boolean()
 }).strict();
-var liveHealthSchema = external_exports.object({
-  capture_phase: external_exports.string().min(1),
-  tap_status: external_exports.string().min(1),
-  tap_warning: external_exports.string().nullable().optional(),
-  system_audio_expected: external_exports.boolean(),
-  system_audio_observed: external_exports.boolean(),
-  transcript_freshness: desktopTranscriptFreshnessSchema.nullable().optional()
-}).strict();
-var liveTranscriptSchema = external_exports.object({
-  at_ms: external_exports.number().int().nonnegative().nullable().optional(),
-  text: external_exports.string()
-}).strict();
-var liveMemoLineSchema = external_exports.object({
-  index: external_exports.number().int().nonnegative(),
-  at_ms: external_exports.number().int().nonnegative().nullable().optional(),
-  text: external_exports.string()
-}).strict();
-var desktopLiveEndpointsSchema = external_exports.object({
-  snapshot: external_exports.string().startsWith("/"),
-  start: external_exports.string().startsWith("/"),
-  pause: external_exports.string().startsWith("/"),
-  resume: external_exports.string().startsWith("/"),
-  stop: external_exports.string().startsWith("/"),
-  update_notepad: external_exports.string().startsWith("/")
-}).strict();
-var desktopLiveDiscoverySchema = external_exports.object({
-  protocol_version: external_exports.literal(1),
-  runtime: external_exports.enum(["margins_desktop", "margins_cli"]),
-  profile: external_exports.string().min(1),
-  pid: external_exports.number().int().nonnegative(),
-  base_url: external_exports.string().url(),
-  token: external_exports.string().min(1),
-  permissions: external_exports.object({
-    loopback_only: external_exports.literal(true),
-    private_file: external_exports.literal(true)
-  }).strict(),
-  endpoints: desktopLiveEndpointsSchema,
-  generated_at_unix_ms: external_exports.number().int().nonnegative()
-}).strict();
-var liveSnapshotSchema = external_exports.object({
-  protocol_version: external_exports.literal(1),
-  server_unix_ms: external_exports.number().int().nonnegative(),
-  session: liveSessionRefSchema.nullable(),
-  health: liveHealthSchema,
-  rolling_transcript: external_exports.array(liveTranscriptSchema).max(80).default([]),
-  memo_lines: external_exports.array(liveMemoLineSchema).max(1e3).default([]),
-  notepad_revision: external_exports.string().min(1)
-}).strict();
-var desktopLiveStartRequestSchema = external_exports.object({
-  operation_id: external_exports.string().min(1),
-  name: external_exports.string().trim().min(1),
-  project_id: external_exports.string().min(1).optional()
-}).strict();
-var desktopLiveSessionRequestSchema = external_exports.object({
-  operation_id: external_exports.string().min(1),
-  session_id: external_exports.string().min(1),
-  expected_generation: external_exports.number().int().nonnegative().optional()
-}).strict();
-var desktopLiveNotepadRequestSchema = desktopLiveSessionRequestSchema.extend({
-  expected_notepad_revision: external_exports.string().min(1),
-  text: external_exports.string()
-}).strict();
-var liveErrorSchema = external_exports.object({
+var hostErrorSchema = external_exports.object({
   code: external_exports.string().min(1),
   message: external_exports.string().min(1),
-  retryable: external_exports.boolean(),
-  state: pluginStateSchema.optional(),
-  installUrl: external_exports.string().url().optional(),
-  details: external_exports.record(external_exports.string(), jsonValueSchema).optional()
+  retryable: external_exports.boolean()
 }).strict();
-var hostReadSnapshotInputSchema = external_exports.object({
-  sessionId: external_exports.string().min(1)
-}).strict();
-var hostStartInputSchema = external_exports.object({
-  operationId: external_exports.string().min(1),
-  name: external_exports.string().trim().min(1).max(160),
-  projectId: external_exports.string().trim().min(1).optional()
-}).strict();
-var hostSessionMutationInputSchema = external_exports.object({
-  operationId: external_exports.string().min(1),
-  sessionId: external_exports.string().min(1),
-  expectedGeneration: external_exports.number().int().nonnegative().nullable()
-}).strict();
-var hostUpdateNotepadInputSchema = hostSessionMutationInputSchema.extend({
-  expectedNotepadRevision: external_exports.string().min(1),
-  text: external_exports.string().max(1e5)
-}).strict();
-var hostOperationResultSchema = external_exports.discriminatedUnion("ok", [
-  external_exports.object({
-    ok: external_exports.literal(true),
-    snapshot: liveSnapshotSchema,
-    idempotent_replay: external_exports.boolean().optional(),
-    stopped_session_id: external_exports.string().nullable().optional()
-  }).strict(),
-  external_exports.object({
-    ok: external_exports.literal(false),
-    error: liveErrorSchema
-  }).strict()
+var hostResultSchema = external_exports.discriminatedUnion("ok", [
+  external_exports.object({ ok: external_exports.literal(true), snapshot: hostCaptureSnapshotSchema.nullable() }).strict(),
+  external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
 ]);
-var hostSignals = {
-  changed: {
-    payload: external_exports.object({
-      reason: external_exports.enum([
-        "snapshot",
-        "ensure_runtime",
-        "start",
-        "pause",
-        "resume",
-        "stop",
-        "notepad"
-      ])
-    }).strict()
-  }
-};
+var targetInputSchema = external_exports.object({ target: projectTargetSchema }).strict();
+var ownedCaptureInputSchema = targetInputSchema.extend({
+  recordingId: external_exports.string().min(1),
+  ownerId: external_exports.string().min(1)
+}).strict();
 var marginsHostContract = defineRpcContract({
-  readSnapshot: {
-    input: hostReadSnapshotInputSchema,
-    output: hostOperationResultSchema
+  prepareProject: {
+    input: targetInputSchema,
+    output: external_exports.object({ ok: external_exports.boolean(), error: hostErrorSchema.optional() }).strict()
   },
-  ensureRuntime: {
-    input: external_exports.object({}).strict(),
-    output: hostOperationResultSchema
+  startBrowserCapture: {
+    input: targetInputSchema.extend({ ownerId: external_exports.string().min(1), name: external_exports.string().min(1).max(160) }).strict(),
+    output: hostResultSchema
   },
-  start: {
-    input: hostStartInputSchema,
-    output: hostOperationResultSchema
-  },
-  pause: {
-    input: hostSessionMutationInputSchema,
-    output: hostOperationResultSchema
-  },
-  resume: {
-    input: hostSessionMutationInputSchema,
-    output: hostOperationResultSchema
-  },
-  stop: {
-    input: hostSessionMutationInputSchema,
-    output: hostOperationResultSchema
-  },
+  readCapture: { input: ownedCaptureInputSchema, output: hostResultSchema },
+  heartbeat: { input: ownedCaptureInputSchema, output: hostResultSchema },
+  pause: { input: ownedCaptureInputSchema, output: hostResultSchema },
+  resume: { input: ownedCaptureInputSchema, output: hostResultSchema },
+  stop: { input: ownedCaptureInputSchema, output: hostResultSchema },
   updateNotepad: {
-    input: hostUpdateNotepadInputSchema,
-    output: hostOperationResultSchema
+    input: ownedCaptureInputSchema.extend({ expectedRevision: external_exports.string().min(1), text: external_exports.string().max(1e5) }).strict(),
+    output: hostResultSchema
+  },
+  uploadChunk: {
+    input: ownedCaptureInputSchema.extend({ sequence: external_exports.number().int().nonnegative(), bytesBase64: external_exports.string() }).strict(),
+    output: external_exports.object({ ok: external_exports.boolean(), error: hostErrorSchema.optional() }).strict()
+  },
+  readContext: {
+    input: targetInputSchema.extend({ meetingId: external_exports.string().min(1), maxChars: external_exports.number().int().positive().max(64e3) }).strict(),
+    output: external_exports.object({ ok: external_exports.boolean(), context: external_exports.string().optional(), error: hostErrorSchema.optional() }).strict()
   }
 });
-var attachmentSchema = external_exports.object({
-  threadId: external_exports.string().min(1),
+var hostSignals = {
+  changed: { payload: external_exports.object({
+    projectId: external_exports.string().min(1),
+    reason: external_exports.enum(["start", "pause", "resume", "stop", "notepad", "lease_expired"])
+  }).strict() }
+};
+var captureRecordSchema = external_exports.object({
+  projectId: external_exports.string().min(1),
   hostId: external_exports.string().min(1),
+  projectRoot: external_exports.string().min(1),
+  recordingId: external_exports.string().min(1),
   meetingId: external_exports.string().min(1),
-  attachedAtUnixMs: external_exports.number().int().nonnegative(),
-  detachedAtUnixMs: external_exports.null(),
-  generation: external_exports.number().int().nonnegative().nullable()
+  clientId: external_exports.string().min(1),
+  ownerId: external_exports.string().min(1),
+  source: captureSourceSchema,
+  status: external_exports.enum(["getting_ready", "recording", "paused", "recovering", "saving"]),
+  lastHeartbeatUnixMs: external_exports.number().int().nonnegative(),
+  startedAtUnixMs: external_exports.number().int().nonnegative()
 }).strict();
 var savedMeetingSchema = external_exports.object({
-  threadId: external_exports.string().min(1),
-  hostId: external_exports.string().min(1),
+  projectId: external_exports.string().min(1),
   meetingId: external_exports.string().min(1),
   savedAtUnixMs: external_exports.number().int().nonnegative()
 }).strict();
 var panelStateSchema = external_exports.object({
   schema: external_exports.literal(PANEL_STATE_SCHEMA),
   threadId: external_exports.string().min(1),
-  state: pluginStateSchema,
+  projectId: external_exports.string().nullable(),
+  state: recordingStateSchema,
   title: external_exports.string().min(1),
   detail: external_exports.string().min(1),
+  sourceLabel: external_exports.string().nullable(),
+  storageLabel: external_exports.string().nullable(),
   primaryAction: primaryActionSchema,
   primaryLabel: external_exports.string().min(1),
-  canEditNotepad: external_exports.boolean(),
   canStop: external_exports.boolean(),
-  canDetach: external_exports.boolean(),
-  firstUse: external_exports.boolean(),
-  preparationNeeded: external_exports.boolean(),
-  installUrl: external_exports.string().url().nullable(),
-  host: external_exports.object({
-    id: external_exports.string().min(1),
-    name: external_exports.string().min(1),
-    status: external_exports.string().min(1)
-  }).strict().nullable(),
-  attachment: attachmentSchema.nullable(),
+  canEditNotepad: external_exports.boolean(),
+  ownsRecording: external_exports.boolean(),
+  recordingId: external_exports.string().nullable(),
+  notepad: notepadSchema.nullable(),
   savedMeeting: savedMeetingSchema.nullable(),
-  snapshot: liveSnapshotSchema.nullable(),
-  error: liveErrorSchema.nullable(),
-  mention: external_exports.object({
-    available: external_exports.boolean(),
-    itemId: external_exports.string().nullable()
-  }).strict()
+  error: hostErrorSchema.nullable(),
+  mention: external_exports.object({ available: external_exports.boolean(), itemId: external_exports.string().nullable() }).strict()
 }).strict();
-var watermarkPacketSchema = external_exports.object({
-  schema: external_exports.literal(WATERMARK_CONTEXT_SCHEMA),
-  meeting: external_exports.object({
-    id: external_exports.string().min(1),
-    live: external_exports.boolean(),
-    status: desktopLiveStatusSchema
-  }).strict(),
-  freshness: external_exports.object({
-    decodedUntilMs: external_exports.number().int().nonnegative().nullable(),
-    committedUntilMs: external_exports.number().int().nonnegative().nullable(),
-    transcriptUpdatedAtUnixMs: external_exports.number().int().nonnegative().nullable(),
-    resolvedAtUnixMs: external_exports.number().int().nonnegative(),
-    stale: external_exports.boolean(),
-    staleReason: external_exports.string().nullable()
-  }).strict(),
-  captureHealth: external_exports.object({
-    phase: external_exports.string().min(1),
-    paused: external_exports.boolean(),
-    tapStatus: external_exports.string().min(1),
-    systemAudioExpected: external_exports.boolean(),
-    systemAudioObserved: external_exports.boolean(),
-    warnings: external_exports.array(external_exports.string()).max(16)
-  }).strict(),
-  bounds: external_exports.object({
-    maxTranscriptChars: external_exports.number().int().positive(),
-    includedTranscriptChars: external_exports.number().int().nonnegative(),
-    memoItemsIncluded: external_exports.number().int().nonnegative()
-  }).strict(),
-  context: external_exports.string()
+var threadClientInputSchema = external_exports.object({
+  threadId: external_exports.string().min(1),
+  client: clientCapabilitiesSchema
 }).strict();
-var threadInputSchema = external_exports.object({ threadId: external_exports.string().min(1) }).strict();
-var titleInputSchema = threadInputSchema.extend({ title: external_exports.string().trim().max(160).optional() }).strict();
-var notepadInputSchema = threadInputSchema.extend({
-  expectedNotepadRevision: external_exports.string().min(1),
-  text: external_exports.string().max(1e5)
-}).strict();
+var captureClientInputSchema = threadClientInputSchema.extend({ recordingId: external_exports.string().min(1) }).strict();
 var marginsRpcContract = defineRpcContract({
-  getPanelState: {
-    input: threadInputSchema,
+  getPanelState: { input: threadClientInputSchema, output: panelStateSchema },
+  beginBrowserCapture: {
+    input: threadClientInputSchema.extend({ ownerId: external_exports.string().min(1), title: external_exports.string().trim().max(160).optional() }).strict(),
     output: panelStateSchema
   },
-  startMeeting: {
-    input: titleInputSchema,
-    output: panelStateSchema
-  },
-  pauseMeeting: {
-    input: threadInputSchema,
-    output: panelStateSchema
-  },
-  resumeMeeting: {
-    input: threadInputSchema,
-    output: panelStateSchema
-  },
-  stopMeeting: {
-    input: threadInputSchema,
-    output: panelStateSchema
-  },
+  heartbeat: { input: captureClientInputSchema, output: panelStateSchema },
+  pause: { input: captureClientInputSchema, output: panelStateSchema },
+  resume: { input: captureClientInputSchema, output: panelStateSchema },
+  stop: { input: captureClientInputSchema, output: panelStateSchema },
   updateNotepad: {
-    input: notepadInputSchema,
+    input: captureClientInputSchema.extend({ expectedRevision: external_exports.string().min(1), text: external_exports.string().max(1e5) }).strict(),
     output: panelStateSchema
   },
-  dismissSavedMeeting: {
-    input: threadInputSchema,
-    output: panelStateSchema
-  },
-  detachThread: {
-    input: threadInputSchema,
-    output: panelStateSchema
-  }
+  dismissSavedMeeting: { input: threadClientInputSchema, output: panelStateSchema }
 });
 
 // src/server.ts
-var ATTACHMENT_PREFIX = "attachment:";
-var SAVED_MEETING_PREFIX = "saved-meeting:";
-var CAPTURE_SEEN_PREFIX = "capture-seen:";
-var LAST_ERROR_PREFIX = "last-error:";
-var REALTIME_CHANNEL = "margins-live";
-var DEFAULT_TRANSCRIPT_WINDOW_CHARS = 12e3;
-var MAX_TRANSCRIPT_WINDOW_CHARS = 64e3;
-var INSTALL_URL = "https://github.com/byenzyme/margins/releases";
-function attachmentKey(threadId) {
-  return `${ATTACHMENT_PREFIX}${threadId}`;
+var CAPTURE_PREFIX = "capture:";
+var SAVED_PREFIX = "saved:";
+var REALTIME_CHANNEL = "margins-recording";
+var DISCONNECT_GRACE_MS = CAPTURE_DISCONNECT_GRACE_MS;
+function captureKey(projectId) {
+  return `${CAPTURE_PREFIX}${projectId}`;
 }
-function savedMeetingKey(threadId) {
-  return `${SAVED_MEETING_PREFIX}${threadId}`;
-}
-function captureSeenKey(threadId) {
-  return `${CAPTURE_SEEN_PREFIX}${threadId}`;
-}
-function lastErrorKey(threadId) {
-  return `${LAST_ERROR_PREFIX}${threadId}`;
-}
-function requestId(prefix, threadId) {
-  return `${prefix}:${threadId}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
-}
-function parseWindowChars(raw) {
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return DEFAULT_TRANSCRIPT_WINDOW_CHARS;
-  }
-  return Math.min(parsed, MAX_TRANSCRIPT_WINDOW_CHARS);
+function savedKey(projectId) {
+  return `${SAVED_PREFIX}${projectId}`;
 }
 function meetingName(value) {
-  const slug = (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 90).replace(/-+$/g, "");
+  const slug = (value || "meeting").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 90);
   return slug || "meeting";
 }
-function stateCopy(state, error61) {
-  if (state === "host_offline") {
-    return {
-      title: "Recording Mac is offline",
-      detail: "Recording could not start. No recording was created. Reconnect this Mac, then try again.",
-      primaryAction: "start",
-      primaryLabel: "Try again"
-    };
-  }
-  if (state === "unsupported_platform") {
-    return {
-      title: "Recording is not supported here",
-      detail: "Recording could not start. No recording was created. Open this thread on an Apple silicon Mac.",
-      primaryAction: "none",
-      primaryLabel: "Recording unavailable"
-    };
-  }
-  if (state === "runtime_auth_error") {
-    return {
-      title: "Margins could not connect securely",
-      detail: "Recording could not start. No recording was created. Restart Margins, then try again.",
-      primaryAction: "start",
-      primaryLabel: "Try again"
-    };
-  }
-  if (state === "microphone_permission") {
-    return {
-      title: "Microphone access is off",
-      detail: "Recording could not start. No recording was created. Allow Microphone access in System Settings, then try again.",
-      primaryAction: "start",
-      primaryLabel: "Try again"
-    };
-  }
-  if (state === "system_audio_permission") {
-    return {
-      title: "System audio access is off",
-      detail: "Recording could not start. No recording was created. Allow System Audio Recording in System Settings, then try again.",
-      primaryAction: "start",
-      primaryLabel: "Try again"
-    };
-  }
-  if (state === "runtime_error") {
-    return {
-      title: "Margins needs attention",
-      detail: `Recording could not start. No recording was created. ${error61?.message ?? "Try again."}`,
-      primaryAction: "start",
-      primaryLabel: "Try again"
-    };
-  }
-  if (state === "preparing") {
-    return {
-      title: "Preparing recording",
-      detail: "Margins is starting the private recorder on this Mac.",
-      primaryAction: "none",
-      primaryLabel: "Preparing recording"
-    };
-  }
-  if (state === "recording") {
-    return {
-      title: "Listening",
-      detail: "Margins is listening to this meeting.",
-      primaryAction: "pause",
-      primaryLabel: "Pause"
-    };
-  }
-  if (state === "paused") {
-    return {
-      title: "Paused",
-      detail: "Recording is paused.",
-      primaryAction: "resume",
-      primaryLabel: "Resume"
-    };
-  }
-  if (state === "finalizing") {
-    return {
-      title: "Saving",
-      detail: "Margins is finishing this recording.",
-      primaryAction: "refresh",
-      primaryLabel: "Refresh"
-    };
-  }
-  if (state === "meeting_saved") {
-    return {
-      title: "Meeting saved on this Mac",
-      detail: "Your recording and notes are safe. Margins can turn them into a connected note when you are ready.",
-      primaryAction: "none",
-      primaryLabel: "Meeting saved"
-    };
-  }
-  if (state === "recoverable_error") {
-    return {
-      title: "Recording was interrupted",
-      detail: error61?.message ?? "Try again when you're ready.",
-      primaryAction: "refresh",
-      primaryLabel: "Try again"
-    };
-  }
-  return {
-    title: "Ready",
-    detail: "Nothing is recorded until you start.",
-    primaryAction: "start",
-    primaryLabel: "Start recording"
-  };
-}
-function isLiveStatus(status) {
-  return status === "starting" || status === "recording" || status === "paused" || status === "finalizing" || status === "needs_attention";
-}
-function isLiveSnapshot(snapshot) {
-  return snapshot?.session ? isLiveStatus(snapshot.session.status) : false;
-}
-function mapSnapshotState(snapshot) {
-  const state = snapshot?.session?.status ?? "idle";
-  if (state === "starting") return "preparing";
-  if (state === "recording") return "recording";
-  if (state === "paused") return "paused";
-  if (state === "finalizing") return "finalizing";
-  if (state === "needs_attention") {
-    return "recoverable_error";
-  }
-  return "ready";
-}
-function mapErrorState(error61) {
-  if (error61.state) return error61.state;
-  const message = error61.message.toLowerCase();
-  if (error61.code === "unsupported" || error61.code === "capability_unavailable") {
-    return "unsupported_platform";
-  }
-  if (error61.code === "unauthorized" || error61.code === "forbidden") return "runtime_auth_error";
-  if (error61.code.includes("microphone") || message.includes("microphone")) {
-    return "microphone_permission";
-  }
-  if (error61.code.includes("system_audio") || message.includes("system audio") || message.includes("screen recording")) {
-    return "system_audio_permission";
-  }
-  if (error61.code === "permission_denied") return "microphone_permission";
-  if (error61.code === "margins_not_found" || error61.code === "not_found" || error61.code === "margins_closed" || error61.code === "connection_refused" || error61.code === "update_needed" || error61.code === "version_mismatch") {
-    return "runtime_error";
-  }
-  if (error61.code === "not_running") return "ready";
-  return "recoverable_error";
-}
-function isPreparationError(error61) {
-  return [
-    "margins_not_found",
-    "not_found",
-    "margins_closed",
-    "connection_refused",
-    "update_needed",
-    "version_mismatch",
-    "not_running"
-  ].includes(error61.code);
-}
-function createEmptySnapshot() {
-  return {
-    protocol_version: 1,
-    server_unix_ms: Date.now(),
-    session: null,
-    health: {
-      capture_phase: "idle",
-      tap_status: "unknown",
-      system_audio_expected: false,
-      system_audio_observed: false,
-      transcript_freshness: null
-    },
-    rolling_transcript: [],
-    memo_lines: [],
-    notepad_revision: "empty"
-  };
-}
-function encodeMentionId(input2) {
-  return Buffer.from(JSON.stringify(input2), "utf8").toString("base64url");
-}
-function decodeMentionId(itemId) {
-  try {
-    const raw = JSON.parse(Buffer.from(itemId, "base64url").toString("utf8"));
-    if (raw && typeof raw.threadId === "string" && typeof raw.hostId === "string" && typeof raw.meetingId === "string" && (typeof raw.projectId === "string" || raw.projectId === null)) {
+function stateCopy(state, sourceLabel, error61) {
+  switch (state) {
+    case "needs_setup":
       return {
-        threadId: raw.threadId,
-        projectId: raw.projectId,
-        hostId: raw.hostId,
-        meetingId: raw.meetingId
+        title: "Enable recording on this Mac",
+        detail: "Margins can capture your microphone and conversations playing on this Mac. Recording starts only when you press Start, and stops and saves if this bb window stays disconnected.",
+        primaryAction: "none",
+        primaryLabel: "Recording unavailable"
       };
-    }
-  } catch {
-    return null;
+    case "ready":
+      return {
+        title: "Ready to record",
+        detail: `${sourceLabel}. Audio and notes will be saved to this bb project.`,
+        primaryAction: "start",
+        primaryLabel: "Start recording"
+      };
+    case "getting_ready":
+      return {
+        title: "Getting recording ready",
+        detail: "Nothing is being recorded until your microphone and the project are both ready.",
+        primaryAction: "none",
+        primaryLabel: "Getting ready"
+      };
+    case "recording":
+      return {
+        title: "Recording",
+        detail: `${sourceLabel}. Audio and notes are being saved to this bb project.`,
+        primaryAction: "pause",
+        primaryLabel: "Pause"
+      };
+    case "paused":
+      return {
+        title: "Paused",
+        detail: "Audio is paused. Your recording and notes received so far are safe in this bb project.",
+        primaryAction: "resume",
+        primaryLabel: "Resume"
+      };
+    case "recovering":
+      return {
+        title: "Reconnecting",
+        detail: "Audio and notes already received are safe. Margins will stop and save if this bb window does not reconnect shortly.",
+        primaryAction: "retry",
+        primaryLabel: "Reconnect"
+      };
+    case "saving":
+      return {
+        title: "Saving",
+        detail: "Capture has stopped. Margins is finishing the audio already received by this bb project.",
+        primaryAction: "none",
+        primaryLabel: "Saving"
+      };
+    case "saved":
+      return {
+        title: "Meeting saved",
+        detail: "Your recording and notes are safe in this bb project. A transcript may take a little longer.",
+        primaryAction: "none",
+        primaryLabel: "Meeting saved"
+      };
+    case "recording_elsewhere":
+      return {
+        title: "Recording from another bb window",
+        detail: "This project already has a recording. Return to that window for recording controls.",
+        primaryAction: "none",
+        primaryLabel: "Recording elsewhere"
+      };
+    case "needs_attention":
+      return {
+        title: "Recording needs attention",
+        detail: error61?.message || "Audio already received is safe. Try reconnecting from the bb window that started recording.",
+        primaryAction: error61?.retryable ? "retry" : "none",
+        primaryLabel: error61?.retryable ? "Try again" : "Recording unavailable"
+      };
+    default:
+      return {
+        title: "Recording is not available here",
+        detail: error61?.message || "This browser cannot provide a microphone recording.",
+        primaryAction: "none",
+        primaryLabel: "Recording unavailable"
+      };
   }
-  return null;
 }
-function panelState(input2) {
-  const copy = stateCopy(input2.state, input2.error);
-  if (input2.state === "ready" && isLiveSnapshot(input2.snapshot) && input2.attachment === null) {
-    copy.detail = "A recording is already live. Start recording will use it.";
-  }
-  if (input2.state === "recoverable_error") {
-    copy.detail = input2.attachment ? "Recording needs attention. Notes already saved are safe. Try again." : "Recording could not start. No recording was created. Try again.";
-  }
-  const primaryAction = copy.primaryAction;
-  return {
-    schema: PANEL_STATE_SCHEMA,
-    threadId: input2.threadId,
-    state: input2.state,
-    title: copy.title,
-    detail: copy.detail,
-    primaryAction,
-    primaryLabel: copy.primaryLabel,
-    canEditNotepad: input2.attachment !== null && (input2.state === "recording" || input2.state === "paused"),
-    canStop: input2.attachment !== null && (input2.state === "recording" || input2.state === "paused"),
-    canDetach: input2.attachment !== null,
-    firstUse: input2.firstUse,
-    preparationNeeded: input2.preparationNeeded ?? false,
-    installUrl: input2.error?.installUrl ?? INSTALL_URL,
-    host: input2.host,
-    attachment: input2.attachment,
-    savedMeeting: input2.savedMeeting,
-    snapshot: input2.snapshot,
-    error: input2.error,
-    mention: {
-      available: input2.mentionItemId !== null,
-      itemId: input2.mentionItemId
-    }
-  };
+function sourceFor(client) {
+  if (client.platform === "macos") return client.nativeMacCapture ? "Microphone + computer audio" : null;
+  return client.secureContext && client.browserMicrophone ? "Microphone only" : null;
 }
-function formatMs(ms) {
-  if (ms === null) return "unknown";
-  const totalSeconds = Math.floor(ms / 1e3);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
-}
-function buildWatermarkPacket(snapshot, maxTranscriptChars) {
-  if (!snapshot.session) {
-    throw new Error("No live Margins meeting is available.");
+function marginsPlugin(bb) {
+  const host = bb.hosts.experimental_client({ contract: marginsHostContract, experimental_signals: hostSignals });
+  const startLocks = /* @__PURE__ */ new Map();
+  host.experimental_onSignal("changed", ({ payload }) => bb.realtime.publish(REALTIME_CHANNEL, payload));
+  host.experimental_onWorkerExit(({ hostId }) => bb.realtime.publish(REALTIME_CHANNEL, { hostId, reason: "project-recorder-offline" }));
+  async function targetForThread(threadId) {
+    const thread = await bb.sdk.threads.get({ threadId });
+    const project = await bb.sdk.projects.get({ projectId: thread.projectId });
+    if (project.kind === "personal") throw new Error("Choose a project with a stable folder before recording.");
+    const source = project.sources.find((candidate) => candidate.isDefault);
+    if (!source) throw new Error("This project does not have a primary folder for recordings.");
+    return { projectId: project.id, hostId: source.hostId, projectRoot: source.path };
   }
-  const transcriptBody = snapshot.rolling_transcript.map((line) => line.text).join("\n").slice(-maxTranscriptChars);
-  const freshness = snapshot.health.transcript_freshness ?? null;
-  const now = Date.now();
-  const transcriptUpdatedAt = freshness?.updated_at_unix_ms ?? null;
-  const stale = transcriptUpdatedAt === null || now - transcriptUpdatedAt > 45e3;
-  const warnings = snapshot.health.tap_warning ? [snapshot.health.tap_warning] : [];
-  const context = [
-    `Margins live meeting: ${snapshot.session.session_id}`,
-    `Recording: ${snapshot.session.status}`,
-    `Transcript: heard through ${formatMs(
-      freshness?.decoded_until_ms ?? null
-    )}, settled through ${formatMs(freshness?.committed_until_ms ?? null)}`,
-    isLiveSnapshot(snapshot) ? "Transcript is live; newest words may still change." : "Transcript is not currently live.",
-    warnings.length > 0 ? `Warnings: ${warnings.join("; ")}` : "Warnings: none",
-    "",
-    "Recent notes:",
-    ...snapshot.memo_lines.length > 0 ? snapshot.memo_lines.map((memo2) => {
-      const mark = memo2.at_ms !== null && memo2.at_ms !== void 0 ? formatMs(memo2.at_ms) : "Note";
-      return `- ${mark}: ${memo2.text}`;
-    }) : ["- none"],
-    "",
-    "Transcript:",
-    transcriptBody
-  ].join("\n");
-  return {
-    schema: WATERMARK_CONTEXT_SCHEMA,
-    meeting: {
-      id: snapshot.session.session_id,
-      live: isLiveSnapshot(snapshot),
-      status: snapshot.session.status
-    },
-    freshness: {
-      decodedUntilMs: freshness?.decoded_until_ms ?? null,
-      committedUntilMs: freshness?.committed_until_ms ?? null,
-      transcriptUpdatedAtUnixMs: transcriptUpdatedAt,
-      resolvedAtUnixMs: now,
-      stale,
-      staleReason: stale ? "Transcript has not updated recently." : null
-    },
-    captureHealth: {
-      phase: snapshot.health.capture_phase,
-      paused: snapshot.session.status === "paused",
-      tapStatus: snapshot.health.tap_status,
-      systemAudioExpected: snapshot.health.system_audio_expected,
-      systemAudioObserved: snapshot.health.system_audio_observed,
-      warnings
-    },
-    bounds: {
-      maxTranscriptChars,
-      includedTranscriptChars: transcriptBody.length,
-      memoItemsIncluded: snapshot.memo_lines.length
-    },
-    context
-  };
-}
-function contextText(packet) {
-  return [
-    `<MarginsContext schema="${packet.schema}">`,
-    JSON.stringify(packet),
-    "</MarginsContext>",
-    "",
-    packet.context
-  ].join("\n");
-}
-async function marginsPlugin(bb) {
-  const settings = bb.settings.define({
-    marginsHostId: {
-      type: "string",
-      label: "Recording Mac",
-      description: "Leave this blank to use the Mac attached to the current thread.",
-      default: ""
-    },
-    transcriptWindowChars: {
-      type: "string",
-      label: "Recent conversation",
-      description: "How much recent transcript @Margins can use.",
-      default: String(DEFAULT_TRANSCRIPT_WINDOW_CHARS)
-    }
-  });
-  const hostClient = bb.hosts.experimental_client({
-    contract: marginsHostContract,
-    experimental_signals: hostSignals
-  });
-  hostClient.experimental_onSignal("changed", ({ hostId }) => {
-    bb.realtime.publish(REALTIME_CHANNEL, { hostId, reason: "changed" });
-  });
-  hostClient.experimental_onWorkerExit(({ hostId }) => {
-    bb.realtime.publish(REALTIME_CHANNEL, { hostId, reason: "host-worker-exit" });
-  });
-  async function readSettings() {
-    return await settings.get();
-  }
-  async function readAttachment(threadId) {
-    const raw = await bb.storage.kv.get(attachmentKey(threadId));
-    const parsed = attachmentSchema.safeParse(raw);
-    if (!parsed.success) return null;
-    return parsed.data;
-  }
-  async function saveAttachment(attachment) {
-    await bb.storage.kv.set(attachmentKey(attachment.threadId), attachment);
-  }
-  async function clearAttachment(threadId) {
-    await bb.storage.kv.delete(attachmentKey(threadId));
-  }
-  async function readSavedMeeting(threadId) {
-    const raw = await bb.storage.kv.get(savedMeetingKey(threadId));
-    const parsed = savedMeetingSchema.safeParse(raw);
+  async function readCapture(projectId) {
+    const parsed = captureRecordSchema.safeParse(await bb.storage.kv.get(captureKey(projectId)));
     return parsed.success ? parsed.data : null;
   }
-  async function saveStoppedMeeting(saved) {
-    await bb.storage.kv.set(savedMeetingKey(saved.threadId), saved);
+  async function saveCapture(value) {
+    await bb.storage.kv.set(captureKey(value.projectId), value);
   }
-  async function clearSavedMeeting(threadId) {
-    await bb.storage.kv.delete(savedMeetingKey(threadId));
+  async function clearCapture(projectId) {
+    await bb.storage.kv.delete(captureKey(projectId));
   }
-  async function hasSeenCapture(threadId) {
-    return await bb.storage.kv.get(captureSeenKey(threadId)) === true;
-  }
-  async function markCaptureSeen(threadId) {
-    await bb.storage.kv.set(captureSeenKey(threadId), true);
-  }
-  async function readLastError(threadId) {
-    const raw = await bb.storage.kv.get(lastErrorKey(threadId));
-    const parsed = liveErrorSchema.safeParse(raw);
+  async function readSaved(projectId) {
+    const parsed = savedMeetingSchema.safeParse(await bb.storage.kv.get(savedKey(projectId)));
     return parsed.success ? parsed.data : null;
   }
-  async function saveLastError(threadId, error61) {
-    await bb.storage.kv.set(lastErrorKey(threadId), error61);
+  async function saveSaved(value) {
+    await bb.storage.kv.set(savedKey(value.projectId), value);
   }
-  async function clearLastError(threadId) {
-    await bb.storage.kv.delete(lastErrorKey(threadId));
+  async function callHost(target, method, input2) {
+    try {
+      return await host.call(method, input2, { hostId: target.hostId });
+    } catch (cause) {
+      return { ok: false, error: { code: "project_machine_offline", message: "Margins could not reach this bb project's machine. Audio already received there is safe; reconnect the project machine and try again.", retryable: true } };
+    }
   }
-  async function resolveHost(threadId) {
-    const config2 = await readSettings();
-    let hostId = config2.marginsHostId.trim();
-    if (!hostId) {
-      const thread = await bb.sdk.threads.get({ threadId });
-      if (thread.environmentId) {
-        const environment = await bb.sdk.environments.get({
-          environmentId: thread.environmentId
-        });
-        hostId = environment.hostId ?? environment.host?.id ?? "";
+  function basePanel(threadId, projectId, state, client, options = {}) {
+    const sourceLabel = options.capture?.source === "mac_system_and_microphone" ? "Microphone + computer audio" : sourceFor(client);
+    const copy = stateCopy(state, sourceLabel, options.error || null);
+    const owns = Boolean(options.capture && options.capture.clientId === client.clientId);
+    return {
+      schema: PANEL_STATE_SCHEMA,
+      threadId,
+      projectId,
+      state,
+      ...copy,
+      sourceLabel,
+      storageLabel: projectId ? "Saved to this bb project" : null,
+      canStop: owns && ["recording", "paused", "recovering"].includes(state),
+      canEditNotepad: owns && ["recording", "paused", "recovering"].includes(state),
+      ownsRecording: owns,
+      recordingId: options.capture?.recordingId || null,
+      notepad: options.notepad || null,
+      savedMeeting: options.saved || null,
+      error: options.error || null,
+      mention: { available: false, itemId: null }
+    };
+  }
+  async function getPanelState(threadId, client) {
+    let target;
+    try {
+      target = await targetForThread(threadId);
+    } catch (cause) {
+      const error61 = { code: "project_folder_unavailable", message: cause instanceof Error ? cause.message : String(cause), retryable: false };
+      return basePanel(threadId, null, "unavailable", client, { error: error61 });
+    }
+    const capture = await readCapture(target.projectId);
+    if (capture) {
+      const owns = capture.clientId === client.clientId;
+      if (!owns) return basePanel(threadId, target.projectId, "recording_elsewhere", client, { capture });
+      const result = await callHost(target, "readCapture", { target, recordingId: capture.recordingId, ownerId: capture.ownerId });
+      if (!result.ok) {
+        const withinGrace = Date.now() - capture.lastHeartbeatUnixMs <= DISCONNECT_GRACE_MS;
+        return basePanel(threadId, target.projectId, withinGrace ? "recovering" : "needs_attention", client, { capture, error: result.error });
+      }
+      if (!result.snapshot) return basePanel(threadId, target.projectId, "saving", client, { capture });
+      const state = result.snapshot.status === "paused" ? "paused" : result.snapshot.status === "saving" ? "saving" : "recording";
+      return basePanel(threadId, target.projectId, state, client, { capture: { ...capture, status: state }, notepad: result.snapshot.notepad });
+    }
+    const saved = await readSaved(target.projectId);
+    if (saved) return basePanel(threadId, target.projectId, "saved", client, { saved });
+    if (client.platform === "macos" && !client.nativeMacCapture) return basePanel(threadId, target.projectId, "needs_setup", client);
+    if (!sourceFor(client)) return basePanel(threadId, target.projectId, "unavailable", client);
+    return basePanel(threadId, target.projectId, "ready", client);
+  }
+  async function locked(projectId, action) {
+    const prior = startLocks.get(projectId) || Promise.resolve();
+    let release;
+    const next = new Promise((resolve) => {
+      release = resolve;
+    });
+    const queued = prior.then(() => next);
+    startLocks.set(projectId, queued);
+    await prior;
+    try {
+      return await action();
+    } finally {
+      release();
+      if (startLocks.get(projectId) === queued) startLocks.delete(projectId);
+    }
+  }
+  async function operate(threadId, client, recordingId, operation) {
+    const target = await targetForThread(threadId);
+    const capture = await readCapture(target.projectId);
+    if (!capture || capture.recordingId !== recordingId || capture.clientId !== client.clientId) return getPanelState(threadId, client);
+    if (operation === "stop") {
+      capture.status = "saving";
+      await saveCapture(capture);
+    }
+    const result = await callHost(target, operation, { target, recordingId, ownerId: capture.ownerId });
+    if (result.ok) {
+      if (operation === "stop") {
+        await saveSaved({ projectId: target.projectId, meetingId: capture.meetingId, savedAtUnixMs: Date.now() });
+        await clearCapture(target.projectId);
+      } else {
+        capture.lastHeartbeatUnixMs = operation === "heartbeat" ? Date.now() : capture.lastHeartbeatUnixMs;
+        capture.status = operation === "pause" ? "paused" : operation === "resume" ? "recording" : capture.status;
+        await saveCapture(capture);
       }
     }
-    if (!hostId) return null;
-    return findHost(hostId);
-  }
-  async function findHost(hostId) {
-    const hosts = await bb.sdk.hosts.list();
-    const host = hosts.find((candidate) => candidate.id === hostId);
-    return {
-      id: hostId,
-      name: host?.name || hostId,
-      status: host?.status || "disconnected"
-    };
-  }
-  async function callHost(host, method, input2) {
-    if (host.status !== "connected") {
-      return {
-        ok: false,
-        error: {
-          code: "host_offline",
-          message: "Pick the Mac that is recording.",
-          retryable: true,
-          state: "host_offline"
-        }
-      };
-    }
-    try {
-      return await hostClient.call(method, input2, { hostId: host.id });
-    } catch {
-      return {
-        ok: false,
-        error: {
-          code: "host_unreachable",
-          message: `bb could not reach Margins on ${host.name}.`,
-          retryable: true,
-          state: "recoverable_error"
-        }
-      };
-    }
-  }
-  async function readSnapshotForThread(threadId) {
-    const attachment = await readAttachment(threadId);
-    const host = attachment ? await findHost(attachment.hostId) : await resolveHost(threadId);
-    if (!host) {
-      return {
-        host: null,
-        attachment,
-        result: {
-          ok: false,
-          error: {
-            code: "host_offline",
-            message: "Pick the Mac that is recording.",
-            retryable: true,
-            state: "host_offline"
-          }
-        }
-      };
-    }
-    const result = await callHost(host, "readSnapshot", {
-      sessionId: attachment?.meetingId ?? "current"
-    });
-    return { host, attachment, result };
-  }
-  function panelForResult(threadId, host, attachment, result, options = {}) {
-    const snapshot = result.ok ? result.snapshot : null;
-    const hiddenPreparationError = !result.ok && options.passive === true && isPreparationError(result.error);
-    const error61 = result.ok || hiddenPreparationError ? null : result.error;
-    const snapshotState = result.ok ? mapSnapshotState(result.snapshot) : "runtime_error";
-    const state = options.savedMeeting ? "meeting_saved" : result.ok ? snapshotState !== "preparing" && isLiveSnapshot(result.snapshot) && attachment === null ? "ready" : snapshotState : hiddenPreparationError ? "ready" : mapErrorState(result.error);
-    const meetingId = result.ok ? result.snapshot.session?.session_id ?? attachment?.meetingId ?? null : attachment?.meetingId ?? null;
-    const mentionItemId = meetingId !== null && host !== null && attachment !== null && (snapshot?.session?.status === "recording" || snapshot?.session?.status === "paused") && state !== "host_offline" ? encodeMentionId({
-      threadId,
-      projectId: null,
-      hostId: host.id,
-      meetingId
-    }) : null;
-    return panelState({
-      threadId,
-      host,
-      attachment,
-      savedMeeting: options.savedMeeting ?? null,
-      firstUse: options.firstUse ?? false,
-      preparationNeeded: hiddenPreparationError,
-      snapshot: state === "meeting_saved" ? null : result.ok ? result.snapshot : state === "ready" ? createEmptySnapshot() : null,
-      error: error61,
-      state,
-      mentionItemId: state === "meeting_saved" ? null : mentionItemId
-    });
-  }
-  async function getPanelState(threadId) {
-    const [savedMeeting, seenCapture, lastError] = await Promise.all([
-      readSavedMeeting(threadId),
-      hasSeenCapture(threadId),
-      readLastError(threadId)
-    ]);
-    if (savedMeeting) {
-      const host2 = await findHost(savedMeeting.hostId);
-      return panelForResult(
-        threadId,
-        host2,
-        null,
-        { ok: true, snapshot: createEmptySnapshot() },
-        { savedMeeting, firstUse: false, passive: true }
-      );
-    }
-    const { host, attachment, result } = await readSnapshotForThread(threadId);
-    if (result.ok && isLiveSnapshot(result.snapshot)) {
-      await clearLastError(threadId);
-    } else if (lastError) {
-      return panelForResult(
-        threadId,
-        host,
-        attachment,
-        { ok: false, error: lastError },
-        { firstUse: !seenCapture }
-      );
-    }
-    return panelForResult(threadId, host, attachment, result, {
-      firstUse: !seenCapture,
-      passive: true
-    });
-  }
-  async function attachSnapshot(threadId, host, snapshot) {
-    const session = snapshot.session;
-    if (!session || !isLiveStatus(session.status)) {
-      throw new Error("No live Margins meeting is available.");
-    }
-    await saveAttachment({
-      threadId,
-      hostId: host.id,
-      meetingId: session.session_id,
-      attachedAtUnixMs: Date.now(),
-      detachedAtUnixMs: null,
-      generation: session.generation
-    });
-    await Promise.all([
-      clearSavedMeeting(threadId),
-      clearLastError(threadId),
-      markCaptureSeen(threadId)
-    ]);
-  }
-  async function runAttachedOperation(threadId, operation) {
-    const attachment = await readAttachment(threadId);
-    if (!attachment) return getPanelState(threadId);
-    const routedHost = await findHost(attachment.hostId);
-    const result = await callHost(routedHost, operation, {
-      operationId: requestId(operation, threadId),
-      sessionId: attachment.meetingId,
-      expectedGeneration: attachment.generation
-    });
-    if (result.ok && operation === "stop") {
-      const meetingId = result.stopped_session_id || attachment.meetingId;
-      await Promise.all([
-        saveStoppedMeeting({
-          threadId,
-          hostId: attachment.hostId,
-          meetingId,
-          savedAtUnixMs: Date.now()
-        }),
-        clearAttachment(threadId),
-        markCaptureSeen(threadId)
-      ]);
-    } else if (result.ok && result.snapshot.session) {
-      await saveAttachment({
-        ...attachment,
-        generation: result.snapshot.session.generation
-      });
-    }
-    bb.realtime.publish(REALTIME_CHANNEL, { threadId, reason: operation });
-    if (!result.ok) {
-      await saveLastError(threadId, result.error);
-      return panelForResult(threadId, routedHost, attachment, result, {
-        firstUse: !await hasSeenCapture(threadId)
-      });
-    }
-    return getPanelState(threadId);
+    bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: operation });
+    if (!result.ok) return basePanel(threadId, target.projectId, "needs_attention", client, { capture, error: result.error });
+    return getPanelState(threadId, client);
   }
   bb.rpc.register(marginsRpcContract, {
-    getPanelState({ threadId }) {
-      return getPanelState(threadId);
-    },
-    async startMeeting({ threadId, title }) {
-      await clearLastError(threadId);
-      const host = await resolveHost(threadId);
-      if (!host) return getPanelState(threadId);
-      const firstUse = !await hasSeenCapture(threadId);
-      const existing = await callHost(host, "readSnapshot", { sessionId: "current" });
-      if (existing.ok && isLiveSnapshot(existing.snapshot)) {
-        await attachSnapshot(threadId, host, existing.snapshot);
-        bb.realtime.publish(REALTIME_CHANNEL, { threadId, reason: "attach" });
-        return getPanelState(threadId);
-      }
-      if (!existing.ok && !isPreparationError(existing.error)) {
-        await saveLastError(threadId, existing.error);
-        return panelForResult(threadId, host, null, existing, { firstUse });
-      }
-      let ready = existing;
-      if (!existing.ok) {
-        ready = await callHost(host, "ensureRuntime", {});
-        bb.realtime.publish(REALTIME_CHANNEL, { threadId, reason: "ensure-runtime" });
-        if (!ready.ok) {
-          await saveLastError(threadId, ready.error);
-          return panelForResult(threadId, host, null, ready, { firstUse });
-        }
-        if (isLiveSnapshot(ready.snapshot)) {
-          await attachSnapshot(threadId, host, ready.snapshot);
-          bb.realtime.publish(REALTIME_CHANNEL, { threadId, reason: "attach" });
-          return getPanelState(threadId);
-        }
-      }
-      const thread = await bb.sdk.threads.get({ threadId });
-      const result = await callHost(host, "start", {
-        operationId: requestId("start", threadId),
-        name: meetingName(title?.trim() || thread.title?.trim())
-      });
-      if (!result.ok) {
-        await saveLastError(threadId, result.error);
-        bb.realtime.publish(REALTIME_CHANNEL, { threadId, reason: "start" });
-        return panelForResult(threadId, host, null, result, { firstUse });
-      }
-      await attachSnapshot(threadId, host, result.snapshot);
-      bb.realtime.publish(REALTIME_CHANNEL, { threadId, reason: "start" });
-      return getPanelState(threadId);
-    },
-    pauseMeeting({ threadId }) {
-      return runAttachedOperation(threadId, "pause");
-    },
-    resumeMeeting({ threadId }) {
-      return runAttachedOperation(threadId, "resume");
-    },
-    stopMeeting({ threadId }) {
-      return runAttachedOperation(threadId, "stop");
-    },
-    async updateNotepad({ threadId, expectedNotepadRevision, text }) {
-      const attachment = await readAttachment(threadId);
-      if (!attachment) return getPanelState(threadId);
-      const routedHost = await findHost(attachment.hostId);
-      const result = await callHost(routedHost, "updateNotepad", {
-        operationId: requestId("notepad", threadId),
-        sessionId: attachment.meetingId,
-        expectedGeneration: attachment.generation,
-        expectedNotepadRevision,
-        text
-      });
-      if (!result.ok) {
-        const latest = await callHost(routedHost, "readSnapshot", {
-          sessionId: attachment.meetingId
+    getPanelState: ({ threadId, client }) => getPanelState(threadId, client),
+    async beginBrowserCapture({ threadId, client, ownerId, title }) {
+      const target = await targetForThread(threadId);
+      if (client.platform === "macos" || !client.secureContext || !client.browserMicrophone) return getPanelState(threadId, client);
+      return locked(target.projectId, async () => {
+        if (await readCapture(target.projectId)) return getPanelState(threadId, client);
+        const result = await callHost(target, "startBrowserCapture", { target, ownerId, name: meetingName(title) });
+        if (!result.ok || !result.snapshot) return basePanel(threadId, target.projectId, "needs_attention", client, { error: result.ok ? null : result.error });
+        await bb.storage.kv.delete(savedKey(target.projectId));
+        await saveCapture({
+          projectId: target.projectId,
+          hostId: target.hostId,
+          projectRoot: target.projectRoot,
+          recordingId: result.snapshot.recordingId,
+          meetingId: result.snapshot.meetingId,
+          clientId: client.clientId,
+          ownerId,
+          source: "browser_microphone",
+          status: "recording",
+          lastHeartbeatUnixMs: Date.now(),
+          startedAtUnixMs: Date.now()
         });
-        if (latest.ok) {
-          return {
-            ...panelForResult(threadId, routedHost, attachment, latest, {
-              firstUse: !await hasSeenCapture(threadId)
-            }),
-            error: result.error
-          };
-        }
-        return panelForResult(threadId, routedHost, attachment, result, {
-          firstUse: !await hasSeenCapture(threadId)
-        });
-      }
-      if (result.ok && result.snapshot.session) {
-        await saveAttachment({
-          ...attachment,
-          generation: result.snapshot.session.generation
-        });
-      }
-      bb.realtime.publish(REALTIME_CHANNEL, { threadId, reason: "notepad" });
-      return panelForResult(threadId, routedHost, attachment, result, {
-        firstUse: !await hasSeenCapture(threadId)
+        bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: "start" });
+        return getPanelState(threadId, client);
       });
     },
-    async dismissSavedMeeting({ threadId }) {
-      await clearSavedMeeting(threadId);
-      await clearLastError(threadId);
-      bb.realtime.publish(REALTIME_CHANNEL, { threadId, reason: "dismiss-saved" });
-      return getPanelState(threadId);
+    heartbeat: ({ threadId, client, recordingId }) => operate(threadId, client, recordingId, "heartbeat"),
+    pause: ({ threadId, client, recordingId }) => operate(threadId, client, recordingId, "pause"),
+    resume: ({ threadId, client, recordingId }) => operate(threadId, client, recordingId, "resume"),
+    stop: ({ threadId, client, recordingId }) => operate(threadId, client, recordingId, "stop"),
+    async updateNotepad({ threadId, client, recordingId, expectedRevision, text }) {
+      const target = await targetForThread(threadId);
+      const capture = await readCapture(target.projectId);
+      if (!capture || capture.recordingId !== recordingId || capture.clientId !== client.clientId) return getPanelState(threadId, client);
+      const result = await callHost(target, "updateNotepad", { target, recordingId, ownerId: capture.ownerId, expectedRevision, text });
+      if (!result.ok) return basePanel(threadId, target.projectId, "needs_attention", client, { capture, error: result.error });
+      return getPanelState(threadId, client);
     },
-    async detachThread({ threadId }) {
-      await clearAttachment(threadId);
-      bb.realtime.publish(REALTIME_CHANNEL, { threadId, reason: "detach" });
-      return getPanelState(threadId);
+    async dismissSavedMeeting({ threadId, client }) {
+      const target = await targetForThread(threadId);
+      await bb.storage.kv.delete(savedKey(target.projectId));
+      return getPanelState(threadId, client);
+    }
+  });
+  const chunkSchema = external_exports.object({
+    threadId: external_exports.string().min(1),
+    client: clientCapabilitiesSchema,
+    recordingId: external_exports.string().min(1),
+    sequence: external_exports.number().int().nonnegative(),
+    bytesBase64: external_exports.string().max(2e6)
+  }).strict();
+  bb.http.route("POST", "/capture/chunk", async (context) => {
+    const parsed = chunkSchema.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ ok: false, error: "Invalid audio chunk" }, 400);
+    const target = await targetForThread(parsed.data.threadId);
+    const capture = await readCapture(target.projectId);
+    if (!capture || capture.recordingId !== parsed.data.recordingId || capture.clientId !== parsed.data.client.clientId) {
+      return context.json({ ok: false, error: "This bb window does not own the recording" }, 409);
+    }
+    const result = await callHost(target, "uploadChunk", {
+      target,
+      recordingId: capture.recordingId,
+      ownerId: capture.ownerId,
+      sequence: parsed.data.sequence,
+      bytesBase64: parsed.data.bytesBase64
+    });
+    return context.json(result, result.ok ? 200 : 502);
+  });
+  bb.background.service("capture-disconnect-safety", {
+    async start(signal) {
+      while (!signal.aborted) {
+        for (const key of await bb.storage.kv.list(CAPTURE_PREFIX)) {
+          const parsed = captureRecordSchema.safeParse(await bb.storage.kv.get(key));
+          if (!parsed.success || Date.now() - parsed.data.lastHeartbeatUnixMs <= DISCONNECT_GRACE_MS) continue;
+          const capture = { ...parsed.data, status: "saving" };
+          await saveCapture(capture);
+          const target = { projectId: capture.projectId, hostId: capture.hostId, projectRoot: capture.projectRoot };
+          const result = await callHost(target, "stop", { target, recordingId: capture.recordingId, ownerId: capture.ownerId });
+          if (result.ok) {
+            await saveSaved({ projectId: capture.projectId, meetingId: capture.meetingId, savedAtUnixMs: Date.now() });
+            await clearCapture(capture.projectId);
+            bb.realtime.publish(REALTIME_CHANNEL, { projectId: capture.projectId, reason: "disconnect-saved" });
+          } else {
+            capture.lastHeartbeatUnixMs = Date.now();
+            capture.status = "recovering";
+            await saveCapture(capture);
+          }
+        }
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, 2e3);
+          signal.addEventListener("abort", () => {
+            clearTimeout(timer);
+            resolve();
+          }, { once: true });
+        });
+      }
     }
   });
   bb.ui.registerMentionProvider({
     id: "margins",
     label: "Margins",
     triggers: ["@"],
-    async search({ query, threadId, projectId }) {
-      if (!threadId) return [];
-      const needle = query.trim().toLowerCase();
-      if (needle && !"margins".startsWith(needle)) return [];
-      const state = await getPanelState(threadId);
-      const meetingId = state.snapshot?.session?.session_id ?? state.attachment?.meetingId ?? null;
-      if (!state.host || !meetingId || !state.mention.available) return [];
-      return [
-        {
-          id: encodeMentionId({
-            threadId,
-            projectId,
-            hostId: state.host.id,
-            meetingId
-          }),
-          title: "@Margins",
-          subtitle: state.state === "paused" ? "Recording is paused" : "Use what Margins is hearing now"
-        }
-      ];
+    async search() {
+      return [];
     },
-    async resolve(itemId) {
-      const decoded = decodeMentionId(itemId);
-      if (!decoded) throw new Error("Margins context was not available.");
-      const config2 = await readSettings();
-      const maxTranscriptChars = parseWindowChars(config2.transcriptWindowChars);
-      const result = await callHost(await findHost(decoded.hostId), "readSnapshot", {
-        sessionId: decoded.meetingId
-      });
-      if (!result.ok) throw new Error(result.error.message);
-      const packet = buildWatermarkPacket(result.snapshot, maxTranscriptChars);
-      return { context: contextText(packet) };
+    async resolve() {
+      throw new Error("Live Margins context is not available until the project recorder has produced a transcript.");
     }
   });
-  bb.agents.configure((context) => {
-    if (context.project.kind === "personal" || context.origin.kind === "fork" && context.origin.pluginId === "side-chat") {
-      return { tools: [], skills: [] };
-    }
-    return {
-      tools: [],
-      skills: ["watermark", "workspace-setup"],
-      instructions: "When the user includes @Margins, use that injected live meeting context as the freshest source. Do not search old notes for live meeting feedback unless the user asks."
-    };
+  bb.agents.configure((context) => context.project.kind === "personal" ? { tools: [], skills: [] } : {
+    tools: [],
+    skills: ["watermark", "workspace-setup"],
+    instructions: "Margins recordings and notes live in the project's .margins folder. Use the Margins skills when the user asks about a recorded meeting; do not treat raw notes as settled knowledge."
   });
 }
 export {

@@ -32563,21 +32563,21 @@ function visit(schema, fnOrHandlers) {
       case "object": {
         const oldShape = def.shape;
         const keys = Object.keys(oldShape);
-        let changed = false;
+        let changed2 = false;
         const newShape = {};
         for (const k of keys) {
           const mapped = run(oldShape[k]);
           if (mapped !== oldShape[k])
-            changed = true;
+            changed2 = true;
           newShape[k] = mapped;
         }
         let newCatchall = def.catchall;
         if (def.catchall) {
           newCatchall = run(def.catchall);
           if (newCatchall !== def.catchall)
-            changed = true;
+            changed2 = true;
         }
-        return changed ? clone2(s, { ...def, shape: newShape, catchall: newCatchall }) : s;
+        return changed2 ? clone2(s, { ...def, shape: newShape, catchall: newCatchall }) : s;
       }
       case "array": {
         const mapped = run(def.element);
@@ -32585,21 +32585,21 @@ function visit(schema, fnOrHandlers) {
       }
       case "tuple": {
         const oldItems = def.items;
-        let changed = false;
+        let changed2 = false;
         const newItems = [];
         for (const item of oldItems) {
           const mapped = run(item);
           if (mapped !== item)
-            changed = true;
+            changed2 = true;
           newItems.push(mapped);
         }
         let newRest = def.rest;
         if (def.rest) {
           newRest = run(def.rest);
           if (newRest !== def.rest)
-            changed = true;
+            changed2 = true;
         }
-        return changed ? clone2(s, { ...def, items: newItems, rest: newRest }) : s;
+        return changed2 ? clone2(s, { ...def, items: newItems, rest: newRest }) : s;
       }
       case "record":
       case "map": {
@@ -32613,15 +32613,15 @@ function visit(schema, fnOrHandlers) {
       }
       case "union": {
         const oldOptions = def.options;
-        let changed = false;
+        let changed2 = false;
         const newOptions = [];
         for (const opt of oldOptions) {
           const mapped = run(opt);
           if (mapped !== opt)
-            changed = true;
+            changed2 = true;
           newOptions.push(mapped);
         }
-        return changed ? clone2(s, { ...def, options: newOptions }) : s;
+        return changed2 ? clone2(s, { ...def, options: newOptions }) : s;
       }
       case "intersection": {
         const newLeft = run(def.left);
@@ -32755,320 +32755,156 @@ function date8(params) {
 }
 
 // src/contracts.ts
-var jsonValueSchema = external_exports2.lazy(
-  () => external_exports2.union([
-    external_exports2.null(),
-    external_exports2.boolean(),
-    external_exports2.number().finite(),
-    external_exports2.string(),
-    external_exports2.array(jsonValueSchema),
-    external_exports2.record(external_exports2.string(), jsonValueSchema)
-  ])
-);
-var PANEL_STATE_SCHEMA = "margins.bb.live.panel.v1";
-var WATERMARK_CONTEXT_SCHEMA = "margins.watermark.context.v1";
-var pluginStateSchema = external_exports2.enum([
-  "host_offline",
-  "unsupported_platform",
-  "runtime_error",
-  "runtime_auth_error",
-  "microphone_permission",
-  "system_audio_permission",
+var PANEL_STATE_SCHEMA = "margins.bb.recording.panel.v2";
+var CAPTURE_PROTOCOL_VERSION = 2;
+var clientCapabilitiesSchema = external_exports2.object({
+  clientId: external_exports2.string().min(1),
+  platform: external_exports2.enum(["macos", "mobile", "other"]),
+  secureContext: external_exports2.boolean(),
+  browserMicrophone: external_exports2.boolean(),
+  nativeMacCapture: external_exports2.boolean()
+}).strict();
+var captureSourceSchema = external_exports2.enum(["browser_microphone", "mac_system_and_microphone"]);
+var recordingStateSchema = external_exports2.enum([
+  "needs_setup",
   "ready",
-  "preparing",
+  "getting_ready",
   "recording",
   "paused",
-  "finalizing",
-  "meeting_saved",
-  "recoverable_error"
+  "recovering",
+  "saving",
+  "saved",
+  "recording_elsewhere",
+  "needs_attention",
+  "unavailable"
 ]);
-var primaryActionSchema = external_exports2.enum([
-  "start",
-  "pause",
-  "resume",
-  "refresh",
-  "none"
-]);
-var desktopLiveStatusSchema = external_exports2.enum([
-  "idle",
-  "starting",
-  "recording",
-  "paused",
-  "finalizing",
-  "needs_attention"
-]);
-var desktopTranscriptFreshnessSchema = external_exports2.object({
-  decoded_until_ms: external_exports2.number().int().nonnegative(),
-  committed_until_ms: external_exports2.number().int().nonnegative(),
-  updated_at_unix_ms: external_exports2.number().int().nonnegative(),
-  age_ms: external_exports2.number().int().nonnegative()
+var primaryActionSchema = external_exports2.enum(["setup", "start", "pause", "resume", "retry", "none"]);
+var projectTargetSchema = external_exports2.object({
+  projectId: external_exports2.string().min(1),
+  hostId: external_exports2.string().min(1),
+  projectRoot: external_exports2.string().min(1)
 }).strict();
-var liveSessionRefSchema = external_exports2.object({
-  session_id: external_exports2.string().min(1),
-  status: desktopLiveStatusSchema,
-  elapsed_ms: external_exports2.number().int().nonnegative(),
-  generation: external_exports2.number().int().nonnegative()
+var notepadSchema = external_exports2.object({ text: external_exports2.string(), revision: external_exports2.string().min(1) }).strict();
+var hostCaptureSnapshotSchema = external_exports2.object({
+  recordingId: external_exports2.string().min(1),
+  meetingId: external_exports2.string().min(1),
+  status: external_exports2.enum(["recording", "paused", "saving"]),
+  elapsedMs: external_exports2.number().int().nonnegative(),
+  notepad: notepadSchema,
+  transcriptAvailable: external_exports2.boolean()
 }).strict();
-var liveHealthSchema = external_exports2.object({
-  capture_phase: external_exports2.string().min(1),
-  tap_status: external_exports2.string().min(1),
-  tap_warning: external_exports2.string().nullable().optional(),
-  system_audio_expected: external_exports2.boolean(),
-  system_audio_observed: external_exports2.boolean(),
-  transcript_freshness: desktopTranscriptFreshnessSchema.nullable().optional()
-}).strict();
-var liveTranscriptSchema = external_exports2.object({
-  at_ms: external_exports2.number().int().nonnegative().nullable().optional(),
-  text: external_exports2.string()
-}).strict();
-var liveMemoLineSchema = external_exports2.object({
-  index: external_exports2.number().int().nonnegative(),
-  at_ms: external_exports2.number().int().nonnegative().nullable().optional(),
-  text: external_exports2.string()
-}).strict();
-var desktopLiveEndpointsSchema = external_exports2.object({
-  snapshot: external_exports2.string().startsWith("/"),
-  start: external_exports2.string().startsWith("/"),
-  pause: external_exports2.string().startsWith("/"),
-  resume: external_exports2.string().startsWith("/"),
-  stop: external_exports2.string().startsWith("/"),
-  update_notepad: external_exports2.string().startsWith("/")
-}).strict();
-var desktopLiveDiscoverySchema = external_exports2.object({
-  protocol_version: external_exports2.literal(1),
-  runtime: external_exports2.enum(["margins_desktop", "margins_cli"]),
-  profile: external_exports2.string().min(1),
-  pid: external_exports2.number().int().nonnegative(),
-  base_url: external_exports2.string().url(),
-  token: external_exports2.string().min(1),
-  permissions: external_exports2.object({
-    loopback_only: external_exports2.literal(true),
-    private_file: external_exports2.literal(true)
-  }).strict(),
-  endpoints: desktopLiveEndpointsSchema,
-  generated_at_unix_ms: external_exports2.number().int().nonnegative()
-}).strict();
-var liveSnapshotSchema = external_exports2.object({
-  protocol_version: external_exports2.literal(1),
-  server_unix_ms: external_exports2.number().int().nonnegative(),
-  session: liveSessionRefSchema.nullable(),
-  health: liveHealthSchema,
-  rolling_transcript: external_exports2.array(liveTranscriptSchema).max(80).default([]),
-  memo_lines: external_exports2.array(liveMemoLineSchema).max(1e3).default([]),
-  notepad_revision: external_exports2.string().min(1)
-}).strict();
-var desktopLiveStartRequestSchema = external_exports2.object({
-  operation_id: external_exports2.string().min(1),
-  name: external_exports2.string().trim().min(1),
-  project_id: external_exports2.string().min(1).optional()
-}).strict();
-var desktopLiveSessionRequestSchema = external_exports2.object({
-  operation_id: external_exports2.string().min(1),
-  session_id: external_exports2.string().min(1),
-  expected_generation: external_exports2.number().int().nonnegative().optional()
-}).strict();
-var desktopLiveNotepadRequestSchema = desktopLiveSessionRequestSchema.extend({
-  expected_notepad_revision: external_exports2.string().min(1),
-  text: external_exports2.string()
-}).strict();
-var liveErrorSchema = external_exports2.object({
+var hostErrorSchema = external_exports2.object({
   code: external_exports2.string().min(1),
   message: external_exports2.string().min(1),
-  retryable: external_exports2.boolean(),
-  state: pluginStateSchema.optional(),
-  installUrl: external_exports2.string().url().optional(),
-  details: external_exports2.record(external_exports2.string(), jsonValueSchema).optional()
+  retryable: external_exports2.boolean()
 }).strict();
-var hostReadSnapshotInputSchema = external_exports2.object({
-  sessionId: external_exports2.string().min(1)
-}).strict();
-var hostStartInputSchema = external_exports2.object({
-  operationId: external_exports2.string().min(1),
-  name: external_exports2.string().trim().min(1).max(160),
-  projectId: external_exports2.string().trim().min(1).optional()
-}).strict();
-var hostSessionMutationInputSchema = external_exports2.object({
-  operationId: external_exports2.string().min(1),
-  sessionId: external_exports2.string().min(1),
-  expectedGeneration: external_exports2.number().int().nonnegative().nullable()
-}).strict();
-var hostUpdateNotepadInputSchema = hostSessionMutationInputSchema.extend({
-  expectedNotepadRevision: external_exports2.string().min(1),
-  text: external_exports2.string().max(1e5)
-}).strict();
-var hostOperationResultSchema = external_exports2.discriminatedUnion("ok", [
-  external_exports2.object({
-    ok: external_exports2.literal(true),
-    snapshot: liveSnapshotSchema,
-    idempotent_replay: external_exports2.boolean().optional(),
-    stopped_session_id: external_exports2.string().nullable().optional()
-  }).strict(),
-  external_exports2.object({
-    ok: external_exports2.literal(false),
-    error: liveErrorSchema
-  }).strict()
+var hostResultSchema = external_exports2.discriminatedUnion("ok", [
+  external_exports2.object({ ok: external_exports2.literal(true), snapshot: hostCaptureSnapshotSchema.nullable() }).strict(),
+  external_exports2.object({ ok: external_exports2.literal(false), error: hostErrorSchema }).strict()
 ]);
-var hostSignals = {
-  changed: {
-    payload: external_exports2.object({
-      reason: external_exports2.enum([
-        "snapshot",
-        "ensure_runtime",
-        "start",
-        "pause",
-        "resume",
-        "stop",
-        "notepad"
-      ])
-    }).strict()
-  }
-};
+var targetInputSchema = external_exports2.object({ target: projectTargetSchema }).strict();
+var ownedCaptureInputSchema = targetInputSchema.extend({
+  recordingId: external_exports2.string().min(1),
+  ownerId: external_exports2.string().min(1)
+}).strict();
 var marginsHostContract = defineRpcContract2({
-  readSnapshot: {
-    input: hostReadSnapshotInputSchema,
-    output: hostOperationResultSchema
+  prepareProject: {
+    input: targetInputSchema,
+    output: external_exports2.object({ ok: external_exports2.boolean(), error: hostErrorSchema.optional() }).strict()
   },
-  ensureRuntime: {
-    input: external_exports2.object({}).strict(),
-    output: hostOperationResultSchema
+  startBrowserCapture: {
+    input: targetInputSchema.extend({ ownerId: external_exports2.string().min(1), name: external_exports2.string().min(1).max(160) }).strict(),
+    output: hostResultSchema
   },
-  start: {
-    input: hostStartInputSchema,
-    output: hostOperationResultSchema
-  },
-  pause: {
-    input: hostSessionMutationInputSchema,
-    output: hostOperationResultSchema
-  },
-  resume: {
-    input: hostSessionMutationInputSchema,
-    output: hostOperationResultSchema
-  },
-  stop: {
-    input: hostSessionMutationInputSchema,
-    output: hostOperationResultSchema
-  },
+  readCapture: { input: ownedCaptureInputSchema, output: hostResultSchema },
+  heartbeat: { input: ownedCaptureInputSchema, output: hostResultSchema },
+  pause: { input: ownedCaptureInputSchema, output: hostResultSchema },
+  resume: { input: ownedCaptureInputSchema, output: hostResultSchema },
+  stop: { input: ownedCaptureInputSchema, output: hostResultSchema },
   updateNotepad: {
-    input: hostUpdateNotepadInputSchema,
-    output: hostOperationResultSchema
+    input: ownedCaptureInputSchema.extend({ expectedRevision: external_exports2.string().min(1), text: external_exports2.string().max(1e5) }).strict(),
+    output: hostResultSchema
+  },
+  uploadChunk: {
+    input: ownedCaptureInputSchema.extend({ sequence: external_exports2.number().int().nonnegative(), bytesBase64: external_exports2.string() }).strict(),
+    output: external_exports2.object({ ok: external_exports2.boolean(), error: hostErrorSchema.optional() }).strict()
+  },
+  readContext: {
+    input: targetInputSchema.extend({ meetingId: external_exports2.string().min(1), maxChars: external_exports2.number().int().positive().max(64e3) }).strict(),
+    output: external_exports2.object({ ok: external_exports2.boolean(), context: external_exports2.string().optional(), error: hostErrorSchema.optional() }).strict()
   }
 });
-var attachmentSchema = external_exports2.object({
-  threadId: external_exports2.string().min(1),
+var hostSignals = {
+  changed: { payload: external_exports2.object({
+    projectId: external_exports2.string().min(1),
+    reason: external_exports2.enum(["start", "pause", "resume", "stop", "notepad", "lease_expired"])
+  }).strict() }
+};
+var captureRecordSchema = external_exports2.object({
+  projectId: external_exports2.string().min(1),
   hostId: external_exports2.string().min(1),
+  projectRoot: external_exports2.string().min(1),
+  recordingId: external_exports2.string().min(1),
   meetingId: external_exports2.string().min(1),
-  attachedAtUnixMs: external_exports2.number().int().nonnegative(),
-  detachedAtUnixMs: external_exports2.null(),
-  generation: external_exports2.number().int().nonnegative().nullable()
+  clientId: external_exports2.string().min(1),
+  ownerId: external_exports2.string().min(1),
+  source: captureSourceSchema,
+  status: external_exports2.enum(["getting_ready", "recording", "paused", "recovering", "saving"]),
+  lastHeartbeatUnixMs: external_exports2.number().int().nonnegative(),
+  startedAtUnixMs: external_exports2.number().int().nonnegative()
 }).strict();
 var savedMeetingSchema = external_exports2.object({
-  threadId: external_exports2.string().min(1),
-  hostId: external_exports2.string().min(1),
+  projectId: external_exports2.string().min(1),
   meetingId: external_exports2.string().min(1),
   savedAtUnixMs: external_exports2.number().int().nonnegative()
 }).strict();
 var panelStateSchema = external_exports2.object({
   schema: external_exports2.literal(PANEL_STATE_SCHEMA),
   threadId: external_exports2.string().min(1),
-  state: pluginStateSchema,
+  projectId: external_exports2.string().nullable(),
+  state: recordingStateSchema,
   title: external_exports2.string().min(1),
   detail: external_exports2.string().min(1),
+  sourceLabel: external_exports2.string().nullable(),
+  storageLabel: external_exports2.string().nullable(),
   primaryAction: primaryActionSchema,
   primaryLabel: external_exports2.string().min(1),
-  canEditNotepad: external_exports2.boolean(),
   canStop: external_exports2.boolean(),
-  canDetach: external_exports2.boolean(),
-  firstUse: external_exports2.boolean(),
-  preparationNeeded: external_exports2.boolean(),
-  installUrl: external_exports2.string().url().nullable(),
-  host: external_exports2.object({
-    id: external_exports2.string().min(1),
-    name: external_exports2.string().min(1),
-    status: external_exports2.string().min(1)
-  }).strict().nullable(),
-  attachment: attachmentSchema.nullable(),
+  canEditNotepad: external_exports2.boolean(),
+  ownsRecording: external_exports2.boolean(),
+  recordingId: external_exports2.string().nullable(),
+  notepad: notepadSchema.nullable(),
   savedMeeting: savedMeetingSchema.nullable(),
-  snapshot: liveSnapshotSchema.nullable(),
-  error: liveErrorSchema.nullable(),
-  mention: external_exports2.object({
-    available: external_exports2.boolean(),
-    itemId: external_exports2.string().nullable()
-  }).strict()
+  error: hostErrorSchema.nullable(),
+  mention: external_exports2.object({ available: external_exports2.boolean(), itemId: external_exports2.string().nullable() }).strict()
 }).strict();
-var watermarkPacketSchema = external_exports2.object({
-  schema: external_exports2.literal(WATERMARK_CONTEXT_SCHEMA),
-  meeting: external_exports2.object({
-    id: external_exports2.string().min(1),
-    live: external_exports2.boolean(),
-    status: desktopLiveStatusSchema
-  }).strict(),
-  freshness: external_exports2.object({
-    decodedUntilMs: external_exports2.number().int().nonnegative().nullable(),
-    committedUntilMs: external_exports2.number().int().nonnegative().nullable(),
-    transcriptUpdatedAtUnixMs: external_exports2.number().int().nonnegative().nullable(),
-    resolvedAtUnixMs: external_exports2.number().int().nonnegative(),
-    stale: external_exports2.boolean(),
-    staleReason: external_exports2.string().nullable()
-  }).strict(),
-  captureHealth: external_exports2.object({
-    phase: external_exports2.string().min(1),
-    paused: external_exports2.boolean(),
-    tapStatus: external_exports2.string().min(1),
-    systemAudioExpected: external_exports2.boolean(),
-    systemAudioObserved: external_exports2.boolean(),
-    warnings: external_exports2.array(external_exports2.string()).max(16)
-  }).strict(),
-  bounds: external_exports2.object({
-    maxTranscriptChars: external_exports2.number().int().positive(),
-    includedTranscriptChars: external_exports2.number().int().nonnegative(),
-    memoItemsIncluded: external_exports2.number().int().nonnegative()
-  }).strict(),
-  context: external_exports2.string()
+var threadClientInputSchema = external_exports2.object({
+  threadId: external_exports2.string().min(1),
+  client: clientCapabilitiesSchema
 }).strict();
-var threadInputSchema = external_exports2.object({ threadId: external_exports2.string().min(1) }).strict();
-var titleInputSchema = threadInputSchema.extend({ title: external_exports2.string().trim().max(160).optional() }).strict();
-var notepadInputSchema = threadInputSchema.extend({
-  expectedNotepadRevision: external_exports2.string().min(1),
-  text: external_exports2.string().max(1e5)
-}).strict();
+var captureClientInputSchema = threadClientInputSchema.extend({ recordingId: external_exports2.string().min(1) }).strict();
 var marginsRpcContract = defineRpcContract2({
-  getPanelState: {
-    input: threadInputSchema,
+  getPanelState: { input: threadClientInputSchema, output: panelStateSchema },
+  beginBrowserCapture: {
+    input: threadClientInputSchema.extend({ ownerId: external_exports2.string().min(1), title: external_exports2.string().trim().max(160).optional() }).strict(),
     output: panelStateSchema
   },
-  startMeeting: {
-    input: titleInputSchema,
-    output: panelStateSchema
-  },
-  pauseMeeting: {
-    input: threadInputSchema,
-    output: panelStateSchema
-  },
-  resumeMeeting: {
-    input: threadInputSchema,
-    output: panelStateSchema
-  },
-  stopMeeting: {
-    input: threadInputSchema,
-    output: panelStateSchema
-  },
+  heartbeat: { input: captureClientInputSchema, output: panelStateSchema },
+  pause: { input: captureClientInputSchema, output: panelStateSchema },
+  resume: { input: captureClientInputSchema, output: panelStateSchema },
+  stop: { input: captureClientInputSchema, output: panelStateSchema },
   updateNotepad: {
-    input: notepadInputSchema,
+    input: captureClientInputSchema.extend({ expectedRevision: external_exports2.string().min(1), text: external_exports2.string().max(1e5) }).strict(),
     output: panelStateSchema
   },
-  dismissSavedMeeting: {
-    input: threadInputSchema,
-    output: panelStateSchema
-  },
-  detachThread: {
-    input: threadInputSchema,
-    output: panelStateSchema
-  }
+  dismissSavedMeeting: { input: threadClientInputSchema, output: panelStateSchema }
 });
 
-// src/live-transport.ts
-import { readFile as defaultReadFile } from "node:fs/promises";
-import { homedir as homedir2, platform as platform2 } from "node:os";
+// src/project-server.ts
+import { createHash as createHash2 } from "node:crypto";
+import { spawn } from "node:child_process";
+import { mkdir as mkdir2, readFile as readFile2 } from "node:fs/promises";
+import { createServer } from "node:net";
 import { join as join2 } from "node:path";
 
 // src/runtime-manager.ts
@@ -33094,10 +32930,9 @@ var RELEASE_API = `https://api.github.com/repos/byenzyme/margins/releases/tags/v
 var MAX_ARCHIVE_BYTES = 128 * 1024 * 1024;
 function targetName(hostPlatform, arch) {
   if (hostPlatform === "darwin" && arch === "arm64") return "aarch64-apple-darwin";
+  if (hostPlatform === "linux" && arch === "x64") return "x86_64-unknown-linux-gnu";
+  if (hostPlatform === "linux" && arch === "arm64") return "aarch64-unknown-linux-gnu";
   return null;
-}
-function executableNames() {
-  return ["margins", "margins-live"];
 }
 async function isRegularExecutable(path2) {
   try {
@@ -33208,7 +33043,7 @@ async function installRuntime(input2) {
     await input2.execFileImpl("/usr/bin/tar", ["-xzf", archivePath, "-C", unpacked], {
       signal: input2.signal
     });
-    for (const name of executableNames()) {
+    for (const name of input2.executables) {
       const source = join(unpacked, name);
       const stat = await lstat(source).catch(() => null);
       if (!stat?.isFile() || stat.isSymbolicLink()) {
@@ -33266,391 +33101,303 @@ function createRuntimeManager(options = {}) {
           runtimeBinDir,
           cliBinDir,
           execFileImpl,
-          signal: input2.signal
+          signal: input2.signal,
+          executables: ["margins", "margins-live"]
         });
       }
       const selected = configuredRuntime || join(runtimeBinDir, "margins-live");
       if (!await hasLiveProtocol(selected, execFileImpl)) return "not_found";
       startDetached(selected, env, home, spawnImpl);
       return "started";
+    },
+    async ensureProjectServer(input2) {
+      const configured = env.MARGINS_PROJECT_SERVER_PATH?.trim();
+      if (configured) {
+        if (!await isRegularExecutable(configured)) {
+          throw new Error("The configured Margins recorder is not executable");
+        }
+        return configured;
+      }
+      const runtimeBinDir = join(input2.dataDir, "runtime", `v${RUNTIME_RELEASE_VERSION}`);
+      const serverPath = join(runtimeBinDir, "margins-server");
+      if (await isRegularExecutable(serverPath)) return serverPath;
+      const target = targetName(hostPlatform, hostArch);
+      if (!target) throw new Error("Recording is not available on this project machine");
+      const expectedName = `margins-${RUNTIME_RELEASE_VERSION}-${target}.tar.gz`;
+      const archive = await downloadPinnedArchive(fetchImpl, expectedName, input2.signal);
+      if (!archive) throw new Error(`Margins ${RUNTIME_RELEASE_VERSION} is not published for this project machine`);
+      await installRuntime({
+        archive,
+        dataDir: input2.dataDir,
+        runtimeBinDir,
+        cliBinDir: env.MARGINS_CLI_BIN_DIR?.trim() || join(home, ".local", "bin"),
+        execFileImpl,
+        signal: input2.signal,
+        executables: ["margins", "margins-server"]
+      });
+      if (!await isRegularExecutable(serverPath)) {
+        throw new Error("The Margins recorder was not installed correctly");
+      }
+      return serverPath;
     }
   };
 }
 
-// src/live-transport.ts
-var DISCOVERY_FILENAME = "desktop-live.v1.json";
-var FALLBACK_ENDPOINTS = {
-  snapshot: "/v1/live/snapshot",
-  start: "/v1/live/start",
-  pause: "/v1/live/pause",
-  resume: "/v1/live/resume",
-  stop: "/v1/live/stop",
-  update_notepad: "/v1/live/notepad"
-};
-var INSTALL_URL = "https://github.com/byenzyme/margins/releases";
-function profileSlug(env) {
-  const profile = env.MARGINS_PROFILE?.trim() || "default";
-  if (profile === "default") return "margins";
-  const slug = profile.split("").map((char) => /[a-zA-Z0-9_-]/.test(char) ? char.toLowerCase() : "-").join("").replace(/^-+|-+$/g, "") || "profile";
-  return `margins-${slug}`;
+// src/project-server.ts
+function hostError(code, message, retryable = true) {
+  return { code, message, retryable };
 }
-function defaultDiscoveryPath(env, hostPlatform, home) {
-  const slug = profileSlug(env);
-  if (hostPlatform === "darwin") {
-    return join2(home, "Library", "Application Support", slug, DISCOVERY_FILENAME);
-  }
-  const dataHome = env.XDG_DATA_HOME?.trim() || join2(home, ".local", "share");
-  return join2(dataHome, slug, DISCOVERY_FILENAME);
+function projectKey(target) {
+  return createHash2("sha256").update(`${target.projectId}\0${target.projectRoot}`).digest("hex").slice(0, 20);
 }
-function resultError(code, message, retryable, extras = {}) {
-  return {
-    ok: false,
-    error: {
-      code,
-      message,
-      retryable,
-      ...extras
-    }
-  };
-}
-async function readDiscovery(env, readFile2, hostPlatform, home) {
-  const discoveryPath = env.MARGINS_LIVE_DISCOVERY_FILE?.trim() || defaultDiscoveryPath(env, hostPlatform, home);
-  try {
-    const parsed = JSON.parse(
-      await readFile2(discoveryPath, "utf8")
-    );
-    if (parsed.protocol_version === 1 && typeof parsed.base_url === "string" && typeof parsed.token === "string" && parsed.endpoints && typeof parsed.endpoints.snapshot === "string") {
-      return {
-        protocol_version: 1,
-        base_url: parsed.base_url,
-        token: parsed.token,
-        endpoints: {
-          ...FALLBACK_ENDPOINTS,
-          ...parsed.endpoints
-        }
-      };
-    }
-  } catch {
-    return null;
-  }
-  return null;
-}
-async function resolveConnection(options) {
-  const discovery = await readDiscovery(
-    options.env,
-    options.readFile,
-    options.platform,
-    options.homeDir
-  );
-  const directUrl = options.env.MARGINS_LIVE_API_URL?.trim();
-  const directToken = options.env.MARGINS_LIVE_API_TOKEN?.trim();
-  const useDirect = Boolean(directUrl && directToken);
-  const baseUrl = (useDirect ? directUrl : discovery?.base_url || "").replace(/\/+$/, "");
-  const token = useDirect ? directToken : discovery?.token || "";
-  if (!baseUrl || !token) return null;
-  return {
-    baseUrl,
-    token,
-    endpoints: discovery?.endpoints ?? FALLBACK_ENDPOINTS
-  };
-}
-function delay(ms, signal) {
+async function availablePort() {
   return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(signal.reason);
-      return;
-    }
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(signal?.reason);
-    };
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
-}
-function normalizeError(raw, fallbackMessage) {
-  if (typeof raw !== "object" || raw === null) {
-    return {
-      code: "request_failed",
-      message: fallbackMessage,
-      retryable: true
-    };
-  }
-  const value = raw;
-  return {
-    code: typeof value.code === "string" ? value.code : "request_failed",
-    message: typeof value.message === "string" ? value.message : fallbackMessage,
-    retryable: typeof value.retryable === "boolean" ? value.retryable : true
-  };
-}
-function mapNetworkError(cause) {
-  const message = cause instanceof Error ? cause.message : String(cause);
-  if (message.includes("ECONNREFUSED") || message.includes("fetch failed") || message.includes("ECONNRESET")) {
-    return resultError("margins_closed", "Margins is not running on this Mac.", true, {
-      state: "runtime_error",
-      installUrl: INSTALL_URL
-    });
-  }
-  return resultError("request_failed", "Something interrupted recording.", true, {
-    state: "recoverable_error"
-  });
-}
-function mapStatusError(status, raw) {
-  if (status === 401 || status === 403) {
-    return resultError("unauthorized", "Restart Margins to renew its private connection.", false, {
-      state: "runtime_auth_error",
-      installUrl: INSTALL_URL
-    });
-  }
-  if (status === 404) {
-    const parsed2 = normalizeError(raw, "Margins is not recording right now.");
-    if (parsed2.code === "no_active_session") {
-      return {
-        ok: false,
-        error: { ...parsed2, state: "ready" }
-      };
-    }
-    return {
-      ok: false,
-      error: {
-        ...parsed2,
-        state: "runtime_error",
-        installUrl: INSTALL_URL
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        server.close();
+        reject(new Error("Could not reserve a local recording port"));
+        return;
       }
-    };
-  }
-  if (status === 426) {
-    return resultError("update_needed", "Update Margins to use this panel.", false, {
-      state: "runtime_error",
-      installUrl: INSTALL_URL
+      server.close((error108) => error108 ? reject(error108) : resolve(address.port));
     });
-  }
-  const parsed = normalizeError(raw, "Something interrupted recording.");
-  return { ok: false, error: parsed };
+  });
 }
-function mutationResult(raw) {
-  if (typeof raw === "object" && raw !== null && "snapshot" in raw) {
-    const response = raw;
-    const parsed2 = liveSnapshotSchema.safeParse(response.snapshot);
-    if (!parsed2.success) {
-      return resultError("contract_mismatch", "Margins returned an unfamiliar live state.", false, {
-        state: "runtime_error",
-        installUrl: INSTALL_URL
-      });
+async function waitForServer(baseUrl, tokenPath, child, signal) {
+  const deadline = Date.now() + 12e3;
+  while (Date.now() < deadline) {
+    if (signal?.aborted) throw signal.reason;
+    if (child.exitCode !== null) throw new Error("Margins stopped while getting recording ready");
+    const token = await readFile2(tokenPath, "utf8").catch(() => "");
+    if (token.trim()) {
+      const healthy = await fetch(`${baseUrl}/health`, { signal }).then((response) => response.ok).catch(() => false);
+      if (healthy) return token.trim();
     }
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  }
+  throw new Error("Margins did not become ready on the project machine");
+}
+var ProjectServerManager = class {
+  handles = /* @__PURE__ */ new Map();
+  runtime = createRuntimeManager();
+  async ensure(target, dataDir, signal) {
+    const key = projectKey(target);
+    const existing = this.handles.get(key);
+    if (existing) return existing;
+    const pending = this.start(target, dataDir, key, signal).catch((error108) => {
+      this.handles.delete(key);
+      throw error108;
+    });
+    this.handles.set(key, pending);
+    return pending;
+  }
+  async start(target, dataDir, key, signal) {
+    const binary = await this.runtime.ensureProjectServer({ dataDir, signal });
+    const instanceDir = join2(dataDir, "projects", key);
+    await mkdir2(instanceDir, { recursive: true });
+    const port = await availablePort();
+    const child = spawn(binary, [], {
+      cwd: target.projectRoot,
+      env: {
+        ...process.env,
+        MARGINS_HOST: "127.0.0.1",
+        MARGINS_PORT: String(port),
+        MARGINS_DATA_DIR: instanceDir,
+        MARGINS_WORK_DIR: target.projectRoot
+      },
+      stdio: "ignore"
+    });
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const token = await waitForServer(baseUrl, join2(instanceDir, "token"), child, signal).catch((error108) => {
+      child.kill("SIGTERM");
+      throw error108;
+    });
+    child.once("exit", () => this.handles.delete(key));
+    return { baseUrl, token, child };
+  }
+  async dispose() {
+    for (const handle of await Promise.allSettled(this.handles.values())) {
+      if (handle.status === "fulfilled" && handle.value.child.exitCode === null) handle.value.child.kill("SIGTERM");
+    }
+    this.handles.clear();
+  }
+};
+var ProjectMarginsTransport = class {
+  constructor(manager = new ProjectServerManager()) {
+    this.manager = manager;
+  }
+  manager;
+  async invoke(handle, command, body, signal) {
+    const response = await fetch(`${handle.baseUrl}/api/invoke/${command}`, {
+      method: "POST",
+      signal,
+      headers: {
+        authorization: `Bearer ${handle.token}`,
+        "content-type": "application/json",
+        "x-margins-capture-protocol": String(CAPTURE_PROTOCOL_VERSION)
+      },
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) throw new Error(`Margins could not save on the project machine (${response.status})`);
+    const value = await response.json();
+    if (!value.ok) throw new Error(value.error || "Margins could not complete the recording action");
+    return value.result;
+  }
+  async snapshot(handle, recordingId, ownerId, signal) {
+    const [status, notepad] = await Promise.all([
+      this.invoke(handle, "get_web_recording_status", { recordingId, ownerId }, signal),
+      this.invoke(handle, "get_web_recording_notepad", { recordingId, ownerId }, signal)
+    ]);
     return {
-      ok: true,
-      snapshot: parsed2.data,
-      idempotent_replay: typeof response.idempotent_replay === "boolean" ? response.idempotent_replay : void 0,
-      stopped_session_id: typeof response.stopped_session_id === "string" ? response.stopped_session_id : response.stopped_session_id === null ? null : void 0
+      recordingId,
+      meetingId: status.session_name || recordingId,
+      status: status.capture_phase === "finalizing" ? "saving" : status.paused ? "paused" : "recording",
+      elapsedMs: Math.max(0, Math.round(status.elapsed_secs * 1e3)),
+      notepad,
+      transcriptAvailable: false
     };
   }
-  const parsed = liveSnapshotSchema.safeParse(raw);
-  if (!parsed.success) {
-    return resultError("contract_mismatch", "Margins returned an unfamiliar live state.", false, {
-      state: "runtime_error",
-      installUrl: INSTALL_URL
-    });
-  }
-  return {
-    ok: true,
-    snapshot: parsed.data
-  };
-}
-function createHttpMarginsLiveTransport(options = {}) {
-  const resolvedOptions = {
-    env: options.env ?? process.env,
-    fetchImpl: options.fetchImpl ?? fetch,
-    readFile: options.readFile ?? defaultReadFile,
-    homeDir: options.homeDir ?? homedir2(),
-    platform: options.platform ?? platform2(),
-    startRuntime: options.startRuntime ?? createRuntimeManager({
-      env: options.env,
-      fetchImpl: options.fetchImpl,
-      homeDir: options.homeDir,
-      platform: options.platform
-    }).ensure
-  };
-  async function call(method, input2, endpointName, body, query) {
-    const connection = await resolveConnection(resolvedOptions);
-    if (!connection) {
-      return resultError("margins_closed", "Start Margins on the selected Mac.", true, {
-        state: "runtime_error",
-        installUrl: INSTALL_URL
-      });
-    }
-    const endpoint = connection.endpoints[endpointName] ?? FALLBACK_ENDPOINTS[endpointName];
-    const url3 = new URL(`${connection.baseUrl}${endpoint}`);
-    query?.forEach((value, key) => url3.searchParams.set(key, value));
+  async withHandle(target, dataDir, action) {
     try {
-      const response = await resolvedOptions.fetchImpl(url3, {
-        method,
-        signal: input2.signal,
-        headers: {
-          accept: "application/json",
-          authorization: `Bearer ${connection.token}`,
-          ...body === void 0 ? {} : { "content-type": "application/json" }
-        },
-        ...body === void 0 ? {} : { body: JSON.stringify(body) }
-      });
-      const raw = await response.json().catch(() => null);
-      if (!response.ok) return mapStatusError(response.status, raw);
-      return mutationResult(raw);
+      return { ok: true, snapshot: await action(await this.manager.ensure(target, dataDir)) };
     } catch (cause) {
-      if (input2.signal?.aborted) throw cause;
-      return mapNetworkError(cause);
+      return { ok: false, error: hostError("project_recorder_unavailable", cause instanceof Error ? cause.message : String(cause)) };
     }
   }
-  return {
-    readSnapshot(input2) {
-      const query = new URLSearchParams();
-      if (input2.sessionId !== "current") query.set("session_id", input2.sessionId);
-      return call("GET", input2, "snapshot", void 0, query);
-    },
-    async ensureRuntime(input2) {
-      let started;
-      try {
-        started = await resolvedOptions.startRuntime(input2);
-      } catch (cause) {
-        if (input2.signal?.aborted) throw cause;
-        return mapNetworkError(cause);
-      }
-      if (started !== "started") {
-        const updateNeeded = started === "update_needed";
-        const unsupported = started === "unsupported";
-        return resultError(unsupported ? "unsupported" : updateNeeded ? "update_needed" : "margins_not_found", unsupported ? "Margins recording needs an Apple silicon Mac." : updateNeeded ? "The bb-ready Margins runtime has not been released yet." : "Margins recording is not available on this machine.", false, {
-          state: unsupported ? "unsupported_platform" : "runtime_error",
-          installUrl: INSTALL_URL
-        });
-      }
-      for (let attempt = 0; attempt < 20; attempt += 1) {
-        if (await resolveConnection(resolvedOptions)) {
-          const result = await call("GET", input2, "snapshot");
-          if (result.ok || result.error.state !== "runtime_error") {
-            return result;
-          }
-        }
-        await delay(250, input2.signal);
-      }
-      return resultError("margins_closed", "Margins is starting. Try again in a moment.", true, {
-        state: "runtime_error"
+  prepareProject(target, dataDir) {
+    return this.manager.ensure(target, dataDir).then(() => ({ ok: true })).catch((cause) => ({
+      ok: false,
+      error: hostError("project_recorder_unavailable", cause instanceof Error ? cause.message : String(cause))
+    }));
+  }
+  start(target, dataDir, ownerId, name) {
+    return this.withHandle(target, dataDir, async (handle) => {
+      const started = await this.invoke(handle, "start_recording", { name, ownerId });
+      return this.snapshot(handle, started.recordingId, ownerId);
+    });
+  }
+  read(target, dataDir, recordingId, ownerId) {
+    return this.withHandle(target, dataDir, (handle) => this.snapshot(handle, recordingId, ownerId));
+  }
+  mutate(target, dataDir, recordingId, ownerId, command) {
+    return this.withHandle(target, dataDir, async (handle) => {
+      await this.invoke(handle, command, { recordingId, ownerId });
+      return this.snapshot(handle, recordingId, ownerId);
+    });
+  }
+  stop(target, dataDir, recordingId, ownerId) {
+    return this.withHandle(target, dataDir, async (handle) => {
+      await this.invoke(handle, "stop_recording", { recordingId, ownerId });
+      return null;
+    });
+  }
+  updateNotepad(target, dataDir, recordingId, ownerId, expectedRevision, text) {
+    return this.withHandle(target, dataDir, async (handle) => {
+      await this.invoke(handle, "update_web_recording_notepad", { recordingId, ownerId, expectedRevision, text });
+      return this.snapshot(handle, recordingId, ownerId);
+    });
+  }
+  async upload(target, dataDir, recordingId, ownerId, sequence, bytesBase64) {
+    try {
+      const handle = await this.manager.ensure(target, dataDir);
+      const response = await fetch(`${handle.baseUrl}/api/audio/chunk`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${handle.token}`,
+          "content-type": "application/octet-stream",
+          "x-margins-capture-protocol": String(CAPTURE_PROTOCOL_VERSION),
+          "x-margins-recording-id": recordingId,
+          "x-margins-capture-owner": ownerId,
+          "x-margins-chunk-sequence": String(sequence)
+        },
+        body: Buffer.from(bytesBase64, "base64")
       });
-    },
-    start(input2) {
-      return call("POST", input2, "start", {
-        operation_id: input2.operationId,
-        name: input2.name,
-        ...input2.projectId ? { project_id: input2.projectId } : {}
-      });
-    },
-    pause(input2) {
-      return call("POST", input2, "pause", {
-        operation_id: input2.operationId,
-        session_id: input2.sessionId,
-        ...input2.expectedGeneration === null ? {} : { expected_generation: input2.expectedGeneration }
-      });
-    },
-    resume(input2) {
-      return call("POST", input2, "resume", {
-        operation_id: input2.operationId,
-        session_id: input2.sessionId,
-        ...input2.expectedGeneration === null ? {} : { expected_generation: input2.expectedGeneration }
-      });
-    },
-    stop(input2) {
-      return call("POST", input2, "stop", {
-        operation_id: input2.operationId,
-        session_id: input2.sessionId,
-        ...input2.expectedGeneration === null ? {} : { expected_generation: input2.expectedGeneration }
-      });
-    },
-    updateNotepad(input2) {
-      return call("POST", input2, "update_notepad", {
-        operation_id: input2.operationId,
-        session_id: input2.sessionId,
-        ...input2.expectedGeneration === null ? {} : { expected_generation: input2.expectedGeneration },
-        expected_notepad_revision: input2.expectedNotepadRevision,
-        text: input2.text
-      });
+      if (!response.ok) throw new Error(`audio upload failed (${response.status})`);
+      const value = await response.json();
+      if (!value.ok) throw new Error(value.error || "audio upload failed");
+      return { ok: true };
+    } catch (cause) {
+      return { ok: false, error: hostError("audio_upload_failed", cause instanceof Error ? cause.message : String(cause)) };
     }
-  };
-}
+  }
+  dispose() {
+    return this.manager.dispose();
+  }
+};
 
 // src/host-entry.ts
-async function emitChanged(context, reason, result) {
-  if (result.ok) {
-    await context.experimental_emitSignal("changed", { reason });
-  }
+async function changed(context, projectId, reason, result) {
+  if (result.ok) await context.experimental_emitSignal("changed", { projectId, reason });
 }
-function createMarginsHostEntry({ transport }) {
+function createMarginsHostEntry(transport) {
+  let workerLease = null;
+  const retain = (context) => {
+    workerLease ??= context.experimental_retainWorker();
+  };
   return experimental_defineHostEntry({
     contract: marginsHostContract,
     experimental_signals: hostSignals,
     handlers: {
-      async readSnapshot(input2, context) {
-        const result = await transport.readSnapshot({
-          ...input2,
-          signal: context.signal
-        });
+      prepareProject(input2, context) {
+        retain(context);
+        return transport.prepareProject(input2.target, context.experimental_paths.dataDir);
+      },
+      async startBrowserCapture(input2, context) {
+        retain(context);
+        const result = await transport.start(input2.target, context.experimental_paths.dataDir, input2.ownerId, input2.name);
+        await changed(context, input2.target.projectId, "start", result);
         return result;
       },
-      async ensureRuntime(_input, context) {
-        const result = await transport.ensureRuntime({
-          dataDir: context.experimental_paths.dataDir,
-          signal: context.signal
-        });
-        await emitChanged(context, "ensure_runtime", result);
-        return result;
+      readCapture(input2, context) {
+        retain(context);
+        return transport.read(input2.target, context.experimental_paths.dataDir, input2.recordingId, input2.ownerId);
       },
-      async start(input2, context) {
-        const result = await transport.start({
-          ...input2,
-          signal: context.signal
-        });
-        await emitChanged(context, "start", result);
-        return result;
+      heartbeat(input2, context) {
+        retain(context);
+        return transport.mutate(input2.target, context.experimental_paths.dataDir, input2.recordingId, input2.ownerId, "heartbeat_web_recording");
       },
       async pause(input2, context) {
-        const result = await transport.pause({
-          ...input2,
-          signal: context.signal
-        });
-        await emitChanged(context, "pause", result);
+        retain(context);
+        const result = await transport.mutate(input2.target, context.experimental_paths.dataDir, input2.recordingId, input2.ownerId, "pause_recording");
+        await changed(context, input2.target.projectId, "pause", result);
         return result;
       },
       async resume(input2, context) {
-        const result = await transport.resume({
-          ...input2,
-          signal: context.signal
-        });
-        await emitChanged(context, "resume", result);
+        retain(context);
+        const result = await transport.mutate(input2.target, context.experimental_paths.dataDir, input2.recordingId, input2.ownerId, "resume_recording");
+        await changed(context, input2.target.projectId, "resume", result);
         return result;
       },
       async stop(input2, context) {
-        const result = await transport.stop({
-          ...input2,
-          signal: context.signal
-        });
-        await emitChanged(context, "stop", result);
+        retain(context);
+        const result = await transport.stop(input2.target, context.experimental_paths.dataDir, input2.recordingId, input2.ownerId);
+        await changed(context, input2.target.projectId, "stop", result);
         return result;
       },
       async updateNotepad(input2, context) {
-        const result = await transport.updateNotepad({
-          ...input2,
-          signal: context.signal
-        });
-        await emitChanged(context, "notepad", result);
+        retain(context);
+        const result = await transport.updateNotepad(input2.target, context.experimental_paths.dataDir, input2.recordingId, input2.ownerId, input2.expectedRevision, input2.text);
+        await changed(context, input2.target.projectId, "notepad", result);
         return result;
+      },
+      uploadChunk(input2, context) {
+        retain(context);
+        return transport.upload(input2.target, context.experimental_paths.dataDir, input2.recordingId, input2.ownerId, input2.sequence, input2.bytesBase64);
+      },
+      async readContext() {
+        return { ok: false, error: { code: "transcript_not_ready", message: "This recording does not have transcript context yet.", retryable: true } };
       }
+    },
+    async dispose() {
+      await transport.dispose();
+      await workerLease?.dispose();
+      workerLease = null;
     }
   });
 }
-var host_entry_default = createMarginsHostEntry({
-  transport: createHttpMarginsLiveTransport()
-});
+var host_entry_default = createMarginsHostEntry(new ProjectMarginsTransport());
 export {
   createMarginsHostEntry,
   host_entry_default as default

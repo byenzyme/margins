@@ -84,6 +84,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
 
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
       - name: Assert native runner architecture
         run: test "$(uname -m)" = "${{ matrix.host_arch }}"
 
@@ -107,6 +113,18 @@ jobs:
           --bin margins-live
           --target "${{ matrix.target }}"
 
+      - name: Build project recording service web assets
+        run: npm ci --prefix desktop && npm run --prefix desktop build
+
+      - name: Compile the project recording service
+        run: >-
+          cargo build --release --locked
+          --manifest-path desktop/src-tauri/Cargo.toml
+          --target-dir target
+          --no-default-features --features server
+          --bin margins-server
+          --target "${{ matrix.target }}"
+
       - name: Verify the meeting runtime permission metadata
         if: runner.os == 'macOS'
         run: scripts/verify-margins-live-macos.sh "target/${{ matrix.target }}/release/margins-live"
@@ -120,7 +138,7 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          BINARY_PATHS: target/${{ matrix.target }}/release/margins-private target/${{ matrix.target }}/release/margins-live
+          BINARY_PATHS: target/${{ matrix.target }}/release/margins-private target/${{ matrix.target }}/release/margins-live target/${{ matrix.target }}/release/margins-server
         run: |
           set -euo pipefail
 
@@ -256,6 +274,7 @@ jobs:
           ARCHIVE="margins-${VERSION}-${TARGET}.tar.gz"
           mkdir packaged-cli
           install -m 0755 "target/${TARGET}/release/margins-private" packaged-cli/margins
+          install -m 0755 "target/${TARGET}/release/margins-server" packaged-cli/margins-server
           if [[ "$TARGET" == "aarch64-apple-darwin" ]]; then
             codesign --verify --deep --strict --verbose=2 packaged-cli/margins
             install -m 0755 "target/${TARGET}/release/margins-live" packaged-cli/margins-live
