@@ -200,22 +200,21 @@ tool and it does not control recording.
 ## Persistent status while the panel is closed
 
 The content-script lifecycle is sufficient to own browser capture across thread
-navigation. The installed SDK also allows a plugin to decorate one explicit
-thread row. Neither is a correct app-global recording control/status surface:
-the recording belongs to a browser window and project, not permanently to the
-thread where it began.
+navigation. Newer bb SDKs now include an experimental app-overlay surface with
+the correct once-per-window lifetime. The plugin does not adopt it as part of
+the capture-core reduction: doing so changes the visible product and raises the
+minimum bb version, so it should be a small, separately verified UI migration.
 
-The plugin therefore does not fabricate an always-visible global control. The
-remaining bb-core seam is a client-scoped status contribution with:
+That migration should provide:
 
 - one state/icon visible on desktop and mobile while the panel is closed;
 - an activation callback that opens the owning project's Margins controls;
 - lifecycle tied to one PWA window, not one thread component;
 - support for recording, paused, saving, recovering, and needs-attention states.
 
-Until that exists, closing the panel is supported for capture continuity but
-the user must return to the thread/panel to see controls. This is an explicit
-product limitation, not represented as complete UX.
+Until the plugin moves to that SDK, closing the panel is supported for capture
+continuity but the user must return to the thread/panel to see controls. This
+is an explicit product limitation, not represented as complete UX.
 
 ## Installation and process boundaries
 

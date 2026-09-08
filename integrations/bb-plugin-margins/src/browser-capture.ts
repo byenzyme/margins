@@ -9,7 +9,6 @@ const CAPTURE_KEY = "margins.bb.capture.v1";
 interface StoredCapture {
   threadId: string;
   recordingId: string;
-  ownerId: string;
   nextSequence: number;
   paused: boolean;
 }
@@ -225,7 +224,7 @@ class BrowserCaptureOwner {
         threadId, client: detectClientCapabilities(), ownerId, ...(title ? { title } : {}),
       });
       if (!state.recordingId || !state.ownsRecording) throw new Error(state.detail);
-      await this.createLocal({ threadId, recordingId: state.recordingId, ownerId, nextSequence: 0, paused: false }, stream);
+      await this.createLocal({ threadId, recordingId: state.recordingId, nextSequence: 0, paused: false }, stream);
       return state;
     } catch (cause) {
       stream.getTracks().forEach((track) => track.stop());

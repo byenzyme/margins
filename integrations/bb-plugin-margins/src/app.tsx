@@ -127,7 +127,7 @@ function MarginsPanel({ threadId, params }: { threadId: string; params: JsonValu
         <div><h3>{title}</h3>{state.sourceLabel && <p>{state.sourceLabel}</p>}</div>
       </div>
       <div className="margins-controls">
-        {state.primaryAction !== "none" && state.primaryAction !== "setup" && <button className={`margins-control primary${state.primaryAction === "start" ? " margins-start" : ""}`} onClick={() => void primary()} disabled={disabled} aria-label={state.primaryLabel} title={state.primaryLabel}>
+        {state.primaryAction !== "none" && <button className={`margins-control primary${state.primaryAction === "start" ? " margins-start" : ""}`} onClick={() => void primary()} disabled={disabled} aria-label={state.primaryLabel} title={state.primaryLabel}>
           {state.primaryAction === "pause" ? <Pause size={14} /> : <Play size={14} />}
           {state.primaryAction === "start" && <span>{state.primaryLabel}</span>}
         </button>}

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { execFile as execFileCallback, spawn as spawnChild } from "node:child_process";
+import { execFile as execFileCallback } from "node:child_process";
 import {
   chmod,
   copyFile,
@@ -21,8 +21,6 @@ export const RUNTIME_RELEASE_VERSION = "0.4.9";
 const RELEASE_API = `https://api.github.com/repos/byenzyme/margins/releases/tags/v${RUNTIME_RELEASE_VERSION}`;
 const MAX_ARCHIVE_BYTES = 128 * 1024 * 1024;
 
-export type RuntimeStartResult = "started" | "not_found" | "unsupported" | "update_needed";
-
 interface ReleaseAsset {
   name?: unknown;
   browser_download_url?: unknown;
@@ -36,7 +34,6 @@ interface RuntimeManagerOptions {
   homeDir?: string;
   platform?: NodeJS.Platform;
   arch?: string;
-  spawn?: typeof spawnChild;
   execFile?: typeof execFile;
 }
 
@@ -47,7 +44,7 @@ function targetName(hostPlatform: NodeJS.Platform, arch: string) {
   return null;
 }
 
-const RELEASE_EXECUTABLES = ["margins", "margins-live", "margins-server"] as const;
+const RELEASE_EXECUTABLES = ["margins", "margins-server"] as const;
 
 async function isRegularExecutable(path: string) {
   try {
@@ -160,26 +157,6 @@ async function copyRuntimeBinary(source: string, destination: string) {
   await rename(temp, destination);
 }
 
-async function hasLiveProtocol(path: string, execFileImpl: typeof execFile) {
-  if (!(await isRegularExecutable(path))) return false;
-  try {
-    const { stdout } = await execFileImpl(path, ["capabilities"], {
-      timeout: 5_000,
-      maxBuffer: 1024 * 1024,
-    });
-    const report = JSON.parse(stdout) as Record<string, unknown>;
-    return (
-      report.schema === 1 &&
-      report.product === "margins-live" &&
-      report.protocol_version === 1 &&
-      report.recording === true &&
-      report.editable_notepad === true
-    );
-  } catch {
-    return false;
-  }
-}
-
 async function installRuntime(input: {
   archive: Uint8Array;
   dataDir: string;
@@ -226,63 +203,15 @@ async function installRuntime(input: {
   }
 }
 
-function startDetached(
-  runtimePath: string,
-  env: NodeJS.ProcessEnv,
-  cwd: string,
-  spawnImpl: typeof spawnChild,
-) {
-  const child = spawnImpl(runtimePath, [], {
-    cwd,
-    env,
-    detached: true,
-    stdio: "ignore",
-  });
-  child.unref();
-}
-
 export function createRuntimeManager(options: RuntimeManagerOptions = {}) {
   const env = options.env ?? process.env;
   const fetchImpl = options.fetchImpl ?? fetch;
   const home = options.homeDir ?? homedir();
   const hostPlatform = options.platform ?? platform();
   const hostArch = options.arch ?? process.arch;
-  const spawnImpl = options.spawn ?? spawnChild;
   const execFileImpl = options.execFile ?? execFile;
 
   return {
-    async ensure(input: { dataDir: string; signal?: AbortSignal }): Promise<RuntimeStartResult> {
-      if (env.MARGINS_LIVE_API_URL?.trim() && env.MARGINS_LIVE_API_TOKEN?.trim()) {
-        return "started";
-      }
-      const cliBinDir = env.MARGINS_CLI_BIN_DIR?.trim() || join(home, ".local", "bin");
-      const runtimeBinDir = join(input.dataDir, "runtime", `v${RUNTIME_RELEASE_VERSION}`);
-      const configuredRuntime = env.MARGINS_LIVE_RUNTIME_PATH?.trim();
-      const runtimePath = configuredRuntime || join(runtimeBinDir, "margins-live");
-
-      if (!(await hasLiveProtocol(runtimePath, execFileImpl))) {
-        if (configuredRuntime) return "not_found";
-        const target = targetName(hostPlatform, hostArch);
-        if (!target) return "unsupported";
-        const expectedName = `margins-${RUNTIME_RELEASE_VERSION}-${target}.tar.gz`;
-        const archive = await downloadPinnedArchive(fetchImpl, expectedName, input.signal);
-        if (!archive) return "update_needed";
-        await installRuntime({
-          archive,
-          dataDir: input.dataDir,
-          runtimeBinDir,
-          cliBinDir,
-          execFileImpl,
-          signal: input.signal,
-          executables: ["margins", "margins-live"],
-        });
-      }
-
-      const selected = configuredRuntime || join(runtimeBinDir, "margins-live");
-      if (!(await hasLiveProtocol(selected, execFileImpl))) return "not_found";
-      startDetached(selected, env, home, spawnImpl);
-      return "started";
-    },
     async ensureProjectServer(input: { dataDir: string; signal?: AbortSignal }): Promise<string> {
       const configured = env.MARGINS_PROJECT_SERVER_PATH?.trim();
       if (configured) {
@@ -316,4 +245,4 @@ export function createRuntimeManager(options: RuntimeManagerOptions = {}) {
   };
 }
 
-export const runtimeManagerInternals = { hasLiveProtocol, selectAsset, sha256, targetName };
+export const runtimeManagerInternals = { selectAsset, sha256, targetName };

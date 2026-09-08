@@ -16,7 +16,6 @@ interface ServerHandle {
 interface RecordingStatus {
   is_recording: boolean;
   paused: boolean;
-  session_name: string | null;
   web_recording_id?: string | null;
   elapsed_secs: number;
   capture_phase?: string;
@@ -139,11 +138,8 @@ export class ProjectMarginsTransport {
     ]);
     return {
       recordingId,
-      meetingId: status.session_name || recordingId,
       status: status.capture_phase === "finalizing" ? "saving" : status.paused ? "paused" : "recording",
-      elapsedMs: Math.max(0, Math.round(status.elapsed_secs * 1000)),
       notepad,
-      transcriptAvailable: false,
     };
   }
 
@@ -155,16 +151,9 @@ export class ProjectMarginsTransport {
     }
   }
 
-  prepareProject(target: ProjectTarget, dataDir: string) {
-    return this.manager.ensure(target, dataDir).then(() => ({ ok: true as const })).catch((cause) => ({
-      ok: false as const,
-      error: hostError("project_recorder_unavailable", cause instanceof Error ? cause.message : String(cause)),
-    }));
-  }
-
   start(target: ProjectTarget, dataDir: string, ownerId: string, name: string) {
     return this.withHandle(target, dataDir, async (handle) => {
-      const started = await this.invoke<{ sessionName: string; recordingId: string }>(handle, "start_recording", { name, ownerId });
+      const started = await this.invoke<{ recordingId: string }>(handle, "start_recording", { name, ownerId });
       return this.snapshot(handle, started.recordingId, ownerId);
     });
   }

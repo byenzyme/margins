@@ -5,7 +5,7 @@ import plugin from "./server.js";
 
 const browser = { clientId: "client-1", platform: "other" as const, secureContext: true, browserMicrophone: true, nativeMacCapture: false };
 const mac = { ...browser, platform: "macos" as const };
-const snapshot = { recordingId: "rec-1", meetingId: "customer-call", status: "recording" as const, elapsedMs: 1_000, notepad: { text: "", revision: "v1" }, transcriptAvailable: false };
+const snapshot = { recordingId: "rec-1", status: "recording" as const, notepad: { text: "", revision: "v1" } };
 
 function harness(options: { heartbeatFails?: boolean } = {}) {
   let stopped = false;
@@ -49,6 +49,11 @@ describe("Margins project recording server", () => {
     const stored = await host.bb.storage.kv.get<Record<string, unknown>>("capture:proj-1");
     expect(stored).toMatchObject({ projectRoot: "/srv/project", recordingId: "rec-1", clientId: "client-1" });
     expect(JSON.stringify(stored)).not.toMatch(/transcript|bytesBase64|notepad/);
+
+    // A reload during a recording may encounter the wider v1 pointer. Its
+    // obsolete routing hints are ignored rather than orphaning the capture.
+    await host.bb.storage.kv.set("capture:proj-1", { ...stored, meetingId: "old-id", source: "browser_microphone", status: "recording", startedAtUnixMs: 1 });
+    await expect(host.harness.behavior.callRpc("getPanelState", { threadId: "thr-1", client: browser })).resolves.toMatchObject({ state: "recording", recordingId: "rec-1" });
   });
 
   it("makes controls client-owned but lets another project client see that recording exists", async () => {
@@ -74,7 +79,7 @@ describe("Margins project recording server", () => {
     await host.harness.behavior.callRpc("beginBrowserCapture", { threadId: "thr-1", client: browser, ownerId: "owner-secret" });
     const running = host.harness.runService("capture-disconnect-safety");
     await vi.advanceTimersByTimeAsync(DISCONNECT_GRACE_MS + 4_000);
-    await expect(host.bb.storage.kv.get("saved:proj-1")).resolves.toMatchObject({ meetingId: "customer-call" });
+    await expect(host.bb.storage.kv.get("saved:proj-1")).resolves.toMatchObject({ savedAtUnixMs: expect.any(Number) });
     await host.harness.lifecycle.dispose();
     await running;
     expect(host.harness.inspection.experimental_hostRpcCalls).toEqual(expect.arrayContaining([expect.objectContaining({ method: "stop", hostId: "project-host" })]));

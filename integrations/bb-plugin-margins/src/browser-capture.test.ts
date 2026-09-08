@@ -6,11 +6,11 @@ import { CAPTURE_DISCONNECT_GRACE_MS } from "./contracts.js";
 
 describe("browser capture ownership", () => {
   const state = (value: Partial<PanelState>): PanelState => ({
-    schema: "margins.bb.recording.panel.v2", threadId: "thr-1", projectId: "project-1",
+    schema: "margins.bb.recording.panel.v2",
     state: "recording", title: "Recording", detail: "Microphone only", sourceLabel: "Microphone only",
     storageLabel: "Saved to this bb project", primaryAction: "pause", primaryLabel: "Pause",
     canStop: true, canEditNotepad: true, ownsRecording: true, recordingId: "rec-1",
-    notepad: null, savedMeeting: null, error: null, mention: { available: false, itemId: null }, ...value,
+    notepad: null, error: null, ...value,
   });
 
   it("only renews the local lease for a host-acknowledged active recording", () => {

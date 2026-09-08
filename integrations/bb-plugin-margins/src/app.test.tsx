@@ -8,12 +8,12 @@ import type { PanelState } from "./contracts.js";
 const app = await loadPluginApp(() => import("../app.js"));
 function panel(changes: Partial<PanelState> = {}): PanelState {
   return {
-    schema: "margins.bb.recording.panel.v2", threadId: "thr-1", projectId: "proj-1",
+    schema: "margins.bb.recording.panel.v2",
     state: "recording", title: "Recording", detail: "Microphone only. Audio and notes are being saved to this bb project.",
     sourceLabel: "Microphone only", storageLabel: "Saved to this bb project",
     primaryAction: "pause", primaryLabel: "Pause", canStop: true, canEditNotepad: true,
     ownsRecording: true, recordingId: "rec-1", notepad: { text: "Pricing", revision: "v1" },
-    savedMeeting: null, error: null, mention: { available: false, itemId: null }, ...changes,
+    error: null, ...changes,
   };
 }
 
@@ -56,7 +56,7 @@ describe("Margins recording panel", () => {
   });
 
   it("puts a natural connected-note request in the composer without sending", async () => {
-    const saved = panel({ state: "saved", title: "Meeting saved", primaryAction: "none", primaryLabel: "Meeting saved", canStop: false, canEditNotepad: false, ownsRecording: false, recordingId: null, notepad: null, savedMeeting: { projectId: "proj-1", meetingId: "opaque-id", savedAtUnixMs: 1 } });
+    const saved = panel({ state: "saved", title: "Meeting saved", primaryAction: "none", primaryLabel: "Meeting saved", canStop: false, canEditNotepad: false, ownsRecording: false, recordingId: null, notepad: null });
     const slot = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-1", params: null }, { rpc: { getPanelState: () => saved }, composer: { text: "Keep this draft." } });
     const screen = within(slot.container);
     fireEvent.click(await screen.findByRole("button", { name: "Make connected note" }));

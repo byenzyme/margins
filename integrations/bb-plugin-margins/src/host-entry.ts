@@ -5,9 +5,9 @@ import { ProjectMarginsTransport } from "./project-server.js";
 type Transport = ProjectMarginsTransport;
 
 async function changed(
-  context: { experimental_emitSignal(name: "changed", payload: { projectId: string; reason: "start" | "pause" | "resume" | "stop" | "notepad" | "lease_expired" }): Promise<void> },
+  context: { experimental_emitSignal(name: "changed", payload: { projectId: string; reason: "start" | "pause" | "resume" | "stop" | "notepad" }): Promise<void> },
   projectId: string,
-  reason: "start" | "pause" | "resume" | "stop" | "notepad" | "lease_expired",
+  reason: "start" | "pause" | "resume" | "stop" | "notepad",
   result: HostResult,
 ) {
   if (result.ok) await context.experimental_emitSignal("changed", { projectId, reason });
@@ -22,10 +22,6 @@ export function createMarginsHostEntry(transport: Transport) {
     contract: marginsHostContract,
     experimental_signals: hostSignals,
     handlers: {
-      prepareProject(input, context) {
-        retain(context);
-        return transport.prepareProject(input.target, context.experimental_paths.dataDir);
-      },
       async startBrowserCapture(input, context) {
         retain(context);
         const result = await transport.start(input.target, context.experimental_paths.dataDir, input.ownerId, input.name);
@@ -67,9 +63,6 @@ export function createMarginsHostEntry(transport: Transport) {
       uploadChunk(input, context) {
         retain(context);
         return transport.upload(input.target, context.experimental_paths.dataDir, input.recordingId, input.ownerId, input.sequence, input.bytesBase64);
-      },
-      async readContext() {
-        return { ok: false as const, error: { code: "transcript_not_ready", message: "This recording does not have transcript context yet.", retryable: true } };
       },
     },
     async dispose() {

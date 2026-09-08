@@ -121,10 +121,10 @@ notepad remains the dominant surface. Background capture is bounded by browser
 and PWA lifecycle rules: the UI must not promise continued recording after the
 browser suspends or kills the page.
 
-bb still needs an app-global client status/control contribution so a user can
-always find an active recording while the side panel is closed. Until then,
-capture continuity and control discoverability are separate: continuity can be
-implemented by the content script; global discoverability cannot be claimed.
+Newer bb SDKs provide an experimental app-overlay contribution that can host a
+client-global recording status. The plugin still needs a separately tested SDK
+migration before it can claim that return path. Capture continuity and control
+discoverability remain separate until then.
 
 ## Falsifiable UX claims
 
@@ -140,7 +140,6 @@ implemented by the content script; global discoverability cannot be claimed.
   Margins session finalization succeeds. False if Stop immediately collapses to
   Ready or promises a transcript.
 
-Known risk: while the current bb SDK can keep a content script alive across
-thread navigation, it cannot render a client-global recording status with a
-route back to controls. That gap must be solved in bb core before the closed-
-panel journey is complete.
+Known risk: the current plugin is pinned below the SDK version that adds an
+experimental app overlay. The closed-panel journey remains incomplete until
+that surface is adopted and verified on desktop and mobile.

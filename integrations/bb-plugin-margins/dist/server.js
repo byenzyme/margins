@@ -18889,7 +18889,6 @@ var clientCapabilitiesSchema = external_exports.object({
   browserMicrophone: external_exports.boolean(),
   nativeMacCapture: external_exports.boolean()
 }).strict();
-var captureSourceSchema = external_exports.enum(["browser_microphone", "mac_system_and_microphone"]);
 var recordingStateSchema = external_exports.enum([
   "needs_setup",
   "ready",
@@ -18903,7 +18902,7 @@ var recordingStateSchema = external_exports.enum([
   "needs_attention",
   "unavailable"
 ]);
-var primaryActionSchema = external_exports.enum(["setup", "start", "pause", "resume", "retry", "none"]);
+var primaryActionSchema = external_exports.enum(["start", "pause", "resume", "retry", "none"]);
 var projectTargetSchema = external_exports.object({
   projectId: external_exports.string().min(1),
   hostId: external_exports.string().min(1),
@@ -18912,11 +18911,8 @@ var projectTargetSchema = external_exports.object({
 var notepadSchema = external_exports.object({ text: external_exports.string(), revision: external_exports.string().min(1) }).strict();
 var hostCaptureSnapshotSchema = external_exports.object({
   recordingId: external_exports.string().min(1),
-  meetingId: external_exports.string().min(1),
   status: external_exports.enum(["recording", "paused", "saving"]),
-  elapsedMs: external_exports.number().int().nonnegative(),
-  notepad: notepadSchema,
-  transcriptAvailable: external_exports.boolean()
+  notepad: notepadSchema
 }).strict();
 var hostErrorSchema = external_exports.object({
   code: external_exports.string().min(1),
@@ -18927,18 +18923,13 @@ var hostResultSchema = external_exports.discriminatedUnion("ok", [
   external_exports.object({ ok: external_exports.literal(true), snapshot: hostCaptureSnapshotSchema.nullable() }).strict(),
   external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
 ]);
-var targetInputSchema = external_exports.object({ target: projectTargetSchema }).strict();
-var ownedCaptureInputSchema = targetInputSchema.extend({
+var ownedCaptureInputSchema = external_exports.object({ target: projectTargetSchema }).extend({
   recordingId: external_exports.string().min(1),
   ownerId: external_exports.string().min(1)
 }).strict();
 var marginsHostContract = defineRpcContract({
-  prepareProject: {
-    input: targetInputSchema,
-    output: external_exports.object({ ok: external_exports.boolean(), error: hostErrorSchema.optional() }).strict()
-  },
   startBrowserCapture: {
-    input: targetInputSchema.extend({ ownerId: external_exports.string().min(1), name: external_exports.string().min(1).max(160) }).strict(),
+    input: external_exports.object({ target: projectTargetSchema, ownerId: external_exports.string().min(1), name: external_exports.string().min(1).max(160) }).strict(),
     output: hostResultSchema
   },
   readCapture: { input: ownedCaptureInputSchema, output: hostResultSchema },
@@ -18953,16 +18944,12 @@ var marginsHostContract = defineRpcContract({
   uploadChunk: {
     input: ownedCaptureInputSchema.extend({ sequence: external_exports.number().int().nonnegative(), bytesBase64: external_exports.string() }).strict(),
     output: external_exports.object({ ok: external_exports.boolean(), error: hostErrorSchema.optional() }).strict()
-  },
-  readContext: {
-    input: targetInputSchema.extend({ meetingId: external_exports.string().min(1), maxChars: external_exports.number().int().positive().max(64e3) }).strict(),
-    output: external_exports.object({ ok: external_exports.boolean(), context: external_exports.string().optional(), error: hostErrorSchema.optional() }).strict()
   }
 });
 var hostSignals = {
   changed: { payload: external_exports.object({
     projectId: external_exports.string().min(1),
-    reason: external_exports.enum(["start", "pause", "resume", "stop", "notepad", "lease_expired"])
+    reason: external_exports.enum(["start", "pause", "resume", "stop", "notepad"])
   }).strict() }
 };
 var captureRecordSchema = external_exports.object({
@@ -18970,23 +18957,15 @@ var captureRecordSchema = external_exports.object({
   hostId: external_exports.string().min(1),
   projectRoot: external_exports.string().min(1),
   recordingId: external_exports.string().min(1),
-  meetingId: external_exports.string().min(1),
   clientId: external_exports.string().min(1),
   ownerId: external_exports.string().min(1),
-  source: captureSourceSchema,
-  status: external_exports.enum(["getting_ready", "recording", "paused", "recovering", "saving"]),
-  lastHeartbeatUnixMs: external_exports.number().int().nonnegative(),
-  startedAtUnixMs: external_exports.number().int().nonnegative()
-}).strict();
+  lastHeartbeatUnixMs: external_exports.number().int().nonnegative()
+});
 var savedMeetingSchema = external_exports.object({
-  projectId: external_exports.string().min(1),
-  meetingId: external_exports.string().min(1),
   savedAtUnixMs: external_exports.number().int().nonnegative()
-}).strict();
+});
 var panelStateSchema = external_exports.object({
   schema: external_exports.literal(PANEL_STATE_SCHEMA),
-  threadId: external_exports.string().min(1),
-  projectId: external_exports.string().nullable(),
   state: recordingStateSchema,
   title: external_exports.string().min(1),
   detail: external_exports.string().min(1),
@@ -18999,9 +18978,7 @@ var panelStateSchema = external_exports.object({
   ownsRecording: external_exports.boolean(),
   recordingId: external_exports.string().nullable(),
   notepad: notepadSchema.nullable(),
-  savedMeeting: savedMeetingSchema.nullable(),
-  error: hostErrorSchema.nullable(),
-  mention: external_exports.object({ available: external_exports.boolean(), itemId: external_exports.string().nullable() }).strict()
+  error: hostErrorSchema.nullable()
 }).strict();
 var threadClientInputSchema = external_exports.object({
   threadId: external_exports.string().min(1),
@@ -19152,8 +19129,8 @@ function marginsPlugin(bb) {
     const parsed = savedMeetingSchema.safeParse(await bb.storage.kv.get(savedKey(projectId)));
     return parsed.success ? parsed.data : null;
   }
-  async function saveSaved(value) {
-    await bb.storage.kv.set(savedKey(value.projectId), value);
+  async function saveSaved(projectId) {
+    await bb.storage.kv.set(savedKey(projectId), { savedAtUnixMs: Date.now() });
   }
   async function callHost(target, method, input2) {
     try {
@@ -19162,14 +19139,12 @@ function marginsPlugin(bb) {
       return { ok: false, error: { code: "project_machine_offline", message: "Margins could not reach this bb project's machine. Audio already received there is safe; reconnect the project machine and try again.", retryable: true } };
     }
   }
-  function basePanel(threadId, projectId, state, client, options = {}) {
-    const sourceLabel = options.capture?.source === "mac_system_and_microphone" ? "Microphone + computer audio" : sourceFor(client);
+  function basePanel(projectId, state, client, options = {}) {
+    const sourceLabel = sourceFor(client);
     const copy = stateCopy(state, sourceLabel, options.error || null);
     const owns = Boolean(options.capture && options.capture.clientId === client.clientId);
     return {
       schema: PANEL_STATE_SCHEMA,
-      threadId,
-      projectId,
       state,
       ...copy,
       sourceLabel,
@@ -19179,9 +19154,7 @@ function marginsPlugin(bb) {
       ownsRecording: owns,
       recordingId: options.capture?.recordingId || null,
       notepad: options.notepad || null,
-      savedMeeting: options.saved || null,
-      error: options.error || null,
-      mention: { available: false, itemId: null }
+      error: options.error || null
     };
   }
   async function getPanelState(threadId, client) {
@@ -19190,26 +19163,26 @@ function marginsPlugin(bb) {
       target = await targetForThread(threadId);
     } catch (cause) {
       const error61 = { code: "project_folder_unavailable", message: cause instanceof Error ? cause.message : String(cause), retryable: false };
-      return basePanel(threadId, null, "unavailable", client, { error: error61 });
+      return basePanel(null, "unavailable", client, { error: error61 });
     }
     const capture = await readCapture(target.projectId);
     if (capture) {
       const owns = capture.clientId === client.clientId;
-      if (!owns) return basePanel(threadId, target.projectId, "recording_elsewhere", client, { capture });
+      if (!owns) return basePanel(target.projectId, "recording_elsewhere", client, { capture });
       const result = await callHost(target, "readCapture", { target, recordingId: capture.recordingId, ownerId: capture.ownerId });
       if (!result.ok) {
         const withinGrace = Date.now() - capture.lastHeartbeatUnixMs <= DISCONNECT_GRACE_MS;
-        return basePanel(threadId, target.projectId, withinGrace ? "recovering" : "needs_attention", client, { capture, error: result.error });
+        return basePanel(target.projectId, withinGrace ? "recovering" : "needs_attention", client, { capture, error: result.error });
       }
-      if (!result.snapshot) return basePanel(threadId, target.projectId, "saving", client, { capture });
+      if (!result.snapshot) return basePanel(target.projectId, "saving", client, { capture });
       const state = result.snapshot.status === "paused" ? "paused" : result.snapshot.status === "saving" ? "saving" : "recording";
-      return basePanel(threadId, target.projectId, state, client, { capture: { ...capture, status: state }, notepad: result.snapshot.notepad });
+      return basePanel(target.projectId, state, client, { capture, notepad: result.snapshot.notepad });
     }
     const saved = await readSaved(target.projectId);
-    if (saved) return basePanel(threadId, target.projectId, "saved", client, { saved });
-    if (client.platform === "macos" && !client.nativeMacCapture) return basePanel(threadId, target.projectId, "needs_setup", client);
-    if (!sourceFor(client)) return basePanel(threadId, target.projectId, "unavailable", client);
-    return basePanel(threadId, target.projectId, "ready", client);
+    if (saved) return basePanel(target.projectId, "saved", client);
+    if (client.platform === "macos" && !client.nativeMacCapture) return basePanel(target.projectId, "needs_setup", client);
+    if (!sourceFor(client)) return basePanel(target.projectId, "unavailable", client);
+    return basePanel(target.projectId, "ready", client);
   }
   async function locked(projectId, action) {
     const prior = startLocks.get(projectId) || Promise.resolve();
@@ -19231,23 +19204,18 @@ function marginsPlugin(bb) {
     const target = await targetForThread(threadId);
     const capture = await readCapture(target.projectId);
     if (!capture || capture.recordingId !== recordingId || capture.clientId !== client.clientId) return getPanelState(threadId, client);
-    if (operation === "stop") {
-      capture.status = "saving";
-      await saveCapture(capture);
-    }
     const result = await callHost(target, operation, { target, recordingId, ownerId: capture.ownerId });
     if (result.ok) {
       if (operation === "stop") {
-        await saveSaved({ projectId: target.projectId, meetingId: capture.meetingId, savedAtUnixMs: Date.now() });
+        await saveSaved(target.projectId);
         await clearCapture(target.projectId);
       } else {
         capture.lastHeartbeatUnixMs = operation === "heartbeat" ? Date.now() : capture.lastHeartbeatUnixMs;
-        capture.status = operation === "pause" ? "paused" : operation === "resume" ? "recording" : capture.status;
         await saveCapture(capture);
       }
     }
     bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: operation });
-    if (!result.ok) return basePanel(threadId, target.projectId, "needs_attention", client, { capture, error: result.error });
+    if (!result.ok) return basePanel(target.projectId, "needs_attention", client, { capture, error: result.error });
     return getPanelState(threadId, client);
   }
   bb.rpc.register(marginsRpcContract, {
@@ -19258,20 +19226,16 @@ function marginsPlugin(bb) {
       return locked(target.projectId, async () => {
         if (await readCapture(target.projectId)) return getPanelState(threadId, client);
         const result = await callHost(target, "startBrowserCapture", { target, ownerId, name: meetingName(title) });
-        if (!result.ok || !result.snapshot) return basePanel(threadId, target.projectId, "needs_attention", client, { error: result.ok ? null : result.error });
+        if (!result.ok || !result.snapshot) return basePanel(target.projectId, "needs_attention", client, { error: result.ok ? null : result.error });
         await bb.storage.kv.delete(savedKey(target.projectId));
         await saveCapture({
           projectId: target.projectId,
           hostId: target.hostId,
           projectRoot: target.projectRoot,
           recordingId: result.snapshot.recordingId,
-          meetingId: result.snapshot.meetingId,
           clientId: client.clientId,
           ownerId,
-          source: "browser_microphone",
-          status: "recording",
-          lastHeartbeatUnixMs: Date.now(),
-          startedAtUnixMs: Date.now()
+          lastHeartbeatUnixMs: Date.now()
         });
         bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: "start" });
         return getPanelState(threadId, client);
@@ -19286,7 +19250,7 @@ function marginsPlugin(bb) {
       const capture = await readCapture(target.projectId);
       if (!capture || capture.recordingId !== recordingId || capture.clientId !== client.clientId) return getPanelState(threadId, client);
       const result = await callHost(target, "updateNotepad", { target, recordingId, ownerId: capture.ownerId, expectedRevision, text });
-      if (!result.ok) return basePanel(threadId, target.projectId, "needs_attention", client, { capture, error: result.error });
+      if (!result.ok) return basePanel(target.projectId, "needs_attention", client, { capture, error: result.error });
       return getPanelState(threadId, client);
     },
     async dismissSavedMeeting({ threadId, client }) {
@@ -19325,17 +19289,16 @@ function marginsPlugin(bb) {
         for (const key of await bb.storage.kv.list(CAPTURE_PREFIX)) {
           const parsed = captureRecordSchema.safeParse(await bb.storage.kv.get(key));
           if (!parsed.success || Date.now() - parsed.data.lastHeartbeatUnixMs <= DISCONNECT_GRACE_MS) continue;
-          const capture = { ...parsed.data, status: "saving" };
+          const capture = parsed.data;
           await saveCapture(capture);
           const target = { projectId: capture.projectId, hostId: capture.hostId, projectRoot: capture.projectRoot };
           const result = await callHost(target, "stop", { target, recordingId: capture.recordingId, ownerId: capture.ownerId });
           if (result.ok) {
-            await saveSaved({ projectId: capture.projectId, meetingId: capture.meetingId, savedAtUnixMs: Date.now() });
+            await saveSaved(capture.projectId);
             await clearCapture(capture.projectId);
             bb.realtime.publish(REALTIME_CHANNEL, { projectId: capture.projectId, reason: "disconnect-saved" });
           } else {
             capture.lastHeartbeatUnixMs = Date.now();
-            capture.status = "recovering";
             await saveCapture(capture);
           }
         }

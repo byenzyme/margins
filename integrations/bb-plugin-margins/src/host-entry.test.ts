@@ -4,12 +4,11 @@ import { createMarginsHostEntry } from "./host-entry.js";
 import type { ProjectMarginsTransport } from "./project-server.js";
 
 const target = { projectId: "proj-1", hostId: "host-1", projectRoot: "/srv/project" };
-const snapshot = { recordingId: "rec-1", meetingId: "meeting-1", status: "recording" as const, elapsedMs: 4_000, notepad: { text: "", revision: "v1" }, transcriptAvailable: false };
+const snapshot = { recordingId: "rec-1", status: "recording" as const, notepad: { text: "", revision: "v1" } };
 
 describe("Margins project host entry", () => {
   it("routes capture to the explicit project root and emits project invalidations", async () => {
     const transport = {
-      prepareProject: vi.fn(async () => ({ ok: true as const })),
       start: vi.fn(async () => ({ ok: true as const, snapshot })),
       read: vi.fn(async () => ({ ok: true as const, snapshot })),
       mutate: vi.fn(async () => ({ ok: true as const, snapshot })),

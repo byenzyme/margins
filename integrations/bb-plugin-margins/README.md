@@ -28,9 +28,7 @@ On first Start, the plugin’s project-host worker installs one version-pinned,
 digest-verified Margins release when needed. That release contains:
 
 - `margins`, the normal CLI;
-- `margins-server`, the project-side recording service;
-- `margins-live` on Apple silicon macOS, retained for the future Mac-local
-  capture bridge.
+- `margins-server`, the project-side recording service.
 
 The service is launched with the bb project’s default source path as
 `MARGINS_WORK_DIR`, so it writes to `<project>/.margins`, never an environment
@@ -39,16 +37,17 @@ worktree or the recording device’s personal Margins store. For local developme
 
 ## Honest current limits
 
-The installed bb SDK does not yet expose either:
+The plugin's current bb SDK does not yet expose either:
 
 1. a browser-window-local native audio capability, required to enable
    microphone + computer audio on the Mac actually running the PWA; or
 2. an app-global, client-scoped status/control contribution, required to keep
    recording controls visibly reachable while the side panel is closed.
 
-The plugin therefore leaves Mac setup unavailable and does not pretend a thread
-host is the current Mac. Browser microphone capture can continue with the panel
-closed, but bb still needs the second SDK seam for a persistent return path.
+The plugin therefore does not pretend a thread host is the current Mac. Browser
+microphone capture can continue with the panel closed. A newer experimental bb
+app-overlay surface may provide the persistent return path once the plugin moves
+to that SDK and its lifecycle has been verified.
 
 `@Margins` is also withheld until the project recording service exposes a
 bounded live-context read. The control snapshot deliberately carries no rolling

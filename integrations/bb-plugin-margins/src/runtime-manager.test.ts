@@ -58,7 +58,7 @@ describe("Margins runtime manager", () => {
     ).toBeNull();
   });
 
-  it("selects native capture on Mac and project recording on Linux", () => {
+  it("selects the release target for supported project machines", () => {
     expect(runtimeManagerInternals.targetName("darwin", "arm64")).toBe(
       "aarch64-apple-darwin",
     );

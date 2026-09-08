@@ -2,7 +2,6 @@ import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 
 export const PANEL_STATE_SCHEMA = "margins.bb.recording.panel.v2";
-export const WATERMARK_CONTEXT_SCHEMA = "margins.watermark.context.v1";
 // This is the existing hosted browser-capture protocol implemented by
 // desktop/src-tauri/src/web_session.rs. Keep the cross-language contract test
 // beside the plugin so a release cannot silently ship mismatched clients.
@@ -16,21 +15,18 @@ export const clientCapabilitiesSchema = z.object({
   browserMicrophone: z.boolean(),
   nativeMacCapture: z.boolean(),
 }).strict();
-export const captureSourceSchema = z.enum(["browser_microphone", "mac_system_and_microphone"]);
 export const recordingStateSchema = z.enum([
   "needs_setup", "ready", "getting_ready", "recording", "paused",
   "recovering", "saving", "saved", "recording_elsewhere", "needs_attention", "unavailable",
 ]);
-export const primaryActionSchema = z.enum(["setup", "start", "pause", "resume", "retry", "none"]);
+export const primaryActionSchema = z.enum(["start", "pause", "resume", "retry", "none"]);
 export const projectTargetSchema = z.object({
   projectId: z.string().min(1), hostId: z.string().min(1), projectRoot: z.string().min(1),
 }).strict();
 export const notepadSchema = z.object({ text: z.string(), revision: z.string().min(1) }).strict();
 export const hostCaptureSnapshotSchema = z.object({
-  recordingId: z.string().min(1), meetingId: z.string().min(1),
-  status: z.enum(["recording", "paused", "saving"]),
-  elapsedMs: z.number().int().nonnegative(), notepad: notepadSchema,
-  transcriptAvailable: z.boolean(),
+  recordingId: z.string().min(1), status: z.enum(["recording", "paused", "saving"]),
+  notepad: notepadSchema,
 }).strict();
 export const hostErrorSchema = z.object({
   code: z.string().min(1), message: z.string().min(1), retryable: z.boolean(),
@@ -40,17 +36,12 @@ export const hostResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
 ]);
 
-const targetInputSchema = z.object({ target: projectTargetSchema }).strict();
-const ownedCaptureInputSchema = targetInputSchema.extend({
+const ownedCaptureInputSchema = z.object({ target: projectTargetSchema }).extend({
   recordingId: z.string().min(1), ownerId: z.string().min(1),
 }).strict();
 export const marginsHostContract = defineRpcContract({
-  prepareProject: {
-    input: targetInputSchema,
-    output: z.object({ ok: z.boolean(), error: hostErrorSchema.optional() }).strict(),
-  },
   startBrowserCapture: {
-    input: targetInputSchema.extend({ ownerId: z.string().min(1), name: z.string().min(1).max(160) }).strict(),
+    input: z.object({ target: projectTargetSchema, ownerId: z.string().min(1), name: z.string().min(1).max(160) }).strict(),
     output: hostResultSchema,
   },
   readCapture: { input: ownedCaptureInputSchema, output: hostResultSchema },
@@ -66,37 +57,30 @@ export const marginsHostContract = defineRpcContract({
     input: ownedCaptureInputSchema.extend({ sequence: z.number().int().nonnegative(), bytesBase64: z.string() }).strict(),
     output: z.object({ ok: z.boolean(), error: hostErrorSchema.optional() }).strict(),
   },
-  readContext: {
-    input: targetInputSchema.extend({ meetingId: z.string().min(1), maxChars: z.number().int().positive().max(64_000) }).strict(),
-    output: z.object({ ok: z.boolean(), context: z.string().optional(), error: hostErrorSchema.optional() }).strict(),
-  },
 });
 export const hostSignals = {
   changed: { payload: z.object({
     projectId: z.string().min(1),
-    reason: z.enum(["start", "pause", "resume", "stop", "notepad", "lease_expired"]),
+    reason: z.enum(["start", "pause", "resume", "stop", "notepad"]),
   }).strict() },
 };
 
 export const captureRecordSchema = z.object({
   projectId: z.string().min(1), hostId: z.string().min(1), projectRoot: z.string().min(1),
-  recordingId: z.string().min(1), meetingId: z.string().min(1),
-  clientId: z.string().min(1), ownerId: z.string().min(1), source: captureSourceSchema,
-  status: z.enum(["getting_ready", "recording", "paused", "recovering", "saving"]),
-  lastHeartbeatUnixMs: z.number().int().nonnegative(), startedAtUnixMs: z.number().int().nonnegative(),
-}).strict();
+  recordingId: z.string().min(1), clientId: z.string().min(1), ownerId: z.string().min(1),
+  lastHeartbeatUnixMs: z.number().int().nonnegative(),
+});
 export const savedMeetingSchema = z.object({
-  projectId: z.string().min(1), meetingId: z.string().min(1), savedAtUnixMs: z.number().int().nonnegative(),
-}).strict();
+  savedAtUnixMs: z.number().int().nonnegative(),
+});
 export const panelStateSchema = z.object({
-  schema: z.literal(PANEL_STATE_SCHEMA), threadId: z.string().min(1), projectId: z.string().nullable(),
-  state: recordingStateSchema, title: z.string().min(1), detail: z.string().min(1),
+  schema: z.literal(PANEL_STATE_SCHEMA), state: recordingStateSchema,
+  title: z.string().min(1), detail: z.string().min(1),
   sourceLabel: z.string().nullable(), storageLabel: z.string().nullable(),
   primaryAction: primaryActionSchema, primaryLabel: z.string().min(1),
   canStop: z.boolean(), canEditNotepad: z.boolean(), ownsRecording: z.boolean(),
   recordingId: z.string().nullable(), notepad: notepadSchema.nullable(),
-  savedMeeting: savedMeetingSchema.nullable(), error: hostErrorSchema.nullable(),
-  mention: z.object({ available: z.boolean(), itemId: z.string().nullable() }).strict(),
+  error: hostErrorSchema.nullable(),
 }).strict();
 
 const threadClientInputSchema = z.object({
@@ -121,7 +105,6 @@ export const marginsRpcContract = defineRpcContract({
 });
 
 export type ClientCapabilities = z.infer<typeof clientCapabilitiesSchema>;
-export type CaptureSource = z.infer<typeof captureSourceSchema>;
 export type RecordingState = z.infer<typeof recordingStateSchema>;
 export type PrimaryAction = z.infer<typeof primaryActionSchema>;
 export type ProjectTarget = z.infer<typeof projectTargetSchema>;
