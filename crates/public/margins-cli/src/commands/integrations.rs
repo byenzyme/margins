@@ -4,11 +4,12 @@ use crate::error::CliError;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use margins_workflows::integrations::{
-    Connector, ConnectorCtx, GoogleCalendarConnector, GoogleCalendarScope,
-    GoogleCredentialBackendKind, GoogleEmailConnector, GoogleMeetConnector, GoogleTokenProvider,
-    HealthReport, HealthStatus, IntegrationsStore, NativeGoogleClient, ReconcileResult,
-    EMAIL_CONNECTOR_ID, GOOGLE_CALENDAR_CONNECTOR_ID, GOOGLE_MEET_CONNECTOR_ID,
-    GOOGLE_MEET_MATERIALIZATION_FINGERPRINT,
+    granola_failure_info, sync_granola_binding, Connector, ConnectorCtx, GoogleCalendarConnector,
+    GoogleCalendarScope, GoogleCredentialBackendKind, GoogleEmailConnector, GoogleMeetConnector,
+    GoogleTokenProvider, GranolaCredentialBackendKind, HealthReport, HealthStatus,
+    IntegrationsStore, NativeGoogleClient, ReconcileResult, EMAIL_CONNECTOR_ID,
+    GOOGLE_CALENDAR_CONNECTOR_ID, GOOGLE_MEET_CONNECTOR_ID,
+    GOOGLE_MEET_MATERIALIZATION_FINGERPRINT, GRANOLA_CONNECTOR_ID,
 };
 use margins_workflows::workspace::{
     resolve_state_dir, validate_mutation_request_id, workspace_revision, WorkspaceBinding,
@@ -39,6 +40,11 @@ enum DeclaredConnector {
         binding: String,
         account: String,
     },
+    Granola {
+        binding: String,
+        account: String,
+        collection: margins_workflows::workspace::GranolaCollectionSelector,
+    },
 }
 
 impl DeclaredConnector {
@@ -46,7 +52,8 @@ impl DeclaredConnector {
         match self {
             Self::Gmail { binding, .. }
             | Self::Calendar { binding, .. }
-            | Self::Meet { binding, .. } => binding,
+            | Self::Meet { binding, .. }
+            | Self::Granola { binding, .. } => binding,
         }
     }
 
@@ -55,6 +62,7 @@ impl DeclaredConnector {
             Self::Gmail { .. } => EMAIL_CONNECTOR_ID,
             Self::Calendar { .. } => GOOGLE_CALENDAR_CONNECTOR_ID,
             Self::Meet { .. } => GOOGLE_MEET_CONNECTOR_ID,
+            Self::Granola { .. } => GRANOLA_CONNECTOR_ID,
         }
     }
 
@@ -62,7 +70,8 @@ impl DeclaredConnector {
         match self {
             Self::Gmail { account, .. }
             | Self::Calendar { account, .. }
-            | Self::Meet { account, .. } => account,
+            | Self::Meet { account, .. }
+            | Self::Granola { account, .. } => account,
         }
     }
 }
@@ -162,7 +171,35 @@ impl ReconcileRow {
     }
 
     fn failed(source: &DeclaredConnector, error: anyhow::Error) -> Self {
-        let _ = error;
+        let granola = matches!(source, DeclaredConnector::Granola { .. });
+        let failure = granola.then(|| granola_failure_info(&error)).flatten();
+        let (code, message, stage, reason, retryable) = failure
+            .map(|failure| {
+                (
+                    failure.code,
+                    "Granola reconciliation failed; inspect the typed stage and reason."
+                        .to_string(),
+                    failure.stage,
+                    failure.reason,
+                    failure.retryable,
+                )
+            })
+            .unwrap_or((
+                if granola {
+                    "granola_materialization_failed"
+                } else {
+                    "connector_reconcile_failed"
+                },
+                "Connector reconciliation failed; no provider response details were retained."
+                    .to_string(),
+                if granola {
+                    "materialization"
+                } else {
+                    "reconcile"
+                },
+                "internal",
+                false,
+            ));
         Self {
             binding: source.binding().to_string(),
             connector_id: source.connector_id().to_string(),
@@ -173,13 +210,11 @@ impl ReconcileRow {
             records_unchanged: 0,
             tombstones: 0,
             error: Some(ReconcileError {
-                code: "connector_reconcile_failed",
-                message:
-                    "Connector reconciliation failed; no provider response details were retained."
-                        .to_string(),
-                stage: "reconcile",
-                reason: "internal",
-                retryable: false,
+                code,
+                message,
+                stage,
+                reason,
+                retryable,
             }),
         }
     }
@@ -534,6 +569,11 @@ pub fn status(
                     &ctx,
                     GOOGLE_MEET_MATERIALIZATION_FINGERPRINT,
                 ),
+                DeclaredConnector::Granola { collection, .. } => collection
+                    .materialization_fingerprint()
+                    .and_then(|fingerprint| {
+                        store.health_report_for_materialization(&ctx, &fingerprint)
+                    }),
             }
             .map_err(CliError::from_anyhow)?
         } else {
@@ -604,6 +644,14 @@ fn declared_connectors(
                 binding: binding.clone(),
                 account: account.clone(),
             }),
+            WorkspaceBinding::Granola {
+                account,
+                collection,
+            } => Some(DeclaredConnector::Granola {
+                binding: binding.clone(),
+                account: account.clone(),
+                collection: collection.clone(),
+            }),
             WorkspaceBinding::NativeMarkdown { .. } | WorkspaceBinding::Captures { .. } => None,
         })
         .filter(|source| {
@@ -638,6 +686,23 @@ fn reconcile_one(
     expected_revision: &str,
     google_transport: &GoogleReconcileTransport<'_>,
 ) -> Result<ReconcileResult> {
+    if let DeclaredConnector::Granola {
+        account,
+        collection,
+        ..
+    } = source
+    {
+        let margins_home = margins_workflows::workspace::margins_home()?;
+        return sync_granola_binding(
+            &margins_home,
+            workspace_state_dir,
+            account,
+            collection,
+            Some(expected_revision),
+            GranolaCredentialBackendKind::File0600,
+            &|_, _, _| {},
+        );
+    }
     let native = match google_transport {
         GoogleReconcileTransport::Credential(google_credential) => {
             let credential = google_credential
@@ -668,6 +733,9 @@ fn reconcile_one(
         }
         DeclaredConnector::Meet { .. } => {
             GoogleMeetConnector::new(native).reconcile(&ctx, Some(expected_revision))
+        }
+        DeclaredConnector::Granola { .. } => {
+            unreachable!("Granola reconciles before Google transport setup")
         }
     }
 }

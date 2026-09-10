@@ -11,7 +11,9 @@ use margins_core::{
 };
 use margins_store::legacy;
 use margins_workflows::project::{ProjectSource, ResolvedProject};
-use margins_workflows::workspace::{self, GmailCollectionSelector, WorkspaceBinding};
+use margins_workflows::workspace::{
+    self, GmailCollectionSelector, GranolaTimeRange, WorkspaceBinding,
+};
 use std::io::{Read, Write as IoWrite};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -267,6 +269,79 @@ fn parser_accepts_source_add_calendar_selector_flags() {
         "180",
     ])
     .unwrap();
+}
+
+#[test]
+fn parser_and_help_expose_granola_workspace_source_binding() {
+    Args::try_parse_from([
+        "margins",
+        "source",
+        "add",
+        "granola",
+        "--name",
+        "granola",
+        "--account",
+        "owner@example.com",
+        "--time-range",
+        "last_30_days",
+    ])
+    .unwrap();
+
+    let error = Args::try_parse_from(["margins", "source", "add", "--help"]).unwrap_err();
+    let help = error.to_string();
+    assert!(help.contains("granola"));
+    assert!(help.contains("last_30_days"));
+}
+
+#[test]
+fn workspace_source_add_persists_granola_account_and_time_range() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    let margins_home = temp.path().join("margins-home");
+    let old_margins_home = std::env::var_os("MARGINS_HOME");
+    std::env::set_var("MARGINS_HOME", &margins_home);
+    workspace::create_workspace(&margins_home, "practice", None, &vault).unwrap();
+    let services = services(&vault);
+
+    let (result, stdout, stderr) = invoke(
+        &services,
+        &vault,
+        &[
+            "margins",
+            "--workspace",
+            "practice",
+            "source",
+            "add",
+            "granola",
+            "--name",
+            "granola",
+            "--account",
+            "Owner@Example.COM",
+            "--time-range",
+            "last_30_days",
+            "--json",
+        ],
+    );
+
+    assert!(result.is_ok(), "{stderr}");
+    assert!(stderr.is_empty());
+    let sources: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(sources
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|source| { source["name"] == "granola" && source["kind"] == "granola" }));
+    let workspace = workspace::resolve_at(&margins_home, "practice").unwrap();
+    assert!(matches!(
+        &workspace.config.bindings["granola"],
+        WorkspaceBinding::Granola { account, collection }
+            if account == "owner@example.com"
+                && collection.time_range == GranolaTimeRange::Last30Days
+                && !collection.workspace_only
+    ));
+    restore_env("MARGINS_HOME", old_margins_home.as_ref());
 }
 
 #[test]
@@ -2094,24 +2169,18 @@ fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only()
         );
     }
     let normalized_guide = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(
-        normalized_guide.contains("Any fallback policy change requires a fresh desired config")
-    );
+    assert!(normalized_guide.contains("Any fallback policy change requires a fresh desired config"));
     assert!(normalized_guide.contains("Do not run unsupported discovery commands"));
     assert!(normalized_guide.contains("Do not provision a hosted lease at the start"));
     assert!(normalized_guide.contains("short-lived lease should begin as late as possible"));
     assert!(normalized_guide.contains("do not run `init` repeatedly"));
     assert!(normalized_guide.contains("earlier setup attempts as hypotheses"));
     assert!(normalized_guide.contains("preserve that approved policy"));
-    assert!(
-        normalized_guide.contains("`live_lexical` status only confirms that an index exists")
-    );
+    assert!(normalized_guide.contains("`live_lexical` status only confirms that an index exists"));
     assert!(normalized_guide.contains("`entity_curation_candidates[].spec`"));
     assert!(normalized_guide.contains("`entity_curation_candidates[].expansion`"));
-    assert!(
-        normalized_guide
-            .contains("`expands_automatically = true` means `expandable = true` is redundant")
-    );
+    assert!(normalized_guide
+        .contains("`expands_automatically = true` means `expandable = true` is redundant"));
     assert!(
         normalized_guide.contains("`mode = \"explicit_available\"` means real child pages exist")
     );

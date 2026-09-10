@@ -35,6 +35,13 @@ Keep it bounded:
    the reference folders it only reads. Do not run `init` or `sync` yet — the
    review grounds its reading in the home first, while the Sources you declare
    define the full recall boundary.
+   For Granola, first use `margins connect status --service granola --json` and,
+   when needed, `margins connect granola --account <account-email>` to verify the
+   machine account. Then bind it with
+   `margins --workspace <id> source add granola --name granola --account <account-email> --time-range last_30_days`.
+   Do not substitute `margins import granola <export.json-or-csv>` unless the user
+   already has an offline export file; OAuth success should continue to Source
+   binding, sync, scan or recognition, and recall proof.
 4. When `recall.scan: true` is present, run `scan` for the named Workspace and
    consume the complete `scan.v2` result. Use its coverage entities, curation
    candidates, representative samples, hierarchy, frontmatter, exclusions, current

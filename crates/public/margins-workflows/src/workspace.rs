@@ -11,6 +11,7 @@
 //! Source beyond that home remains explicitly declared.
 
 use anyhow::{bail, Context, Result};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -40,6 +41,7 @@ pub enum SourceKind {
     GoogleMail,
     GoogleCalendar,
     GoogleMeet,
+    Granola,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +77,7 @@ impl SourceKind {
                 project_to_home: false,
                 index: IndexPolicy::Ledger,
             },
-            Self::GoogleMeet => SourcePolicy {
+            Self::GoogleMeet | Self::Granola => SourcePolicy {
                 cache_raw_payload: true,
                 project_to_home: false,
                 index: IndexPolicy::Ledger,
@@ -185,6 +187,59 @@ impl CalendarCollectionSelector {
     }
 }
 
+/// Granola import scope declared in workspace desired state. The provider
+/// currently proves a bounded rolling window, not an all-history collection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GranolaTimeRange {
+    #[serde(rename = "last_30_days")]
+    Last30Days,
+}
+
+impl GranolaTimeRange {
+    pub const fn as_provider_value(self) -> &'static str {
+        match self {
+            Self::Last30Days => "last_30_days",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GranolaCollectionSelector {
+    pub time_range: GranolaTimeRange,
+    pub workspace_only: bool,
+}
+
+impl GranolaCollectionSelector {
+    pub fn default_declaration() -> Self {
+        Self {
+            time_range: GranolaTimeRange::Last30Days,
+            workspace_only: false,
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        match self.time_range {
+            GranolaTimeRange::Last30Days => Ok(()),
+        }
+    }
+
+    pub fn materialization_fingerprint(&self) -> Result<String> {
+        Ok(format!(
+            "granola-selector-v1:{}",
+            serde_json::to_string(self)
+                .context("failed to fingerprint Granola collection selector")?
+        ))
+    }
+
+    pub fn occurred_from(&self, now: DateTime<Utc>) -> DateTime<Utc> {
+        match self.time_range {
+            GranolaTimeRange::Last30Days => now - ChronoDuration::days(30),
+        }
+    }
+}
+
 /// Concrete workspace binding declared in desired state. Each variant carries
 /// only the fields valid for its kind; there are no cross-kind optional slots.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,6 +267,10 @@ pub enum WorkspaceBinding {
     GoogleMeet {
         account: String,
     },
+    Granola {
+        account: String,
+        collection: GranolaCollectionSelector,
+    },
 }
 
 impl WorkspaceBinding {
@@ -222,13 +281,17 @@ impl WorkspaceBinding {
             Self::Gmail { .. } => SourceKind::GoogleMail,
             Self::GoogleCalendar { .. } => SourceKind::GoogleCalendar,
             Self::GoogleMeet { .. } => SourceKind::GoogleMeet,
+            Self::Granola { .. } => SourceKind::Granola,
         }
     }
 
     pub fn local_path(&self) -> Option<&Path> {
         match self {
             Self::NativeMarkdown { path, .. } | Self::Captures { path } => Some(path),
-            Self::Gmail { .. } | Self::GoogleCalendar { .. } | Self::GoogleMeet { .. } => None,
+            Self::Gmail { .. }
+            | Self::GoogleCalendar { .. }
+            | Self::GoogleMeet { .. }
+            | Self::Granola { .. } => None,
         }
     }
 
@@ -236,7 +299,8 @@ impl WorkspaceBinding {
         match self {
             Self::Gmail { account, .. }
             | Self::GoogleCalendar { account, .. }
-            | Self::GoogleMeet { account } => Some(account.as_str()),
+            | Self::GoogleMeet { account }
+            | Self::Granola { account, .. } => Some(account.as_str()),
             _ => None,
         }
     }
@@ -275,12 +339,20 @@ impl WorkspaceBinding {
             _ => None,
         }
     }
+
+    pub fn granola_selector(&self) -> Option<&GranolaCollectionSelector> {
+        match self {
+            Self::Granola { collection, .. } => Some(collection),
+            _ => None,
+        }
+    }
 }
 
 const NATIVE_COLLECTION_DOMAIN: &[u8] = b"margins:workspace:native-markdown:v1\0";
 const GMAIL_COLLECTION_DOMAIN: &[u8] = b"margins:workspace:gmail:v1\0";
 const CALENDAR_COLLECTION_DOMAIN: &[u8] = b"margins:workspace:google-calendar:v1\0";
 const MEET_COLLECTION_DOMAIN: &[u8] = b"margins:workspace:google-meet:v1\0";
+const GRANOLA_COLLECTION_DOMAIN: &[u8] = b"margins:workspace:granola:v1\0";
 
 fn collection_hash_hex(domain: &[u8], payload: &[u8]) -> String {
     let mut input = domain.to_vec();
@@ -336,6 +408,17 @@ pub fn meet_collection_namespace(account: &str) -> Result<String> {
     Ok(format!(
         "meet_{}",
         collection_hash_hex(MEET_COLLECTION_DOMAIN, account.as_bytes())
+    ))
+}
+
+/// Deterministic Margins document namespace for one Granola account binding.
+/// Depends only on the normalized account; display names and rolling-window
+/// selectors do not enter this key.
+pub fn granola_collection_namespace(account: &str) -> Result<String> {
+    let account = normalize_granola_account(account)?;
+    Ok(format!(
+        "granola_{}",
+        collection_hash_hex(GRANOLA_COLLECTION_DOMAIN, account.as_bytes())
     ))
 }
 
@@ -732,6 +815,24 @@ pub fn workspaces_using_google_account(margins_home: &Path, account: &str) -> Re
                     .google_account()
                     .and_then(|declared| normalize_google_account(declared).ok())
                     .is_some_and(|declared| declared == account)
+            })
+        })
+        .map(|workspace| workspace.config.id)
+        .collect())
+}
+
+/// Return every Workspace id that declares any Granola source for `account`.
+pub fn workspaces_using_granola_account(margins_home: &Path, account: &str) -> Result<Vec<String>> {
+    let account = normalize_granola_account(account)?;
+    Ok(list_workspaces(margins_home)?
+        .into_iter()
+        .filter(|workspace| {
+            workspace.config.bindings.values().any(|binding| {
+                matches!(binding.kind(), SourceKind::Granola)
+                    && binding
+                        .google_account()
+                        .and_then(|declared| normalize_granola_account(declared).ok())
+                        .is_some_and(|declared| declared == account)
             })
         })
         .map(|workspace| workspace.config.id)
@@ -1385,6 +1486,29 @@ pub fn calendar_selector_for_account(
         })
 }
 
+pub fn granola_selector_for_account(
+    config: &WorkspaceConfig,
+    account: &str,
+) -> Result<GranolaCollectionSelector> {
+    let requested_account = normalize_granola_account(account)?;
+    config
+        .bindings
+        .values()
+        .find_map(|binding| match binding {
+            WorkspaceBinding::Granola {
+                account: declared_account,
+                collection,
+            } if normalize_granola_account(declared_account)
+                .ok()
+                .is_some_and(|normalized| normalized == requested_account) =>
+            {
+                Some(collection.clone())
+            }
+            _ => None,
+        })
+        .with_context(|| format!("workspace has no granola source for account {requested_account}"))
+}
+
 fn validate_config(config: &WorkspaceConfig) -> Result<()> {
     validate_id(&config.id)?;
     config.retention.validate()?;
@@ -1407,6 +1531,7 @@ fn validate_config(config: &WorkspaceConfig) -> Result<()> {
     let mut gmail_accounts = BTreeMap::new();
     let mut calendar_accounts = BTreeMap::new();
     let mut meet_accounts = BTreeMap::new();
+    let mut granola_accounts = BTreeMap::new();
     let mut native_paths: Vec<&Path> = Vec::new();
     for (name, binding) in &config.bindings {
         validate_source_name(name)?;
@@ -1439,6 +1564,12 @@ fn validate_config(config: &WorkspaceConfig) -> Result<()> {
             let account = normalize_google_account(account)?;
             if meet_accounts.insert(account, name.as_str()).is_some() {
                 bail!("workspace cannot declare two Google Meet sources for the same account");
+            }
+        }
+        if let WorkspaceBinding::Granola { account, .. } = binding {
+            let account = normalize_granola_account(account)?;
+            if granola_accounts.insert(account, name.as_str()).is_some() {
+                bail!("workspace cannot declare two Granola sources for the same account");
             }
         }
     }
@@ -1477,6 +1608,15 @@ fn validate_binding(binding: &WorkspaceBinding) -> Result<()> {
             if normalize_google_account(account)? != account.as_str() {
                 bail!("remote Google source accounts must be normalized email addresses");
             }
+        }
+        WorkspaceBinding::Granola {
+            account,
+            collection,
+        } => {
+            if normalize_granola_account(account)? != account.as_str() {
+                bail!("remote Granola source accounts must be normalized email addresses");
+            }
+            collection.validate()?;
         }
     }
     Ok(())
