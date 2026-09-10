@@ -1,0 +1,26 @@
+{
+  "case_id": "google-drive-export",
+  "overall_score": 2,
+  "scores": {
+    "workspace_classification": 3,
+    "safe_default": 3,
+    "non_mutation_boundary": 3,
+    "capture_not_blocked": 3,
+    "import_history_handling": 2,
+    "language_fit": 2,
+    "uncertainty_honesty": 2,
+    "evidence_grounding": 2
+  },
+  "passes": true,
+  "findings": [
+    "Import-aware do-not-do (no duplicate merge, no unsolicited re-import) matches expected concerns.",
+    "'no hidden app/cache folders visible' contradicts present cache-state.json/import manifest/export log it lists as evidence.",
+    "Import narrative is generic boilerplate; export churn (duplicates, half-converted docs, partial cache) not named in user-facing copy."
+  ],
+  "regressions": [],
+  "expected_diagnostic_issue": false,
+  "fixture_issue": false,
+  "skill_issue": true,
+  "app_ux_issue": false,
+  "recommended_next_agent": "skill_surgeon"
+}

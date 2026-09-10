@@ -1,0 +1,27 @@
+{
+  "case_id": "daily-notes-vault",
+  "overall_score": 2,
+  "scores": {
+    "workspace_classification": 3,
+    "safe_default": 3,
+    "non_mutation_boundary": 3,
+    "capture_not_blocked": 3,
+    "import_history_handling": 2,
+    "language_fit": 2,
+    "uncertainty_honesty": 1,
+    "evidence_grounding": 2
+  },
+  "passes": true,
+  "findings": [
+    "Correctly piggybacks on Daily/ rhythm; matches expected destination.",
+    "do-not-do 'force a meeting folder that doesn't exist' contradicts the present meetings/ folder; competing convention never acknowledged.",
+    "'No strong import requirement' is inaccurate given meetings/notes-raw.txt transcript.",
+    "Misses expected caveat that not every Daily file is a meeting."
+  ],
+  "regressions": [],
+  "expected_diagnostic_issue": false,
+  "fixture_issue": false,
+  "skill_issue": true,
+  "app_ux_issue": false,
+  "recommended_next_agent": "skill_surgeon"
+}

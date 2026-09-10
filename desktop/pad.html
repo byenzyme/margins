@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pad</title>
+    <link rel="stylesheet" href="/src/pad.css" />
+  </head>
+  <body>
+    <header class="pad-drag" data-tauri-drag-region>
+      <span class="pad-kicker">Pad</span>
+      <strong id="pad-title"></strong>
+      <div class="pad-window-actions">
+        <button id="pad-open" type="button">Open Margins</button>
+        <button id="pad-close" type="button" aria-label="Close Pad">×</button>
+      </div>
+    </header>
+    <main id="pad-lines" aria-live="polite"></main>
+    <form id="pad-compose">
+      <textarea id="pad-input" rows="2" placeholder="Add a mark…" aria-label="Add a mark"></textarea>
+      <button type="submit">Add</button>
+    </form>
+    <p id="pad-status" role="status" aria-live="polite"></p>
+    <script type="module" src="/src/pad.ts"></script>
+  </body>
+</html>

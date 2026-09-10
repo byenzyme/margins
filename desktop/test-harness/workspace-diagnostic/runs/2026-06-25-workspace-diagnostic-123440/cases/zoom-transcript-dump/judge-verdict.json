@@ -1,0 +1,26 @@
+{
+  "case_id": "zoom-transcript-dump",
+  "overall_score": 2,
+  "scores": {
+    "workspace_classification": 3,
+    "safe_default": 3,
+    "non_mutation_boundary": 3,
+    "capture_not_blocked": 3,
+    "import_history_handling": 2,
+    "language_fit": 2,
+    "uncertainty_honesty": 2,
+    "evidence_grounding": 2
+  },
+  "passes": true,
+  "findings": [
+    "Captures the key transcript-dump rule: do not import transcripts as finished notes.",
+    "'no hidden app/cache folders visible' contradicts present cache-state.json/zoom-manifest/export-log evidence.",
+    "Partial-import state and VTT/TXT duplicate not surfaced; detected_patterns leaks junk tokens ('none','mixed') from the manifest."
+  ],
+  "regressions": [],
+  "expected_diagnostic_issue": false,
+  "fixture_issue": false,
+  "skill_issue": true,
+  "app_ux_issue": false,
+  "recommended_next_agent": "skill_surgeon"
+}

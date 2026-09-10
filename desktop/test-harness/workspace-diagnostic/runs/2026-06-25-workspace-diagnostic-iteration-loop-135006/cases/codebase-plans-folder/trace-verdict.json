@@ -1,0 +1,32 @@
+{
+  "case_id": "codebase-plans-folder",
+  "active_revision": "skill-revisions/v000-baseline.md",
+  "active_skill_revision": "skill-revisions/v000-baseline.md",
+  "pass": "trace",
+  "passed": true,
+  "score": 2,
+  "enzyme_context_loaded": true,
+  "original_enzyme_skill_read_or_ported_context_used": true,
+  "read_only_boundary_proven": true,
+  "trace_complete": true,
+  "missing_trace_evidence": [
+    "enzyme --version value not captured",
+    "explicit pre/post mutation-guard diff/hash not recorded; boundary asserted plus de-facto clean (no .enzyme/.margins in fixture)"
+  ],
+  "trace_findings": [
+    "evaluator-trace.md names active revision and confirms original Enzyme skill + ported evaluator context were read.",
+    "Command hygiene clean: 'enzyme scan -p <workspace>' only; no init/refresh/apply/petri/catalyze/--write-config.",
+    "The scan's severe undercoverage (1 file) is the load-bearing fact the trace and substrate map both surface, proving the indexability lens was applied rather than a generic file walk.",
+    "Build/runtime folders correctly excluded by scan (target, node_modules, dist, etc. in excluded_folders)."
+  ],
+  "evidence": [
+    "enzyme-scan.json current_config config_found (read-only)."
+  ],
+  "failures": [
+    "Read-only boundary asserted, not demonstrated with recorded pre/post guard.",
+    "enzyme --version output not captured."
+  ],
+  "failed_pass_area": null,
+  "patch_recommendation": "Require captured enzyme --version and explicit pre/post listing as boundary proof.",
+  "risk_notes": "No mutation occurred; case validly covered."
+}

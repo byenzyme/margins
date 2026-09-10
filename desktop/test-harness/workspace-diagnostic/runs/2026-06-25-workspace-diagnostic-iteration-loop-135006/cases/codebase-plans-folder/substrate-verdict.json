@@ -1,0 +1,21 @@
+{
+  "case_id": "codebase-plans-folder",
+  "active_revision": "skill-revisions/v000-baseline.md",
+  "pass": "substrate",
+  "passed": true,
+  "score": 2,
+  "evidence": [
+    "Catches the most severe scan gap of the three: 'enzyme scan counted 1 Markdown file, README.md, so the scan underrepresents docs/plans and docs/notes that are visible in the workspace snapshot.' Confirmed by enzyme-scan.json (files=1, folder:., only README sampled) vs fixture which has docs/plans/*.md, docs/notes/*.md.",
+    "Reads representative files instead of trusting scan: 'Representative files show mixed owner/status blocks, dated and undated planning notes, and raw transcript text.'",
+    "Catches the in-fixture signal: 'raw-meeting.txt explicitly suggests docs/meetings but says do not move anything' — verified, and it pre-justifies the safe default.",
+    "Snapshot file count 16 matches fixture; source/build (src/, package.json) correctly distinguished from docs."
+  ],
+  "failures": [
+    "Does not follow the 8-section substrate template.",
+    "Does not affirmatively enumerate the existing conventions to preserve (owner/status blocks, docs/plans vs docs/notes split, dated meeting-2026-04-01.md duplicated across both folders) under a dedicated section.",
+    "Does not name the duplicate meeting-2026-04-01.md present in BOTH docs/plans and docs/notes as a concrete substrate observation."
+  ],
+  "failed_pass_area": null,
+  "patch_recommendation": "Enforce 8-section template; add an explicit conventions-to-preserve section (owner/status blocks, code-vs-docs boundary). Notably, the maker's correct refusal to over-trust the 1-file scan is the behavior to keep.",
+  "risk_notes": "Substantively strong: scan saw only README yet the map compensated by reading docs. This is exactly the 'scan is evidence, not the whole workspace' discipline the loop wants. Structurally thin."
+}

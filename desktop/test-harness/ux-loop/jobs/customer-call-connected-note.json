@@ -1,0 +1,41 @@
+{
+  "job": "customer-call-connected-note",
+  "fixture": "customer-call",
+  "user_mindset": "Post-meeting reviewer: tired, wants a grounded Obsidian note and proof that Margins used the important moments.",
+  "promise": "A user can move from a finished customer call to a trusted note, inspect how the note was generated, and ask for one refinement without losing context.",
+  "journey": [
+    "Open the completed customer-call capture.",
+    "Skim the Backchannel/memo evidence.",
+    "Start writing the note.",
+    "Observe progress before note text appears.",
+    "Inspect how-generated/provenance details while the note remains primary.",
+    "Wait for completion.",
+    "Ask for sharper action items and preserved open questions.",
+    "Confirm the refined note updates in place."
+  ],
+  "typed_refinement": "Make the action items sharper, preserve the open questions, and keep the note concise enough to review in two minutes.",
+  "timing_marks": [
+    "click_to_first_progress",
+    "click_to_first_tool_event",
+    "click_to_first_note_token",
+    "first_note_token_to_complete",
+    "refine_click_to_first_note_token"
+  ],
+  "falsifiable_claims": [
+    {
+      "id": "started-before-first-note-token",
+      "claim": "The user can tell note-making has started before the first note token appears.",
+      "could_be_false_if": "The UI sits on a generic loading state or shows no new information for several seconds."
+    },
+    {
+      "id": "note-primary-provenance-secondary",
+      "claim": "The note remains the primary artifact while provenance is available.",
+      "could_be_false_if": "Tool/progress boxes visually dominate the generated note."
+    },
+    {
+      "id": "refinement-continues-same-note",
+      "claim": "Refinement feels like continuing the same distillation.",
+      "could_be_false_if": "The UI resets to a blank run, loses the original note, or hides whether the saved note changed."
+    }
+  ]
+}

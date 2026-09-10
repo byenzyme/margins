@@ -1,0 +1,17 @@
+{
+  "last_scan": "2026-06-22T01:21:09-07:00",
+  "status": "partial",
+  "scanned_files": 17,
+  "transcript_count": 3,
+  "note_count": 7,
+  "parse_errors": [
+    {
+      "path": "MyDrive-Shared/Projects/Atlas/roadmap-2026-06-20.md",
+      "error": "frontmatter-open not closed"
+    },
+    {
+      "path": "MyDrive-Shared/Old Folder/notes-from-q2-meeting.txt",
+      "error": "timestamp drift"
+    }
+  ]
+}

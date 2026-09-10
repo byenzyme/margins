@@ -1,0 +1,46 @@
+{
+  "case_id": "codebase-plans-folder",
+  "workspace_type": "codebase-with-docs",
+  "confidence": "medium",
+  "detected_patterns": [
+    "Snapshot has 16 files: package/src code, README, docs/plans, docs/notes, and raw-meeting.txt.",
+    "enzyme scan counted 1 Markdown file, README.md, so the scan underrepresents docs/plans and docs/notes that are visible in the workspace snapshot.",
+    "Representative files show mixed owner/status blocks, dated and undated planning notes, and raw transcript text.",
+    "raw-meeting.txt explicitly suggests docs/meetings but says do not move anything."
+  ],
+  "safe_default": {
+    "folder": "docs/meetings",
+    "filename": "YYYY-MM-DD meeting-title.md",
+    "reason": "smallest additive destination for future meeting notes without changing existing files"
+  },
+  "do_not_do": [
+    "move existing files",
+    "rename old notes",
+    "rewrite cache/import state",
+    "create people/project folders without evidence",
+    "block capture until import or cleanup"
+  ],
+  "next_actions": [
+    "start_capture",
+    "choose_destination",
+    "build_private_search_cache_optional",
+    "import_past_notes_optional"
+  ],
+  "retrieval_risks": [
+    {
+      "name": "Codebase corpus dominance",
+      "severity": "medium",
+      "confidence": "high"
+    },
+    {
+      "name": "Meeting convention split",
+      "severity": "medium",
+      "confidence": "high"
+    },
+    {
+      "name": "Scan undercoverage",
+      "severity": "medium",
+      "confidence": "medium"
+    }
+  ]
+}

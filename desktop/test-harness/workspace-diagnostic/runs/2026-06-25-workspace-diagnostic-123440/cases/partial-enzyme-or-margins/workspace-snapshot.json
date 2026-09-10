@@ -1,0 +1,240 @@
+{
+  "case_id": "partial-enzyme-or-margins",
+  "title": "Partially migrated vault with leftover `.enzyme` and `.margins` state",
+  "manifest_workspace_type": "partial-enzyme-or-margins",
+  "manifest_simulated_total_files": 32,
+  "actual_file_count": 11,
+  "actual_directory_count": 7,
+  "extensions": {
+    ".json": 6,
+    ".md": 3,
+    ".txt": 2
+  },
+  "hidden_dirs": [
+    ".margins",
+    ".enzyme"
+  ],
+  "directory_tree": [
+    ".",
+    "  cache-state.json",
+    "  .margins/",
+    "    cache-state.json",
+    "    config.json",
+    "    import-state.json",
+    "  .enzyme/",
+    "    cache-state.json",
+    "    state.json",
+    "  notes/",
+    "    Captures/",
+    "      2026-06-08-customer-checkin.md",
+    "    legacy/",
+    "      2026-05-20-kickoff.md",
+    "    meeting-notes/",
+    "      2026-06-01 meeting sync.md",
+    "  transcripts/",
+    "    2026-06-07-enzyme-migration.txt",
+    "    notes-from-transcript-dump.txt"
+  ],
+  "largest_files": [
+    {
+      "path": "notes/Captures/2026-06-08-customer-checkin.md",
+      "bytes": 226
+    },
+    {
+      "path": ".enzyme/state.json",
+      "bytes": 223
+    },
+    {
+      "path": ".margins/cache-state.json",
+      "bytes": 217
+    },
+    {
+      "path": "cache-state.json",
+      "bytes": 214
+    },
+    {
+      "path": ".margins/import-state.json",
+      "bytes": 213
+    },
+    {
+      "path": ".enzyme/cache-state.json",
+      "bytes": 213
+    },
+    {
+      "path": "notes/legacy/2026-05-20-kickoff.md",
+      "bytes": 180
+    },
+    {
+      "path": "transcripts/notes-from-transcript-dump.txt",
+      "bytes": 180
+    }
+  ],
+  "likely_relevant_files": [
+    {
+      "path": "notes/Captures/2026-06-08-customer-checkin.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "# 2026-06-08 - Customer checkin I left this in the old capital folder when tool update changed settings. ## Takeaways - ask for transcript file export - align namespaced tags [[Legacy Note|notes/legacy/2026-05-20-kickoff]]"
+    },
+    {
+      "path": "notes/legacy/2026-05-20-kickoff.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- title: Old kick-off date: 2026-05-20 tags: [meeting] --- This was imported from old system and kept because some links rely on it. ## Transcript not available (file missing)"
+    },
+    {
+      "path": "notes/meeting-notes/2026-06-01 meeting sync.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- title: meeting sync date: 2026-06-01 --- # Meeting sync Participants: Dana, Maya - [ ] action: check dashboard status - [ ] action: clean up stale caches"
+    },
+    {
+      "path": ".margins/cache-state.json",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "{ \"status\": \"interrupted\", \"schema_version\": \"0.9\", \"default_destination\": \"notes/Captures\", \"run_id\": \"margins-2026-06-02\", \"transcripts_seen\": 3, \"last_error\": \"cache-path mismatch with moved notes dir\" }"
+    },
+    {
+      "path": ".margins/import-state.json",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "{ \"queued\": [ \"notes/meeting-notes/2026-05-14-customer-update.md\", \"notes/Captures/2026-06-02-sync.md\" ], \"applied\": [ \"notes/legacy/2026-05-20-kickoff.md\" ], \"status\": \"partially-applied\" }"
+    },
+    {
+      "path": ".enzyme/cache-state.json",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "{ \"workspace\": \"/old/path/margins\", \"cache_index\": 1204, \"stale\": true, \"migrated_items\": 8, \"unparsed_files\": [ \"notes/legacy/2026-06-01-meeting.md\", \"notes/meeting-notes/weekly-checkin.md\" ] }"
+    },
+    {
+      "path": "transcripts/2026-06-07-enzyme-migration.txt",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "00:00:10 Dana: we have two outputs side by side and no one knows which to use 00:01:42 Maya: just write future notes to one place 00:03:00 [call dropped]"
+    },
+    {
+      "path": "cache-state.json",
+      "score": 4,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "{ \"version\": \"0.8.9\", \"active_tool\": \"margins\", \"candidate_default\": \"notes/meeting-notes\", \"state_conflict\": [ \".margins config path differs from .enzyme state notes_root\" ], \"safe_to_add_new\": true }"
+    },
+    {
+      "path": ".margins/config.json",
+      "score": 3,
+      "signals": [
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "{ \"version\": \"0.9.7\", \"created_at\": \"2026-04-03T10:00:00Z\", \"capture_destination\": \"notes/captures\", \"last_seen\": \"2026-04-09\", \"notes_path\": \"notes/meeting-notes\" }"
+    },
+    {
+      "path": ".enzyme/state.json",
+      "score": 3,
+      "signals": [
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "{ \"tool\": \"enzyme\", \"version\": \"1.2.0-beta\", \"workspace_id\": \"ws-prod-19\", \"last_run_at\": \"2026-05-14T09:15:00Z\", \"active_file\": \"notes/meetin-notes/2026-05-13-standup.md\", \"notes_root\": \"notes/meeting-notes\" }"
+    },
+    {
+      "path": "transcripts/notes-from-transcript-dump.txt",
+      "score": 2,
+      "signals": [
+        "name_meeting_or_import_signal"
+      ],
+      "snippet": "Speaker labels missing in this file. Timestamp format changes half-way through: 1) Dana: we'll keep the old path for historical references. 2) Maya: maybe re-link after migration?"
+    }
+  ],
+  "all_files": [
+    {
+      "path": ".margins/cache-state.json",
+      "bytes": 217,
+      "extension": ".json"
+    },
+    {
+      "path": ".margins/config.json",
+      "bytes": 176,
+      "extension": ".json"
+    },
+    {
+      "path": ".margins/import-state.json",
+      "bytes": 213,
+      "extension": ".json"
+    },
+    {
+      "path": ".enzyme/cache-state.json",
+      "bytes": 213,
+      "extension": ".json"
+    },
+    {
+      "path": ".enzyme/state.json",
+      "bytes": 223,
+      "extension": ".json"
+    },
+    {
+      "path": "cache-state.json",
+      "bytes": 214,
+      "extension": ".json"
+    },
+    {
+      "path": "notes/Captures/2026-06-08-customer-checkin.md",
+      "bytes": 226,
+      "extension": ".md"
+    },
+    {
+      "path": "notes/legacy/2026-05-20-kickoff.md",
+      "bytes": 180,
+      "extension": ".md"
+    },
+    {
+      "path": "notes/meeting-notes/2026-06-01 meeting sync.md",
+      "bytes": 161,
+      "extension": ".md"
+    },
+    {
+      "path": "transcripts/2026-06-07-enzyme-migration.txt",
+      "bytes": 154,
+      "extension": ".txt"
+    },
+    {
+      "path": "transcripts/notes-from-transcript-dump.txt",
+      "bytes": 180,
+      "extension": ".txt"
+    }
+  ],
+  "mutation_guard": "snapshot only; fixture workspace not modified by this run"
+}

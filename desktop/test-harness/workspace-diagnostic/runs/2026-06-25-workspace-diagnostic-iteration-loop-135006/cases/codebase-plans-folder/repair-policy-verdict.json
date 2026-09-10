@@ -1,0 +1,19 @@
+{
+  "case_id": "codebase-plans-folder",
+  "active_revision": "skill-revisions/v000-baseline.md",
+  "pass": "repair-policy",
+  "passed": true,
+  "score": 3,
+  "evidence": [
+    "Four tiers: 'No-op: capture can start now; no existing code/docs need to move.' / 'Minimal reversible: create/add new notes only under docs/meetings, adjacent to docs without touching docs/plans.' / 'Medium convention: add a lightweight meeting-note template if the team accepts dates and owner/action blocks.' / 'Heavy migration: reorganize existing plans/notes only after a repo-owner review and backup.'",
+    "Approval boundary explicit and additive-by-default.",
+    "Medium tier sensibly reuses the existing owner/status/action-block convention rather than inventing one.",
+    "Respects manifest must_not_suggest: does not move existing files, does not retag docs, does not create people folders (do_not_do enumerates these)."
+  ],
+  "failures": [
+    "Template headers (Do-Not-Touch / Raw-Source-Preservation / Recommended-Path) not explicit; content inline."
+  ],
+  "failed_pass_area": null,
+  "patch_recommendation": "Optional header structuring only.",
+  "risk_notes": "Correctly keeps source/build files untouched and proposes an additive docs/meetings destination. No risk."
+}

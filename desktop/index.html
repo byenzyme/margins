@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
+    <title>margins</title>
+    <meta name="theme-color" content="#0f1112" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Margins" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/png" href="/logo.png" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+    <script type="module">
+      // Production web builds use the generated immutable asset graph. In dev,
+      // unregister an older production worker and reload once to unpoison HMR.
+      if (!('__TAURI_INTERNALS__' in window) && 'serviceWorker' in navigator && location.protocol.startsWith('http')) {
+        if (import.meta.env.PROD) {
+          navigator.serviceWorker.register('/sw.js').catch(err => {
+            console.error('Service Worker registration failed:', err);
+          });
+        } else {
+          navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
+            .then(registration => registration.update())
+            .catch(err => {
+              console.warn('Service Worker development cleanup failed:', err);
+            });
+        }
+      }
+    </script>
+  </body>
+</html>

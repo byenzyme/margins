@@ -1,0 +1,26 @@
+{
+  "case_id": "rfc-decision-log",
+  "overall_score": 2,
+  "scores": {
+    "workspace_classification": 3,
+    "safe_default": 3,
+    "non_mutation_boundary": 3,
+    "capture_not_blocked": 3,
+    "import_history_handling": 2,
+    "language_fit": 3,
+    "uncertainty_honesty": 2,
+    "evidence_grounding": 3
+  },
+  "passes": true,
+  "findings": [
+    "Process-aware do-not-do: refuses to rename RFCs or merge decision logs into meeting notes.",
+    "Separate docs/meeting-notes/ destination matches expected.",
+    "Confidence 'high' overshoots; misses the 'process docs are not a meeting workflow' nuance the expected diagnostic emphasizes."
+  ],
+  "regressions": [],
+  "expected_diagnostic_issue": false,
+  "fixture_issue": false,
+  "skill_issue": true,
+  "app_ux_issue": false,
+  "recommended_next_agent": "skill_surgeon"
+}

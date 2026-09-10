@@ -1,0 +1,86 @@
+{
+   "file_count" : 16,
+   "files" : [
+      {
+         "mtime" : 1782414695,
+         "path" : "README.md",
+         "size" : 728
+      },
+      {
+         "mtime" : 1782414705,
+         "path" : "docs/notes/incident-playbook.md",
+         "size" : 266
+      },
+      {
+         "mtime" : 1782414394,
+         "path" : "docs/notes/meeting-2026-04-01.md",
+         "size" : 225
+      },
+      {
+         "mtime" : 1782414393,
+         "path" : "docs/notes/sprint-plan.md",
+         "size" : 163
+      },
+      {
+         "mtime" : 1782414391,
+         "path" : "docs/notes/weekly-sync-2026-03-19.md",
+         "size" : 289
+      },
+      {
+         "mtime" : 1782414390,
+         "path" : "docs/plans/incident-playbook.md",
+         "size" : 304
+      },
+      {
+         "mtime" : 1782414703,
+         "path" : "docs/plans/meeting-2026-04-01.md",
+         "size" : 236
+      },
+      {
+         "mtime" : 1782414397,
+         "path" : "docs/plans/retro-notes-2026-02.txt",
+         "size" : 144
+      },
+      {
+         "mtime" : 1782414704,
+         "path" : "docs/plans/retro.md",
+         "size" : 219
+      },
+      {
+         "mtime" : 1782414389,
+         "path" : "docs/plans/roadmap.md",
+         "size" : 268
+      },
+      {
+         "mtime" : 1782414702,
+         "path" : "docs/plans/sprint-plan.md",
+         "size" : 157
+      },
+      {
+         "mtime" : 1782414700,
+         "path" : "docs/plans/weekly-sync.md",
+         "size" : 236
+      },
+      {
+         "mtime" : 1782414384,
+         "path" : "package.json",
+         "size" : 170
+      },
+      {
+         "mtime" : 1782414697,
+         "path" : "raw-meeting.txt",
+         "size" : 465
+      },
+      {
+         "mtime" : 1782414386,
+         "path" : "src/index.ts",
+         "size" : 169
+      },
+      {
+         "mtime" : 1782414387,
+         "path" : "src/sync/conflicts.ts",
+         "size" : 112
+      }
+   ],
+   "workspace" : "desktop/test-harness/workspace-diagnostic/test-cases/codebase-plans-folder/workspace"
+}

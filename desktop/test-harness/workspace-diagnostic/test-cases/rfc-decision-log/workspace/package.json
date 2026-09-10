@@ -1,0 +1,5 @@
+{
+  "name": "signal-router",
+  "version": "1.8.0",
+  "main": "dist/index.js"
+}

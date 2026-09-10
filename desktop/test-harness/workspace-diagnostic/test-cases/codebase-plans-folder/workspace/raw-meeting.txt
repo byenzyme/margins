@@ -1,0 +1,9 @@
+[Transcript excerpt]
+03/18/26 10:03 AM  Eli: We keep shipping notes with random filenames.
+03/18/26 10:04 AM  Maya: Maybe keep under docs/notes for now.
+03/18/26 10:05 AM  Rina: I can’t find where old meeting notes are from last month.
+
+03/21/26 14:22 PM  Elias: Can we agree on where to land future meeting notes?
+03/21/26 14:23 PM  Maya: docs/meetings maybe, but don't move anything.
+03/21/26 14:24 PM  Rina: status: open, owner: Maya, action: follow-up only.
+

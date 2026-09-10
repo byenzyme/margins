@@ -1,0 +1,22 @@
+{
+  "id": "fresh-empty",
+  "title": "Fresh empty project folder",
+  "workspace_type": "empty-folder",
+  "scale": "tiny",
+  "simulated_total_files": 1,
+  "date_conventions": [],
+  "metadata_conventions": [],
+  "meeting_material": [],
+  "entity_signals": [],
+  "margins_fit": "start-fresh",
+  "expected_safe_default": {
+    "folder": "meeting-notes",
+    "filename": "YYYY-MM-DD meeting-title.md"
+  },
+  "must_not_suggest": [
+    "move existing files",
+    "rename legacy files",
+    "ask for vault cleanup before capture",
+    "invent naming style from nothing"
+  ]
+}

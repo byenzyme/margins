@@ -1,0 +1,109 @@
+[package]
+name = "margins-desktop"
+version = "0.4.9"
+edition = "2021"
+license = "Apache-2.0"
+default-run = "margins-desktop"
+
+# Keep the desktop package and its lockfile independent from the public crate
+# workspace at the repository root.
+[workspace]
+members = ["vendor/libsqlite3-sys-libsql", "vendor/matroska-demuxer"]
+resolver = "2"
+
+[patch.crates-io]
+# Pi 0.1.x's sqlmodel adapter only needs SQLite's C ABI, but its otherwise
+# unused libsqlite3-sys dependency builds a second bundled SQLite. Route that
+# dependency through the libSQL ABI already linked by recall and margins-store.
+libsqlite3-sys = { path = "vendor/libsqlite3-sys-libsql" }
+matroska-demuxer = { path = "vendor/matroska-demuxer" }
+
+[features]
+default = ["tauri-app", "rust-diarization-coreml", "coreml-asr", "recall-local-model"]
+# In-process associative search + distillation context, replacing the external
+# enzyme sidecar. This portable tier does not link llama.cpp.
+recall = ["margins/recall"]
+# Offline catalyst generation through the subtree-linked engine's local model.
+recall-local-model = ["recall", "margins/recall-local-model"]
+tauri-app = [
+  "dep:tauri",
+  "dep:tauri-build",
+  "dep:tauri-plugin-shell",
+  "dep:tauri-plugin-dialog",
+  "dep:tauri-plugin-fs",
+  "dep:tauri-plugin-global-shortcut",
+  "dep:tauri-plugin-updater",
+  "dep:window-vibrancy",
+  "dep:objc2-web-kit",
+  "dep:objc2-app-kit",
+  "dep:objc2",
+  "dep:objc2-foundation",
+  "dep:cpal",
+  "margins/audio-capture",
+]
+coreml-asr = ["margins/coreml-asr"]
+parakeet-asr = ["margins/parakeet-asr"]
+parakeet-asr-dynamic = ["parakeet-asr", "margins/parakeet-asr-dynamic"]
+# Normal hosted browser composition: HTTP server, in-process recall, and live
+# Parakeet loaded from an explicitly provisioned ONNX Runtime + model bundle.
+hosted-web = ["server", "recall", "parakeet-asr-dynamic"]
+rust-diarization = ["margins/polyvoice-diarization", "dep:polyvoice"]
+rust-diarization-coreml = ["rust-diarization", "margins/polyvoice-coreml", "polyvoice/coreml"]
+devtools = ["tauri-app", "tauri/devtools"]
+server = ["dep:axum", "dep:tower-http", "dep:rust-embed"]
+
+[[bin]]
+name = "margins-server"
+path = "src/server_main.rs"
+required-features = ["server"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [], optional = true }
+
+[dependencies]
+margins = { path = "../..", default-features = false }
+margins-workflows = { path = "../../crates/public/margins-workflows" }
+polyvoice = { version = "0.6.7", optional = true, features = ["onnx", "download"] }
+tauri = { version = "2", features = ["macos-private-api"], optional = true }
+tauri-plugin-shell = { version = "2", optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
+tauri-plugin-fs = { version = "2", optional = true }
+tauri-plugin-global-shortcut = { version = "2", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+chrono = "0.4"
+cpal = { version = "0.15", optional = true }
+dirs = "6"
+toml = "0.8"
+async-trait = "0.1"
+base64 = "0.22"
+rand = "0.8"
+libc = "0.2"
+sha2 = "0.10"
+matroska-demuxer = "0.8"
+ropus = "0.12"
+hound = "3.5"
+asupersync = { version = "=0.3.2", default-features = false, features = ["tls-native-roots"] }
+pi = { package = "pi_agent_rust", git = "https://github.com/byenzyme/pi_agent_rust.git", rev = "ee79a7a5f4538171962a09b5647f64aeeab27856", default-features = false }
+rusqlite = { package = "libsql-rusqlite", version = "=0.9.30" }
+tauri-plugin-updater = { version = "2", optional = true }
+notify = { version = "6", default-features = false, features = ["macos_fsevent"] }
+axum = { version = "0.7", features = ["ws"], optional = true }
+tower-http = { version = "0.5", features = ["fs", "cors"], optional = true }
+rust-embed = { version = "8", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+window-vibrancy = { version = "0.8.0", optional = true }
+objc2-web-kit = { version = "0.3.2", default-features = false, features = ["objc2-app-kit", "WKWebView"], optional = true }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWindow"], optional = true }
+objc2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSString"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,26 @@
+{
+  "case_id": "frontmatter-obsidian",
+  "overall_score": 2,
+  "scores": {
+    "workspace_classification": 3,
+    "safe_default": 3,
+    "non_mutation_boundary": 3,
+    "capture_not_blocked": 3,
+    "import_history_handling": 2,
+    "language_fit": 2,
+    "uncertainty_honesty": 2,
+    "evidence_grounding": 3
+  },
+  "passes": true,
+  "findings": [
+    "Refuses frontmatter normalization and retagging as prerequisites — correct indexability-lens behavior on malformed YAML.",
+    "Safe default notes/meetings matches expected.",
+    "User-facing uncertainty exposes raw tokens ('malformed-frontmatter','wikilinks') instead of plain-language framing."
+  ],
+  "regressions": [],
+  "expected_diagnostic_issue": false,
+  "fixture_issue": false,
+  "skill_issue": true,
+  "app_ux_issue": false,
+  "recommended_next_agent": "skill_surgeon"
+}

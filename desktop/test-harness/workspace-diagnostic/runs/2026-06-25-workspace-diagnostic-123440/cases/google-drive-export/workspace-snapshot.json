@@ -1,0 +1,219 @@
+{
+  "case_id": "google-drive-export",
+  "title": "Google Drive export with mixed note and transcript leftovers",
+  "manifest_workspace_type": "google-drive-export",
+  "manifest_simulated_total_files": 26,
+  "actual_file_count": 10,
+  "actual_directory_count": 7,
+  "extensions": {
+    ".json": 2,
+    ".log": 1,
+    ".md": 5,
+    ".txt": 2
+  },
+  "hidden_dirs": [],
+  "directory_tree": [
+    ".",
+    "  cache-state.json",
+    "  google-drive-export.log",
+    "  MyDrive-Shared/",
+    "    Meetings/",
+    "      client-kickoff-2026-06-21 copy.md",
+    "      client-kickoff-2026-06-21.md",
+    "    Old-Folder/",
+    "      notes-from-q2-meeting.txt",
+    "    Projects/",
+    "      Atlas/",
+    "        Untitled document.md",
+    "        roadmap-2026-06-20.md",
+    "        zoom-transcript-client-call.txt",
+    "  import/",
+    "    drive-manifest.json",
+    "  notes/",
+    "    notes-2026-06-23-meeting-summary.md"
+  ],
+  "largest_files": [
+    {
+      "path": "import/drive-manifest.json",
+      "bytes": 588
+    },
+    {
+      "path": "cache-state.json",
+      "bytes": 403
+    },
+    {
+      "path": "MyDrive-Shared/Meetings/client-kickoff-2026-06-21.md",
+      "bytes": 395
+    },
+    {
+      "path": "google-drive-export.log",
+      "bytes": 292
+    },
+    {
+      "path": "MyDrive-Shared/Meetings/client-kickoff-2026-06-21 copy.md",
+      "bytes": 225
+    },
+    {
+      "path": "MyDrive-Shared/Projects/Atlas/Untitled document.md",
+      "bytes": 207
+    },
+    {
+      "path": "MyDrive-Shared/Projects/Atlas/zoom-transcript-client-call.txt",
+      "bytes": 204
+    },
+    {
+      "path": "notes/notes-2026-06-23-meeting-summary.md",
+      "bytes": 197
+    }
+  ],
+  "likely_relevant_files": [
+    {
+      "path": "MyDrive-Shared/Meetings/client-kickoff-2026-06-21.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "# Client kickoff notes Date: 2026-06-21 Attendees: Dana (<dana@company.com>), Priya <priya@company.com>, Tom ## Agenda - Project kickoff deck - billing approach - next check-in ## Notes - we said \"we need this in notes by friday\" (all caps in email thread) - a"
+    },
+    {
+      "path": "notes/notes-2026-06-23-meeting-summary.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "# 2026-06-23 - Weekly sync We might have moved this one from Drive manually into notes. ## Actions - Follow up with legal about transcript retention. - Keep this file at top level notes for now."
+    },
+    {
+      "path": "MyDrive-Shared/Meetings/client-kickoff-2026-06-21 copy.md",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "# client-kickoff ### participants - Dana - Priya - Tom ## Notes We talked about timeline and scope. I think dates are not in title on this one? ## Action items: 1) Priya: share draft pricing 2) Dan: send sample data model"
+    },
+    {
+      "path": "cache-state.json",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "{ \"last_scan\": \"2026-06-22T01:21:09-07:00\", \"status\": \"partial\", \"scanned_files\": 17, \"transcript_count\": 3, \"note_count\": 7, \"parse_errors\": [ { \"path\": \"MyDrive-Shared/Projects/Atlas/roadmap-2026-06-20.md\", \"error\": \"frontmatter-open not closed\" }, { \"path\":"
+    },
+    {
+      "path": "import/drive-manifest.json",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "{ \"source\": \"google-drive\", \"export_id\": \"gdrive-2026-06-21-cc9\", \"owner\": \"client-delivery@company.example\", \"items\": [ \"MyDrive-Shared/Meetings/client-kickoff-2026-06-21.md\", \"MyDrive-Shared/Meetings/client-kickoff-2026-06-21 copy.md\", \"MyDrive-Shared/Projec"
+    },
+    {
+      "path": "MyDrive-Shared/Old-Folder/notes-from-q2-meeting.txt",
+      "score": 4,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "notes from q2 participants: \"dana@\" \"priya@\" no date format used here maybe later. actions: - review docs - send deck ?? duplicate of an older meeting not linked"
+    },
+    {
+      "path": "google-drive-export.log",
+      "score": 3,
+      "signals": [
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "Export completed: 2026-06-21T22:08:44Z Source: shared-drive \"Client Delivery\" Included: .md .txt .csv .html Skipped: - .tmp files - google-form-templates Errors encountered: 1) duplicate filename: client-kickoff.md 2) document conversion warning: malformed hea"
+    },
+    {
+      "path": "MyDrive-Shared/Projects/Atlas/Untitled document.md",
+      "score": 2,
+      "signals": [
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "Random pasted content from docs <div class=\"heading-1\">Client kickoff notes</div> Customer concerns *scope creep * unclear owner TODO fix later <p>Imported from Google Docs with partial conversion</p>"
+    },
+    {
+      "path": "MyDrive-Shared/Projects/Atlas/roadmap-2026-06-20.md",
+      "score": 2,
+      "signals": [
+        "name_date_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- title: Atlas roadmap created: 2026-06-20 tags: #roadmap #atlas This document has no ending marker, because exporter cut off. ## Milestones - sprint 1 design - sprint 2 qa - sprint 3 pilot"
+    },
+    {
+      "path": "MyDrive-Shared/Projects/Atlas/zoom-transcript-client-call.txt",
+      "score": 2,
+      "signals": [
+        "name_meeting_or_import_signal"
+      ],
+      "snippet": "00:00:00 Dana: quick, can we just skip to the action items? 00:01:22 Tom: yes, but pricing still open 01:12:03 [inaudible] can we ship demo next week? 01:14:55 ??? 01:16:01 Dana: let's push to monday"
+    }
+  ],
+  "all_files": [
+    {
+      "path": "MyDrive-Shared/Meetings/client-kickoff-2026-06-21 copy.md",
+      "bytes": 225,
+      "extension": ".md"
+    },
+    {
+      "path": "MyDrive-Shared/Meetings/client-kickoff-2026-06-21.md",
+      "bytes": 395,
+      "extension": ".md"
+    },
+    {
+      "path": "MyDrive-Shared/Old-Folder/notes-from-q2-meeting.txt",
+      "bytes": 164,
+      "extension": ".txt"
+    },
+    {
+      "path": "MyDrive-Shared/Projects/Atlas/Untitled document.md",
+      "bytes": 207,
+      "extension": ".md"
+    },
+    {
+      "path": "MyDrive-Shared/Projects/Atlas/roadmap-2026-06-20.md",
+      "bytes": 194,
+      "extension": ".md"
+    },
+    {
+      "path": "MyDrive-Shared/Projects/Atlas/zoom-transcript-client-call.txt",
+      "bytes": 204,
+      "extension": ".txt"
+    },
+    {
+      "path": "cache-state.json",
+      "bytes": 403,
+      "extension": ".json"
+    },
+    {
+      "path": "google-drive-export.log",
+      "bytes": 292,
+      "extension": ".log"
+    },
+    {
+      "path": "import/drive-manifest.json",
+      "bytes": 588,
+      "extension": ".json"
+    },
+    {
+      "path": "notes/notes-2026-06-23-meeting-summary.md",
+      "bytes": 197,
+      "extension": ".md"
+    }
+  ],
+  "mutation_guard": "snapshot only; fixture workspace not modified by this run"
+}

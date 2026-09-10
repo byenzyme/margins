@@ -1,0 +1,7 @@
+RFC 0002 discussion notes
+Date: 2026/02/26
+
+Participants: Kai, Mina, Jules
+Decisions:
+- adopt jitter strategy
+- unresolved: default window size

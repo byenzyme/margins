@@ -1,0 +1,56 @@
+{
+   "file_count" : 10,
+   "files" : [
+      {
+         "mtime" : 1782414394,
+         "path" : "MyDrive-Shared/Meetings/client-kickoff-2026-06-21 copy.md",
+         "size" : 225
+      },
+      {
+         "mtime" : 1782414393,
+         "path" : "MyDrive-Shared/Meetings/client-kickoff-2026-06-21.md",
+         "size" : 395
+      },
+      {
+         "mtime" : 1782414404,
+         "path" : "MyDrive-Shared/Old-Folder/notes-from-q2-meeting.txt",
+         "size" : 164
+      },
+      {
+         "mtime" : 1782414714,
+         "path" : "MyDrive-Shared/Projects/Atlas/Untitled document.md",
+         "size" : 207
+      },
+      {
+         "mtime" : 1782414398,
+         "path" : "MyDrive-Shared/Projects/Atlas/roadmap-2026-06-20.md",
+         "size" : 194
+      },
+      {
+         "mtime" : 1782414402,
+         "path" : "MyDrive-Shared/Projects/Atlas/zoom-transcript-client-call.txt",
+         "size" : 204
+      },
+      {
+         "mtime" : 1782414391,
+         "path" : "cache-state.json",
+         "size" : 403
+      },
+      {
+         "mtime" : 1782414388,
+         "path" : "google-drive-export.log",
+         "size" : 292
+      },
+      {
+         "mtime" : 1782414390,
+         "path" : "import/drive-manifest.json",
+         "size" : 588
+      },
+      {
+         "mtime" : 1782414406,
+         "path" : "notes/notes-2026-06-23-meeting-summary.md",
+         "size" : 197
+      }
+   ],
+   "workspace" : "desktop/test-harness/workspace-diagnostic/test-cases/google-drive-export/workspace"
+}

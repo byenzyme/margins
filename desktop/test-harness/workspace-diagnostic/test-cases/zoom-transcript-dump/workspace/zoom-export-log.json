@@ -1,0 +1,16 @@
+{
+  "source": "zoom",
+  "downloaded_at": "2026-06-24T04:11:22Z",
+  "status": "partial",
+  "files": [
+    "transcripts/2026-06-17_q2-planning.txt",
+    "transcripts/06-20 product review.txt",
+    "transcripts/06-20 product review (copy).txt",
+    "transcripts/06-20-product-review.vtt",
+    "transcripts/2026-06-22_customer_checkin.txt"
+  ],
+  "errors": [
+    "missing speaker names in transcript 06-20 product review.txt",
+    "truncated file: 2026-06-22_customer_checkin.txt"
+  ]
+}

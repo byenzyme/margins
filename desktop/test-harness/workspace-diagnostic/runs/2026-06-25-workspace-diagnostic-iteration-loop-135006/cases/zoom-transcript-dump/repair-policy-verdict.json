@@ -1,0 +1,19 @@
+{
+  "case_id": "zoom-transcript-dump",
+  "active_revision": "skill-revisions/v000-baseline.md",
+  "pass": "repair-policy",
+  "passed": true,
+  "score": 3,
+  "evidence": [
+    "Four tiers: 'No-op: start capture now in notes/meetings and leave transcripts alone.' / 'Minimal reversible: keep transcripts as source boundary and create new meeting notes next to notes/; optionally add a manifest note that points to raw files after approval.' / 'Medium convention: convert only selected transcripts into dated meeting summaries, preserving raw files.' / 'Heavy migration: normalize the transcript archive, dedupe formats, and repair speaker labels only with preview/backups.'",
+    "Approval boundary explicit: 'any move, rename, dedupe, import materialization, or cache-state rewrite requires explicit approval. New capture destination creation is additive.'",
+    "Raw preservation stated ('keep transcripts as source boundary', 'preserving raw files').",
+    "Respects manifest must_not_suggest: does not import all transcripts as finished notes (medium tier converts only 'selected', gated), does not rename old transcripts (heavy tier only), does not move files before first capture."
+  ],
+  "failures": [
+    "Template headers Do-Not-Touch / Raw-Source-Preservation / Recommended-Path not used as explicit sections (content present inline)."
+  ],
+  "failed_pass_area": null,
+  "patch_recommendation": "Optional header structuring only.",
+  "risk_notes": "Correctly proposes a real medium-tier transcript->summary repair without forcing it. No risk."
+}

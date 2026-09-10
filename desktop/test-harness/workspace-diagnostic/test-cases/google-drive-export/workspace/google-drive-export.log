@@ -1,0 +1,9 @@
+Export completed: 2026-06-21T22:08:44Z
+Source: shared-drive "Client Delivery"
+Included: .md .txt .csv .html
+Skipped:
+- .tmp files
+- google-form-templates
+Errors encountered:
+1) duplicate filename: client-kickoff.md
+2) document conversion warning: malformed headings on "Untitled document.md"

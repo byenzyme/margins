@@ -1,0 +1,149 @@
+{
+  "run_id": "2026-06-25-workspace-diagnostic-123440",
+  "active_skill_revision": "skill-revisions/v002-import-narrative-and-language.md",
+  "final_verifier": {
+    "cases_verified": 12,
+    "passed": 12,
+    "failed": 0,
+    "all_passed": true,
+    "fixtures_modified_by_verifier": false,
+    "disallowed_raw_token_set_checked": "specified four-token set from final verifier request",
+    "import_heavy_cases": [
+      "google-drive-export",
+      "mixed-messy-power-vault",
+      "partial-enzyme-or-margins",
+      "zoom-transcript-dump"
+    ]
+  },
+  "coverage_matrix": [
+    {
+      "case_id": "append-only-dated-log",
+      "structured_v002": true,
+      "trace_v002_and_enzyme_context": true,
+      "capture_now_preserved": true,
+      "non_mutation_preserved": true,
+      "import_files_named": true,
+      "raw_tokens_absent": true,
+      "pass": true
+    },
+    {
+      "case_id": "codebase-plans-folder",
+      "structured_v002": true,
+      "trace_v002_and_enzyme_context": true,
+      "capture_now_preserved": true,
+      "non_mutation_preserved": true,
+      "import_files_named": true,
+      "raw_tokens_absent": true,
+      "pass": true
+    },
+    {
+      "case_id": "daily-notes-vault",
+      "structured_v002": true,
+      "trace_v002_and_enzyme_context": true,
+      "capture_now_preserved": true,
+      "non_mutation_preserved": true,
+      "import_files_named": true,
+      "raw_tokens_absent": true,
+      "pass": true
+    },
+    {
+      "case_id": "foreign-domain-vault",
+      "structured_v002": true,
+      "trace_v002_and_enzyme_context": true,
+      "capture_now_preserved": true,
+      "non_mutation_preserved": true,
+      "import_files_named": true,
+      "raw_tokens_absent": true,
+      "pass": true
+    },
+    {
+      "case_id": "fresh-empty",
+      "structured_v002": true,
+      "trace_v002_and_enzyme_context": true,
+      "capture_now_preserved": true,
+      "non_mutation_preserved": true,
+      "import_files_named": true,
+      "raw_tokens_absent": true,
+      "pass": true
+    },
+    {
+      "case_id": "frontmatter-obsidian",
+      "structured_v002": true,
+      "trace_v002_and_enzyme_context": true,
+      "capture_now_preserved": true,
+      "non_mutation_preserved": true,
+      "import_files_named": true,
+      "raw_tokens_absent": true,
+      "pass": true
+    },
+    {
+      "case_id": "google-drive-export",
+      "structured_v002": true,
+      "trace_v002_and_enzyme_context": true,
+      "capture_now_preserved": true,
+      "non_mutation_preserved": true,
+      "import_files_named": true,
+      "raw_tokens_absent": true,
+      "pass": true
+    },
+    {
+      "case_id": "mixed-messy-power-vault",
+      "structured_v002": true,
+      "trace_v002_and_enzyme_context": true,
+      "capture_now_preserved": true,
+      "non_mutation_preserved": true,
+      "import_files_named": true,
+      "raw_tokens_absent": true,
+      "pass": true
+    },
+    {
+      "case_id": "partial-enzyme-or-margins",
+      "structured_v002": true,
+      "trace_v002_and_enzyme_context": true,
+      "capture_now_preserved": true,
+      "non_mutation_preserved": true,
+      "import_files_named": true,
+      "raw_tokens_absent": true,
+      "pass": true
+    },
+    {
+      "case_id": "rfc-decision-log",
+      "structured_v002": true,
+      "trace_v002_and_enzyme_context": true,
+      "capture_now_preserved": true,
+      "non_mutation_preserved": true,
+      "import_files_named": true,
+      "raw_tokens_absent": true,
+      "pass": true
+    },
+    {
+      "case_id": "sparse-random-notes",
+      "structured_v002": true,
+      "trace_v002_and_enzyme_context": true,
+      "capture_now_preserved": true,
+      "non_mutation_preserved": true,
+      "import_files_named": true,
+      "raw_tokens_absent": true,
+      "pass": true
+    },
+    {
+      "case_id": "zoom-transcript-dump",
+      "structured_v002": true,
+      "trace_v002_and_enzyme_context": true,
+      "capture_now_preserved": true,
+      "non_mutation_preserved": true,
+      "import_files_named": true,
+      "raw_tokens_absent": true,
+      "pass": true
+    }
+  ],
+  "remaining_risks": [
+    "Verifier checked generated artifacts only; it did not rerun the diagnostic generator or Enzyme scan commands.",
+    "Non-mutation is inferred from trace and diagnostic text, not from filesystem timestamp or checksum comparison against fixtures.",
+    "Import-heavy coverage is filename-based and does not validate semantic completeness of every import/export path."
+  ],
+  "validation_commands": [
+    "node - <<'CHECK'\nconst fs=require('fs'),path='desktop/test-harness/workspace-diagnostic/runs/2026-06-25-workspace-diagnostic-123440';\nconst toks=['malformed'+'-frontmatter','csv'+'-headers','['+'object Object'+']','v'+'000'];\nconst cp=require('child_process');\nfor (const t of toks) { try { cp.execFileSync('rg',['-n',t,path+'/cases'],{stdio:'pipe'}); console.log('FOUND '+t); process.exitCode=1; } catch {} }\nCHECK",
+    "node -e \"const fs=require('fs'); const a=JSON.parse(fs.readFileSync('desktop/test-harness/workspace-diagnostic/runs/2026-06-25-workspace-diagnostic-123440/aggregate-verdict.json','utf8')); console.log(a.final_verifier)\""
+  ]
+}

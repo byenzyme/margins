@@ -1,0 +1,752 @@
+#!/usr/bin/env python3
+"""Run Margins builds in durable shared or lifecycle-owned disposable lanes."""
+
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+
+ISOLATED_SLOT_COUNT = 2
+MIN_ISOLATED_FREE_BYTES = 20 * 1024**3
+TARGET_SIZE_CACHE_MAX_AGE_SECONDS = 60
+
+
+USAGE = """usage:
+  scripts/cargo-lane status
+  scripts/cargo-lane target-dir
+  scripts/cargo-lane build-dir
+  scripts/cargo-lane prune
+  scripts/cargo-lane sccache-stats
+  scripts/cargo-lane shared -- <command> [args...]
+  scripts/cargo-lane isolated -- <command> [args...]
+  scripts/cargo-lane disposable -- <command> [args...]
+"""
+
+SCCACHE_POLICY_ENV = "MARGINS_CARGO_LANE_SCCACHE"
+SCCACHE_POLICIES = {"auto", "off", "required"}
+SCCACHE_STATS_TIMEOUT_SECONDS = 15
+SCCACHE_CMAKE_LAUNCHER_ENVS = (
+    "CMAKE_C_COMPILER_LAUNCHER",
+    "CMAKE_CXX_COMPILER_LAUNCHER",
+)
+LANE_MODE_ENV = "MARGINS_CARGO_LANE_MODE"
+LANE_TARGET_ENV = "MARGINS_CARGO_LANE_TARGET_DIR"
+LANE_BUILD_ENV = "MARGINS_CARGO_LANE_BUILD_DIR"
+
+
+def fail(message: str, code: int = 2) -> "None":
+    print(f"cargo-lane: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def git_common_dir() -> Path:
+    try:
+        output = subprocess.check_output(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            text=True,
+            stderr=subprocess.STDOUT,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        fail(f"could not resolve Git common directory: {exc}")
+    return Path(output).resolve()
+
+
+def paths() -> tuple[Path, Path, Path, Path, Path]:
+    common_dir = git_common_dir()
+    repo_root = common_dir.parent
+    target_dir = repo_root.parent / "margins-cargo-target"
+    build_dir = repo_root.parent / "margins-cargo-build"
+    lock_path = repo_root.parent / ".margins-cargo-build.lock"
+    owner_path = repo_root.parent / ".margins-cargo-build-owner.json"
+    isolated_state_dir = repo_root.parent / ".margins-cargo-isolated"
+    return target_dir, build_dir, lock_path, owner_path, isolated_state_dir
+
+
+def owner_summary(owner_path: Path) -> str:
+    try:
+        owner = json.loads(owner_path.read_text())
+    except (OSError, ValueError):
+        return "an unreported same-host build"
+    bits = [
+        f"thread={owner.get('thread_id') or 'unknown'}",
+        f"pid={owner.get('pid') or 'unknown'}",
+        f"host={owner.get('host') or 'unknown'}",
+    ]
+    command = owner.get("command")
+    if command:
+        bits.append(f"command={command}")
+    return ", ".join(bits)
+
+
+def wrapper_looks_like_sccache(wrapper: str) -> bool:
+    return Path(wrapper).name == "sccache"
+
+
+def sccache_plan(env: dict[str, str], *, for_build: bool) -> dict[str, object]:
+    policy = env.get(SCCACHE_POLICY_ENV, "auto").strip().lower() or "auto"
+    if policy not in SCCACHE_POLICIES:
+        fail(
+            f"{SCCACHE_POLICY_ENV} must be one of auto, off, required; got {policy!r}"
+        )
+
+    explicit_wrapper = env.get("RUSTC_WRAPPER")
+    sccache_path = shutil.which("sccache", path=env.get("PATH"))
+    if explicit_wrapper:
+        uses_sccache = wrapper_looks_like_sccache(explicit_wrapper)
+        if for_build and policy == "required" and not uses_sccache:
+            fail(
+                f"sccache required by {SCCACHE_POLICY_ENV}=required, but "
+                f"RUSTC_WRAPPER is already set to {explicit_wrapper!r}; "
+                "cargo-lane will not override explicit wrappers"
+            )
+        return {
+            "policy": policy,
+            "state": "external-sccache" if uses_sccache else "external-wrapper",
+            "sccache_path": sccache_path,
+            "wrapper": explicit_wrapper,
+            "will_set_wrapper": False,
+            "will_use_sccache": uses_sccache,
+        }
+
+    if policy == "off":
+        return {
+            "policy": policy,
+            "state": "disabled",
+            "sccache_path": sccache_path,
+            "wrapper": None,
+            "will_set_wrapper": False,
+            "will_use_sccache": False,
+        }
+
+    if sccache_path:
+        return {
+            "policy": policy,
+            "state": "enabled",
+            "sccache_path": sccache_path,
+            "wrapper": sccache_path,
+            "will_set_wrapper": True,
+            "will_use_sccache": True,
+        }
+
+    if for_build and policy == "required":
+        fail(
+            f"sccache required by {SCCACHE_POLICY_ENV}=required, but no "
+            "'sccache' executable was found on PATH"
+        )
+
+    return {
+        "policy": policy,
+        "state": "unavailable",
+        "sccache_path": None,
+        "wrapper": None,
+        "will_set_wrapper": False,
+        "will_use_sccache": False,
+    }
+
+
+def describe_sccache(plan: dict[str, object]) -> str:
+    policy = plan["policy"]
+    state = plan["state"]
+    sccache_path = plan["sccache_path"]
+    wrapper = plan["wrapper"]
+
+    if state == "enabled":
+        return (
+            f"sccache policy {policy}: enabled; builds will set "
+            f"RUSTC_WRAPPER={wrapper} and missing CMake C/C++ compiler launchers"
+        )
+    if state == "disabled":
+        if sccache_path:
+            return (
+                f"sccache policy off: available at {sccache_path}, "
+                "but disabled; builds will not change Rust or CMake compiler launchers"
+            )
+        return (
+            "sccache policy off: disabled; builds will not change Rust or CMake "
+            "compiler launchers"
+        )
+    if state == "unavailable":
+        if policy == "required":
+            return (
+                "sccache policy required: unavailable; builds will fail before "
+                "running because no 'sccache' executable was found on PATH"
+            )
+        return "sccache policy auto: unavailable; builds unchanged"
+    if state == "external-sccache":
+        availability = f"; PATH sccache at {sccache_path}" if sccache_path else ""
+        cmake = (
+            "; missing CMake C/C++ compiler launchers will use the same wrapper"
+            if policy != "off"
+            else ""
+        )
+        return (
+            f"sccache policy {policy}: externally configured wrapper "
+            f"RUSTC_WRAPPER={wrapper} will be preserved and uses sccache"
+            f"{cmake}"
+            f"{availability}"
+        )
+    availability = f"; PATH sccache at {sccache_path}" if sccache_path else ""
+    return (
+        f"sccache policy {policy}: externally configured wrapper "
+        f"RUSTC_WRAPPER={wrapper} will be preserved; cargo-lane will not use "
+        f"sccache{availability}"
+    )
+
+
+def apply_sccache_policy(env: dict[str, str]) -> dict[str, object]:
+    plan = sccache_plan(env, for_build=True)
+    if plan["will_set_wrapper"]:
+        env["RUSTC_WRAPPER"] = str(plan["wrapper"])
+    if plan["will_use_sccache"] and plan["policy"] != "off":
+        wrapper = str(plan["wrapper"])
+        for variable in SCCACHE_CMAKE_LAUNCHER_ENVS:
+            if not env.get(variable):
+                env[variable] = wrapper
+    if plan["will_set_wrapper"] or plan["will_use_sccache"]:
+        print(f"cargo-lane: {describe_sccache(plan)}", file=sys.stderr, flush=True)
+    return plan
+
+
+def sccache_stats(env: dict[str, str]) -> int:
+    sccache_plan(env, for_build=False)
+    wrapper = env.get("RUSTC_WRAPPER")
+    if wrapper and wrapper_looks_like_sccache(wrapper):
+        command = wrapper
+    else:
+        command = shutil.which("sccache", path=env.get("PATH"))
+    if not command:
+        fail("sccache stats unavailable: no 'sccache' executable found on PATH")
+    try:
+        completed = subprocess.run(
+            [command, "--show-stats"],
+            env=env,
+            timeout=SCCACHE_STATS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        fail(
+            f"sccache --show-stats exceeded {SCCACHE_STATS_TIMEOUT_SECONDS}s timeout",
+            124,
+        )
+    except OSError as exc:
+        fail(f"could not start sccache stats command {command!r}: {exc}", 127)
+    return completed.returncode
+
+
+def write_owner(owner_path: Path, owner: dict[str, object]) -> None:
+    temporary = owner_path.with_name(f"{owner_path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(owner, indent=2) + "\n")
+    os.replace(temporary, owner_path)
+
+
+def scratch_slot_paths(state_dir: Path, slot: int) -> tuple[Path, Path, Path]:
+    return (
+        state_dir / f"slot-{slot}.lock",
+        state_dir / f"slot-{slot}-owner.json",
+        state_dir / f"slot-{slot}-target",
+    )
+
+
+def remove_scratch_target(state_dir: Path, target_dir: Path) -> bool:
+    expected_parent = state_dir.resolve()
+    if target_dir.parent.resolve() != expected_parent or not re.fullmatch(
+        r"slot-[1-9][0-9]*-target", target_dir.name
+    ):
+        fail(f"refusing to remove unexpected scratch target {target_dir}")
+    existed = target_dir.exists()
+    if existed:
+        shutil.rmtree(target_dir)
+    return existed
+
+
+def recover_scratch_slots(state_dir: Path, *, announce: bool) -> int:
+    """Remove targets left by interrupted jobs, but never touch a locked slot."""
+    state_dir.mkdir(parents=True, exist_ok=True)
+    recovered = 0
+    for slot in range(1, ISOLATED_SLOT_COUNT + 1):
+        lock_path, owner_path, target_dir = scratch_slot_paths(state_dir, slot)
+        with lock_path.open("a+") as lock_file:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                continue
+            if remove_scratch_target(state_dir, target_dir):
+                recovered += 1
+                if announce:
+                    print(f"cargo-lane: recovered abandoned scratch target {target_dir}")
+            owner_path.unlink(missing_ok=True)
+    return recovered
+
+
+def isolated_status(state_dir: Path) -> int:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    busy = 0
+    for slot in range(1, ISOLATED_SLOT_COUNT + 1):
+        lock_path, owner_path, target_dir = scratch_slot_paths(state_dir, slot)
+        with lock_path.open("a+") as lock_file:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                busy += 1
+                print(f"cargo-lane: scratch slot {slot} busy ({owner_summary(owner_path)})")
+            else:
+                residue = f"; abandoned target {target_dir}" if target_dir.exists() else ""
+                print(f"cargo-lane: scratch slot {slot} free{residue}")
+    return busy
+
+
+def status(
+    lock_path: Path,
+    owner_path: Path,
+    target_dir: Path,
+    build_dir: Path,
+    state_dir: Path,
+) -> int:
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    shared_busy = False
+    with lock_path.open("a+") as lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            shared_busy = True
+            print(f"cargo-lane: shared lane busy ({owner_summary(owner_path)})")
+        else:
+            print("cargo-lane: shared lane free (wrapper-managed builds)")
+        print(f"cargo-lane: shared target {target_dir}")
+        print(f"cargo-lane: shared build cache {build_dir}")
+    print(f"cargo-lane: {describe_sccache(sccache_plan(os.environ, for_build=False))}")
+    isolated_status(state_dir)
+    return 1 if shared_busy else 0
+
+
+def command_text(command: list[str]) -> str:
+    return " ".join(command)
+
+
+def validate_disposable(command: list[str]) -> None:
+    lowered = [part.lower() for part in command]
+    executable = Path(lowered[0]).name
+    script_basenames = {Path(part).name for part in lowered}
+
+    if executable in {"tauri", "cargo-tauri"}:
+        fail("disposable lanes are not allowed for Tauri release/install workflows")
+    if script_basenames.intersection(
+        {"build-signed-mac.sh", "build-updater-release.sh", "reinstall-app.sh"}
+    ):
+        fail("disposable lanes are not allowed for install, bundle, signing, or release workflows")
+    if executable == "cargo":
+        cargo_words = {word for word in lowered[1:] if not word.startswith("-")}
+        if cargo_words.intersection({"install", "package", "publish"}):
+            fail("disposable lanes are not allowed for cargo install/package/publish")
+        if "tauri" in cargo_words:
+            fail("disposable lanes are not allowed for Tauri release/install workflows")
+    if executable in {"npm", "pnpm", "yarn"}:
+        candidates = lowered[1:]
+        if candidates and candidates[0] == "run":
+            candidates = candidates[1:]
+        script = candidates[0] if candidates else ""
+        if script.startswith("app:reinstall") or script.startswith("bundle:"):
+            fail("disposable lanes are not allowed for install, bundle, signing, or release workflows")
+
+
+def validate_isolated(command: list[str]) -> None:
+    validate_disposable(command)
+    lowered = [part.lower() for part in command]
+    executable = Path(lowered[0]).name
+    if executable == "cargo":
+        if "--release" in lowered:
+            fail("isolated mode is reserved for narrow development checks and tests")
+        for index, part in enumerate(lowered[:-1]):
+            if part == "--profile" and lowered[index + 1] == "release":
+                fail("isolated mode is reserved for narrow development checks and tests")
+
+
+def validate_shared(command: list[str]) -> None:
+    """Keep high-churn test artifacts out of the durable development cache."""
+    lowered = [part.lower() for part in command]
+    if Path(lowered[0]).name != "cargo":
+        return
+    cargo_words = [
+        word
+        for word in lowered[1:]
+        if not word.startswith("-") and not word.startswith("+")
+    ]
+    action = cargo_words[0] if cargo_words else ""
+    if action in {"test", "bench"} or "--example" in lowered or "--examples" in lowered:
+        fail(
+            "high-churn Cargo tests, benches, and examples belong in the disposable "
+            "lane; use scripts/cargo-lane disposable -- <command>"
+        )
+
+
+def run_command(command: list[str], env: dict[str, str]) -> int:
+    child: subprocess.Popen[bytes] | None = None
+
+    def forward(signum: int, _frame: object) -> None:
+        if child is not None and child.poll() is None:
+            child.send_signal(signum)
+
+    previous = {
+        signum: signal.signal(signum, forward)
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    }
+    try:
+        child = subprocess.Popen(command, env=env)
+        return child.wait()
+    except OSError as exc:
+        fail(f"could not start {command[0]!r}: {exc}", 127)
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def target_size_bytes(target_dir: Path, build_dir: Path, state_dir: Path) -> int:
+    cache_path = state_dir / "shared-target-size.json"
+    try:
+        cached = json.loads(cache_path.read_text())
+        age = time.time() - float(cached["measured_at"])
+        if (
+            cached.get("target_dir") == str(target_dir)
+            and cached.get("build_dir") == str(build_dir)
+            and 0 <= age <= TARGET_SIZE_CACHE_MAX_AGE_SECONDS
+        ):
+            return int(cached["size_bytes"])
+    except (KeyError, OSError, TypeError, ValueError):
+        pass
+
+    size_bytes = 0
+    for measured_dir in (target_dir, build_dir):
+        if not measured_dir.exists():
+            continue
+        try:
+            output = subprocess.check_output(
+                ["du", "-sk", str(measured_dir)],
+                text=True,
+                stderr=subprocess.STDOUT,
+            )
+            size_bytes += int(output.split()[0]) * 1024
+        except (OSError, subprocess.CalledProcessError, ValueError) as exc:
+            fail(f"could not measure shared Cargo storage before scratch build: {exc}")
+    write_owner(
+        cache_path,
+        {
+            "target_dir": str(target_dir),
+            "build_dir": str(build_dir),
+            "size_bytes": size_bytes,
+            "measured_at": time.time(),
+        },
+    )
+    return size_bytes
+
+
+def require_isolated_capacity(target_dir: Path, build_dir: Path, state_dir: Path) -> None:
+    shared_size = target_size_bytes(target_dir, build_dir, state_dir)
+    required = max(MIN_ISOLATED_FREE_BYTES, shared_size * 2)
+    temp_root = Path(tempfile.gettempdir())
+    free = shutil.disk_usage(temp_root).free
+    gib = 1024**3
+    if free < required:
+        fail(
+            "isolated mode needs "
+            f"{required / gib:.1f} GiB free (max of 20 GiB and 2x the shared target); "
+            f"{temp_root} has {free / gib:.1f} GiB"
+        )
+    print(
+        f"cargo-lane: isolated capacity {free / gib:.1f} GiB free; "
+        f"requires {required / gib:.1f} GiB",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def acquire_isolated_slot(
+    state_dir: Path, command: list[str], mode: str
+) -> tuple[object, Path, str, int, Path]:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    announced_wait = False
+    while True:
+        busy_owners = []
+        for slot in range(1, ISOLATED_SLOT_COUNT + 1):
+            lock_path, owner_path, target_dir = scratch_slot_paths(state_dir, slot)
+            lock_file = lock_path.open("a+")
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                lock_file.close()
+                busy_owners.append(owner_summary(owner_path))
+                continue
+            if remove_scratch_target(state_dir, target_dir):
+                print(
+                    f"cargo-lane: recovered abandoned scratch target {target_dir}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            target_dir.mkdir(parents=True)
+            token = uuid.uuid4().hex
+            write_owner(
+                owner_path,
+                {
+                    "token": token,
+                    "slot": slot,
+                    "mode": mode,
+                    "thread_id": os.environ.get("BB_THREAD_ID"),
+                    "environment_id": os.environ.get("BB_ENVIRONMENT_ID"),
+                    "pid": os.getpid(),
+                    "host": socket.gethostname(),
+                    "started_at": int(time.time()),
+                    "command": command_text(command),
+                    "target_dir": str(target_dir),
+                },
+            )
+            return lock_file, owner_path, token, slot, target_dir
+        if not announced_wait:
+            print(
+                "cargo-lane: waiting for an isolated slot "
+                f"({ISOLATED_SLOT_COUNT}/{ISOLATED_SLOT_COUNT} busy: "
+                + "; ".join(busy_owners)
+                + ")",
+                file=sys.stderr,
+                flush=True,
+            )
+            announced_wait = True
+        time.sleep(1)
+
+
+def release_isolated_slot(lock_file: object, owner_path: Path, token: str) -> None:
+    try:
+        recorded = json.loads(owner_path.read_text())
+        if recorded.get("token") == token:
+            owner_path.unlink(missing_ok=True)
+    except (OSError, ValueError):
+        pass
+    lock_file.close()
+
+
+def shared(
+    command: list[str],
+    target_dir: Path,
+    build_dir: Path,
+    lock_path: Path,
+    owner_path: Path,
+    isolated_state_dir: Path,
+) -> int:
+    validate_shared(command)
+    recover_scratch_slots(isolated_state_dir, announce=False)
+    env = os.environ.copy()
+    env["CARGO_TARGET_DIR"] = str(target_dir)
+    env["CARGO_BUILD_BUILD_DIR"] = str(build_dir)
+    active_mode = env.get(LANE_MODE_ENV)
+    if active_mode:
+        if active_mode != "shared":
+            fail(
+                f"cannot enter shared lane from active {active_mode!r} lane; "
+                "run the Tauri workflow directly in the shared lane"
+            )
+        active_target = env.get(LANE_TARGET_ENV)
+        if active_target and Path(active_target).resolve() != target_dir.resolve():
+            fail(
+                f"active shared lane target {active_target} does not match "
+                f"canonical target {target_dir}"
+            )
+        active_build = env.get(LANE_BUILD_ENV)
+        if active_build and Path(active_build).resolve() != build_dir.resolve():
+            fail(
+                f"active shared lane build cache {active_build} does not match "
+                f"canonical build cache {build_dir}"
+            )
+        apply_sccache_policy(env)
+        print(
+            f"cargo-lane: reusing active shared lane at {target_dir}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return run_command(command, env)
+
+    env[LANE_MODE_ENV] = "shared"
+    env[LANE_TARGET_ENV] = str(target_dir)
+    env[LANE_BUILD_ENV] = str(build_dir)
+    apply_sccache_policy(env)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    build_dir.mkdir(parents=True, exist_ok=True)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    token = uuid.uuid4().hex
+    owner = {
+        "token": token,
+        "thread_id": os.environ.get("BB_THREAD_ID"),
+        "environment_id": os.environ.get("BB_ENVIRONMENT_ID"),
+        "pid": os.getpid(),
+        "host": socket.gethostname(),
+        "started_at": int(time.time()),
+        "command": command_text(command),
+        "target_dir": str(target_dir),
+        "build_dir": str(build_dir),
+    }
+    with lock_path.open("a+") as lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(
+                f"cargo-lane: waiting for shared lane ({owner_summary(owner_path)})",
+                file=sys.stderr,
+                flush=True,
+            )
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        write_owner(owner_path, owner)
+        print(f"cargo-lane: shared target {target_dir}", file=sys.stderr, flush=True)
+        print(f"cargo-lane: shared build cache {build_dir}", file=sys.stderr, flush=True)
+        try:
+            return run_command(command, env)
+        finally:
+            try:
+                recorded = json.loads(owner_path.read_text())
+                if recorded.get("token") == token:
+                    owner_path.unlink(missing_ok=True)
+            except (OSError, ValueError):
+                pass
+            (isolated_state_dir / "shared-target-size.json").unlink(missing_ok=True)
+
+
+def scratch(
+    command: list[str],
+    shared_target_dir: Path,
+    shared_build_dir: Path,
+    state_dir: Path,
+    mode: str,
+) -> int:
+    if mode == "isolated":
+        validate_isolated(command)
+    else:
+        validate_disposable(command)
+    env = os.environ.copy()
+    active_mode = env.get(LANE_MODE_ENV)
+    if active_mode:
+        fail(f"cannot enter {mode} lane from active {active_mode!r} lane")
+    env["CARGO_INCREMENTAL"] = "0"
+    apply_sccache_policy(env)
+    lock_file, owner_path, token, slot, scratch_dir = acquire_isolated_slot(
+        state_dir, command, mode
+    )
+    try:
+        require_isolated_capacity(shared_target_dir, shared_build_dir, state_dir)
+        env["CARGO_TARGET_DIR"] = str(scratch_dir)
+        env.pop("CARGO_BUILD_BUILD_DIR", None)
+        env[LANE_MODE_ENV] = mode
+        env[LANE_TARGET_ENV] = str(scratch_dir)
+        env.pop(LANE_BUILD_ENV, None)
+        print(
+            f"cargo-lane: {mode} scratch slot {slot}/{ISOLATED_SLOT_COUNT}; "
+            f"target {scratch_dir} (shared target remains {shared_target_dir})",
+            file=sys.stderr,
+            flush=True,
+        )
+        try:
+            return run_command(command, env)
+        finally:
+            try:
+                remove_scratch_target(state_dir, scratch_dir)
+            except OSError as exc:
+                print(
+                    f"cargo-lane: warning: cleanup incomplete for {scratch_dir}: {exc}",
+                    file=sys.stderr,
+                )
+            if scratch_dir.exists():
+                print(f"cargo-lane: warning: cleanup incomplete for {scratch_dir}", file=sys.stderr)
+            else:
+                print(f"cargo-lane: removed scratch target {scratch_dir}", file=sys.stderr)
+    finally:
+        release_isolated_slot(lock_file, owner_path, token)
+
+
+def prune_legacy_intermediates(
+    target_dir: Path,
+    build_dir: Path,
+    lock_path: Path,
+    owner_path: Path,
+    state_dir: Path,
+) -> int:
+    """Remove abandoned scratch slots and pre-build-dir Cargo intermediates."""
+    recover_scratch_slots(state_dir, announce=True)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    removed: list[Path] = []
+    with lock_path.open("a+") as lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            fail(f"cannot prune while shared lane is busy ({owner_summary(owner_path)})")
+        if target_dir.exists() and target_dir.resolve() != build_dir.resolve():
+            profile_markers = list(target_dir.glob("**/.fingerprint"))
+            profile_markers.extend(target_dir.glob("**/examples"))
+            profile_dirs = {marker.parent for marker in profile_markers if marker.is_dir()}
+            for profile_dir in sorted(profile_dirs):
+                # Examples are final artifacts to Cargo, but this repository now
+                # routes them through disposable lanes. Any examples in the old
+                # shared layout are therefore migration residue as well.
+                for name in ("deps", "incremental", "build", ".fingerprint", "examples"):
+                    candidate = profile_dir / name
+                    if candidate.is_dir():
+                        shutil.rmtree(candidate)
+                        removed.append(candidate)
+            rustc_info = target_dir / ".rustc_info.json"
+            if rustc_info.is_file():
+                rustc_info.unlink()
+                removed.append(rustc_info)
+    for path in removed:
+        print(f"cargo-lane: removed legacy intermediate path {path}")
+    if not removed:
+        print("cargo-lane: no legacy shared intermediates to remove")
+    (state_dir / "shared-target-size.json").unlink(missing_ok=True)
+    return 0
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        fail(USAGE.rstrip())
+    mode = sys.argv[1]
+    target_dir, build_dir, lock_path, owner_path, isolated_state_dir = paths()
+    if mode == "target-dir":
+        if len(sys.argv) != 2:
+            fail(USAGE.rstrip())
+        print(target_dir)
+        return 0
+    if mode == "build-dir":
+        if len(sys.argv) != 2:
+            fail(USAGE.rstrip())
+        print(build_dir)
+        return 0
+    if mode == "prune":
+        if len(sys.argv) != 2:
+            fail(USAGE.rstrip())
+        return prune_legacy_intermediates(
+            target_dir, build_dir, lock_path, owner_path, isolated_state_dir
+        )
+    if mode == "sccache-stats":
+        if len(sys.argv) != 2:
+            fail(USAGE.rstrip())
+        return sccache_stats(os.environ.copy())
+    if mode == "status":
+        if len(sys.argv) != 2:
+            fail(USAGE.rstrip())
+        return status(lock_path, owner_path, target_dir, build_dir, isolated_state_dir)
+    if mode not in {"shared", "isolated", "disposable"} or len(sys.argv) < 4 or sys.argv[2] != "--":
+        fail(USAGE.rstrip())
+    command = sys.argv[3:]
+    if mode == "shared":
+        return shared(
+            command, target_dir, build_dir, lock_path, owner_path, isolated_state_dir
+        )
+    return scratch(command, target_dir, build_dir, isolated_state_dir, mode)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

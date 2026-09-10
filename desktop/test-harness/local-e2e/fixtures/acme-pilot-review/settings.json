@@ -1,0 +1,10 @@
+{
+  "session_name": "acme-pilot-review",
+  "event_title": "Acme Pilot: Week 2 Review",
+  "people": ["Kevin Smith", "Annie Zhang"],
+  "inbox_folder": "meetings",
+  "people_folder": "people",
+  "created_date_format": "[[%Y-%m-%d]]",
+  "note_filename_template": "{{date:%Y-%m-%d}} {{event_title}}",
+  "distill_instructions": "Write a concise Obsidian-native note. Make the decision the headline, represent both Kevin and Annie, preserve Kevin's constraint concretely, and keep follow-ups actionable. Link people with [[wikilinks]]."
+}

@@ -1,0 +1,17 @@
+{
+  "case_id": "codebase-plans-folder",
+  "active_revision": "skill-revisions/v000-baseline.md",
+  "pass": "product-translation",
+  "passed": true,
+  "score": 3,
+  "evidence": [
+    "Preserves Margins promise: 'You can start now. Put new meeting notes in docs/meetings/YYYY-MM-DD meeting-title.md.' Matches expected_safe_default and expected-diagnostic suggested language.",
+    "Reason given is product-correct: 'This keeps captures near project docs without changing code or planning files.'",
+    "Non-mutation explicit: 'Existing docs/plans and docs/notes stay as they are' and 'Do not create people folders or retag existing project docs.'",
+    "Action separation preserved."
+  ],
+  "failures": [],
+  "failed_pass_area": null,
+  "patch_recommendation": "None.",
+  "risk_notes": "No mechanism-first language; codebase correctly not treated as a vault; capture not blocked. Strong."
+}

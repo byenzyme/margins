@@ -1,0 +1,21 @@
+{
+  "case_id": "google-drive-export",
+  "active_revision": "skill-revisions/v000-baseline.md",
+  "pass": "failure-model",
+  "passed": true,
+  "score": 2,
+  "evidence": [
+    "Three concrete, retrieval-oriented modes, each with severity/confidence/evidence/falsifier: 'Import-state invisibility' (high/high) — 'Scan excludes the manifest/log/cache files that explain duplicate export churn, so retrieval can over-trust the converted Markdown.'",
+    "'Duplicate meeting evidence' (medium/high) maps to verified fixture: client-kickoff-2026-06-21.md + ' copy' variant which is genuinely a sparser, divergent note.",
+    "'Raw transcript weak evidence' (medium/medium) maps to zoom-transcript-client-call.txt with [inaudible]/??? fragments and no decisions.",
+    "Each mode carries a 'Do not infer: the workspace is unusable or must be reorganized before capture' guard, avoiding moralizing language."
+  ],
+  "failures": [
+    "No '## Non-Failures' and '## Ambiguities' sections, which the LOOP_SPEC template and ENZYME context both require ('Must name no material failure when a workspace is already indexable enough'). Healthy aspects (clean notes/ summary) never affirmatively named.",
+    "Coverage thinner than fixture supports: empty/malformed 'Untitled document.md', malformed headings / unclosed frontmatter (roadmap-2026-06-20.md cache parse error), and mixed/split date conventions are not named as distinct modes.",
+    "'Retrieval impact' line is identical across all three modes ('weak or misleading retrieval handles for setup and later meeting context') and identical to other cases — formulaic, not per-mode reasoning. 'Do not infer' line is also copy-pasted."
+  ],
+  "failed_pass_area": "failure-taxonomy-and-evidence-rules",
+  "patch_recommendation": "Patch failure-model instructions to (1) mandate '## Non-Failures' and '## Ambiguities' sections, (2) require a per-mode (not templated) Retrieval impact statement, and (3) require coverage of malformed/empty-conversion and mixed-date modes when fixture evidence (cache parse errors, manifest empty_file) supports them.",
+  "risk_notes": "Modes present are concrete and evidence-backed (gate passes), but the templated retrieval-impact and missing Non-Failures section recur across all judged cases and are the strongest patch signal."
+}

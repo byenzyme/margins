@@ -1,0 +1,26 @@
+{
+  "case_id": "partial-enzyme-or-margins",
+  "overall_score": 2,
+  "scores": {
+    "workspace_classification": 3,
+    "safe_default": 3,
+    "non_mutation_boundary": 3,
+    "capture_not_blocked": 3,
+    "import_history_handling": 2,
+    "language_fit": 2,
+    "uncertainty_honesty": 2,
+    "evidence_grounding": 3
+  },
+  "passes": true,
+  "findings": [
+    "Correct Enzyme/cache lens: detects .margins/.enzyme state and refuses to repair, move, or rebuild it before capture.",
+    "Does not make cache rebuild or migration completion a prerequisite — matches read-before-write / cache-is-separate boundary.",
+    "Interrupted-migration detail flattened into boilerplate; mechanism terms (.enzyme/.margins/cache) surfaced without outcome framing; cache-rebuild not named as an explicit separate optional action."
+  ],
+  "regressions": [],
+  "expected_diagnostic_issue": false,
+  "fixture_issue": false,
+  "skill_issue": true,
+  "app_ux_issue": false,
+  "recommended_next_agent": "skill_surgeon"
+}

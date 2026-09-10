@@ -1,0 +1,36 @@
+{
+  "case_id": "append-only-dated-log",
+  "active_skill_revision": "skill-revisions/v002-import-narrative-and-language.md",
+  "workspace_type": "personal-vault",
+  "confidence": "high",
+  "detected_patterns": [
+    "personal vault",
+    "dates in filenames",
+    "dates in metadata",
+    "dates in note bodies",
+    "YAML metadata",
+    "heading dates",
+    "notes present",
+    "transcripts present"
+  ],
+  "safe_default": {
+    "folder": "meeting-log",
+    "filename": "YYYY-MM-DD topic.md",
+    "reason": "least surprising next-note destination from fixture evidence; preserves existing files and separates import/cache/repair from first capture"
+  },
+  "competing_destinations": [],
+  "import_history": "I see existing notes or history signals such as meeting-log/2026-06-14.md, meeting-log/2026-06-16.md, meeting-log/2026-06-17.md, meeting-log/append-only.md, meeting-log/old-log.txt, meeting-log/transcript-2026-06-16-zoom.txt. They are useful context later, not setup work required now.",
+  "do_not_do": [
+    "restructure append-only logs",
+    "rename legacy log files",
+    "delete duplicates before asking user",
+    "create a different top-level scheme"
+  ],
+  "next_actions": [
+    "start_capture",
+    "choose_destination",
+    "build_private_search_cache_later",
+    "import_past_notes_later"
+  ],
+  "revision_notes": "v002 rerun: case-specific import/cache/export prose, outcome-language convention labels, active revision trace."
+}

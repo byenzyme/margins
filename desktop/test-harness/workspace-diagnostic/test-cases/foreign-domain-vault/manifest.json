@@ -1,0 +1,22 @@
+{
+  "id": "foreign-domain-vault",
+  "title": "Mixed personal and admin folders with partial note-like files",
+  "workspace_type": "foreign-domain-vault",
+  "scale": "small",
+  "simulated_total_files": 19,
+  "date_conventions": ["filename", "body"],
+  "metadata_conventions": ["filename-ids", "none", "csv-headers"],
+  "meeting_material": ["notes"],
+  "entity_signals": ["names-in-folders", "names-in-body"],
+  "margins_fit": "start-fresh",
+  "expected_safe_default": {
+    "folder": "notes/meetings",
+    "filename": "YYYY-MM-DD meeting-title.md"
+  },
+  "must_not_suggest": [
+    "move existing files",
+    "create people folders",
+    "impose people-based taxonomy",
+    "assume this is a meeting notes vault"
+  ]
+}

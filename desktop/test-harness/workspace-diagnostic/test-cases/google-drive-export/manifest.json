@@ -1,0 +1,22 @@
+{
+  "id": "google-drive-export",
+  "title": "Google Drive export with mixed note and transcript leftovers",
+  "workspace_type": "google-drive-export",
+  "scale": "small",
+  "simulated_total_files": 26,
+  "date_conventions": ["filename", "body", "malformed"],
+  "metadata_conventions": ["google-docs-headings", "inline-tags", "missing-frontmatter"],
+  "meeting_material": ["notes", "transcripts", "raw-import-artifacts"],
+  "entity_signals": ["names-in-body", "email-style-participants", "project-names", "duplicate-filenames"],
+  "margins_fit": "usable-but-needs-destination-choice",
+  "expected_safe_default": {
+    "folder": "notes/meeting-notes",
+    "filename": "YYYY-MM-DD meeting-title.md"
+  },
+  "must_not_suggest": [
+    "recreate people folders",
+    "rename or move exported files",
+    "merge duplicate copies",
+    "run another full import without user intent"
+  ]
+}

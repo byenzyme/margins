@@ -1,0 +1,21 @@
+{
+  "case_id": "zoom-transcript-dump",
+  "active_revision": "skill-revisions/v000-baseline.md",
+  "pass": "substrate",
+  "passed": true,
+  "score": 2,
+  "evidence": [
+    "Correctly catches the central scan/workspace mismatch: 'enzyme scan counted only 1 Markdown file under folder:notes; transcript .txt/.vtt, CSV, and JSON state were absent from scan entities.' enzyme-scan.json confirms files=1 (only notes/2026-06-17-product-review.md).",
+    "Source-boundary stance correct: 'Preserve raw/import material as source boundary; do not treat it as finished meeting notes.'",
+    "Cites real partial-import evidence: 'zoom-export-log.json says status partial and lists missing speaker names plus truncated customer checkin' and 'import/zoom-manifest.csv shows mixed TXT/VTT/copy/partial formats.' Both verified.",
+    "workspace-snapshot.json file_count=9 matches; per-file mtime/size baseline present."
+  ],
+  "failures": [
+    "Does not follow the required 8-section substrate template; 4 bullets plus 'Evidence implications'.",
+    "Does not affirmatively name the one indexable convention (the single dated, well-formed note notes/2026-06-17-product-review.md) under an 'Already Indexable Signal' or 'Existing Conventions To Preserve' heading.",
+    "Duplicate-format collision (06-20 as .txt, copy .txt, and .vtt) is named in the failure model but not mapped in the substrate map's noise/raw section."
+  ],
+  "failed_pass_area": null,
+  "patch_recommendation": "Same as other cases: enforce the 8-section substrate template with an affirmative indexable-signal/conventions section. No safety risk.",
+  "risk_notes": "Strong substantive insight (almost all evidence is non-Markdown transcript state the scan cannot see); structurally thin. Recurring template gap."
+}

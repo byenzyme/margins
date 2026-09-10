@@ -1,0 +1,61 @@
+{
+   "file_count" : 11,
+   "files" : [
+      {
+         "mtime" : 1782414446,
+         "path" : ".margins/cache-state.json",
+         "size" : 217
+      },
+      {
+         "mtime" : 1782414445,
+         "path" : ".margins/config.json",
+         "size" : 176
+      },
+      {
+         "mtime" : 1782414448,
+         "path" : ".margins/import-state.json",
+         "size" : 213
+      },
+      {
+         "mtime" : 1782414444,
+         "path" : ".enzyme/cache-state.json",
+         "size" : 213
+      },
+      {
+         "mtime" : 1782414442,
+         "path" : ".enzyme/state.json",
+         "size" : 223
+      },
+      {
+         "mtime" : 1782414456,
+         "path" : "cache-state.json",
+         "size" : 214
+      },
+      {
+         "mtime" : 1782414451,
+         "path" : "notes/Captures/2026-06-08-customer-checkin.md",
+         "size" : 226
+      },
+      {
+         "mtime" : 1782414452,
+         "path" : "notes/legacy/2026-05-20-kickoff.md",
+         "size" : 180
+      },
+      {
+         "mtime" : 1782414449,
+         "path" : "notes/meeting-notes/2026-06-01 meeting sync.md",
+         "size" : 161
+      },
+      {
+         "mtime" : 1782414454,
+         "path" : "transcripts/2026-06-07-enzyme-migration.txt",
+         "size" : 154
+      },
+      {
+         "mtime" : 1782414455,
+         "path" : "transcripts/notes-from-transcript-dump.txt",
+         "size" : 180
+      }
+   ],
+   "workspace" : "desktop/test-harness/workspace-diagnostic/test-cases/partial-enzyme-or-margins/workspace"
+}

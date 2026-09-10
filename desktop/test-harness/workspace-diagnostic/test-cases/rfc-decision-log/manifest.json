@@ -1,0 +1,22 @@
+{
+  "id": "rfc-decision-log",
+  "title": "Repo with RFC drafts and decision logs",
+  "workspace_type": "codebase-with-docs",
+  "scale": "medium",
+  "simulated_total_files": 41,
+  "date_conventions": ["frontmatter", "filename", "body"],
+  "metadata_conventions": ["yaml-frontmatter", "status-owner-blocks", "inline-tags", "malformed-frontmatter"],
+  "meeting_material": ["summaries", "notes", "transcripts"],
+  "entity_signals": ["email-style-participants", "names-in-body", "project-names"],
+  "margins_fit": "ready-now",
+  "expected_safe_default": {
+    "folder": "docs/meeting-notes",
+    "filename": "YYYY-MM-DD meeting-title.md"
+  },
+  "must_not_suggest": [
+    "move existing files",
+    "rename RFC names",
+    "create people folders without evidence",
+    "merge decision log and meeting notes automatically"
+  ]
+}

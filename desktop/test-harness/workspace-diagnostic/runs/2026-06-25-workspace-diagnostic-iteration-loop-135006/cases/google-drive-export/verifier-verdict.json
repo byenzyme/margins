@@ -1,0 +1,35 @@
+{
+  "case_id": "google-drive-export",
+  "run_id": "2026-06-25-workspace-diagnostic-iteration-loop-135006",
+  "active_revision": "skill-revisions/v001-case-level-enzyme-probes.md",
+  "verdict": "pass_with_minor_risk",
+  "process_failure_fixed": true,
+  "scope": "v001 regression verification of case-level Enzyme Skill Diagnostic Probe only",
+  "criteria": {
+    "upstream_skill_loaded_as_operating_instructions": true,
+    "loop_context_and_active_revision_loaded": true,
+    "read_only_scan_run_or_reviewed": true,
+    "representative_files_read": true,
+    "hypotheses_falsifiers_recorded": true,
+    "handoff_claims_recorded": true,
+    "old_v000_artifacts_marked_provisional": true
+  },
+  "evidence": [
+    "Probe names upstream ../enzyme-rust/plugin/agent/SKILL.md, loop evaluator context, and active v001 revision.",
+    "Probe records enzyme scan command, read-only mutation guard, and forbidden commands not run.",
+    "Probe reads Drive export logs/manifests/cache/raw transcript plus converted Markdown and notes.",
+    "Probe records Enzyme-lens hypotheses, confirmations/falsifiers, and handoff claims for substrate, failure model, repair policy, and product translation.",
+    "Probe explicitly marks prior v000 artifacts aligned but provisional because old trace was scan/snapshot-oriented."
+  ],
+  "remaining_risks": [
+    "Mutation guard is summarized rather than backed by recorded pre/post checksum evidence.",
+    "Four pass artifacts were not fully regenerated under v001 in this verifier scope; they are only supplementally supported by the new probe."
+  ],
+  "validation_commands_reviewed": [
+    "enzyme scan -p desktop/test-harness/workspace-diagnostic/test-cases/google-drive-export/workspace"
+  ],
+  "unverified_cases": [
+    "append-only-dated-log",
+    "partial-enzyme-or-margins"
+  ]
+}

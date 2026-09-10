@@ -1,0 +1,11 @@
+{
+  "session_name": "customer-call",
+  "event_title": "Customer call: Margins pilot scope",
+  "people": ["Kevin Smith", "Joshua Pham"],
+  "inbox_folder": "inbox",
+  "people_folder": "people",
+  "created_date_format": "[[%Y-%m-%d]]",
+  "note_filename_template": "{{date:%Y-%m-%d-%-H-%M-%S}} {{event_title}}",
+  "distill_instructions": "Write concise Obsidian-native notes. Preserve user-marked moments, represent both speakers, and keep action items concrete."
+}
+

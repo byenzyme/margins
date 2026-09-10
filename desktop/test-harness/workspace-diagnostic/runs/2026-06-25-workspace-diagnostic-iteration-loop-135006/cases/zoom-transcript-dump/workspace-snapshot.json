@@ -1,0 +1,51 @@
+{
+   "file_count" : 9,
+   "files" : [
+      {
+         "mtime" : 1782414414,
+         "path" : "cache-state.json",
+         "size" : 259
+      },
+      {
+         "mtime" : 1782414427,
+         "path" : "import/zoom-manifest.csv",
+         "size" : 189
+      },
+      {
+         "mtime" : 1782414424,
+         "path" : "notes/2026-06-17-product-review.md",
+         "size" : 214
+      },
+      {
+         "mtime" : 1782414419,
+         "path" : "transcripts/06-20 product review (copy).txt",
+         "size" : 112
+      },
+      {
+         "mtime" : 1782414417,
+         "path" : "transcripts/06-20 product review.txt",
+         "size" : 123
+      },
+      {
+         "mtime" : 1782414420,
+         "path" : "transcripts/06-20-product-review.vtt",
+         "size" : 121
+      },
+      {
+         "mtime" : 1782414415,
+         "path" : "transcripts/2026-06-17_q2-planning.txt",
+         "size" : 151
+      },
+      {
+         "mtime" : 1782414422,
+         "path" : "transcripts/2026-06-22_customer_checkin.txt",
+         "size" : 159
+      },
+      {
+         "mtime" : 1782414412,
+         "path" : "zoom-export-log.json",
+         "size" : 483
+      }
+   ],
+   "workspace" : "desktop/test-harness/workspace-diagnostic/test-cases/zoom-transcript-dump/workspace"
+}

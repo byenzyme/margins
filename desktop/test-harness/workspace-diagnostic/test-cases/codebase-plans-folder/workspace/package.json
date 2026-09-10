@@ -1,0 +1,11 @@
+{
+  "name": "atlas-sync",
+  "version": "0.14.2",
+  "scripts": {
+    "build": "tsc",
+    "lint": "eslint src/**/*.ts"
+  },
+  "dependencies": {
+    "axios": "^1.6.0"
+  }
+}

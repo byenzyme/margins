@@ -1,0 +1,8 @@
+{
+  "enabledPlugins": [
+    "calendar",
+    "templater",
+    "obsidian-daily-notes-interface"
+  ],
+  "disabledPlugins": []
+}

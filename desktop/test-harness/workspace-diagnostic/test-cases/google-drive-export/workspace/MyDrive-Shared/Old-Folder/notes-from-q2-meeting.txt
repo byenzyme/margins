@@ -1,0 +1,9 @@
+notes from q2
+participants: "dana@" "priya@"
+no date format used here maybe later.
+
+actions:
+- review docs
+- send deck
+
+?? duplicate of an older meeting not linked

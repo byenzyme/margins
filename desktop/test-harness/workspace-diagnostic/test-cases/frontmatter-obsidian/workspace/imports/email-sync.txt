@@ -1,0 +1,7 @@
+From: Mina <mina@phoenix.io>
+Subject: re: follow up
+
+- can you add meeting note for today
+- forgot action: ping legal
+
+Fyi my notes are in `notes/meetings/client-kickoff.md`

@@ -1,0 +1,38 @@
+{
+  "case_id": "google-drive-export",
+  "active_skill_revision": "skill-revisions/v002-import-narrative-and-language.md",
+  "workspace_type": "google-drive-export",
+  "confidence": "medium",
+  "detected_patterns": [
+    "google drive export",
+    "dates in filenames",
+    "dates in note bodies",
+    "malformed",
+    "google docs headings",
+    "inline tags",
+    "notes without metadata",
+    "notes present",
+    "transcripts present",
+    "raw import artifacts present"
+  ],
+  "safe_default": {
+    "folder": "notes/meeting-notes",
+    "filename": "YYYY-MM-DD meeting-title.md",
+    "reason": "least surprising next-note destination from fixture evidence; preserves existing files and separates import/cache/repair from first capture"
+  },
+  "competing_destinations": [],
+  "import_history": "I see Drive/export state such as MyDrive-Shared/Meetings/client-kickoff-2026-06-21.md, notes/notes-2026-06-23-meeting-summary.md, MyDrive-Shared/Meetings/client-kickoff-2026-06-21 copy.md, cache-state.json, import/drive-manifest.json, MyDrive-Shared/Old-Folder/notes-from-q2-meeting.txt. Those files can be reviewed or imported later after preview; they do not need to be converted before the next capture.",
+  "do_not_do": [
+    "recreate people folders",
+    "rename or move exported files",
+    "merge duplicate copies",
+    "run another full import without user intent"
+  ],
+  "next_actions": [
+    "start_capture",
+    "choose_destination",
+    "build_private_search_cache_later",
+    "import_past_notes_later"
+  ],
+  "revision_notes": "v002 rerun: case-specific import/cache/export prose, outcome-language convention labels, active revision trace."
+}

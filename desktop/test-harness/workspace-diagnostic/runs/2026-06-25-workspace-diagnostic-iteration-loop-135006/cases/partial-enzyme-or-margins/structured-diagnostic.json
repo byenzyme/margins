@@ -1,0 +1,44 @@
+{
+  "case_id": "partial-enzyme-or-margins",
+  "workspace_type": "partial-enzyme-or-margins",
+  "confidence": "high",
+  "safe_default": {
+    "folder": "notes/meeting-notes",
+    "filename": "YYYY-MM-DD meeting-title.md"
+  },
+  "detected_patterns": [
+    "Snapshot has 11 files including notes/, transcripts/, root cache-state.json, and stale .enzyme/.margins tool state.",
+    "Scanned a temporary copy because fixture includes .enzyme and .margins; scan counted 3 Markdown notes under folder:notes, #meeting, and one legacy wikilink.",
+    "Root cache-state.json says candidate_default notes/meeting-notes and safe_to_add_new true.",
+    "Tool state conflicts: .enzyme active_file has typo notes/meetin-notes, .margins capture_destination is notes/captures, .margins cache default is notes/Captures, import-state is partially-applied."
+  ],
+  "do_not_do": [
+    "move existing files",
+    "rename old notes",
+    "rewrite tool state",
+    "block capture until cleanup"
+  ],
+  "next_actions": [
+    "start_capture",
+    "choose_destination",
+    "build_private_search_cache_optional",
+    "import_or_cleanup_optional"
+  ],
+  "retrieval_risks": [
+    {
+      "name": "Stale tool-state confusion",
+      "severity": "high",
+      "confidence": "high"
+    },
+    {
+      "name": "Destination casing/path drift",
+      "severity": "medium",
+      "confidence": "high"
+    },
+    {
+      "name": "Raw transcript/import leftovers",
+      "severity": "medium",
+      "confidence": "medium"
+    }
+  ]
+}

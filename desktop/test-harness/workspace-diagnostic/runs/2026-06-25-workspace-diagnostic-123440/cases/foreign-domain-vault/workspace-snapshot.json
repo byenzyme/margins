@@ -1,0 +1,184 @@
+{
+  "case_id": "foreign-domain-vault",
+  "title": "Mixed personal and admin folders with partial note-like files",
+  "manifest_workspace_type": "foreign-domain-vault",
+  "manifest_simulated_total_files": 19,
+  "actual_file_count": 8,
+  "actual_directory_count": 7,
+  "extensions": {
+    ".csv": 1,
+    ".json": 1,
+    ".md": 3,
+    ".txt": 3
+  },
+  "hidden_dirs": [],
+  "directory_tree": [
+    ".",
+    "  README.txt",
+    "  contacts/",
+    "    people.json",
+    "  finance/",
+    "    invoices/",
+    "      INV-2026-05-29.csv",
+    "    tax/",
+    "      receipts-notes.md",
+    "  health/",
+    "    personal-docs.txt",
+    "  misc/",
+    "    pasted-from-calendar.txt",
+    "  travel/",
+    "    board-meeting-notes.md",
+    "    itinerary-2026-08-dublin.md"
+  ],
+  "largest_files": [
+    {
+      "path": "README.txt",
+      "bytes": 335
+    },
+    {
+      "path": "travel/board-meeting-notes.md",
+      "bytes": 323
+    },
+    {
+      "path": "contacts/people.json",
+      "bytes": 174
+    },
+    {
+      "path": "misc/pasted-from-calendar.txt",
+      "bytes": 171
+    },
+    {
+      "path": "travel/itinerary-2026-08-dublin.md",
+      "bytes": 150
+    },
+    {
+      "path": "finance/tax/receipts-notes.md",
+      "bytes": 122
+    },
+    {
+      "path": "finance/invoices/INV-2026-05-29.csv",
+      "bytes": 109
+    },
+    {
+      "path": "health/personal-docs.txt",
+      "bytes": 108
+    }
+  ],
+  "likely_relevant_files": [
+    {
+      "path": "travel/board-meeting-notes.md",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "2026-06-10, board call with investor Maya: okay with delays, but wants clearer action owners. Rex: follow up by email. No follow-up file exists in this folder; this is a pasted log, not a formal meeting system. status: archived owner: household Line items: - i"
+    },
+    {
+      "path": "travel/itinerary-2026-08-dublin.md",
+      "score": 4,
+      "signals": [
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "Trip draft notes dates: 2026-08-14 to 2026-08-22 Who: Maya + guest list not final Hotel: Harbor Bay (maybe) Checklist: passports, chargers, adapter"
+    },
+    {
+      "path": "finance/tax/receipts-notes.md",
+      "score": 3,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "# Receipts - 2026-02-11: office chair - 2026-02-14: whiteboard markers Totaling may be off because one scan is missing."
+    },
+    {
+      "path": "health/personal-docs.txt",
+      "score": 3,
+      "signals": [
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "- dentist appt 2026-06-01 - bloodwork pending This is a personal health checklist, not a meeting archive."
+    },
+    {
+      "path": "misc/pasted-from-calendar.txt",
+      "score": 3,
+      "signals": [
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "2026-04-09 14:00 partner sync agenda copied: - billing, timeline, maybe meeting notes No structure was saved with this paste, and it has no surrounding meeting folder."
+    },
+    {
+      "path": "README.txt",
+      "score": 2,
+      "signals": [
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "Personal admin exports and mixed domain data. This folder contains: - travel notes - finance documents (including invoices and tax receipts) - health and contact scraps There is no repeatable meeting-note taxonomy. A few files look meeting-like only by filenam"
+    },
+    {
+      "path": "finance/invoices/INV-2026-05-29.csv",
+      "score": 2,
+      "signals": [
+        "name_date_signal",
+        "body_date_signal"
+      ],
+      "snippet": "date,vendor,amount,status 2026-05-29,Greenline Hosting,3120,paid 2026-04-03,Paperclip Consulting,890,pending"
+    },
+    {
+      "path": "contacts/people.json",
+      "score": 1,
+      "signals": [
+        "body_date_signal"
+      ],
+      "snippet": "{ \"contacts\": [ {\"name\": \"Maya L.\", \"relation\": \"family\", \"last_contact\": \"2026-05-30\"}, {\"name\": \"Rex\", \"relation\": \"lawyer\", \"company\": \"Northfield Group\"} ] }"
+    }
+  ],
+  "all_files": [
+    {
+      "path": "README.txt",
+      "bytes": 335,
+      "extension": ".txt"
+    },
+    {
+      "path": "contacts/people.json",
+      "bytes": 174,
+      "extension": ".json"
+    },
+    {
+      "path": "finance/invoices/INV-2026-05-29.csv",
+      "bytes": 109,
+      "extension": ".csv"
+    },
+    {
+      "path": "finance/tax/receipts-notes.md",
+      "bytes": 122,
+      "extension": ".md"
+    },
+    {
+      "path": "health/personal-docs.txt",
+      "bytes": 108,
+      "extension": ".txt"
+    },
+    {
+      "path": "misc/pasted-from-calendar.txt",
+      "bytes": 171,
+      "extension": ".txt"
+    },
+    {
+      "path": "travel/board-meeting-notes.md",
+      "bytes": 323,
+      "extension": ".md"
+    },
+    {
+      "path": "travel/itinerary-2026-08-dublin.md",
+      "bytes": 150,
+      "extension": ".md"
+    }
+  ],
+  "mutation_guard": "snapshot only; fixture workspace not modified by this run"
+}

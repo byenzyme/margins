@@ -1,0 +1,57 @@
+{
+  "conferenceRecords": [
+  {
+    "name": "conferenceRecords/conf-alpha",
+    "startTime": "2026-08-20T15:02:00Z",
+    "endTime": "2026-08-20T15:58:00Z",
+    "transcripts": [
+      {
+        "name": "conferenceRecords/conf-alpha/transcripts/transcript-alpha",
+        "state": "FILE_GENERATED",
+        "startTime": "2026-08-20T15:03:00Z",
+        "endTime": "2026-08-20T15:57:00Z",
+        "docsDestination": { "document": "documents/doc-alpha" }
+      }
+    ],
+    "participants": [
+      {
+        "name": "conferenceRecords/conf-alpha/participants/alice",
+        "signedinUser": { "displayName": "Alice Rivera", "user": "users/alice-1" }
+      },
+      {
+        "name": "conferenceRecords/conf-alpha/participants/owner",
+        "signedinUser": { "displayName": "Owner Person", "user": "users/owner-1" }
+      },
+      {
+        "name": "conferenceRecords/conf-alpha/participants/kevin",
+        "anonymousUser": { "displayName": "Kevin" }
+      }
+    ],
+    "calendarAttendees": [
+      {
+        "displayName": "Alice Rivera",
+        "email": "alice@acme.test",
+        "googleUserId": "users/alice-1",
+        "evidence": "calendar/events/event-alpha attendee"
+      },
+      {
+        "displayName": "Owner Person",
+        "email": "owner@margins.test",
+        "googleUserId": "users/owner-1",
+        "evidence": "calendar/events/event-alpha organizer"
+      },
+      {
+        "displayName": "Kevin Chen",
+        "email": "kevin.chen@acme.test",
+        "evidence": "calendar/events/event-alpha attendee"
+      },
+      {
+        "displayName": "Kevin Patel",
+        "email": "kevin.patel@other.test",
+        "evidence": "calendar/events/event-alpha attendee"
+      }
+    ],
+    "space": "spaces/space-alpha"
+  }
+  ]
+}

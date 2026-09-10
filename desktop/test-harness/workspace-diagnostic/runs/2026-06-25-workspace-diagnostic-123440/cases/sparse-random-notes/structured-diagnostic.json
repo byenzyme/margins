@@ -1,0 +1,35 @@
+{
+  "case_id": "sparse-random-notes",
+  "active_skill_revision": "skill-revisions/v002-import-narrative-and-language.md",
+  "workspace_type": "obsidian-vault",
+  "confidence": "medium",
+  "detected_patterns": [
+    "obsidian vault",
+    "dates in filenames",
+    "dates in note bodies",
+    "inline tags",
+    "body labels",
+    "notes present",
+    "transcripts present"
+  ],
+  "safe_default": {
+    "folder": "notes/meetings",
+    "filename": "YYYY-MM-DD meeting-title.md",
+    "reason": "least surprising next-note destination from fixture evidence; preserves existing files and separates import/cache/repair from first capture"
+  },
+  "competing_destinations": [],
+  "import_history": "I see existing notes or history signals such as notes/2026-06-01 sprint-planning.md, clients/Acme/meeting notes.md, notes/2026-06-04 quick-check.md, notes/call_notes_maybe.md, notes/notes.md, notes/transcript_2026_06_02_zoom.txt. They are useful context later, not setup work required now.",
+  "do_not_do": [
+    "create people folders without evidence",
+    "move notes into client folders",
+    "ask for immediate cleanup",
+    "enforce a single meeting-note standard"
+  ],
+  "next_actions": [
+    "start_capture",
+    "choose_destination",
+    "build_private_search_cache_later",
+    "import_past_notes_later"
+  ],
+  "revision_notes": "v002 rerun: case-specific import/cache/export prose, outcome-language convention labels, active revision trace."
+}

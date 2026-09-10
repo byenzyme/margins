@@ -1,0 +1,21 @@
+{
+  "case_id": "zoom-transcript-dump",
+  "active_revision": "skill-revisions/v000-baseline.md",
+  "pass": "failure-model",
+  "passed": true,
+  "score": 2,
+  "evidence": [
+    "Three concrete retrieval-oriented modes: 'Transcript pile invisible to setup scan' (high/high) — 'the main corpus is transcript/source files, but scan exposes only one summary note, so initialization as-is would underrepresent history.'",
+    "'Raw speech is weak decision evidence' (medium/high) — 'Timestamps, missing speakers, VTT blocks, and truncation make retrieval noisy for decisions/actions.' Matches manifest/log evidence and is exactly the transcript-vs-finished-notes distinction the case is built to test.",
+    "'Duplicate format collision' (medium/medium) — '06-20 appears as TXT, copy TXT, and VTT, so retrieval can surface redundant or conflicting snippets.' Verified in workspace.",
+    "Each mode has a falsifier and a non-moralizing 'Do not infer' guard."
+  ],
+  "failures": [
+    "No '## Non-Failures' / '## Ambiguities' sections; the one clean indexable note is never named as a non-failure.",
+    "Identical templated 'Retrieval impact' line on all three modes ('weak or misleading retrieval handles for setup and later meeting context'), reused verbatim across other cases.",
+    "VTT/TXT timestamp-format mismatch (frame-style vs conversational) is collapsed into 'Duplicate format collision' rather than named as its own temporal-retrieval issue."
+  ],
+  "failed_pass_area": "failure-taxonomy-and-evidence-rules",
+  "patch_recommendation": "Mandate Non-Failures/Ambiguities sections and per-mode (non-templated) retrieval impact; this case strongly supports the transcript-vs-notes distinction, which is its best feature and should be preserved.",
+  "risk_notes": "Best-fit failure model of the three cases (transcript dump is what the modes describe). Gate passes; templated retrieval-impact and missing Non-Failures recur."
+}

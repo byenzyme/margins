@@ -1,0 +1,36 @@
+{
+  "case_id": "foreign-domain-vault",
+  "active_skill_revision": "skill-revisions/v002-import-narrative-and-language.md",
+  "workspace_type": "foreign-domain-vault",
+  "confidence": "medium",
+  "detected_patterns": [
+    "foreign domain vault",
+    "dates in filenames",
+    "dates in note bodies",
+    "filename ids",
+    "spreadsheet-style exports",
+    "notes present"
+  ],
+  "safe_default": {
+    "folder": "notes/meetings",
+    "filename": "YYYY-MM-DD meeting-title.md",
+    "reason": "least surprising next-note destination from fixture evidence; preserves existing files and separates import/cache/repair from first capture"
+  },
+  "competing_destinations": [
+    "Because most folders are non-meeting domains, keeping meetings isolated is safer than blending into travel, health, or finance."
+  ],
+  "import_history": "I see existing notes or history signals such as travel/board-meeting-notes.md, travel/itinerary-2026-08-dublin.md, finance/tax/receipts-notes.md, health/personal-docs.txt, misc/pasted-from-calendar.txt, README.txt. They are useful context later, not setup work required now.",
+  "do_not_do": [
+    "move existing files",
+    "create people folders",
+    "impose people-based taxonomy",
+    "assume this is a meeting notes vault"
+  ],
+  "next_actions": [
+    "start_capture",
+    "choose_destination",
+    "build_private_search_cache_later",
+    "import_past_notes_later"
+  ],
+  "revision_notes": "v002 rerun: case-specific import/cache/export prose, outcome-language convention labels, active revision trace."
+}

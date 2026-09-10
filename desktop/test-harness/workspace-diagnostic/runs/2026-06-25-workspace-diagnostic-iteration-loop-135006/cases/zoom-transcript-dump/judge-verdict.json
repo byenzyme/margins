@@ -1,0 +1,41 @@
+{
+  "case_id": "zoom-transcript-dump",
+  "active_revision": "skill-revisions/v000-baseline.md",
+  "pass": "final-diagnostic",
+  "passed": true,
+  "passes": true,
+  "score": 2.88,
+  "overall_score": 2.88,
+  "scores": {
+    "workspace_classification": 3,
+    "safe_default": 3,
+    "non_mutation_boundary": 3,
+    "capture_not_blocked": 3,
+    "import_history_handling": 2,
+    "language_fit": 3,
+    "uncertainty_honesty": 3,
+    "evidence_grounding": 3
+  },
+  "evidence": [
+    "agent-diagnostic.md answers all required points: 'You can start now', destination notes/meetings/, 'Existing files should stay unchanged', 'A private search cache can be built later as a separate read-and-cache step.'",
+    "structured-diagnostic.json confidence high with retrieval_risks carrying the transcript-pile/raw-speech/duplicate-format modes.",
+    "adversarial-user-log.md: 'Can it use old notes/transcripts? A: Yes later, but raw/import material may need previewed conversion or cache setup to be strong retrieval evidence.' — correctly treats transcripts as weak finished-note evidence.",
+    "diff-against-expected.md aligns with expected default and notes scan is 'especially misleading here because almost all evidence is non-Markdown transcript state.'"
+  ],
+  "findings": [
+    "import_history_handling at 2: the case's signature adversarial question 'Are these transcripts enough, or do I need notes?' is not asked in adversarial-user-log (fixed 4-question script reused). The transcript-vs-notes truth is present in the modes but not surfaced as a direct user answer.",
+    "product-critic.md and adversarial-user-log.md are byte-for-byte generic across cases — the strongest single weakness in the downstream stage."
+  ],
+  "regressions": [],
+  "expected_diagnostic_issue": false,
+  "fixture_issue": false,
+  "skill_issue": true,
+  "app_ux_issue": false,
+  "failures": [
+    "Templated adversarial/critic artifacts; case-specific transcript pushback not exercised."
+  ],
+  "failed_pass_area": "failure-taxonomy-and-evidence-rules; orchestration-trace (adversarial question selection)",
+  "patch_recommendation": "Skill Surgeon: require case-tailored adversarial questions and a direct 'transcripts are searchable source material but weak decision evidence; you do not need to convert them to start' answer.",
+  "recommended_next_agent": "skill_surgeon",
+  "risk_notes": "Passes comfortably; no safety-critical zero. The single best-classified case of the three (transcript dump correctly identified, scan-blindness correctly diagnosed)."
+}

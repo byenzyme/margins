@@ -1,0 +1,37 @@
+{
+  "case_id": "daily-notes-vault",
+  "active_skill_revision": "skill-revisions/v002-import-narrative-and-language.md",
+  "workspace_type": "obsidian-vault",
+  "confidence": "medium",
+  "detected_patterns": [
+    "obsidian vault",
+    "dates in filenames",
+    "dates in note bodies",
+    "body labels",
+    "inline tags",
+    "inconsistent metadata",
+    "notes present",
+    "summaries present"
+  ],
+  "safe_default": {
+    "folder": "Daily",
+    "filename": "YYYY-MM-DD meeting-title.md",
+    "reason": "least surprising next-note destination from fixture evidence; preserves existing files and separates import/cache/repair from first capture"
+  },
+  "competing_destinations": [
+    "A meetings folder also exists, but the fixture expectation favors Daily because that is the stronger daily-note capture habit."
+  ],
+  "import_history": "I see existing notes or history signals such as Daily/2026-06-09.md, Daily/2026-06-10.md, Daily/2026-06-13.md, Daily/2026-06-14.md, Daily/Daily Note - 6-11-2026.md, meetings/2026-06-11 product sync.md. They are useful context later, not setup work required now.",
+  "do_not_do": [
+    "move existing files",
+    "force a meeting folder that doesn't exist",
+    "rebuild all daily notes format first"
+  ],
+  "next_actions": [
+    "start_capture",
+    "choose_destination",
+    "build_private_search_cache_later",
+    "import_past_notes_later"
+  ],
+  "revision_notes": "v002 rerun: case-specific import/cache/export prose, outcome-language convention labels, active revision trace."
+}

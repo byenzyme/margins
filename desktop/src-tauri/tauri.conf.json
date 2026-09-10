@@ -1,0 +1,89 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-config-schema/schema.json",
+  "productName": "Margins",
+  "mainBinaryName": "margins-desktop",
+  "version": "0.4.9",
+  "identifier": "com.margins.desktop",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "beforeBundleCommand": "src-tauri/scripts/prepare-mac-bundle-sidecars.sh"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "title": "Margins",
+        "width": 1280,
+        "height": 860,
+        "minWidth": 420,
+        "minHeight": 620,
+        "center": true,
+        "resizable": true,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 16,
+          "y": 33
+        },
+        "transparent": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "externalBin": [
+      "binaries/margins-cli"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "resources": {
+      "../../skills/margins/SKILL.md": "skills/margins/SKILL.md",
+      "../../skills/margins/distillation-core.md": "skills/margins/distillation-core.md",
+      "../../skills/margins/hosts/desktop.md": "skills/margins/hosts/desktop.md",
+      "../../skills/margins/templates/*.md": "skills/margins/templates/"
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "infoPlist": "Info.plist",
+      "dmg": {
+        "background": "resources/dmg-background.png",
+        "windowSize": {
+          "width": 720,
+          "height": 420
+        },
+        "appPosition": {
+          "x": 200,
+          "y": 190
+        },
+        "applicationFolderPosition": {
+          "x": 520,
+          "y": 190
+        }
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU1MjA3ODM5NjRGMEIxREMKUldUY3NmQmtPWGdnNWQ1Q2VXUjUybXp4MWVRM3RCU2JhK0pxbUZ6RjZsVzZ5cVlFL3VLa2ZCbWsK",
+      "endpoints": [
+        "https://api.enzyme.garden/site/margins-updates/{{target}}/{{arch}}/{{current_version}}",
+        "https://api.enzyme.garden/site/aside-updates/{{target}}/{{arch}}/{{current_version}}"
+      ]
+    }
+  }
+}

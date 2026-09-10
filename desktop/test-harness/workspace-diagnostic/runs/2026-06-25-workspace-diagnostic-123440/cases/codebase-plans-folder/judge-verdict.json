@@ -1,0 +1,26 @@
+{
+  "case_id": "codebase-plans-folder",
+  "overall_score": 2,
+  "scores": {
+    "workspace_classification": 3,
+    "safe_default": 3,
+    "non_mutation_boundary": 3,
+    "capture_not_blocked": 3,
+    "import_history_handling": 2,
+    "language_fit": 3,
+    "uncertainty_honesty": 2,
+    "evidence_grounding": 3
+  },
+  "passes": true,
+  "findings": [
+    "docs/meetings/ adjacent-but-separate destination matches expected reasoning exactly.",
+    "Correctly treats workspace as a codebase; no vault-philosophy drift.",
+    "raw-meeting.txt cited as evidence but not specifically addressed in the generic import section."
+  ],
+  "regressions": [],
+  "expected_diagnostic_issue": false,
+  "fixture_issue": false,
+  "skill_issue": true,
+  "app_ux_issue": false,
+  "recommended_next_agent": "skill_surgeon"
+}

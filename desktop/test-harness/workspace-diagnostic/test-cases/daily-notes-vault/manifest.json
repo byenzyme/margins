@@ -1,0 +1,21 @@
+{
+  "id": "daily-notes-vault",
+  "title": "Daily-notes vault with ad-hoc meeting drops",
+  "workspace_type": "obsidian-vault",
+  "scale": "small",
+  "simulated_total_files": 33,
+  "date_conventions": ["filename", "body"],
+  "metadata_conventions": ["body-labels", "inline-tags", "malformed-frontmatter"],
+  "meeting_material": ["notes", "summaries"],
+  "entity_signals": ["names-in-body", "project-names", "email-style-participants"],
+  "margins_fit": "usable-but-needs-destination-choice",
+  "expected_safe_default": {
+    "folder": "Daily",
+    "filename": "YYYY-MM-DD meeting-title.md"
+  },
+  "must_not_suggest": [
+    "move existing files",
+    "force a meeting folder that doesn't exist",
+    "rebuild all daily notes format first"
+  ]
+}

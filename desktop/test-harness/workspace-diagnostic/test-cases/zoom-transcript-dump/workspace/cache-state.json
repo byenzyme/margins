@@ -1,0 +1,8 @@
+{
+  "last_index_run": "2026-06-24T04:15:10-07:00",
+  "parser_version": "zoom-transcript-dump/0.9.1",
+  "known_topics": ["q2-planning", "product-review", "customer-checkin"],
+  "note_imported_count": 1,
+  "transcript_imported_count": 4,
+  "incomplete": true
+}

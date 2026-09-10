@@ -1,0 +1,6 @@
+{
+  "contacts": [
+    {"name": "Maya L.", "relation": "family", "last_contact": "2026-05-30"},
+    {"name": "Rex", "relation": "lawyer", "company": "Northfield Group"}
+  ]
+}

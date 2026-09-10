@@ -1,0 +1,27 @@
+{
+  "id": "fully-configured-vault",
+  "title": "Fully configured vault — already healthy for Enzyme",
+  "workspace_type": "personal-vault",
+  "scale": "small",
+  "simulated_total_files": 14,
+  "date_conventions": ["filename", "frontmatter"],
+  "metadata_conventions": ["yaml-frontmatter"],
+  "meeting_material": ["notes"],
+  "entity_signals": ["wikilinks", "participants-frontmatter", "people-folder"],
+  "margins_fit": "ready-now",
+  "expected_safe_default": {
+    "folder": "meetings",
+    "filename": "YYYY-MM-DD topic.md"
+  },
+  "must_not_suggest": [
+    "any restructuring, moves, or renames of existing files",
+    "changing the capture destination",
+    "adding or normalizing frontmatter on existing notes",
+    "importing or converting existing files",
+    "initializing enzyme (already initialized)",
+    "creating any new folders",
+    "any mutation to .margins or .enzyme state"
+  ],
+  "control_type": "healthy-vault",
+  "promotion_gate_role": "fully-configured-vault control — must produce no-action-needed verdict and proof note; failure here means over-diagnosis regression"
+}

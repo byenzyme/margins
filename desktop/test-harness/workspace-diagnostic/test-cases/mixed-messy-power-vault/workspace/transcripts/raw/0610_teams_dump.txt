@@ -1,0 +1,3 @@
+Speaker A: "Please read this in /notes/captures first."
+Speaker B: "But /transcripts keeps duplicating lines."
+Speaker C: "No one owns the note naming."

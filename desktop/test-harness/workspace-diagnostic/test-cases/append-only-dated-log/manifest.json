@@ -1,0 +1,22 @@
+{
+  "id": "append-only-dated-log",
+  "title": "Append-only dated meeting log with minor drift",
+  "workspace_type": "personal-vault",
+  "scale": "medium",
+  "simulated_total_files": 9,
+  "date_conventions": ["filename", "frontmatter", "body"],
+  "metadata_conventions": ["yaml-frontmatter", "heading-dates"],
+  "meeting_material": ["notes", "transcripts"],
+  "entity_signals": ["names-in-body", "project-team-names", "meeting-sequence"],
+  "margins_fit": "ready-now",
+  "expected_safe_default": {
+    "folder": "meeting-log",
+    "filename": "YYYY-MM-DD topic.md"
+  },
+  "must_not_suggest": [
+    "restructure append-only logs",
+    "rename legacy log files",
+    "delete duplicates before asking user",
+    "create a different top-level scheme"
+  ]
+}

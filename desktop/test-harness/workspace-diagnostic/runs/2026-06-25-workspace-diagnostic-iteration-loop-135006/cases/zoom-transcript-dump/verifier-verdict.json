@@ -1,0 +1,36 @@
+{
+  "case_id": "zoom-transcript-dump",
+  "run_id": "2026-06-25-workspace-diagnostic-iteration-loop-135006",
+  "active_revision": "skill-revisions/v001-case-level-enzyme-probes.md",
+  "verdict": "pass_with_minor_risk",
+  "process_failure_fixed": true,
+  "scope": "v001 regression verification of case-level Enzyme Skill Diagnostic Probe only",
+  "criteria": {
+    "upstream_skill_loaded_as_operating_instructions": true,
+    "loop_context_and_active_revision_loaded": true,
+    "read_only_scan_run_or_reviewed": true,
+    "representative_files_read": true,
+    "hypotheses_falsifiers_recorded": true,
+    "handoff_claims_recorded": true,
+    "old_v000_artifacts_marked_provisional": true
+  },
+  "evidence": [
+    "Probe states it read upstream ../enzyme-rust/plugin/agent/SKILL.md as operating instructions, plus evaluator context and v001.",
+    "Probe records enzyme 0.5.15, scan command, mutation guard, and forbidden commands not run.",
+    "Probe reads manifest, expected diagnostic, Zoom export log, cache state, import manifest, manual note, and transcripts.",
+    "Probe records hypotheses, confirmations/falsifiers, and handoff claims for all four downstream passes.",
+    "Probe explicitly marks prior artifacts evidence-aligned but provisional because the previous trace lacked explicit case-level hypotheses, confirmations/falsifiers, and handoff claims."
+  ],
+  "remaining_risks": [
+    "The probe validates process coverage, not a complete v001 rebuild of final diagnostic artifacts.",
+    "Case-specific adversarial/user-question depth remains a downstream quality risk from the v000 run."
+  ],
+  "validation_commands_reviewed": [
+    "enzyme --version",
+    "enzyme scan -p desktop/test-harness/workspace-diagnostic/test-cases/zoom-transcript-dump/workspace"
+  ],
+  "unverified_cases": [
+    "append-only-dated-log",
+    "partial-enzyme-or-margins"
+  ]
+}

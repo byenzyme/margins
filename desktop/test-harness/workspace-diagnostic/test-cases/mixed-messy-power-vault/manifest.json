@@ -1,0 +1,22 @@
+{
+  "id": "mixed-messy-power-vault",
+  "title": "Mixed team vault with recurring naming drift and transcript leftovers",
+  "workspace_type": "team-knowledge-base",
+  "scale": "medium",
+  "simulated_total_files": 47,
+  "date_conventions": ["filename", "body", "frontmatter"],
+  "metadata_conventions": ["malformed-frontmatter", "inline-tags", "body-labels", "wikilinks"],
+  "meeting_material": ["notes", "transcripts", "summaries"],
+  "entity_signals": ["names-in-filenames", "project-names", "email-style-participants", "stale-action-blocks"],
+  "margins_fit": "usable-but-needs-destination-choice",
+  "expected_safe_default": {
+    "folder": "notes/captures",
+    "filename": "YYYY-MM-DD meeting-title.md"
+  },
+  "must_not_suggest": [
+    "create people folders without strong evidence",
+    "reorganize existing strategic docs",
+    "delete or archive legacy transcripts",
+    "rename mixed-format files before first use"
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "case_id": "codebase-plans-folder",
+  "active_skill_revision": "skill-revisions/v002-import-narrative-and-language.md",
+  "workspace_type": "codebase-with-docs",
+  "confidence": "medium",
+  "detected_patterns": [
+    "codebase with docs",
+    "dates in filenames",
+    "dates in note bodies",
+    "inline tags",
+    "inconsistent metadata",
+    "status owner blocks",
+    "notes present",
+    "transcripts present",
+    "summaries present"
+  ],
+  "safe_default": {
+    "folder": "docs/meetings",
+    "filename": "YYYY-MM-DD meeting-title.md",
+    "reason": "least surprising next-note destination from fixture evidence; preserves existing files and separates import/cache/repair from first capture"
+  },
+  "competing_destinations": [],
+  "import_history": "I see existing notes or history signals such as docs/notes/weekly-sync-2026-03-19.md, docs/plans/meeting-2026-04-01.md, docs/notes/incident-playbook.md, docs/notes/meeting-2026-04-01.md, docs/plans/retro-notes-2026-02.txt, docs/plans/weekly-sync.md. They are useful context later, not setup work required now.",
+  "do_not_do": [
+    "move existing files",
+    "retag existing docs",
+    "create people folders without evidence"
+  ],
+  "next_actions": [
+    "start_capture",
+    "choose_destination",
+    "build_private_search_cache_later",
+    "import_past_notes_later"
+  ],
+  "revision_notes": "v002 rerun: case-specific import/cache/export prose, outcome-language convention labels, active revision trace."
+}

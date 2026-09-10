@@ -1,0 +1,26 @@
+{
+  "case_id": "append-only-dated-log",
+  "overall_score": 2,
+  "scores": {
+    "workspace_classification": 3,
+    "safe_default": 3,
+    "non_mutation_boundary": 3,
+    "capture_not_blocked": 3,
+    "import_history_handling": 2,
+    "language_fit": 3,
+    "uncertainty_honesty": 2,
+    "evidence_grounding": 3
+  },
+  "passes": true,
+  "findings": [
+    "Reuses existing meeting-log/ and does NOT impose append-only structure (avoids the named DESIGN anti-pattern).",
+    "Safe default matches expected exactly (folder + YYYY-MM-DD topic.md filename).",
+    "Duplicate pair and transcript fragment are protected by do-not-do but not named in user-facing uncertainty."
+  ],
+  "regressions": [],
+  "expected_diagnostic_issue": false,
+  "fixture_issue": false,
+  "skill_issue": true,
+  "app_ux_issue": false,
+  "recommended_next_agent": "skill_surgeon"
+}

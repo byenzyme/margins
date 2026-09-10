@@ -1,0 +1,26 @@
+{
+  "name": "margins",
+  "version": "0.2.1",
+  "description": "Margins headless server launcher",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "margins": "bin/cli.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/useenzyme/aside-desktop.git"
+  },
+  "keywords": [
+    "margins",
+    "headless",
+    "server"
+  ],
+  "author": "Joshua Pham",
+  "license": "Apache-2.0"
+}

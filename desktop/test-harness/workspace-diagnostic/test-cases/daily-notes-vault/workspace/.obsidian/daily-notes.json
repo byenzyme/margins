@@ -1,0 +1,5 @@
+{
+  "folder": "Daily",
+  "template": "Templates/Daily Template.md",
+  "dateFormat": "YYYY-MM-DD"
+}

@@ -1,0 +1,33 @@
+{
+  "case_id": "google-drive-export",
+  "active_revision": "skill-revisions/v000-baseline.md",
+  "active_skill_revision": "skill-revisions/v000-baseline.md",
+  "pass": "trace",
+  "passed": true,
+  "score": 2,
+  "enzyme_context_loaded": true,
+  "original_enzyme_skill_read_or_ported_context_used": true,
+  "read_only_boundary_proven": true,
+  "trace_complete": true,
+  "missing_trace_evidence": [
+    "enzyme --version value not captured (command named but version string not recorded)",
+    "explicit pre/post mutation-guard diff/hash not recorded; boundary is asserted ('fixture workspace was not intentionally written') plus de-facto clean (no .enzyme residue found in fixture) rather than a demonstrated guard"
+  ],
+  "trace_findings": [
+    "evaluator-trace.md names active revision v000-baseline.md, states original Enzyme skill source read (../enzyme-rust/plugin/agent/SKILL.md) and ENZYME_EVALUATOR_CONTEXT.md loaded.",
+    "Command hygiene clean: 'enzyme scan -p <workspace>' only; no --write-config/init/refresh/apply/petri/catalyze. Forbidden commands in run-manifest were respected.",
+    "Scan ran against the fixture path directly; acceptable here because no .enzyme/.margins tool-state exists in this fixture, so no residue risk. Independent find confirmed no .enzyme residue created.",
+    "Scan output path recorded; representative fixture files read after scan."
+  ],
+  "evidence": [
+    "Trace proves the Enzyme lens was used: scan-derived insight ('scan saw 5 MD, missed import/log/cache JSON') drives the substrate map and failure model.",
+    "current_config in enzyme-scan.json points at ~/.enzyme/config.toml as config_found (read, not written)."
+  ],
+  "failures": [
+    "Read-only boundary is asserted, not demonstrated with a recorded pre/post guard.",
+    "enzyme --version output not captured."
+  ],
+  "failed_pass_area": null,
+  "patch_recommendation": "Tighten trace/mutation-guard discipline in the evaluator context: require capturing the enzyme --version string and an explicit pre/post file-listing or hash diff as boundary proof, not just an assertion.",
+  "risk_notes": "Boundary held in practice (no residue), so no mutation occurred; the gap is evidentiary rigor, not an actual violation. Case is validly covered by a judge pass."
+}

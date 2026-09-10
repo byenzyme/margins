@@ -1,0 +1,56 @@
+{
+   "file_count" : 10,
+   "files" : [
+      {
+         "mtime" : 1782414414,
+         "path" : "meeting-log/2026-06-14 copy.md",
+         "size" : 101
+      },
+      {
+         "mtime" : 1782414413,
+         "path" : "meeting-log/2026-06-14.md",
+         "size" : 132
+      },
+      {
+         "mtime" : 1782414416,
+         "path" : "meeting-log/2026-06-15.md",
+         "size" : 173
+      },
+      {
+         "mtime" : 1782414417,
+         "path" : "meeting-log/2026-06-16.md",
+         "size" : 149
+      },
+      {
+         "mtime" : 1782414424,
+         "path" : "meeting-log/2026-06-17.md",
+         "size" : 184
+      },
+      {
+         "mtime" : 1782414411,
+         "path" : "meeting-log/append-only.md",
+         "size" : 304
+      },
+      {
+         "mtime" : 1782414420,
+         "path" : "meeting-log/old-log.txt",
+         "size" : 93
+      },
+      {
+         "mtime" : 1782414708,
+         "path" : "meeting-log/raw-sync-snippet.txt",
+         "size" : 190
+      },
+      {
+         "mtime" : 1782414419,
+         "path" : "meeting-log/transcript-2026-06-16-zoom.txt",
+         "size" : 154
+      },
+      {
+         "mtime" : 1782414422,
+         "path" : "plans/sprint-notes.txt",
+         "size" : 161
+      }
+   ],
+   "workspace" : "desktop/test-harness/workspace-diagnostic/test-cases/append-only-dated-log/workspace"
+}

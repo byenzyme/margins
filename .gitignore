@@ -1,0 +1,37 @@
+/target
+.claude/worktrees/
+.margins/
+.aside/
+.DS_Store
+/homebrew-margins/
+/homebrew-aside/
+CLAUDE.md
+docs/
+.enzyme/
+.enzyme-embeddings/
+node_modules/
+dist/
+/desktop/node_modules/
+/desktop/dist/
+/desktop/ux-shots/
+/desktop/ux-e2e-runs/
+/desktop/test-harness/local-snapshot.json
+/desktop/test-harness/ux-loop/runtime/
+/desktop/.enzyme/
+/desktop/src-tauri/target/
+/desktop/src-tauri/.enzyme/
+/desktop/src-tauri/gen/
+
+# Local credentials and agent artifacts
+.env
+/.pi/reports/
+__pycache__/
+/coreaudio-forensics-*/
+
+# Shared local Cargo target dir used by agents/worktrees
+/margins-cargo-target/
+/desktop/src-tauri/binaries/
+/target-linux-server/
+/desktop/ux-shots-real/
+/.worktrees/
+!public-repository/docs/

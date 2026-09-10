@@ -1,0 +1,290 @@
+{
+  "case_id": "codebase-plans-folder",
+  "title": "Codebase with a partial plans directory",
+  "manifest_workspace_type": "codebase-with-docs",
+  "manifest_simulated_total_files": 27,
+  "actual_file_count": 16,
+  "actual_directory_count": 5,
+  "extensions": {
+    ".json": 1,
+    ".md": 11,
+    ".ts": 2,
+    ".txt": 2
+  },
+  "hidden_dirs": [],
+  "directory_tree": [
+    ".",
+    "  README.md",
+    "  package.json",
+    "  raw-meeting.txt",
+    "  docs/",
+    "    notes/",
+    "      incident-playbook.md",
+    "      meeting-2026-04-01.md",
+    "      sprint-plan.md",
+    "      weekly-sync-2026-03-19.md",
+    "    plans/",
+    "      incident-playbook.md",
+    "      meeting-2026-04-01.md",
+    "      retro-notes-2026-02.txt",
+    "      retro.md",
+    "      roadmap.md",
+    "      sprint-plan.md",
+    "      weekly-sync.md",
+    "  src/",
+    "    index.ts",
+    "    sync/",
+    "      conflicts.ts"
+  ],
+  "largest_files": [
+    {
+      "path": "README.md",
+      "bytes": 728
+    },
+    {
+      "path": "raw-meeting.txt",
+      "bytes": 465
+    },
+    {
+      "path": "docs/plans/incident-playbook.md",
+      "bytes": 304
+    },
+    {
+      "path": "docs/notes/weekly-sync-2026-03-19.md",
+      "bytes": 289
+    },
+    {
+      "path": "docs/plans/roadmap.md",
+      "bytes": 268
+    },
+    {
+      "path": "docs/notes/incident-playbook.md",
+      "bytes": 266
+    },
+    {
+      "path": "docs/plans/meeting-2026-04-01.md",
+      "bytes": 236
+    },
+    {
+      "path": "docs/plans/weekly-sync.md",
+      "bytes": 236
+    }
+  ],
+  "likely_relevant_files": [
+    {
+      "path": "docs/notes/weekly-sync-2026-03-19.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- title: Weekly sync date: 2026-03-19 tags: [sync,weekly] --- ## Participants - Maya - Rina - Eli ## Decisions - Keep `docs/plans/` as source of truth for project tasks. - Meeting notes still landing in multiple places; need better convention. ## TODO - add "
+    },
+    {
+      "path": "docs/plans/meeting-2026-04-01.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "# April 1 planning meeting owner: Kai status: note-ready ## Notes - 2026-04-01: aligned on three action owners for the sprint migration. - attendees: Maya, Kai, Rina --- action-owner: Rina status: done - check raw export ingestion"
+    },
+    {
+      "path": "docs/notes/incident-playbook.md",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "# Incident playbook status: draft owner: SRE ```yaml owner: incident-command status: pending-review ``` ## Meeting-style notes - 2026-03-14: on-call handoff was split across Slack and terminal logs. - attendees: Eli, Maya - owner: Maya, status: follow-up neede"
+    },
+    {
+      "path": "docs/notes/meeting-2026-04-01.md",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "--- title: \"Kickoff - Platform\" status: draft --- # Platform meeting Date in body: 1 Apr 2026 (04/01) - Maya: API sidecar should be moved first. - Rina: no change to retention policy yet. - Eli: please share notes with QA"
+    },
+    {
+      "path": "docs/plans/retro-notes-2026-02.txt",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "Team retro - Feb - good: less noisy alerts - bad: names duplicated as \"m\" \"r\" in agenda - action item: create meeting folder? (still not done)"
+    },
+    {
+      "path": "docs/plans/weekly-sync.md",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "# Weekly sync notes owner: Maya status: open ## Meeting notes - We didn’t define a reliable path for recurring check-ins. - 2026-03-19: shipped docs to `docs/plans` for now, still partial. - owner: Rina - status: pending follow-up"
+    },
+    {
+      "path": "docs/notes/sprint-plan.md",
+      "score": 4,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "# sprint-plan March sprint planning notes. owner: Eli | status: done ### attendees - Maya rina - Eli (host) Need to confirm date format when naming this file."
+    },
+    {
+      "path": "docs/plans/retro.md",
+      "score": 4,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "# retro status: documented owner: Rina ## What happened - This was a rough retro note with no date in the filename. - owner tag is present, but date convention is missing. - next: decide a consistent capture folder."
+    },
+    {
+      "path": "raw-meeting.txt",
+      "score": 4,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "[Transcript excerpt] 03/18/26 10:03 AM Eli: We keep shipping notes with random filenames. 03/18/26 10:04 AM Maya: Maybe keep under docs/notes for now. 03/18/26 10:05 AM Rina: I can’t find where old meeting notes are from last month. 03/21/26 14:22 PM Elias: Ca"
+    },
+    {
+      "path": "src/sync/conflicts.ts",
+      "score": 4,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "export async function resolveConflicts() { // TODO: replace with exponential backoff return { ok: true }; }"
+    },
+    {
+      "path": "docs/plans/incident-playbook.md",
+      "score": 3,
+      "signals": [
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "## incident-playbook owner: rina@team.atlas status: draft ### 2026-02-11 - Pager triggered for sync-worker queue growth - on-call: Eli + Jess ### Owner notes - \"If on-call not in room, escalate in #eng-ops\" - duplicate section exists below ## Owner notes - kee"
+    },
+    {
+      "path": "docs/plans/roadmap.md",
+      "score": 3,
+      "signals": [
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- title: Q2 roadmap owner: Maya status: in-flight tags: [planning, product] # intentionally malformed closing marker missing # Roadmap notes - 2026-03-01: onboarding copy hard to parse - 2026-03-15: API owner switch to Daniel - 2026-04-01: ship capture templ"
+    },
+    {
+      "path": "README.md",
+      "score": 2,
+      "signals": [
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "# Atlas Sync monorepo (partial) Main code is in `src/`, planning lives partly in `docs/plans/`, and call notes are mixed into `docs/notes/` without a stable convention. The planning folder is intentionally spotty: - some entries include `status` and `owner` ma"
+    },
+    {
+      "path": "docs/plans/sprint-plan.md",
+      "score": 2,
+      "signals": [
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "# Sprint plan owner: Eli status: in-progress ## Open items - owner: Eli - finish sync migration notes - status: blocked - waiting on review from Maya"
+    }
+  ],
+  "all_files": [
+    {
+      "path": "README.md",
+      "bytes": 728,
+      "extension": ".md"
+    },
+    {
+      "path": "docs/notes/incident-playbook.md",
+      "bytes": 266,
+      "extension": ".md"
+    },
+    {
+      "path": "docs/notes/meeting-2026-04-01.md",
+      "bytes": 225,
+      "extension": ".md"
+    },
+    {
+      "path": "docs/notes/sprint-plan.md",
+      "bytes": 163,
+      "extension": ".md"
+    },
+    {
+      "path": "docs/notes/weekly-sync-2026-03-19.md",
+      "bytes": 289,
+      "extension": ".md"
+    },
+    {
+      "path": "docs/plans/incident-playbook.md",
+      "bytes": 304,
+      "extension": ".md"
+    },
+    {
+      "path": "docs/plans/meeting-2026-04-01.md",
+      "bytes": 236,
+      "extension": ".md"
+    },
+    {
+      "path": "docs/plans/retro-notes-2026-02.txt",
+      "bytes": 144,
+      "extension": ".txt"
+    },
+    {
+      "path": "docs/plans/retro.md",
+      "bytes": 219,
+      "extension": ".md"
+    },
+    {
+      "path": "docs/plans/roadmap.md",
+      "bytes": 268,
+      "extension": ".md"
+    },
+    {
+      "path": "docs/plans/sprint-plan.md",
+      "bytes": 157,
+      "extension": ".md"
+    },
+    {
+      "path": "docs/plans/weekly-sync.md",
+      "bytes": 236,
+      "extension": ".md"
+    },
+    {
+      "path": "package.json",
+      "bytes": 170,
+      "extension": ".json"
+    },
+    {
+      "path": "raw-meeting.txt",
+      "bytes": 465,
+      "extension": ".txt"
+    },
+    {
+      "path": "src/index.ts",
+      "bytes": 169,
+      "extension": ".ts"
+    },
+    {
+      "path": "src/sync/conflicts.ts",
+      "bytes": 112,
+      "extension": ".ts"
+    }
+  ],
+  "mutation_guard": "snapshot only; fixture workspace not modified by this run"
+}

@@ -1,0 +1,218 @@
+{
+  "case_id": "append-only-dated-log",
+  "title": "Append-only dated meeting log with minor drift",
+  "manifest_workspace_type": "personal-vault",
+  "manifest_simulated_total_files": 9,
+  "actual_file_count": 10,
+  "actual_directory_count": 2,
+  "extensions": {
+    ".md": 6,
+    ".txt": 4
+  },
+  "hidden_dirs": [],
+  "directory_tree": [
+    ".",
+    "  meeting-log/",
+    "    2026-06-14 copy.md",
+    "    2026-06-14.md",
+    "    2026-06-15.md",
+    "    2026-06-16.md",
+    "    2026-06-17.md",
+    "    append-only.md",
+    "    old-log.txt",
+    "    raw-sync-snippet.txt",
+    "    transcript-2026-06-16-zoom.txt",
+    "  plans/",
+    "    sprint-notes.txt"
+  ],
+  "largest_files": [
+    {
+      "path": "meeting-log/append-only.md",
+      "bytes": 304
+    },
+    {
+      "path": "meeting-log/raw-sync-snippet.txt",
+      "bytes": 190
+    },
+    {
+      "path": "meeting-log/2026-06-17.md",
+      "bytes": 184
+    },
+    {
+      "path": "meeting-log/2026-06-15.md",
+      "bytes": 173
+    },
+    {
+      "path": "plans/sprint-notes.txt",
+      "bytes": 161
+    },
+    {
+      "path": "meeting-log/transcript-2026-06-16-zoom.txt",
+      "bytes": 154
+    },
+    {
+      "path": "meeting-log/2026-06-16.md",
+      "bytes": 149
+    },
+    {
+      "path": "meeting-log/2026-06-14.md",
+      "bytes": 132
+    }
+  ],
+  "likely_relevant_files": [
+    {
+      "path": "meeting-log/2026-06-14.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "# 2026-06-14 Client call Attendees: leo@atlas.com, Maya - reviewed scope - action: [ ] confirm dates Next sync: 2026-06-16 maybe"
+    },
+    {
+      "path": "meeting-log/2026-06-16.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "# 06-16-2026 - client follow-up No fixed template today: - shared draft notes in slack - one link to old doc maybe use same pattern as other files"
+    },
+    {
+      "path": "meeting-log/2026-06-17.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- title: june-17 date: \"2026-06-17\" participants: - \"Maya\" - \"Jordan\" tags: [meeting] # 2026-06-17 - follow up on action items - decide if meeting folder stays as `meeting-log`"
+    },
+    {
+      "path": "meeting-log/append-only.md",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- title: \"meeting-log\" owner: \"Team Atlas\" updated: 2026-06-20 --- # 2026-06-20 ## Check-in - shipped first pass of notes destination - decide default now and avoid folder churn # 2026-06-19 ## Sync with design - J. and Priya on action plan - duplicate? ther"
+    },
+    {
+      "path": "meeting-log/old-log.txt",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "2026-06-10 weekly check notes moved from slack notes dump not all bullets are indented right"
+    },
+    {
+      "path": "meeting-log/transcript-2026-06-16-zoom.txt",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "00:00 Jordan: can you paste transcript? 00:22 Priya: sent to channel but forgot filename 00:40 Jordan: fine, we'll keep this in meeting-log and continue"
+    },
+    {
+      "path": "meeting-log/2026-06-14 copy.md",
+      "score": 4,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_date_signal"
+      ],
+      "snippet": "# 2026-06-14 Same as above, duplicated by accident - I think we should keep it but maybe merge later"
+    },
+    {
+      "path": "meeting-log/2026-06-15.md",
+      "score": 4,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- date: 2026-06-15 title: \"weekly check-in\" participants: - Priya - Leo status: done --- # 2026-06-15 - discussed milestones - action: prep agenda for monday (again)"
+    },
+    {
+      "path": "meeting-log/raw-sync-snippet.txt",
+      "score": 4,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "00:00 Jordan: this folder is still our meeting home, even with rough files. 00:31 Priya: duplicates look messy but okay for now. 00:42 Maya: don't invent a new scheme unless user wants one."
+    },
+    {
+      "path": "plans/sprint-notes.txt",
+      "score": 4,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "project plan notes unrelated to meetings - this folder should not be recommended as primary meeting destination - dates here are task only and not meeting notes"
+    }
+  ],
+  "all_files": [
+    {
+      "path": "meeting-log/2026-06-14 copy.md",
+      "bytes": 101,
+      "extension": ".md"
+    },
+    {
+      "path": "meeting-log/2026-06-14.md",
+      "bytes": 132,
+      "extension": ".md"
+    },
+    {
+      "path": "meeting-log/2026-06-15.md",
+      "bytes": 173,
+      "extension": ".md"
+    },
+    {
+      "path": "meeting-log/2026-06-16.md",
+      "bytes": 149,
+      "extension": ".md"
+    },
+    {
+      "path": "meeting-log/2026-06-17.md",
+      "bytes": 184,
+      "extension": ".md"
+    },
+    {
+      "path": "meeting-log/append-only.md",
+      "bytes": 304,
+      "extension": ".md"
+    },
+    {
+      "path": "meeting-log/old-log.txt",
+      "bytes": 93,
+      "extension": ".txt"
+    },
+    {
+      "path": "meeting-log/raw-sync-snippet.txt",
+      "bytes": 190,
+      "extension": ".txt"
+    },
+    {
+      "path": "meeting-log/transcript-2026-06-16-zoom.txt",
+      "bytes": 154,
+      "extension": ".txt"
+    },
+    {
+      "path": "plans/sprint-notes.txt",
+      "bytes": 161,
+      "extension": ".txt"
+    }
+  ],
+  "mutation_guard": "snapshot only; fixture workspace not modified by this run"
+}

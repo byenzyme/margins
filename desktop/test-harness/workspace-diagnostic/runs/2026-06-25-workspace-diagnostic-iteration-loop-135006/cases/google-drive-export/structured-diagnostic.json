@@ -1,0 +1,46 @@
+{
+  "case_id": "google-drive-export",
+  "workspace_type": "google-drive-export",
+  "confidence": "high",
+  "detected_patterns": [
+    "Snapshot has 10 files: exported Drive folders, import manifest, cache-state.json, export log, notes/, and raw transcript/text leftovers.",
+    "enzyme scan counted 5 Markdown files and entities folder:mydrive-shared, folder:notes, #atlas, #roadmap; it did not index JSON/log/txt import evidence.",
+    "Evidence: google-drive-export.log reports duplicate filename and malformed heading warning; import/drive-manifest.json records duplicate_title: client-kickoff and empty_file: Untitled document.md; cache-state.json is partial with parse errors.",
+    "Meeting material is split between MyDrive-Shared/Meetings, MyDrive-Shared/Projects/Atlas, and top-level notes/."
+  ],
+  "safe_default": {
+    "folder": "notes/meeting-notes",
+    "filename": "YYYY-MM-DD meeting-title.md",
+    "reason": "smallest additive destination for future meeting notes without changing existing files"
+  },
+  "do_not_do": [
+    "move existing files",
+    "rename old notes",
+    "rewrite cache/import state",
+    "create people/project folders without evidence",
+    "block capture until import or cleanup"
+  ],
+  "next_actions": [
+    "start_capture",
+    "choose_destination",
+    "build_private_search_cache_optional",
+    "import_past_notes_optional"
+  ],
+  "retrieval_risks": [
+    {
+      "name": "Import-state invisibility",
+      "severity": "high",
+      "confidence": "high"
+    },
+    {
+      "name": "Duplicate meeting evidence",
+      "severity": "medium",
+      "confidence": "high"
+    },
+    {
+      "name": "Raw transcript weak evidence",
+      "severity": "medium",
+      "confidence": "medium"
+    }
+  ]
+}

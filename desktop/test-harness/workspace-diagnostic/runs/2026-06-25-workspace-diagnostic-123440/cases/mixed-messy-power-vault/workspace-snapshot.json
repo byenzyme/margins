@@ -1,0 +1,256 @@
+{
+  "case_id": "mixed-messy-power-vault",
+  "title": "Mixed team vault with recurring naming drift and transcript leftovers",
+  "manifest_workspace_type": "team-knowledge-base",
+  "manifest_simulated_total_files": 47,
+  "actual_file_count": 12,
+  "actual_directory_count": 11,
+  "extensions": {
+    ".csv": 1,
+    ".md": 9,
+    ".txt": 2
+  },
+  "hidden_dirs": [],
+  "directory_tree": [
+    ".",
+    "  People/",
+    "    Alex.md",
+    "    Rachel.md",
+    "  exports/",
+    "    notes-from-drive.md",
+    "  imports/",
+    "    legacy-capture-index.md",
+    "  meetings/",
+    "    2026-06-05 - Quarterly Sync.md",
+    "    old-meeting.txt",
+    "  notes/",
+    "    captures/",
+    "      2026-06-02-meeting-notes.md",
+    "      meeting-note-june-3.md",
+    "  project-power/",
+    "    exec/",
+    "      decision-log.md",
+    "    notes/",
+    "      owner-status.md",
+    "  transcripts/",
+    "    2026-06-07_call-log.csv",
+    "    raw/",
+    "      0610_teams_dump.txt"
+  ],
+  "largest_files": [
+    {
+      "path": "imports/legacy-capture-index.md",
+      "bytes": 354
+    },
+    {
+      "path": "notes/captures/meeting-note-june-3.md",
+      "bytes": 270
+    },
+    {
+      "path": "notes/captures/2026-06-02-meeting-notes.md",
+      "bytes": 256
+    },
+    {
+      "path": "project-power/exec/decision-log.md",
+      "bytes": 230
+    },
+    {
+      "path": "meetings/2026-06-05 - Quarterly Sync.md",
+      "bytes": 218
+    },
+    {
+      "path": "transcripts/2026-06-07_call-log.csv",
+      "bytes": 212
+    },
+    {
+      "path": "exports/notes-from-drive.md",
+      "bytes": 206
+    },
+    {
+      "path": "project-power/notes/owner-status.md",
+      "bytes": 202
+    }
+  ],
+  "likely_relevant_files": [
+    {
+      "path": "meetings/2026-06-05 - Quarterly Sync.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- type: meeting title: Quarterly Sync date: 2026-06-05 --- ## Participants - [[People/Alex]] - Maya - external: nora@power.io ## Summary This sync was copied from a Teams note and still includes old action owners."
+    },
+    {
+      "path": "notes/captures/2026-06-02-meeting-notes.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- type: note title: \"meeting-notes\" --- Date: 2026-06-02 Attendees: rachel@power.io, \"Alex\", team-leads ## Notes - agreed to keep capture history in `notes/captures` and also mirror into `project-power/exec/` - unresolved from last week: metrics scope"
+    },
+    {
+      "path": "exports/notes-from-drive.md",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "Imported from Google Drive --- title Drive export created 2026-06-11 - this note has no meeting schema - but has action list that sounds like meeting notes - check with [[project-power/exec/decision-log]]"
+    },
+    {
+      "path": "imports/legacy-capture-index.md",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "Legacy import map (stale): - source path: `notes/old-capture-bucket/` - intended destinations: `notes/captures/` and `meetings/` (both now referenced) - import run date in manifest: 2026-06-05 - [ ] remove this file when old capture folder is retired The paths"
+    },
+    {
+      "path": "notes/captures/meeting-note-june-3.md",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "Title: Meeting Note Date 2026-06-03 Status: draft Attended by: rachel, alex, maya Action items - [ ] confirm scope by monday - [x] add follow-up folder - [ ] archive this after 30 days duplicate heading below ## Notes ## notes - no one remembers where template"
+    },
+    {
+      "path": "project-power/exec/decision-log.md",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- title: decision-log type: decision owner: rachel status: active --- ## Decisions - keep all power updates in one place - this folder is for strategy, not call logs ## Meeting notes - [[meetings/2026-06-05 - Quarterly Sync]]"
+    },
+    {
+      "path": "transcripts/2026-06-07_call-log.csv",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "ts,event,speaker,text 00:01:12,utterance,Rachel,\"Can we still use the old notes template?\" 00:05:42,utterance,Alex,\"I only pasted what I had\" 00:05:43,utterance,Host,\"There are two meeting notes folders already\""
+    },
+    {
+      "path": "meetings/old-meeting.txt",
+      "score": 4,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "Transcribed log from old project: 00:00:00 Riley: can we keep this in notes? 00:03:15 Rachel: maybe not, but no one agrees 00:07:00 Host: next: metrics sprint 00:20:00 [file attached: agenda.docx]"
+    },
+    {
+      "path": "project-power/notes/owner-status.md",
+      "score": 4,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "--- owner: power-ops status: at risk --- ## Notes - This note predates the current transcript folder and still uses old naming. - Action: align owners and maybe ignore. - stale action item (done?) [x]"
+    },
+    {
+      "path": "transcripts/raw/0610_teams_dump.txt",
+      "score": 4,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "Speaker A: \"Please read this in /notes/captures first.\" Speaker B: \"But /transcripts keeps duplicating lines.\" Speaker C: \"No one owns the note naming.\""
+    },
+    {
+      "path": "People/Alex.md",
+      "score": 3,
+      "signals": [
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "name: Alex department: Product - prefers short meeting notes - asked for `transcripts/` import cleanup in 2026-06-07 call"
+    },
+    {
+      "path": "People/Rachel.md",
+      "score": 3,
+      "signals": [
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "Name: Rachel ## Notes - Last updated: 2026-05 - says: \"don't invent folders from names unless they already exist\""
+    }
+  ],
+  "all_files": [
+    {
+      "path": "People/Alex.md",
+      "bytes": 123,
+      "extension": ".md"
+    },
+    {
+      "path": "People/Rachel.md",
+      "bytes": 115,
+      "extension": ".md"
+    },
+    {
+      "path": "exports/notes-from-drive.md",
+      "bytes": 206,
+      "extension": ".md"
+    },
+    {
+      "path": "imports/legacy-capture-index.md",
+      "bytes": 354,
+      "extension": ".md"
+    },
+    {
+      "path": "meetings/2026-06-05 - Quarterly Sync.md",
+      "bytes": 218,
+      "extension": ".md"
+    },
+    {
+      "path": "meetings/old-meeting.txt",
+      "bytes": 197,
+      "extension": ".txt"
+    },
+    {
+      "path": "notes/captures/2026-06-02-meeting-notes.md",
+      "bytes": 256,
+      "extension": ".md"
+    },
+    {
+      "path": "notes/captures/meeting-note-june-3.md",
+      "bytes": 270,
+      "extension": ".md"
+    },
+    {
+      "path": "project-power/exec/decision-log.md",
+      "bytes": 230,
+      "extension": ".md"
+    },
+    {
+      "path": "project-power/notes/owner-status.md",
+      "bytes": 202,
+      "extension": ".md"
+    },
+    {
+      "path": "transcripts/2026-06-07_call-log.csv",
+      "bytes": 212,
+      "extension": ".csv"
+    },
+    {
+      "path": "transcripts/raw/0610_teams_dump.txt",
+      "bytes": 153,
+      "extension": ".txt"
+    }
+  ],
+  "mutation_guard": "snapshot only; fixture workspace not modified by this run"
+}

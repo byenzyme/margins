@@ -1,0 +1,7 @@
+{
+  "threads": [
+    {"id": "t-ambiguous"},
+    {"id": "t-shared"}
+  ],
+  "nextPageToken": ""
+}

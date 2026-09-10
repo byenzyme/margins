@@ -1,0 +1,3 @@
+project plan notes unrelated to meetings
+- this folder should not be recommended as primary meeting destination
+- dates here are task only and not meeting notes

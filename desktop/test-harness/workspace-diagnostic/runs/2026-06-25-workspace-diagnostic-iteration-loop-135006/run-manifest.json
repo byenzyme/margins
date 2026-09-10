@@ -1,0 +1,101 @@
+{
+  "run_id": "2026-06-25-workspace-diagnostic-iteration-loop-135006",
+  "iteration": 1,
+  "loop_spec": "desktop/test-harness/workspace-diagnostic/LOOP_SPEC.md",
+  "ux_surface": "first-project-onboarding",
+  "selected_cases": [
+    "google-drive-export",
+    "zoom-transcript-dump",
+    "codebase-plans-folder",
+    "partial-enzyme-or-margins",
+    "append-only-dated-log"
+  ],
+  "selection_rationale": "Targeted set for poorly structured workspace diagnosis: raw Drive exports, transcript archives, codebase/generated-noise risk, partial tool state, and a mostly indexable append-only control.",
+  "active_skill_revision": "skill-revisions/v000-baseline.md",
+  "upstream_enzyme_skill_path": "../enzyme-rust/plugin/agent/SKILL.md",
+  "evaluator_context_path": "desktop/test-harness/workspace-diagnostic/ENZYME_EVALUATOR_CONTEXT.md",
+  "design_context_path": "desktop/test-harness/workspace-diagnostic/DESIGN_CONTEXT.md",
+  "fixture_contract_path": "desktop/test-harness/workspace-diagnostic/SPEC.md",
+  "mutation_policy": {
+    "fixture_workspaces": "read-only",
+    "allowed_writes": [
+      "desktop/test-harness/workspace-diagnostic/runs/2026-06-25-workspace-diagnostic-iteration-loop-135006/**"
+    ],
+    "forbidden_commands": [
+      "enzyme scan --write-config",
+      "enzyme init",
+      "enzyme refresh",
+      "enzyme apply",
+      "enzyme petri",
+      "enzyme catalyze"
+    ],
+    "scan_command": "enzyme scan -p <workspace>",
+    "partial_tool_state_policy": "scan a temporary copy or prove pre/post mutation guard; do not remove user fixture files"
+  },
+  "child_threads": [
+    {
+      "id": "thr_35p36qaa4v",
+      "role": "Diagnostic Runner / maker",
+      "provider": "codex",
+      "case_scope": [
+        "google-drive-export",
+        "zoom-transcript-dump",
+        "codebase-plans-folder",
+        "partial-enzyme-or-margins",
+        "append-only-dated-log"
+      ],
+      "active_skill_revision": "skill-revisions/v000-baseline.md",
+      "status": "completed"
+    },
+    {
+      "id": "thr_36actjrbrg",
+      "role": "Diagnostic Runner / replacement maker",
+      "provider": "codex",
+      "case_scope": [
+        "google-drive-export",
+        "zoom-transcript-dump",
+        "codebase-plans-folder"
+      ],
+      "active_skill_revision": "skill-revisions/v000-baseline.md",
+      "status": "stopped_superseded_by_original_maker_completion"
+    },
+    {
+      "id": "thr_c92z2eittg",
+      "role": "Judge / checker",
+      "provider": "claude-code",
+      "model": "claude-opus-4-8[1m]",
+      "case_scope": [
+        "google-drive-export",
+        "zoom-transcript-dump",
+        "codebase-plans-folder"
+      ],
+      "active_skill_revision": "skill-revisions/v000-baseline.md",
+      "status": "stopped_superseded_by_five_case_checker"
+    },
+    {
+      "id": "thr_7fkhm8x6ad",
+      "role": "Judge / five-case checker",
+      "provider": "claude-code",
+      "model": "claude-opus-4-8[1m]",
+      "case_scope": [
+        "google-drive-export",
+        "zoom-transcript-dump",
+        "codebase-plans-folder",
+        "partial-enzyme-or-margins",
+        "append-only-dated-log"
+      ],
+      "active_skill_revision": "skill-revisions/v000-baseline.md",
+      "status": "running"
+    },
+    {
+      "id": "thr_i3wb88ddf9",
+      "role": "Skill Surgeon / patcher",
+      "provider": "codex",
+      "case_scope": [
+        "orchestration/loop discipline"
+      ],
+      "active_skill_revision": "skill-revisions/v000-baseline.md",
+      "status": "running"
+    }
+  ]
+}

@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HARNESS="$REPO_ROOT/scripts/workspace-setup-rollout-review.py"
+RUN_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/margins-rollout-review-test.XXXXXX")"
+RUN_ROOT="$(cd "$RUN_ROOT" && pwd -P)"
+trap 'rm -rf "$RUN_ROOT"' EXIT
+
+make_fixture() {
+  local name="$1"
+  local vault="$RUN_ROOT/$name/vault"
+  local other_vault="$RUN_ROOT/$name/other-vault"
+  local margins_home="$RUN_ROOT/$name/margins-home"
+  local state="$margins_home/workspaces/fixture"
+  mkdir -p "$vault/.margins" "$other_vault" "$state/captures" "$RUN_ROOT/$name/run"
+  printf '# One\n\nA note.\n' > "$RUN_ROOT/$name/vault/one.md"
+  printf 'legacy session state\n' > "$vault/.margins/session.md"
+  printf 'old index\n' > "$state/index.db"
+  printf 'id = "fixture"\n\n[policy]\nentities = []\n\n[bindings.home]\nkind = "notes"\npath = "%s"\nrole = "home"\n\n[bindings.captures]\nkind = "captures"\npath = "%s"\n' \
+    "$vault" "$state/captures" > "$state/config.toml"
+  printf '[llm]\nmode = "hosted"\n\n[defaults]\nminimum_tags = 2\n\n[cli]\nnote_agent = "codex"\n\n[vaults."%s"]\nentities = ["folder:people"]\n\n[vaults."%s"]\nentities = ["#unrelated"]\n\n[workspaces.target]\nentities = ["folder:people"]\n\n[workspaces.target.sources.notes]\npath = "%s"\nwritable = true\n\n[workspaces.unrelated]\nentities = ["#unrelated"]\n\n[workspaces.unrelated.sources.notes]\npath = "%s"\nwritable = true\n' \
+    "$vault" "$other_vault" "$vault" "$other_vault" > "$margins_home/config.toml"
+  cp "$margins_home/config.toml" "$RUN_ROOT/$name/global-config.original"
+  chmod 0640 "$margins_home/config.toml"
+  "$HARNESS" prepare \
+    --vault "$vault" \
+    --margins-home "$margins_home" \
+    --run-dir "$RUN_ROOT/$name/run" >/dev/null
+  test ! -e "$vault/.margins"
+  test ! -e "$state"
+  test -f "$RUN_ROOT/$name/run/backup/vault-dot-margins/session.md"
+  test -f "$RUN_ROOT/$name/run/backup/workspaces/fixture/config.toml"
+  test -f "$RUN_ROOT/$name/run/backup/global-config.toml"
+  cmp "$RUN_ROOT/$name/global-config.original" "$RUN_ROOT/$name/run/backup/global-config.toml"
+  python3 - "$margins_home/config.toml" "$vault" "$other_vault" <<'PY'
+import sys, tomllib
+value = tomllib.load(open(sys.argv[1], "rb"))
+assert value["llm"]["mode"] == "hosted"
+assert value["defaults"]["minimum_tags"] == 2
+assert value["cli"]["note_agent"] == "codex"
+assert sys.argv[2] not in value.get("vaults", {})
+assert "target" not in value.get("workspaces", {})
+assert value["vaults"][sys.argv[3]]["entities"] == ["#unrelated"]
+assert value["workspaces"]["unrelated"]["sources"]["notes"]["path"] == sys.argv[3]
+PY
+  grep -Fx 'Help me set up Margins so it reflects how I use these notes. Run margins guide workspace-setup and follow it end to end.' \
+    "$RUN_ROOT/$name/run/user-prompt.txt" >/dev/null
+  grep -Fx "export MARGINS_HOME=$margins_home" \
+    "$RUN_ROOT/$name/run/rollout-environment.sh" >/dev/null
+  grep -Fx 'unset MARGINS_WORKSPACE' \
+    "$RUN_ROOT/$name/run/rollout-environment.sh" >/dev/null
+}
+
+make_fixture safe
+if "$HARNESS" workspace-id --run-dir "$RUN_ROOT/safe/run" >/dev/null 2>&1; then
+  echo "expected observer lookup to refuse when no Workspace was generated" >&2
+  exit 1
+fi
+printf 'Setup completed. No credential values were inspected.\n' > "$RUN_ROOT/safe/transcript.txt"
+printf '{"status":"ok"}\n' > "$RUN_ROOT/safe/run/final-status.json"
+"$HARNESS" finalize \
+  --run-dir "$RUN_ROOT/safe/run" \
+  --transcript "$RUN_ROOT/safe/transcript.txt" \
+  --final-status "$RUN_ROOT/safe/run/final-status.json" >/dev/null
+test -f "$RUN_ROOT/safe/vault/.margins/session.md"
+test -f "$RUN_ROOT/safe/margins-home/workspaces/fixture/index.db"
+cmp "$RUN_ROOT/safe/global-config.original" "$RUN_ROOT/safe/margins-home/config.toml"
+grep -Fx 'legacy session state' "$RUN_ROOT/safe/vault/.margins/session.md" >/dev/null
+grep -Fx 'old index' "$RUN_ROOT/safe/margins-home/workspaces/fixture/index.db" >/dev/null
+python3 - "$RUN_ROOT/safe/run/hard-gates.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value["passed"] is True
+assert value["vault_markdown_immutability"]["passed"] is True
+assert value["secret_material_in_transcript"]["passed"] is True
+assert value["preexisting_setup_restoration"]["passed"] is True
+assert value["preexisting_setup_restoration"]["details"]["global_config_exact"] is True
+PY
+
+make_fixture secret
+printf 'debug api_key="sk-or-v1-abcdefghijklmnopqrstuv"\n' > "$RUN_ROOT/secret/transcript.txt"
+printf '{"api_key":"sk-abcdefghijklmnopqrstuvwxyz123456"}\n' > "$RUN_ROOT/secret/status-input.json"
+if "$HARNESS" finalize \
+  --run-dir "$RUN_ROOT/secret/run" \
+  --transcript "$RUN_ROOT/secret/transcript.txt" \
+  --final-status "$RUN_ROOT/secret/status-input.json" >/dev/null; then
+  echo "expected secret-bearing transcript to fail" >&2
+  exit 1
+fi
+test -f "$RUN_ROOT/secret/vault/.margins/session.md"
+test -f "$RUN_ROOT/secret/margins-home/workspaces/fixture/index.db"
+grep -F '"kind": "openrouter_key"' "$RUN_ROOT/secret/run/hard-gates.json" >/dev/null
+grep -F '"source": "final-status.json"' "$RUN_ROOT/secret/run/hard-gates.json" >/dev/null
+grep -F '[REDACTED_CREDENTIAL:openrouter_key]' "$RUN_ROOT/secret/run/transcript.txt" >/dev/null
+grep -F '[REDACTED_CREDENTIAL:json_api_key]' "$RUN_ROOT/secret/run/final-status.json" >/dev/null
+if grep -F 'sk-or-v1-abcdefghijklmnopqrstuv' "$RUN_ROOT/secret/run/transcript.txt" >/dev/null; then
+  echo "captured transcript retained credential material" >&2
+  exit 1
+fi
+if grep -F 'sk-abcdefghijklmnopqrstuvwxyz123456' "$RUN_ROOT/secret/run/final-status.json" >/dev/null; then
+  echo "captured final status retained credential material" >&2
+  exit 1
+fi
+
+make_fixture modified
+printf '\nUnexpected setup edit.\n' >> "$RUN_ROOT/modified/vault/one.md"
+printf 'Setup completed.\n' > "$RUN_ROOT/modified/transcript.txt"
+if "$HARNESS" finalize \
+  --run-dir "$RUN_ROOT/modified/run" \
+  --transcript "$RUN_ROOT/modified/transcript.txt" >/dev/null; then
+  echo "expected Markdown mutation to fail" >&2
+  exit 1
+fi
+test -f "$RUN_ROOT/modified/vault/.margins/session.md"
+test -f "$RUN_ROOT/modified/margins-home/workspaces/fixture/index.db"
+grep -F '"one.md"' "$RUN_ROOT/modified/run/vault-changes.json" >/dev/null
+
+make_fixture partial_finalize
+mkdir -p "$RUN_ROOT/partial_finalize/margins-home/workspaces/partial"
+printf 'partial setup\n' > "$RUN_ROOT/partial_finalize/margins-home/workspaces/partial/index.db"
+printf 'Setup failed partway.\n' > "$RUN_ROOT/partial_finalize/transcript.txt"
+"$HARNESS" finalize \
+  --run-dir "$RUN_ROOT/partial_finalize/run" \
+  --transcript "$RUN_ROOT/partial_finalize/transcript.txt" >/dev/null
+test -f "$RUN_ROOT/partial_finalize/vault/.margins/session.md"
+test -f "$RUN_ROOT/partial_finalize/margins-home/workspaces/fixture/index.db"
+test -f "$RUN_ROOT/partial_finalize/run/generated/workspaces/partial/index.db"
+
+mkdir -p "$RUN_ROOT/fresh/vault" "$RUN_ROOT/fresh/margins-home" "$RUN_ROOT/fresh/run"
+printf '# Fresh\n' > "$RUN_ROOT/fresh/vault/fresh.md"
+"$HARNESS" prepare \
+  --vault "$RUN_ROOT/fresh/vault" \
+  --margins-home "$RUN_ROOT/fresh/margins-home" \
+  --run-dir "$RUN_ROOT/fresh/run" >/dev/null
+mkdir -p "$RUN_ROOT/fresh/margins-home/workspaces/fresh/captures"
+printf '[vaults."%s"]\nentities = ["#generated"]\n' \
+  "$RUN_ROOT/fresh/vault" > "$RUN_ROOT/fresh/margins-home/config.toml"
+printf 'generated index\n' > "$RUN_ROOT/fresh/margins-home/workspaces/fresh/index.db"
+printf 'id = "fresh"\n\n[policy]\nentities = []\n\n[bindings.home]\nkind = "notes"\npath = "%s"\nrole = "home"\n\n[bindings.captures]\nkind = "captures"\npath = "%s"\n' \
+  "$RUN_ROOT/fresh/vault" "$RUN_ROOT/fresh/margins-home/workspaces/fresh/captures" \
+  > "$RUN_ROOT/fresh/margins-home/workspaces/fresh/config.toml"
+test "$("$HARNESS" workspace-id --run-dir "$RUN_ROOT/fresh/run")" = fresh
+printf 'Setup completed.\n' > "$RUN_ROOT/fresh/transcript.txt"
+"$HARNESS" finalize \
+  --run-dir "$RUN_ROOT/fresh/run" \
+  --transcript "$RUN_ROOT/fresh/transcript.txt" >/dev/null
+test ! -e "$RUN_ROOT/fresh/margins-home/workspaces/fresh"
+test ! -e "$RUN_ROOT/fresh/margins-home/config.toml"
+test -f "$RUN_ROOT/fresh/run/generated/workspaces/fresh/index.db"
+test -f "$RUN_ROOT/fresh/run/generated/global-config.toml"
+test -f "$RUN_ROOT/fresh/run/workspace-configs-after/fresh.toml"
+
+mkdir -p "$RUN_ROOT/malformed/vault/.margins" "$RUN_ROOT/malformed/margins-home/workspaces/fixture" "$RUN_ROOT/malformed/run"
+printf '# Malformed\n' > "$RUN_ROOT/malformed/vault/note.md"
+printf 'old local\n' > "$RUN_ROOT/malformed/vault/.margins/old.md"
+printf 'old index\n' > "$RUN_ROOT/malformed/margins-home/workspaces/fixture/index.db"
+printf '[vaults."unterminated"\n' > "$RUN_ROOT/malformed/margins-home/config.toml"
+if "$HARNESS" prepare \
+  --vault "$RUN_ROOT/malformed/vault" \
+  --margins-home "$RUN_ROOT/malformed/margins-home" \
+  --run-dir "$RUN_ROOT/malformed/run" >/dev/null 2>&1; then
+  echo "expected malformed global config to fail closed" >&2
+  exit 1
+fi
+test -f "$RUN_ROOT/malformed/vault/.margins/old.md"
+test -f "$RUN_ROOT/malformed/margins-home/workspaces/fixture/index.db"
+grep -Fx '[vaults."unterminated"' "$RUN_ROOT/malformed/margins-home/config.toml" >/dev/null
+
+mkdir -p "$RUN_ROOT/ambiguous/vault/.margins" "$RUN_ROOT/ambiguous/margins-home/workspaces/fixture" "$RUN_ROOT/ambiguous/run"
+printf '# Ambiguous\n' > "$RUN_ROOT/ambiguous/vault/note.md"
+printf 'old local\n' > "$RUN_ROOT/ambiguous/vault/.margins/old.md"
+printf 'old index\n' > "$RUN_ROOT/ambiguous/margins-home/workspaces/fixture/index.db"
+printf '[defaults]\ndescription = """\n[vaults."%s"]\n[update]\n"""\n\n[vaults."%s"]\nentities = ["#old"]\n\n[update]\nauto = false\n' \
+  "$RUN_ROOT/ambiguous/vault" "$RUN_ROOT/ambiguous/vault" \
+  > "$RUN_ROOT/ambiguous/margins-home/config.toml"
+if "$HARNESS" prepare \
+  --vault "$RUN_ROOT/ambiguous/vault" \
+  --margins-home "$RUN_ROOT/ambiguous/margins-home" \
+  --run-dir "$RUN_ROOT/ambiguous/run" >/dev/null 2>&1; then
+  echo "expected ambiguous global config to fail semantic preservation" >&2
+  exit 1
+fi
+test -f "$RUN_ROOT/ambiguous/vault/.margins/old.md"
+test -f "$RUN_ROOT/ambiguous/margins-home/workspaces/fixture/index.db"
+grep -F 'description = """' "$RUN_ROOT/ambiguous/margins-home/config.toml" >/dev/null
+
+mkdir -p "$RUN_ROOT/recovery/vault/.margins" "$RUN_ROOT/recovery/margins-home/workspaces/fixture" "$RUN_ROOT/recovery/run"
+printf '# Recovery\n' > "$RUN_ROOT/recovery/vault/recovery.md"
+printf 'old local\n' > "$RUN_ROOT/recovery/vault/.margins/old.md"
+printf 'id = "fixture"\n\n[bindings.home]\nkind = "notes"\npath = "%s"\nrole = "home"\n' \
+  "$RUN_ROOT/recovery/vault" > "$RUN_ROOT/recovery/margins-home/workspaces/fixture/config.toml"
+"$HARNESS" prepare \
+  --vault "$RUN_ROOT/recovery/vault" \
+  --margins-home "$RUN_ROOT/recovery/margins-home" \
+  --run-dir "$RUN_ROOT/recovery/run" >/dev/null
+mkdir -p "$RUN_ROOT/recovery/margins-home/workspaces/partial"
+printf 'partial setup\n' > "$RUN_ROOT/recovery/margins-home/workspaces/partial/index.db"
+"$HARNESS" restore --run-dir "$RUN_ROOT/recovery/run" >/dev/null
+test -f "$RUN_ROOT/recovery/vault/.margins/old.md"
+test -f "$RUN_ROOT/recovery/margins-home/workspaces/fixture/config.toml"
+grep -Fx 'old local' "$RUN_ROOT/recovery/vault/.margins/old.md" >/dev/null
+test ! -e "$RUN_ROOT/recovery/margins-home/workspaces/partial"
+test -f "$RUN_ROOT/recovery/run/generated/workspaces/partial/index.db"
+
+mkdir -p "$RUN_ROOT/legacy-v2/vault" "$RUN_ROOT/legacy-v2/margins-home" "$RUN_ROOT/legacy-v2/run/backup"
+printf '[llm]\nmode = "hosted"\n' > "$RUN_ROOT/legacy-v2/margins-home/config.toml"
+printf '{}\n' > "$RUN_ROOT/legacy-v2/run/preexisting-workspace-state.json"
+printf '{}\n' > "$RUN_ROOT/legacy-v2/run/vault-local-state-before.json"
+python3 - "$RUN_ROOT/legacy-v2/run/run.json" "$RUN_ROOT/legacy-v2/vault" "$RUN_ROOT/legacy-v2/margins-home" <<'PY'
+import json, sys
+json.dump({
+    "schema": "margins.workspace-setup-rollout-review.v2",
+    "vault": sys.argv[2],
+    "margins_home": sys.argv[3],
+    "workspace_ids_before": [],
+    "preexisting_workspaces": [],
+    "workspace_registry_backed_up": False,
+    "vault_local_state_backed_up": False,
+}, open(sys.argv[1], "w"))
+PY
+"$HARNESS" restore --run-dir "$RUN_ROOT/legacy-v2/run" >/dev/null
+grep -Fx 'mode = "hosted"' "$RUN_ROOT/legacy-v2/margins-home/config.toml" >/dev/null
+grep -F '"global_config_tracked": false' "$RUN_ROOT/legacy-v2/run/restoration.json" >/dev/null
+
+mkdir -p "$RUN_ROOT/symlink/vault" "$RUN_ROOT/symlink/margins-home/workspaces" "$RUN_ROOT/symlink/external-state" "$RUN_ROOT/symlink/run"
+printf '# Symlink\n' > "$RUN_ROOT/symlink/vault/symlink.md"
+printf 'id = "linked"\n\n[bindings.home]\nkind = "notes"\npath = "%s"\nrole = "home"\n' \
+  "$RUN_ROOT/symlink/vault" > "$RUN_ROOT/symlink/external-state/config.toml"
+ln -s "$RUN_ROOT/symlink/external-state" "$RUN_ROOT/symlink/margins-home/workspaces/linked"
+printf '[llm]\nmode = "auto"\n\n[vaults."%s"]\nentities = ["#old"]\n' \
+  "$RUN_ROOT/symlink/vault" > "$RUN_ROOT/symlink/external-global-config.toml"
+ln -s "$RUN_ROOT/symlink/external-global-config.toml" "$RUN_ROOT/symlink/margins-home/config.toml"
+"$HARNESS" prepare \
+  --vault "$RUN_ROOT/symlink/vault" \
+  --margins-home "$RUN_ROOT/symlink/margins-home" \
+  --run-dir "$RUN_ROOT/symlink/run" >/dev/null
+test -L "$RUN_ROOT/symlink/run/backup/workspaces/linked"
+test -L "$RUN_ROOT/symlink/run/backup/global-config.toml"
+test ! -L "$RUN_ROOT/symlink/margins-home/config.toml"
+test -f "$RUN_ROOT/symlink/external-state/config.toml"
+"$HARNESS" restore --run-dir "$RUN_ROOT/symlink/run" >/dev/null
+test -L "$RUN_ROOT/symlink/margins-home/workspaces/linked"
+test -L "$RUN_ROOT/symlink/margins-home/config.toml"
+test -f "$RUN_ROOT/symlink/margins-home/workspaces/linked/config.toml"
+grep -F '#old' "$RUN_ROOT/symlink/margins-home/config.toml" >/dev/null
+
+mkdir -p "$RUN_ROOT/symlink-drift/vault" "$RUN_ROOT/symlink-drift/margins-home" "$RUN_ROOT/symlink-drift/run"
+printf '# Symlink drift\n' > "$RUN_ROOT/symlink-drift/vault/note.md"
+printf '[llm]\nmode = "auto"\n\n[vaults."%s"]\nentities = ["#old"]\n' \
+  "$RUN_ROOT/symlink-drift/vault" > "$RUN_ROOT/symlink-drift/external-config.toml"
+ln -s "$RUN_ROOT/symlink-drift/external-config.toml" "$RUN_ROOT/symlink-drift/margins-home/config.toml"
+"$HARNESS" prepare \
+  --vault "$RUN_ROOT/symlink-drift/vault" \
+  --margins-home "$RUN_ROOT/symlink-drift/margins-home" \
+  --run-dir "$RUN_ROOT/symlink-drift/run" >/dev/null
+printf '# external mutation\n' >> "$RUN_ROOT/symlink-drift/external-config.toml"
+if "$HARNESS" restore --run-dir "$RUN_ROOT/symlink-drift/run" >/dev/null; then
+  echo "expected external symlink-target drift to fail restoration" >&2
+  exit 1
+fi
+test -L "$RUN_ROOT/symlink-drift/margins-home/config.toml"
+grep -F '"global_config_exact": false' "$RUN_ROOT/symlink-drift/run/restoration.json" >/dev/null
+
+echo "workspace setup rollout review harness: ok"

@@ -1,0 +1,207 @@
+{
+  "case_id": "sparse-random-notes",
+  "title": "Sparse random notes in a lightly organized vault",
+  "manifest_workspace_type": "obsidian-vault",
+  "manifest_simulated_total_files": 8,
+  "actual_file_count": 9,
+  "actual_directory_count": 7,
+  "extensions": {
+    ".json": 1,
+    ".md": 7,
+    ".txt": 1
+  },
+  "hidden_dirs": [
+    ".obsidian"
+  ],
+  "directory_tree": [
+    ".",
+    "  .obsidian/",
+    "    workspace.json",
+    "  clients/",
+    "    Acme/",
+    "      meeting notes.md",
+    "  inbox/",
+    "    Untitled.md",
+    "  notes/",
+    "    2026-06-01 sprint-planning.md",
+    "    2026-06-04 quick-check.md",
+    "    call_notes_maybe.md",
+    "    notes.md",
+    "    transcript_2026_06_02_zoom.txt",
+    "  projects/",
+    "    Orbit/",
+    "      notes (final).md"
+  ],
+  "largest_files": [
+    {
+      "path": "notes/call_notes_maybe.md",
+      "bytes": 294
+    },
+    {
+      "path": "notes/transcript_2026_06_02_zoom.txt",
+      "bytes": 272
+    },
+    {
+      "path": "notes/2026-06-04 quick-check.md",
+      "bytes": 263
+    },
+    {
+      "path": "notes/2026-06-01 sprint-planning.md",
+      "bytes": 242
+    },
+    {
+      "path": "projects/Orbit/notes (final).md",
+      "bytes": 197
+    },
+    {
+      "path": "notes/notes.md",
+      "bytes": 193
+    },
+    {
+      "path": "clients/Acme/meeting notes.md",
+      "bytes": 176
+    },
+    {
+      "path": ".obsidian/workspace.json",
+      "bytes": 138
+    }
+  ],
+  "likely_relevant_files": [
+    {
+      "path": "notes/2026-06-01 sprint-planning.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "# sprint plan Date: 2026-06-01 Attendees: alex@orbit.co, tian@orbit ## notes - need demo by monday, maybe Friday? unsure - update the landing copy (wording still a mess) ## action - [ ] fix typo in hero - [x] ping maria for recording link"
+    },
+    {
+      "path": "clients/Acme/meeting notes.md",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "Client: Acme ### 2026-05-31 We discussed Q3 roadmap + demo timing. notes are in a hurry: - maybe add followup summary - send deck by friday *duplicate from sprint-planning?*"
+    },
+    {
+      "path": "notes/2026-06-04 quick-check.md",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "# quick check notes title: \"06-04 follow-up\" Attendees were in orbit channel; no one saved this in one place. - decide whether meeting notes go to `notes/meetings` or stay ad-hoc - recording link missing - send follow-up in whichever folder we keep using last"
+    },
+    {
+      "path": "notes/call_notes_maybe.md",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- title: meeting notes rough tags: [call,client] date: 6/4/2026 owner: \"tian\" status: inprogress --- ### with acme no time stamp. participants: - \"Maria\" <maria@acme.com> - J. * action: setup analytics dashboard TODO: follow up on transcript path \"transcript"
+    },
+    {
+      "path": "notes/notes.md",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "# meeting archive ## 2026 06 03 kickoff - no date label in the file name, title exists in body - action items not tracked consistently ## old - maybe duplicate of sprint-planning note above?"
+    },
+    {
+      "path": "notes/transcript_2026_06_02_zoom.txt",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "00:00 - Maria: can we move meeting notes to notes/meetings? I think so, but it's inconsistent 00:47 - Alex: I'll just paste this in a random file for now 01:12 - I got the recording URL but forgot it in Slack 03:20 - note: there was a 2nd attendee who only joi"
+    },
+    {
+      "path": "projects/Orbit/notes (final).md",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "project: Orbit launch date: 2026-06-01 This folder is for launch tasks, not meeting notes. I keep dropping meeting notes in here anyway. ## blockers - unclear API docs - QA feedback loop stalled"
+    },
+    {
+      "path": ".obsidian/workspace.json",
+      "score": 3,
+      "signals": [
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "{ \"files\": [ \"notes/2026-06-01 sprint-planning.md\", \"notes/transcript_2026_06_02_zoom.txt\", \"notes/call_notes_maybe.md\" ]"
+    },
+    {
+      "path": "inbox/Untitled.md",
+      "score": 2,
+      "signals": [
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "ideas for next week random note about call followups no date"
+    }
+  ],
+  "all_files": [
+    {
+      "path": ".obsidian/workspace.json",
+      "bytes": 138,
+      "extension": ".json"
+    },
+    {
+      "path": "clients/Acme/meeting notes.md",
+      "bytes": 176,
+      "extension": ".md"
+    },
+    {
+      "path": "inbox/Untitled.md",
+      "bytes": 63,
+      "extension": ".md"
+    },
+    {
+      "path": "notes/2026-06-01 sprint-planning.md",
+      "bytes": 242,
+      "extension": ".md"
+    },
+    {
+      "path": "notes/2026-06-04 quick-check.md",
+      "bytes": 263,
+      "extension": ".md"
+    },
+    {
+      "path": "notes/call_notes_maybe.md",
+      "bytes": 294,
+      "extension": ".md"
+    },
+    {
+      "path": "notes/notes.md",
+      "bytes": 193,
+      "extension": ".md"
+    },
+    {
+      "path": "notes/transcript_2026_06_02_zoom.txt",
+      "bytes": 272,
+      "extension": ".txt"
+    },
+    {
+      "path": "projects/Orbit/notes (final).md",
+      "bytes": 197,
+      "extension": ".md"
+    }
+  ],
+  "mutation_guard": "snapshot only; fixture workspace not modified by this run"
+}

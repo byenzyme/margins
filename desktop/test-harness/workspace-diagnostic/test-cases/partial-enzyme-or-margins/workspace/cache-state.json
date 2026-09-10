@@ -1,0 +1,9 @@
+{
+  "version": "0.8.9",
+  "active_tool": "margins",
+  "candidate_default": "notes/meeting-notes",
+  "state_conflict": [
+    ".margins config path differs from .enzyme state notes_root"
+  ],
+  "safe_to_add_new": true
+}

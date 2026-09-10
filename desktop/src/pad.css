@@ -1,0 +1,171 @@
+:root {
+  color-scheme: light dark;
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+}
+
+body {
+  display: grid;
+  grid-template-rows: auto 1fr auto auto;
+  color: #29261f;
+  background: #fbf8f0;
+  border: 1px solid rgba(79, 69, 55, 0.16);
+  border-radius: 14px;
+  box-sizing: border-box;
+}
+
+.pad-drag {
+  -webkit-app-region: drag;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 12px;
+  border-bottom: 1px solid rgba(79, 69, 55, 0.12);
+}
+
+.pad-kicker {
+  color: #8a7252;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+#pad-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pad-window-actions,
+.pad-window-actions *,
+#pad-compose,
+#pad-compose * {
+  -webkit-app-region: no-drag;
+}
+
+.pad-window-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.pad-window-actions button {
+  appearance: none;
+  padding: 4px 7px;
+  border: 0;
+  background: transparent;
+  color: #76644f;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+#pad-close {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 17px;
+  line-height: 1;
+}
+
+.pad-window-actions button:hover {
+  background: rgba(79, 69, 55, 0.08);
+}
+
+#pad-lines {
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 18px;
+}
+
+.pad-line {
+  display: grid;
+  grid-template-columns: 52px 1fr;
+  gap: 8px;
+  padding: 7px 0;
+}
+
+.pad-line time {
+  color: #998a76;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pad-line p {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: 15px/1.5 "Iowan Old Style", "Palatino", Georgia, serif;
+}
+
+.pad-empty {
+  color: #887d6e;
+  font: 15px/1.5 "Iowan Old Style", "Palatino", Georgia, serif;
+}
+
+#pad-compose {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  padding: 10px 12px 8px;
+  border-top: 1px solid rgba(79, 69, 55, 0.12);
+}
+
+#pad-input {
+  resize: none;
+  padding: 8px 10px;
+  border: 1px solid rgba(79, 69, 55, 0.2);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.5);
+  color: inherit;
+  font: 15px/1.4 "Iowan Old Style", "Palatino", Georgia, serif;
+}
+
+#pad-compose button {
+  align-self: end;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 9px;
+  background: #6e5b44;
+  color: #fff;
+  cursor: pointer;
+  font: inherit;
+}
+
+#pad-status {
+  min-height: 18px;
+  margin: 0;
+  padding: 0 14px 8px;
+  color: #887d6e;
+  font-size: 11px;
+}
+
+@media (prefers-color-scheme: dark) {
+  body {
+    color: #ece7dc;
+    background: #211f1a;
+    border-color: rgba(255, 255, 255, 0.12);
+  }
+
+  .pad-drag,
+  #pad-compose {
+    border-color: rgba(255, 255, 255, 0.1);
+  }
+
+  #pad-input {
+    background: rgba(255, 255, 255, 0.06);
+    border-color: rgba(255, 255, 255, 0.14);
+  }
+}

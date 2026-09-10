@@ -1,0 +1,66 @@
+{
+  "run_id": "2026-06-25-workspace-diagnostic-iteration-loop-135006",
+  "active_revision": "skill-revisions/v001-case-level-enzyme-probes.md",
+  "stacked_revisions": [
+    {
+      "revision": "skill-revisions/v000-baseline.md",
+      "status": "baseline_iteration_1"
+    },
+    {
+      "revision": "skill-revisions/v001-case-level-enzyme-probes.md",
+      "status": "verified_for_three_priority_cases"
+    },
+    {
+      "revision": "skill-revisions/v002-failure-taxonomy-specificity.md",
+      "status": "stacked_unverified"
+    }
+  ],
+  "verdict": "pass_with_minor_risk",
+  "process_failure_fixed": true,
+  "scope": "v001 regression verification of three case-level probe artifacts",
+  "cases": {
+    "google-drive-export": {
+      "verdict": "pass_with_minor_risk",
+      "process_failure_fixed": true
+    },
+    "zoom-transcript-dump": {
+      "verdict": "pass_with_minor_risk",
+      "process_failure_fixed": true
+    },
+    "codebase-plans-folder": {
+      "verdict": "pass",
+      "process_failure_fixed": true
+    },
+    "append-only-dated-log": {
+      "verdict": "out_of_scope_for_v001_regression_verification"
+    },
+    "partial-enzyme-or-margins": {
+      "verdict": "out_of_scope_for_v001_regression_verification"
+    }
+  },
+  "recurring_failure_modes": [
+    "Scan-only or snapshot-only traces are insufficient because scan output misses import logs, cache state, transcripts, and nested docs.",
+    "Read-only boundaries need recorded pre/post evidence; summary assertions are weaker than checksum or file-list guards.",
+    "Old v000 downstream artifacts may be evidence-aligned but must remain provisional unless revalidated against v001 probe traces.",
+    "Templated adversarial and product-critic artifacts remain a downstream quality issue outside this v001 process fix."
+  ],
+  "remaining_risks": [
+    "Four-pass artifacts and final diagnostics were not fully regenerated under v001 in this verifier scope.",
+    "Only three probe cases were verified.",
+    "Promotion should target loop orchestration/evaluator context, not app copy or upstream Enzyme behavior.",
+    "v002 failure-taxonomy specificity is patched but not independently verified."
+  ],
+  "validation_commands_reviewed": [
+    "enzyme scan -p desktop/test-harness/workspace-diagnostic/test-cases/google-drive-export/workspace",
+    "enzyme --version",
+    "enzyme scan -p desktop/test-harness/workspace-diagnostic/test-cases/zoom-transcript-dump/workspace",
+    "enzyme scan -p desktop/test-harness/workspace-diagnostic/test-cases/codebase-plans-folder/workspace",
+    "enzyme scan -p /Users/example/Hacks/margins/desktop/test-harness/workspace-diagnostic/test-cases/codebase-plans-folder/workspace"
+  ],
+  "promotion_target_classification": {
+    "upstream_enzyme_skill": "do_not_promote_now",
+    "loop_local_evaluator_context": "promote",
+    "margins_prompt_or_app": "do_not_promote_now",
+    "run_local": "keep_as_evidence_and_revision_record"
+  }
+}

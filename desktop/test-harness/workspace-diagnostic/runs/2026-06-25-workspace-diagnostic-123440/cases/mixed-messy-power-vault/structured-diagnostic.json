@@ -1,0 +1,39 @@
+{
+  "case_id": "mixed-messy-power-vault",
+  "active_skill_revision": "skill-revisions/v002-import-narrative-and-language.md",
+  "workspace_type": "team-knowledge-base",
+  "confidence": "medium",
+  "detected_patterns": [
+    "team knowledge base",
+    "dates in filenames",
+    "dates in note bodies",
+    "dates in metadata",
+    "inconsistent metadata",
+    "inline tags",
+    "body labels",
+    "existing links",
+    "notes present",
+    "transcripts present",
+    "summaries present"
+  ],
+  "safe_default": {
+    "folder": "notes/captures",
+    "filename": "YYYY-MM-DD meeting-title.md",
+    "reason": "least surprising next-note destination from fixture evidence; preserves existing files and separates import/cache/repair from first capture"
+  },
+  "competing_destinations": [],
+  "import_history": "I see existing notes or history signals such as meetings/2026-06-05 - Quarterly Sync.md, notes/captures/2026-06-02-meeting-notes.md, exports/notes-from-drive.md, imports/legacy-capture-index.md, notes/captures/meeting-note-june-3.md, project-power/exec/decision-log.md. They are useful context later, not setup work required now.",
+  "do_not_do": [
+    "create people folders without strong evidence",
+    "reorganize existing strategic docs",
+    "delete or archive legacy transcripts",
+    "rename mixed-format files before first use"
+  ],
+  "next_actions": [
+    "start_capture",
+    "choose_destination",
+    "build_private_search_cache_later",
+    "import_past_notes_later"
+  ],
+  "revision_notes": "v002 rerun: case-specific import/cache/export prose, outcome-language convention labels, active revision trace."
+}

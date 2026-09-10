@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  fresh-onboarding-harness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build portable Margins CLI
+        run: cargo build --package margins-cli
+
+      - name: Exercise isolated native Google onboarding
+        run: tests/test_e2e_fresh_onboarding.sh
+        env:
+          MARGINS_E2E_BIN: ${{ github.workspace }}/target/debug/margins-public
+
+      - name: Exercise setup E2E lane shell contracts
+        run: tests/test_setup_e2e_lanes.sh
+
+      - name: Exercise ecological setup rollout capture hard gates
+        run: tests/test_workspace_setup_rollout_review.sh
+
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build private distributable
+        run: cargo build --release --package margins --bin margins-private
+
+      - name: Build public workspace
+        run: cargo build --workspace --exclude margins --all-targets
+
+      - name: Test private composition
+        run: cargo test --package margins
+
+      - name: Test public workspace
+        run: cargo test --workspace --exclude margins --all-targets

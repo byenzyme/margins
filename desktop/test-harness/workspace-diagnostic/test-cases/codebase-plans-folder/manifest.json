@@ -1,0 +1,21 @@
+{
+  "id": "codebase-plans-folder",
+  "title": "Codebase with a partial plans directory",
+  "workspace_type": "codebase-with-docs",
+  "scale": "small",
+  "simulated_total_files": 27,
+  "date_conventions": ["filename", "body"],
+  "metadata_conventions": ["inline-tags", "malformed-frontmatter", "status-owner-blocks"],
+  "meeting_material": ["notes", "transcripts", "summaries"],
+  "entity_signals": ["names-in-body", "project-names", "email-style-participants"],
+  "margins_fit": "usable-but-needs-destination-choice",
+  "expected_safe_default": {
+    "folder": "docs/meetings",
+    "filename": "YYYY-MM-DD meeting-title.md"
+  },
+  "must_not_suggest": [
+    "move existing files",
+    "retag existing docs",
+    "create people folders without evidence"
+  ]
+}

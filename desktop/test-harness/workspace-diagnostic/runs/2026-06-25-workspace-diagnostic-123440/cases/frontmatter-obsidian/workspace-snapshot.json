@@ -1,0 +1,282 @@
+{
+  "case_id": "frontmatter-obsidian",
+  "title": "Obsidian vault with uneven frontmatter practices",
+  "manifest_workspace_type": "obsidian-vault",
+  "manifest_simulated_total_files": 29,
+  "actual_file_count": 14,
+  "actual_directory_count": 10,
+  "extensions": {
+    ".json": 2,
+    ".md": 10,
+    ".txt": 2
+  },
+  "hidden_dirs": [
+    ".obsidian"
+  ],
+  "directory_tree": [
+    ".",
+    "  .obsidian/",
+    "    config.json",
+    "    plugins.json",
+    "  imports/",
+    "    email-sync.txt",
+    "    zoom/",
+    "      2026-06-15_zoom-transcript.txt",
+    "  notes/",
+    "    inbox.md",
+    "    archive/",
+    "      Client Sync - 2026-06-12 archive copy.md",
+    "    meetings/",
+    "      2026-06-10-standup.md",
+    "      2026-06-15-random-meeting-note.md",
+    "      Client Sync - 2026-06-12.md",
+    "      Client_sync_2026-06-13_followup.md",
+    "      client-kickoff.md",
+    "    projects/",
+    "      phoenix/",
+    "        overview.md",
+    "        notes-archive/",
+    "          meeting-notes.md",
+    "  templates/",
+    "    meeting-template.md"
+  ],
+  "largest_files": [
+    {
+      "path": "notes/meetings/2026-06-10-standup.md",
+      "bytes": 367
+    },
+    {
+      "path": "notes/meetings/Client Sync - 2026-06-12.md",
+      "bytes": 355
+    },
+    {
+      "path": "notes/meetings/Client_sync_2026-06-13_followup.md",
+      "bytes": 344
+    },
+    {
+      "path": "notes/archive/Client Sync - 2026-06-12 archive copy.md",
+      "bytes": 279
+    },
+    {
+      "path": "imports/zoom/2026-06-15_zoom-transcript.txt",
+      "bytes": 278
+    },
+    {
+      "path": "notes/meetings/2026-06-15-random-meeting-note.md",
+      "bytes": 268
+    },
+    {
+      "path": "notes/meetings/client-kickoff.md",
+      "bytes": 268
+    },
+    {
+      "path": "notes/projects/phoenix/overview.md",
+      "bytes": 265
+    }
+  ],
+  "likely_relevant_files": [
+    {
+      "path": "notes/archive/Client Sync - 2026-06-12 archive copy.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- type: meeting-note title: \"Client Sync - Archive Copy\" date 2026-06-12 participants: - Mina - Riley --- ## Meeting notes This duplicate appears under archive after manual export. - attendees: Mina, partner@client - status: kept for history, not the active "
+    },
+    {
+      "path": "notes/meetings/2026-06-10-standup.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- type: meeting-note title: \"standup notes\" date: 2026-06-10 participants: - ariel@phoenix.io - \"Nina Park\" --- # Standup - June 10 Decided to keep API work separate from UI tickets. Action owner:: maybe to self? - [ ] close open PRs (Nina) - [ ] confirm tim"
+    },
+    {
+      "path": "notes/meetings/2026-06-15-random-meeting-note.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- title: 2026-06-15 Meeting created: 2026-06-15T09:00:00Z tags: - meeting - team --- Meeting link from Zoom: https://us.zoom.us/j/000000000 No action list was provided. ## Notes Spoke mostly about support tickets. This one has body date but no `participants`"
+    },
+    {
+      "path": "notes/meetings/Client Sync - 2026-06-12.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- type: meeting date 2026-06-12 participants: - \"Mina\" - \"Rivka (partner@client.com)\" tags: - client - review --- ## notes Followed up about sprint blockers. *notes were taken from zoom summary bot* - action: confirm feature scope - action: send numbers for "
+    },
+    {
+      "path": "notes/meetings/Client_sync_2026-06-13_followup.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- type: meeting title: \"Client_sync_2026-06-13_followup\" date: 2026-06-13 people: - \"Mina\" - \"Product Team\" tags: [meeting, client] --- ## Summary There is still no one official template. I wrote this with tabs, not spaces. - [x] update pricing note - [ ] sc"
+    },
+    {
+      "path": "imports/zoom/2026-06-15_zoom-transcript.txt",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "00:00:00 - Host: We can probably move this to a separate doc, but not yet. 00:02:14 - Mina: Do we have a meeting note folder? no 00:05:32 - Jordan: I can paste notes into existing `meetings` if needed. 00:11:00 - [audio dropped] 00:12:01 - Host: please send su"
+    },
+    {
+      "path": "notes/meetings/client-kickoff.md",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- type: meeting-note title: \"Client Kickoff\" date: 2026-06-14 status: draft --- Date in body: 2026-06-14 Participants: aaron@phoenix.io, <Mina>, riley ## Action items - confirm notes in [[notes/meetings/2026-06-10-standup]] - create backlog card for auth ref"
+    },
+    {
+      "path": "notes/projects/phoenix/notes-archive/meeting-notes.md",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- type: note --- old folder has messy exports. [[notes/meetings/Client Sync - 2026-06-12]] 2026-06-11 Action: update risk register"
+    },
+    {
+      "path": "notes/projects/phoenix/overview.md",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "# Phoenix Project Current plan lives in Google docs and is only partly copied here. ## Owner - Owner: Jordan - Status: active Meeting evidence: - references `notes/meetings/2026-06-10-standup.md` - `client` tag appears in multiple notes with inconsistent casin"
+    },
+    {
+      "path": "imports/email-sync.txt",
+      "score": 4,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "From: Mina <mina@phoenix.io> Subject: re: follow up - can you add meeting note for today - forgot action: ping legal Fyi my notes are in `notes/meetings/client-kickoff.md`"
+    },
+    {
+      "path": "notes/inbox.md",
+      "score": 4,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "# Inbox Some random notes got dumped in during triage: - Need to follow up with @nina - review \"client-sync 6-12\" folder before standup - call with support at 2pm"
+    },
+    {
+      "path": "templates/meeting-template.md",
+      "score": 4,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "--- title: \"{{title}}\" type: meeting-note date: {{date}} participants: - \"\" --- # Meeting Notes ## What happened ## Action items"
+    },
+    {
+      "path": ".obsidian/plugins.json",
+      "score": 2,
+      "signals": [
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "{ \"enabledPlugins\": [ \"calendar\", \"templater\", \"obsidian-daily-notes-interface\" ], \"disabledPlugins\": [] }"
+    }
+  ],
+  "all_files": [
+    {
+      "path": ".obsidian/config.json",
+      "bytes": 111,
+      "extension": ".json"
+    },
+    {
+      "path": ".obsidian/plugins.json",
+      "bytes": 125,
+      "extension": ".json"
+    },
+    {
+      "path": "imports/email-sync.txt",
+      "bytes": 174,
+      "extension": ".txt"
+    },
+    {
+      "path": "imports/zoom/2026-06-15_zoom-transcript.txt",
+      "bytes": 278,
+      "extension": ".txt"
+    },
+    {
+      "path": "notes/archive/Client Sync - 2026-06-12 archive copy.md",
+      "bytes": 279,
+      "extension": ".md"
+    },
+    {
+      "path": "notes/inbox.md",
+      "bytes": 165,
+      "extension": ".md"
+    },
+    {
+      "path": "notes/meetings/2026-06-10-standup.md",
+      "bytes": 367,
+      "extension": ".md"
+    },
+    {
+      "path": "notes/meetings/2026-06-15-random-meeting-note.md",
+      "bytes": 268,
+      "extension": ".md"
+    },
+    {
+      "path": "notes/meetings/Client Sync - 2026-06-12.md",
+      "bytes": 355,
+      "extension": ".md"
+    },
+    {
+      "path": "notes/meetings/Client_sync_2026-06-13_followup.md",
+      "bytes": 344,
+      "extension": ".md"
+    },
+    {
+      "path": "notes/meetings/client-kickoff.md",
+      "bytes": 268,
+      "extension": ".md"
+    },
+    {
+      "path": "notes/projects/phoenix/notes-archive/meeting-notes.md",
+      "bytes": 136,
+      "extension": ".md"
+    },
+    {
+      "path": "notes/projects/phoenix/overview.md",
+      "bytes": 265,
+      "extension": ".md"
+    },
+    {
+      "path": "templates/meeting-template.md",
+      "bytes": 135,
+      "extension": ".md"
+    }
+  ],
+  "mutation_guard": "snapshot only; fixture workspace not modified by this run"
+}

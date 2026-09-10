@@ -1,0 +1,38 @@
+{
+  "case_id": "frontmatter-obsidian",
+  "active_skill_revision": "skill-revisions/v002-import-narrative-and-language.md",
+  "workspace_type": "obsidian-vault",
+  "confidence": "medium",
+  "detected_patterns": [
+    "obsidian vault",
+    "dates in metadata",
+    "dates in filenames",
+    "dates in note bodies",
+    "YAML metadata",
+    "inconsistent metadata",
+    "existing links",
+    "inline tags",
+    "notes present",
+    "transcripts present"
+  ],
+  "safe_default": {
+    "folder": "notes/meetings",
+    "filename": "YYYY-MM-DD meeting-title.md",
+    "reason": "least surprising next-note destination from fixture evidence; preserves existing files and separates import/cache/repair from first capture"
+  },
+  "competing_destinations": [],
+  "import_history": "I see existing notes or history signals such as notes/archive/Client Sync - 2026-06-12 archive copy.md, notes/meetings/2026-06-10-standup.md, notes/meetings/2026-06-15-random-meeting-note.md, notes/meetings/Client Sync - 2026-06-12.md, notes/meetings/Client_sync_2026-06-13_followup.md, imports/zoom/2026-06-15_zoom-transcript.txt. They are useful context later, not setup work required now.",
+  "do_not_do": [
+    "move existing files",
+    "retag existing notes",
+    "create people folders without evidence",
+    "normalize all frontmatter before first capture"
+  ],
+  "next_actions": [
+    "start_capture",
+    "choose_destination",
+    "build_private_search_cache_later",
+    "import_past_notes_later"
+  ],
+  "revision_notes": "v002 rerun: case-specific import/cache/export prose, outcome-language convention labels, active revision trace."
+}

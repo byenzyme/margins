@@ -1,0 +1,4 @@
+00:00:01 -> Dana: this file cut off mid sentence
+00:00:20: Maya: ...the integration
+00:01:30: ??? missing
+00:02:10: Dana: stop here, we have connection issues

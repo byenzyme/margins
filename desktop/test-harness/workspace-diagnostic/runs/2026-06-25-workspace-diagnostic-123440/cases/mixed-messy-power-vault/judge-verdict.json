@@ -1,0 +1,26 @@
+{
+  "case_id": "mixed-messy-power-vault",
+  "overall_score": 2,
+  "scores": {
+    "workspace_classification": 3,
+    "safe_default": 3,
+    "non_mutation_boundary": 3,
+    "capture_not_blocked": 3,
+    "import_history_handling": 2,
+    "language_fit": 2,
+    "uncertainty_honesty": 2,
+    "evidence_grounding": 3
+  },
+  "passes": true,
+  "findings": [
+    "Treats a messy multi-root vault as usable, not broken; selects active notes/captures/ over strategy/export/transcript roots (matches expected).",
+    "Strong do-not-do protecting strategic docs and legacy transcripts.",
+    "Stale imports/legacy-capture-index.md not explicitly framed as history-only per expected caveat."
+  ],
+  "regressions": [],
+  "expected_diagnostic_issue": false,
+  "fixture_issue": false,
+  "skill_issue": true,
+  "app_ux_issue": false,
+  "recommended_next_agent": "skill_surgeon"
+}

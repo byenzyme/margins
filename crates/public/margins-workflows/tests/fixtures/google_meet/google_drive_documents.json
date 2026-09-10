@@ -1,0 +1,19 @@
+{
+  "files": [
+    {
+      "id": "doc-alpha",
+      "name": "Acme product review - 2026-08-20 - Transcript",
+      "mimeType": "application/vnd.google-apps.document",
+      "createdTime": "2026-08-20T15:00:00Z",
+      "modifiedTime": "2026-08-20T16:00:00Z",
+      "webViewLink": "https://docs.google.com/document/d/doc-alpha/edit"
+    },
+    {
+      "id": "doc-orphan",
+      "name": "Older customer call - 2026-07-01 - Transcript",
+      "mimeType": "application/vnd.google-apps.document",
+      "createdTime": "2026-07-01T09:00:00Z",
+      "modifiedTime": "2026-07-01T10:00:00Z"
+    }
+  ]
+}

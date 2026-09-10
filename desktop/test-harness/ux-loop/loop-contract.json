@@ -1,0 +1,182 @@
+{
+  "loop": "margins-hybrid-ux-e2e",
+  "goal": "Improve one end-to-end Margins user job using research-informed Playwright/video evidence and a real LLM distillation run over stable capture fixtures.",
+  "when": {
+    "on": "manual | PR | scheduled",
+    "fires": "manual during UX work; on PRs touching desktop UI/distill surfaces; optionally nightly against long fixtures"
+  },
+  "pick_work": "Choose one user job and one fixture. Prefer jobs affected by the diff. Do not run broad rewrites or multiple unrelated UX fixes in one pass.",
+  "research": {
+    "sources": [
+      "desktop/UX_REVIEW.md",
+      "desktop/TAURI_MULTIPASS.md",
+      "desktop/UX_CDP_LOOP.md",
+      "desktop/test-harness/ux-loop/research-brief.md",
+      "Obsidian/Enzyme product notes",
+      "previous loop observations"
+    ],
+    "vault_context_pass": {
+      "when": "Run unless the task is a narrow mechanical bug, pure CSS regression, or harness failure where product context cannot change the fix.",
+      "queries": [
+        "User language around the job, artifact, workflow, and concern.",
+        "Adjacent product memories: prior UX reviews, naming decisions, user complaints, sample notes, or desired Margins feel.",
+        "Fixture/domain anchors from memo.md, aligned.md, and capture-context.md."
+      ],
+      "limit": "Keep 3-7 high-signal notes or catalysts. Record breadcrumbs, not note dumps.",
+      "output": [
+        "Source breadcrumbs with one sentence of relevance.",
+        "Terms the product should prefer or avoid.",
+        "Trust signals the UI or generated note should make visible.",
+        "One or more falsifiable claims derived from vault context."
+      ]
+    },
+    "output": "A short job-specific UX brief: mindset, path, expected information hierarchy, copy rules, clutter risks, latency expectations, and falsifiable claims."
+  },
+  "journey_plan": {
+    "input": "research brief + current app/source + available fixtures",
+    "output": "A dynamic Playwright journey: starting state, user actions, typed text, expected transitions, observation points, timing marks, and stop/escalation criteria."
+  },
+  "act": {
+    "browser": "Headless Chrome/Vite on VPS with mocked permissions and native shell behavior.",
+    "runtime_vault": {
+      "setup": "Create a run-scoped Obsidian-shaped vault and runtime JSON before opening the browser harness.",
+      "runtime_file": "desktop/test-harness/ux-loop/runtime/<run-id>.json",
+      "vault_dir": "desktop/ux-e2e-runs/<run-id>/runtime-vault/",
+      "contents": [
+        ".obsidian/",
+        ".margins/",
+        "inbox/ seeded related notes",
+        "people/ seeded people notes",
+        "fixture memo/aligned/capture context"
+      ],
+      "cleanup": "Remove the runtime JSON and runtime-vault directory after the Playwright run; keep evidence artifacts."
+    },
+    "playwright_video": {
+      "runner": "Use the Playwright CLI or test runner once wired, with video recording enabled for the full journey.",
+      "output_dir": "desktop/ux-e2e-runs/<run-id>/",
+      "artifacts": [
+        "journey.webm or the raw Playwright video",
+        "journey.mp4 when conversion is available",
+        "trace.zip",
+        "screenshots/",
+        "visible-text/",
+        "timing.json",
+        "runtime-vault-manifest.json",
+        "generated-note.md",
+        "distill-trace.json",
+        "judge-verdict.json"
+      ],
+      "requirements": [
+        "Record from journey start through completion or failure.",
+        "Keep the raw video even when MP4 conversion fails.",
+        "Use stable artifact names for judge/verifier threads.",
+        "Record the video conversion command in the run manifest."
+      ]
+    },
+    "llm": "Run real Pi/LLM distillation against fixture memo/transcript/capture context for selected E2E jobs.",
+    "artifacts": [
+      "video",
+      "mp4/webm journey recording",
+      "trace",
+      "screenshots",
+      "visible text snapshots",
+      "accessibility tree",
+      "console log",
+      "timing log",
+      "distill trace",
+      "generated note"
+    ]
+  },
+  "layers": {
+    "durable_spine": [
+      "Capture stable artifacts from a journey: screenshots, visible text, timing, generated note, trace, video, and manifest.",
+      "Run a judge pass that scores those artifacts against the job brief, expected-user-job.md, and falsifiable claims.",
+      "Emit judge-verdict.json with claim IDs, deterministic checks, evidence paths, note_source, and overall pass/risk/fail."
+    ],
+    "per_job_skin": [
+      "Fixture, runtime vault seed notes, journey intent, typed refinement, and falsifiable claims.",
+      "Allowed to churn with product direction; adding a job should not fork the durable judge."
+    ],
+    "runner_hooks": [
+      "Prefer role/state/test-id hooks over exact copy assertions so the judge can critique wording without breaking the runner.",
+      "Use literal copy only when the job explicitly makes that wording a requirement."
+    ]
+  },
+  "checks": [
+    {
+      "id": "runtime-clean",
+      "kind": "assertion",
+      "severity": "high",
+      "description": "No console/runtime errors during the journey."
+    },
+    {
+      "id": "quick-visible-feedback",
+      "kind": "assertion",
+      "severity": "high",
+      "threshold_ms": 1000,
+      "description": "The user receives visible feedback quickly after each major action."
+    },
+    {
+      "id": "first-note-token",
+      "kind": "assertion",
+      "severity": "high",
+      "threshold_ms": 8000,
+      "description": "First visible note text appears before the wait feels opaque."
+    },
+    {
+      "id": "copy-no-private-language",
+      "kind": "assertion",
+      "severity": "high",
+      "description": "Visible text and generated notes avoid implementation/private language such as synthesize, semantic search, raw tool names, channel labels, and absolute temp paths."
+    },
+    {
+      "id": "vault-context-visible",
+      "kind": "judgment",
+      "severity": "high",
+      "description": "UI or generated note makes the seeded vault/domain context visible without exposing developer plumbing."
+    },
+    {
+      "id": "note-primary-provenance-secondary",
+      "kind": "judgment",
+      "severity": "medium",
+      "description": "Provenance/how-generated details are inspectable but secondary to the note."
+    },
+    {
+      "id": "generated-note-job-fit",
+      "kind": "judgment",
+      "severity": "high",
+      "description": "The generated note satisfies expected-user-job.md for the selected fixture."
+    },
+    {
+      "id": "refinement-continues-same-note",
+      "kind": "judgment",
+      "severity": "medium",
+      "description": "Refinement continues the same note context and updates the visible artifact."
+    }
+  ],
+  "memory": {
+    "brief": "desktop/test-harness/ux-loop/research-brief.md",
+    "jobs": "desktop/test-harness/ux-loop/jobs/",
+    "fixtures": "desktop/test-harness/ux-loop/fixtures/",
+    "runs": "desktop/ux-e2e-runs/ (gitignored)"
+  },
+  "limits": {
+    "max_jobs_per_run": 1,
+    "max_patch_attempts": 2,
+    "max_llm_minutes": 12,
+    "max_total_minutes": 30
+  },
+  "hand_off": {
+    "when": [
+    "The issue is product/taste judgment without an artifact-backed judge finding.",
+    "Generated note quality is the bottleneck rather than the interface.",
+      "The LLM/provider is unavailable or too slow to judge the app fairly.",
+    "Two patch attempts do not improve the same falsifiable claim ID in judge-verdict.json."
+    ],
+    "to": "A concise UX review with video/timing evidence and the smallest proposed product decision."
+  },
+  "done": {
+    "success": "The rerun shows a concrete improvement for the selected user job and all artifacts are recorded.",
+    "give_up": "The loop reaches a human judgment boundary, provider failure, or patch budget without improvement."
+  }
+}

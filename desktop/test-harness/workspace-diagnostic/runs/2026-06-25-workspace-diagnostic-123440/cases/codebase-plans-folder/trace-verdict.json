@@ -1,0 +1,13 @@
+{
+  "case_id": "codebase-plans-folder",
+  "artifact": "evaluator-trace.md",
+  "active_skill_revision": "skill-revisions/v002-import-narrative-and-language.md",
+  "pass": true,
+  "checks": {
+    "names_v002": true,
+    "names_enzyme_context": true,
+    "names_enzyme_source": true,
+    "read_only_boundary_recorded": true
+  },
+  "failures": []
+}

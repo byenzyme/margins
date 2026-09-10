@@ -1,0 +1,10 @@
+{
+  "session_name": "readme-referential-line",
+  "event_title": "Workspace handoff review with Leah",
+  "people": ["Leah Morgan"],
+  "inbox_folder": "meetings",
+  "people_folder": "people",
+  "created_date_format": "[[%Y-%m-%d]]",
+  "note_filename_template": "{{date:%Y-%m-%d-%-H-%M-%S}} {{event_title}}",
+  "distill_instructions": "Write a concise connected note, not a generic recap. Preserve the memo-marked recognition, use only confirmed vault links, distinguish settled decisions from unresolved risks, and represent both speakers precisely."
+}

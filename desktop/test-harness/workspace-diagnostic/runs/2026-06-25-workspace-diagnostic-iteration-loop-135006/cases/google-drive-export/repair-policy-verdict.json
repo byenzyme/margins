@@ -1,0 +1,19 @@
+{
+  "case_id": "google-drive-export",
+  "active_revision": "skill-revisions/v000-baseline.md",
+  "pass": "repair-policy",
+  "passed": true,
+  "score": 3,
+  "evidence": [
+    "Four genuine tiers: 'No-op: start new captures without changing exported files' / 'Minimal reversible: keep old export under MyDrive-Shared as source material and create only new notes under notes/meeting-notes; optionally exclude cache/log/import artifacts' / 'Medium convention: ...materialize selected Drive history... while preserving originals' / 'Heavy migration: deduplicate Drive copies or convert the export tree only with preview, backup, and explicit approval.'",
+    "Explicit approval boundary: 'any move, rename, dedupe, import materialization, or cache-state rewrite requires explicit approval. New capture destination creation is additive.'",
+    "Raw-source preservation stated in two tiers ('preserving originals', 'keep old export... as source material').",
+    "All four manifest must_not_suggest items respected: dedupe gated to heavy tier; rename/move approval-gated; recreate people folders forbidden in do_not_do; full re-import only as optional next_action."
+  ],
+  "failures": [
+    "Template headers 'Do-Not-Touch List', 'Raw Source Preservation', and 'Recommended Path For This Product Surface' are not used as explicit sections; the content exists but is distributed across tiers and structured-diagnostic do_not_do."
+  ],
+  "failed_pass_area": null,
+  "patch_recommendation": "Minor: add the explicit Do-Not-Touch / Raw-Source-Preservation / Recommended-Path headers for checker legibility; no substantive change needed.",
+  "risk_notes": "Strongest stage. Does not jump to migration; every mutation gated; raw export preserved. No risk."
+}

@@ -1,0 +1,21 @@
+{
+  "case_id": "mixed-messy-power-vault",
+  "active_skill_revision": "skill-revisions/v002-import-narrative-and-language.md",
+  "pass": true,
+  "checks": {
+    "active_skill_revision_v002": true,
+    "evaluator_trace_names_v002": true,
+    "evaluator_trace_names_enzyme_context_and_source": true,
+    "preserves_you_can_start_now": true,
+    "preserves_non_mutation_boundary": true,
+    "import_heavy_specific_files": true,
+    "no_disallowed_raw_tokens_in_core_artifacts": true
+  },
+  "failures": [],
+  "import_heavy_expected_files": [
+    "exports/notes-from-drive.md",
+    "imports/legacy-capture-index.md"
+  ],
+  "disallowed_raw_token_set_checked": "specified four-token set from final verifier request",
+  "notes": "Current v002 rerun artifacts satisfy final verifier checks."
+}

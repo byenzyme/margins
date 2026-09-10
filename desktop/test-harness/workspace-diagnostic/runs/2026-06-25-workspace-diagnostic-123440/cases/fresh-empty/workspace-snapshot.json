@@ -1,0 +1,31 @@
+{
+  "case_id": "fresh-empty",
+  "title": "Fresh empty project folder",
+  "manifest_workspace_type": "empty-folder",
+  "manifest_simulated_total_files": 1,
+  "actual_file_count": 1,
+  "actual_directory_count": 0,
+  "extensions": {
+    "[none]": 1
+  },
+  "hidden_dirs": [],
+  "directory_tree": [
+    ".",
+    "  .gitkeep"
+  ],
+  "largest_files": [
+    {
+      "path": ".gitkeep",
+      "bytes": 1
+    }
+  ],
+  "likely_relevant_files": [],
+  "all_files": [
+    {
+      "path": ".gitkeep",
+      "bytes": 1,
+      "extension": "[none]"
+    }
+  ],
+  "mutation_guard": "snapshot only; fixture workspace not modified by this run"
+}

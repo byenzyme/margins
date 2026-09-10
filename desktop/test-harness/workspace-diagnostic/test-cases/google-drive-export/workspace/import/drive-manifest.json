@@ -1,0 +1,17 @@
+{
+  "source": "google-drive",
+  "export_id": "gdrive-2026-06-21-cc9",
+  "owner": "client-delivery@company.example",
+  "items": [
+    "MyDrive-Shared/Meetings/client-kickoff-2026-06-21.md",
+    "MyDrive-Shared/Meetings/client-kickoff-2026-06-21 copy.md",
+    "MyDrive-Shared/Projects/Atlas/zoom-transcript-client-call.txt",
+    "MyDrive-Shared/Projects/Atlas/roadmap-2026-06-20.md",
+    "MyDrive-Shared/Projects/Atlas/Untitled document.md"
+  ],
+  "errors": [
+    "duplicate_title: client-kickoff",
+    "empty_file: Untitled document.md"
+  ],
+  "exported_at": "2026-06-21T21:55:11-07:00"
+}

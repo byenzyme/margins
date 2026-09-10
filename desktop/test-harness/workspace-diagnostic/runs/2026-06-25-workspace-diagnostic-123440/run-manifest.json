@@ -1,0 +1,60 @@
+{
+  "run_id": "2026-06-25-workspace-diagnostic-123440",
+  "created_at": "2026-06-25T19:40:37.863768+00:00",
+  "artifact_root": "desktop/test-harness/workspace-diagnostic/runs/2026-06-25-workspace-diagnostic-123440",
+  "role": "Diagnostic Runner",
+  "ux_surface": "skill-only",
+  "case_count": 12,
+  "cases": [
+    "fresh-empty",
+    "sparse-random-notes",
+    "append-only-dated-log",
+    "frontmatter-obsidian",
+    "daily-notes-vault",
+    "codebase-plans-folder",
+    "rfc-decision-log",
+    "google-drive-export",
+    "zoom-transcript-dump",
+    "mixed-messy-power-vault",
+    "foreign-domain-vault",
+    "partial-enzyme-or-margins"
+  ],
+  "required_artifacts_per_case": [
+    "workspace-snapshot.json",
+    "enzyme-scan.json",
+    "exploratory-brief.md",
+    "agent-diagnostic.md",
+    "structured-diagnostic.json",
+    "adversarial-user-log.md",
+    "diff-against-expected.md"
+  ],
+  "enzyme_command": "enzyme scan --vault <fixture-workspace>; use a temporary copy when the workspace contains .enzyme or .margins",
+  "enzyme_version": "enzyme 0.5.15",
+  "enzyme_read_only_boundary": "use scan without --write-config; for workspaces with .enzyme or .margins, scan a temporary copy and record pre/post mutation guards",
+  "enzyme_evaluator_context": "desktop/test-harness/workspace-diagnostic/ENZYME_EVALUATOR_CONTEXT.md",
+  "original_enzyme_skill_source": "../enzyme-rust/plugin/agent/SKILL.md",
+  "original_enzyme_skill_source_read": true,
+  "active_skill_revision": "skill-revisions/v002-import-narrative-and-language.md",
+  "dedicated_workspace_diagnostic_skill_found": false,
+  "limitation": "best-candidate diagnostic generated from current Margins/desktop skill constraints and fixture evidence",
+  "summary": {
+    "completed_cases": [
+      "fresh-empty",
+      "sparse-random-notes",
+      "append-only-dated-log",
+      "frontmatter-obsidian",
+      "daily-notes-vault",
+      "codebase-plans-folder",
+      "rfc-decision-log",
+      "google-drive-export",
+      "zoom-transcript-dump",
+      "mixed-messy-power-vault",
+      "foreign-domain-vault",
+      "partial-enzyme-or-margins"
+    ],
+    "all_capture_can_start_now": true,
+    "all_existing_files_changed": false,
+    "evaluator_traces_written": true,
+    "diagnostics_changed_by_enzyme_evaluator": []
+  }
+}

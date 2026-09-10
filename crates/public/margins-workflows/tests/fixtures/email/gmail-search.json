@@ -1,0 +1,9 @@
+{
+  "threads": [
+    {"id": "t-client", "date": "2026-08-20 10:05", "from": "Alice Client <alice@acme.test>", "subject": "Pilot follow-up", "messageCount": 1},
+    {"id": "t-unrelated", "date": "2026-08-20 11:00", "from": "News Bot <newsletter@noise.test>", "subject": "Daily digest", "messageCount": 1},
+    {"id": "t-ambiguous", "date": "2026-08-21 09:15", "from": "Kevin <kevin.one@north.test>", "subject": "Introductions", "messageCount": 2},
+    {"id": "t-shared", "date": "2026-08-21 10:15", "from": "DK Kim <dk@matching.test>", "subject": "Complete Matching Survey", "messageCount": 2}
+  ],
+  "nextPageToken": ""
+}

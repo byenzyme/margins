@@ -1,0 +1,41 @@
+{
+  "case_id": "codebase-plans-folder",
+  "active_revision": "skill-revisions/v000-baseline.md",
+  "pass": "final-diagnostic",
+  "passed": true,
+  "passes": true,
+  "score": 2.88,
+  "overall_score": 2.88,
+  "scores": {
+    "workspace_classification": 3,
+    "safe_default": 3,
+    "non_mutation_boundary": 3,
+    "capture_not_blocked": 3,
+    "import_history_handling": 2,
+    "language_fit": 3,
+    "uncertainty_honesty": 3,
+    "evidence_grounding": 3
+  },
+  "evidence": [
+    "agent-diagnostic.md answers all required points; destination docs/meetings/, 'Existing files should stay unchanged', 'You can start now'.",
+    "structured-diagnostic.json confidence MEDIUM — appropriately calibrated for a workspace with no single meeting-note convention (good uncertainty honesty).",
+    "Correctly classifies codebase-with-docs and does NOT call it a vault or treat src/ as notes — passes the key codebase trap.",
+    "diff-against-expected.md aligns on docs/meetings destination and notes scan evidence alone was insufficient so representative file reads were required."
+  ],
+  "findings": [
+    "import_history_handling at 2: raw-meeting.txt and the docs/notes vs docs/plans split are handled, but the case-specific adversarial question 'Will this touch source files?' is not asked (fixed 4-question script). The answer is implied ('no existing files moved') but the source-code-specific reassurance is not delivered directly.",
+    "product-critic.md / adversarial-user-log.md generic and identical to other cases."
+  ],
+  "regressions": [],
+  "expected_diagnostic_issue": false,
+  "fixture_issue": false,
+  "skill_issue": true,
+  "app_ux_issue": false,
+  "failures": [
+    "Templated adversarial/critic artifacts; codebase-specific 'will this touch my code?' pushback not exercised."
+  ],
+  "failed_pass_area": "failure-taxonomy-and-evidence-rules; orchestration-trace (adversarial question selection)",
+  "patch_recommendation": "Skill Surgeon: require case-tailored adversarial questions ('Will this touch source files?') with a direct 'no, only new notes under docs/meetings; source and build files are never read-written by capture' answer.",
+  "recommended_next_agent": "skill_surgeon",
+  "risk_notes": "Passes comfortably; no safety-critical zero. Medium confidence is correctly calibrated, not a defect."
+}

@@ -1,0 +1,200 @@
+{
+  "case_id": "zoom-transcript-dump",
+  "title": "Unstructured Zoom transcript archive with partial summary notes",
+  "manifest_workspace_type": "zoom-transcript-dump",
+  "manifest_simulated_total_files": 21,
+  "actual_file_count": 9,
+  "actual_directory_count": 3,
+  "extensions": {
+    ".csv": 1,
+    ".json": 2,
+    ".md": 1,
+    ".txt": 4,
+    ".vtt": 1
+  },
+  "hidden_dirs": [],
+  "directory_tree": [
+    ".",
+    "  cache-state.json",
+    "  zoom-export-log.json",
+    "  import/",
+    "    zoom-manifest.csv",
+    "  notes/",
+    "    2026-06-17-product-review.md",
+    "  transcripts/",
+    "    06-20 product review (copy).txt",
+    "    06-20 product review.txt",
+    "    06-20-product-review.vtt",
+    "    2026-06-17_q2-planning.txt",
+    "    2026-06-22_customer_checkin.txt"
+  ],
+  "largest_files": [
+    {
+      "path": "zoom-export-log.json",
+      "bytes": 483
+    },
+    {
+      "path": "cache-state.json",
+      "bytes": 259
+    },
+    {
+      "path": "notes/2026-06-17-product-review.md",
+      "bytes": 214
+    },
+    {
+      "path": "import/zoom-manifest.csv",
+      "bytes": 189
+    },
+    {
+      "path": "transcripts/2026-06-22_customer_checkin.txt",
+      "bytes": 159
+    },
+    {
+      "path": "transcripts/2026-06-17_q2-planning.txt",
+      "bytes": 151
+    },
+    {
+      "path": "transcripts/06-20 product review.txt",
+      "bytes": 123
+    },
+    {
+      "path": "transcripts/06-20-product-review.vtt",
+      "bytes": 121
+    }
+  ],
+  "likely_relevant_files": [
+    {
+      "path": "notes/2026-06-17-product-review.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "# 2026-06-17 Product Review I tried to summarize from the transcript but it got messy. Keep manual notes next to the raw dumps for now. ## Items - ask Tom for a clean action list - ask Maya for updated estimates"
+    },
+    {
+      "path": "cache-state.json",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "{ \"last_index_run\": \"2026-06-24T04:15:10-07:00\", \"parser_version\": \"zoom-transcript-dump/0.9.1\", \"known_topics\": [\"q2-planning\", \"product-review\", \"customer-checkin\"], \"note_imported_count\": 1, \"transcript_imported_count\": 4, \"incomplete\": true }"
+    },
+    {
+      "path": "import/zoom-manifest.csv",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "filename,status,problem 2026-06-17_q2-planning.txt,ok,ok 06-20 product review.txt,missing speaker labels,ok 06-20-product-review.vtt,ok,ok 2026-06-22_customer_checkin.txt,partial,truncated"
+    },
+    {
+      "path": "zoom-export-log.json",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "{ \"source\": \"zoom\", \"downloaded_at\": \"2026-06-24T04:11:22Z\", \"status\": \"partial\", \"files\": [ \"transcripts/2026-06-17_q2-planning.txt\", \"transcripts/06-20 product review.txt\", \"transcripts/06-20 product review (copy).txt\", \"transcripts/06-20-product-review.vtt\""
+    },
+    {
+      "path": "transcripts/06-20 product review (copy).txt",
+      "score": 4,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "0:00 Dana: same meeting as above but renamed 00:01:12 Maya: duplicate because one export had speaker labels ..."
+    },
+    {
+      "path": "transcripts/06-20-product-review.vtt",
+      "score": 4,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "WEBVTT 1 00:00:00.000 --> 00:00:03.000 Dana: can we keep notes in one place 2 00:00:03.000 --> 00:00:07.000 Maya: yes."
+    },
+    {
+      "path": "transcripts/2026-06-17_q2-planning.txt",
+      "score": 3,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal"
+      ],
+      "snippet": "00:00 Dana: we need this by tuesday 00:47 Maya: who is owning Q2 risks? 00:48 ??: ... 00:55 Tom: maybe we should not over-optimise right now 02:12 END"
+    },
+    {
+      "path": "transcripts/2026-06-22_customer_checkin.txt",
+      "score": 3,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal"
+      ],
+      "snippet": "00:00:01 -> Dana: this file cut off mid sentence 00:00:20: Maya: ...the integration 00:01:30: ??? missing 00:02:10: Dana: stop here, we have connection issues"
+    },
+    {
+      "path": "transcripts/06-20 product review.txt",
+      "score": 2,
+      "signals": [
+        "name_meeting_or_import_signal"
+      ],
+      "snippet": "0:00 maya: i missed first few mins 02:10 Dana: let's just use action items in recap 04:00 @tom no network access maybe end"
+    }
+  ],
+  "all_files": [
+    {
+      "path": "cache-state.json",
+      "bytes": 259,
+      "extension": ".json"
+    },
+    {
+      "path": "import/zoom-manifest.csv",
+      "bytes": 189,
+      "extension": ".csv"
+    },
+    {
+      "path": "notes/2026-06-17-product-review.md",
+      "bytes": 214,
+      "extension": ".md"
+    },
+    {
+      "path": "transcripts/06-20 product review (copy).txt",
+      "bytes": 112,
+      "extension": ".txt"
+    },
+    {
+      "path": "transcripts/06-20 product review.txt",
+      "bytes": 123,
+      "extension": ".txt"
+    },
+    {
+      "path": "transcripts/06-20-product-review.vtt",
+      "bytes": 121,
+      "extension": ".vtt"
+    },
+    {
+      "path": "transcripts/2026-06-17_q2-planning.txt",
+      "bytes": 151,
+      "extension": ".txt"
+    },
+    {
+      "path": "transcripts/2026-06-22_customer_checkin.txt",
+      "bytes": 159,
+      "extension": ".txt"
+    },
+    {
+      "path": "zoom-export-log.json",
+      "bytes": 483,
+      "extension": ".json"
+    }
+  ],
+  "mutation_guard": "snapshot only; fixture workspace not modified by this run"
+}

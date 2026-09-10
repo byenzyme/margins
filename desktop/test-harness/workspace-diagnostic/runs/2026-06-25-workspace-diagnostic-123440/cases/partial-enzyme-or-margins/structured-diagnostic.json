@@ -1,0 +1,36 @@
+{
+  "case_id": "partial-enzyme-or-margins",
+  "active_skill_revision": "skill-revisions/v002-import-narrative-and-language.md",
+  "workspace_type": "partial-enzyme-or-margins",
+  "confidence": "medium",
+  "detected_patterns": [
+    "partial enzyme or margins",
+    "dates in filenames",
+    "dates in metadata",
+    "YAML metadata",
+    "inline notes",
+    "stale cache metadata",
+    "notes present",
+    "transcripts present",
+    "import state present"
+  ],
+  "safe_default": {
+    "folder": "notes/meeting-notes",
+    "filename": "YYYY-MM-DD meeting-title.md",
+    "reason": "least surprising next-note destination from fixture evidence; preserves existing files and separates import/cache/repair from first capture"
+  },
+  "competing_destinations": [],
+  "import_history": "I see prior Margins/Enzyme state and transcript leftovers such as notes/Captures/2026-06-08-customer-checkin.md, notes/legacy/2026-05-20-kickoff.md, notes/meeting-notes/2026-06-01 meeting sync.md, .margins/cache-state.json, .margins/import-state.json, .enzyme/cache-state.json. Cache rebuilding, import recovery, and repair should stay separate from choosing the next note destination.",
+  "do_not_do": [
+    "repair or rewrite existing tool state files",
+    "move notes into `.enzyme` or `.margins` directories",
+    "delete stale cache artifacts"
+  ],
+  "next_actions": [
+    "start_capture",
+    "choose_destination",
+    "build_private_search_cache_later",
+    "import_past_notes_later"
+  ],
+  "revision_notes": "v002 rerun: case-specific import/cache/export prose, outcome-language convention labels, active revision trace."
+}

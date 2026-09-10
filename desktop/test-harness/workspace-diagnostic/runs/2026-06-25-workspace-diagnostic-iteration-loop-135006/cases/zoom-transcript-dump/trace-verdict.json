@@ -1,0 +1,32 @@
+{
+  "case_id": "zoom-transcript-dump",
+  "active_revision": "skill-revisions/v000-baseline.md",
+  "active_skill_revision": "skill-revisions/v000-baseline.md",
+  "pass": "trace",
+  "passed": true,
+  "score": 2,
+  "enzyme_context_loaded": true,
+  "original_enzyme_skill_read_or_ported_context_used": true,
+  "read_only_boundary_proven": true,
+  "trace_complete": true,
+  "missing_trace_evidence": [
+    "enzyme --version value not captured",
+    "explicit pre/post mutation-guard diff/hash not recorded; boundary asserted plus de-facto clean (no .enzyme/.margins in fixture so no residue risk)"
+  ],
+  "trace_findings": [
+    "evaluator-trace.md and interaction-log.md both confirm reading LOOP_SPEC, ENZYME_EVALUATOR_CONTEXT.md, original ../enzyme-rust SKILL.md, and active v000-baseline.md.",
+    "Command hygiene clean: 'enzyme scan -p <workspace>' only; forbidden init/refresh/apply/petri/catalyze/--write-config not used.",
+    "Scan-derived insight (scan saw 1 MD, missed 5 transcripts + manifest + log + cache) actually drives the diagnosis, proving the Enzyme indexability lens was applied."
+  ],
+  "evidence": [
+    "interaction-log.md: 'Ran enzyme scan -p against fixture workspace and saved enzyme-scan.json.'",
+    "current_config in enzyme-scan.json read-only (config_found)."
+  ],
+  "failures": [
+    "Read-only boundary asserted, not demonstrated with recorded pre/post guard.",
+    "enzyme --version output not captured."
+  ],
+  "failed_pass_area": null,
+  "patch_recommendation": "Require captured enzyme --version and explicit pre/post listing as boundary proof.",
+  "risk_notes": "No mutation occurred; case validly covered. Evidentiary rigor gap only."
+}

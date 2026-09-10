@@ -1,0 +1,35 @@
+{
+  "case_id": "zoom-transcript-dump",
+  "active_skill_revision": "skill-revisions/v002-import-narrative-and-language.md",
+  "workspace_type": "zoom-transcript-dump",
+  "confidence": "medium",
+  "detected_patterns": [
+    "zoom transcript dump",
+    "transcript timestamps",
+    "dates in filenames",
+    "mixed date evidence",
+    "body labels",
+    "transcripts present",
+    "notes present",
+    "raw import artifacts present"
+  ],
+  "safe_default": {
+    "folder": "notes/meetings",
+    "filename": "YYYY-MM-DD topic.md",
+    "reason": "least surprising next-note destination from fixture evidence; preserves existing files and separates import/cache/repair from first capture"
+  },
+  "competing_destinations": [],
+  "import_history": "I see transcript/export material such as notes/2026-06-17-product-review.md, cache-state.json, import/zoom-manifest.csv, zoom-export-log.json, transcripts/06-20 product review (copy).txt, transcripts/06-20-product-review.vtt. Margins can use that history later, but transcripts do not need to be renamed or turned into finished notes before capture.",
+  "do_not_do": [
+    "import all transcripts as finished notes",
+    "rename old transcript files",
+    "move existing files before first capture"
+  ],
+  "next_actions": [
+    "start_capture",
+    "choose_destination",
+    "build_private_search_cache_later",
+    "import_past_notes_later"
+  ],
+  "revision_notes": "v002 rerun: case-specific import/cache/export prose, outcome-language convention labels, active revision trace."
+}

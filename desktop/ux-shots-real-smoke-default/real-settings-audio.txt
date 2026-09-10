@@ -1,0 +1,75 @@
++
+New in Margins
+PROJECTS
++
+Margins
+▾
+margins/
+meetings
+×
+Help Margins write with your memory
+Connect your notes so writeups can remember the right people, decisions, and follow-ups.
+Agent setup
+Recommended
+Quick setup
+No captures yet.
+Import audio
+Connect Granola
+For the things you notice but don't say.
+A tap, mid-conversation
+Enter marks the thought without breaking your attention.
+A cue while it's live
+Margins quietly surfaces the question you're not asking.
+A note that connects
+Afterward, your marks are woven into the transcript and the notes you already keep.
+
+Audio stays on this Mac. Nothing records until you say so.
+
+Start your first capture
+Just the transcript
+Settings
+SETUP
+1/2
+Note-making
+Audio
+PREFERENCES
+Notes
+Calendar
+Advanced
+Audio
+
+Microphone, computer audio, and local transcription
+
+✕
+AUDIO READINESS RECOMMENDED
+Let Margins hear the conversation
+
+Grant Microphone for your voice and Screen & System Audio Recording for computer audio. If permission changes, Margins can restart and return to this check automatically.
+
+Open Microphone
+Open System Audio
+MICROPHONE
+System Default
+Refresh
+Used for new captures. Computer audio is captured separately.
+Test microphone
+Speak normally during the check
+Test computer audio
+Plays a short test sound
+DEFAULT SPEAKER SEPARATION FOR IMPORTS
+Single voice
+2 speakers
+3 speakers
+4+ speakers
+Imports are transcribed as a single voice by default. Choose 2+ to separate speakers (diarization). 4+ allows up to 8 detected speakers.
+LOCAL TRANSCRIPTION RECOMMENDED
+Prepare local transcription
+
+Checks the FluidAudio CoreML assets used for live cues and transcription on this Mac.
+
+Check
+Clear
+Not checked yet.
+Advanced local transcription options
+Save
+Ready to save. Capture works now; connected note context can be added later.

@@ -1,0 +1,19 @@
+{
+  "case_id": "google-drive-export",
+  "active_revision": "skill-revisions/v000-baseline.md",
+  "pass": "product-translation",
+  "passed": true,
+  "score": 3,
+  "evidence": [
+    "Preserves the Margins promise: 'You can start now. Save the next capture in notes/meeting-notes/YYYY-MM-DD meeting-title.md.' Destination matches manifest expected_safe_default exactly.",
+    "Non-mutation explicit: 'Existing Drive export files stay untouched.'",
+    "Import/cache kept optional and separated: 'Old Drive notes and transcripts can be used later, but import cleanup is separate from starting capture' and 'choosing the folder, reading workspace shape, building a private search cache, and importing history are separate actions.'",
+    "Carries the real Enzyme failure modes without watering them down (import-state churn survives as 'import cleanup is separate'), and uses 'private search cache' as a clean outcome-language paraphrase rather than embedding/petri mechanism leak."
+  ],
+  "failures": [
+    "Does not block first capture (correct); no failures of substance."
+  ],
+  "failed_pass_area": null,
+  "patch_recommendation": "None. This is the model translation behavior the loop wants for an Margins onboarding surface.",
+  "risk_notes": "No banned mechanism-first user-facing language. Capture not blocked. Strong."
+}

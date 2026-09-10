@@ -1,0 +1,26 @@
+{
+  "case_id": "foreign-domain-vault",
+  "overall_score": 2,
+  "scores": {
+    "workspace_classification": 3,
+    "safe_default": 2,
+    "non_mutation_boundary": 3,
+    "capture_not_blocked": 3,
+    "import_history_handling": 3,
+    "language_fit": 2,
+    "uncertainty_honesty": 3,
+    "evidence_grounding": 3
+  },
+  "passes": true,
+  "findings": [
+    "Resists meeting-vault and people-taxonomy inference despite contacts/people.json and 'board-meeting' filename bait — the key foreign-domain win.",
+    "Correctly start-fresh with optional import of pasted snippets.",
+    "notes/meetings/ is adequate (matches expected) but less isolating than DESIGN's preferred clearly-namespaced foreign-domain destination."
+  ],
+  "regressions": [],
+  "expected_diagnostic_issue": false,
+  "fixture_issue": false,
+  "skill_issue": true,
+  "app_ux_issue": false,
+  "recommended_next_agent": "skill_surgeon"
+}

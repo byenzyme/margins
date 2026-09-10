@@ -1,0 +1,220 @@
+{
+  "case_id": "rfc-decision-log",
+  "title": "Repo with RFC drafts and decision logs",
+  "manifest_workspace_type": "codebase-with-docs",
+  "manifest_simulated_total_files": 41,
+  "actual_file_count": 12,
+  "actual_directory_count": 4,
+  "extensions": {
+    ".go": 1,
+    ".json": 1,
+    ".md": 7,
+    ".rs": 1,
+    ".txt": 2
+  },
+  "hidden_dirs": [],
+  "directory_tree": [
+    ".",
+    "  README.md",
+    "  package.json",
+    "  decisions/",
+    "    DEC-026-security-thread.md",
+    "  notes/",
+    "    2026-03-11-architecture-review.md",
+    "    meeting-sync-jan.md",
+    "    raw-thread.txt",
+    "  rfc/",
+    "    0001-api-contract.md",
+    "    0002-retry-policy.md",
+    "    ADR-0002-api-limits.md",
+    "    rfc-appendix.txt",
+    "  src/",
+    "    engine.rs",
+    "    retry.go"
+  ],
+  "largest_files": [
+    {
+      "path": "README.md",
+      "bytes": 470
+    },
+    {
+      "path": "rfc/0002-retry-policy.md",
+      "bytes": 382
+    },
+    {
+      "path": "decisions/DEC-026-security-thread.md",
+      "bytes": 350
+    },
+    {
+      "path": "rfc/0001-api-contract.md",
+      "bytes": 342
+    },
+    {
+      "path": "notes/meeting-sync-jan.md",
+      "bytes": 322
+    },
+    {
+      "path": "notes/raw-thread.txt",
+      "bytes": 264
+    },
+    {
+      "path": "rfc/ADR-0002-api-limits.md",
+      "bytes": 255
+    },
+    {
+      "path": "notes/2026-03-11-architecture-review.md",
+      "bytes": 237
+    }
+  ],
+  "likely_relevant_files": [
+    {
+      "path": "notes/2026-03-11-architecture-review.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "Date: 2026-03-11 Tags: [decision, architecture] # Architecture review Mina: \"Can this become a weekly note folder?\" Jules: \"Maybe, but no, we keep notes in PR comments too.\" ## Action - create a meeting note capture rule (not done)"
+    },
+    {
+      "path": "decisions/DEC-026-security-thread.md",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- id: DEC-026 title: Security thread for signal replay status: approved owner: SecurityTeam date: 2026-03-03 --- ## Resolution - Keep event replay bounded by tenant - Add audit trail to incident log ## Attendees - Kai - Priya - Mira ## References - [RFC-0001"
+    },
+    {
+      "path": "rfc/0001-api-contract.md",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- title: \"RFC 0001 - API contract versioning\" status: accepted owners: - Kai - Lena date: 2026-01-08 --- ## Proposal - Add version header `X-Api-Revision`. - Keep old clients on `v1` for one quarter. ## References - [ADR-0002-api-limits](./ADR-0002-api-limit"
+    },
+    {
+      "path": "rfc/0002-retry-policy.md",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- title: Retry policy status: review owners: - Kai - Jules reviewers: - Mina - Jules # missing closing frontmatter intentionally ## Context 2026-02: incidents increasing under load. * Kai (<kai@signals.io>) suggested exponential jitter ## ADR references - [A"
+    },
+    {
+      "path": "rfc/rfc-appendix.txt",
+      "score": 5,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "RFC 0002 discussion notes Date: 2026/02/26 Participants: Kai, Mina, Jules Decisions: - adopt jitter strategy - unresolved: default window size"
+    },
+    {
+      "path": "notes/meeting-sync-jan.md",
+      "score": 4,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "# meeting-sync-jan status: unresolved owner: Kai 2026 Jan 08 - RFC follow-up - Kai was here - unclear if this file should be in `/notes` or `/decisions` - owner: Kai, status: follow-up Related: - [DEC-026-security-thread](../decisions/DEC-026-security-thread.m"
+    },
+    {
+      "path": "notes/raw-thread.txt",
+      "score": 4,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "Kai <kai@signal> [10:01] can we keep one format for decisions? Mina <mina@signal> [10:02] maybe next quarter Priya <priya@signal> [10:03] I logged it in DEC-026 anyway Action-owner: Priya Status: pending Ref: [ADR-0002-api-limits](../rfc/ADR-0002-api-limits.md"
+    },
+    {
+      "path": "rfc/ADR-0002-api-limits.md",
+      "score": 4,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "# ADR-0002 API rate limits status: draft owner: Priya ## Context Our recent retry policy work references this ADR-style note for load shaping. ## Notes - retry ceilings - backoff jitter - owner updates and review status will be tracked in DEC records"
+    },
+    {
+      "path": "README.md",
+      "score": 2,
+      "signals": [
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "# Signal Service docs workspace This repo is about architecture decisions, RFC drafts, and occasional meeting fragments. Signals of process are mixed across folders: - `rfc/` for standards proposals (including one malformed frontmatter sample) - `decisions/` f"
+    }
+  ],
+  "all_files": [
+    {
+      "path": "README.md",
+      "bytes": 470,
+      "extension": ".md"
+    },
+    {
+      "path": "decisions/DEC-026-security-thread.md",
+      "bytes": 350,
+      "extension": ".md"
+    },
+    {
+      "path": "notes/2026-03-11-architecture-review.md",
+      "bytes": 237,
+      "extension": ".md"
+    },
+    {
+      "path": "notes/meeting-sync-jan.md",
+      "bytes": 322,
+      "extension": ".md"
+    },
+    {
+      "path": "notes/raw-thread.txt",
+      "bytes": 264,
+      "extension": ".txt"
+    },
+    {
+      "path": "package.json",
+      "bytes": 79,
+      "extension": ".json"
+    },
+    {
+      "path": "rfc/0001-api-contract.md",
+      "bytes": 342,
+      "extension": ".md"
+    },
+    {
+      "path": "rfc/0002-retry-policy.md",
+      "bytes": 382,
+      "extension": ".md"
+    },
+    {
+      "path": "rfc/ADR-0002-api-limits.md",
+      "bytes": 255,
+      "extension": ".md"
+    },
+    {
+      "path": "rfc/rfc-appendix.txt",
+      "bytes": 144,
+      "extension": ".txt"
+    },
+    {
+      "path": "src/engine.rs",
+      "bytes": 147,
+      "extension": ".rs"
+    },
+    {
+      "path": "src/retry.go",
+      "bytes": 111,
+      "extension": ".go"
+    }
+  ],
+  "mutation_guard": "snapshot only; fixture workspace not modified by this run"
+}

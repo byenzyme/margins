@@ -1,0 +1,45 @@
+{
+  "words": [
+    { "start_ms": 10, "end_ms": 25, "text": "hello" },
+    { "start_ms": 100, "end_ms": 150, "text": "yeah" },
+    { "start_ms": 160, "end_ms": 220, "text": "yeah," },
+    { "start_ms": 4000, "end_ms": 4100, "text": "world" }
+  ],
+  "channel": 1,
+  "offset_ms": 100,
+  "max_gap_ms": 500,
+  "expected_entries": [
+    {
+      "channel": 1,
+      "start_ms": 110,
+      "end_ms": 320,
+      "text": " hello yeah"
+    },
+    {
+      "channel": 1,
+      "start_ms": 4100,
+      "end_ms": 4200,
+      "text": " world"
+    }
+  ],
+  "expected_json": {
+    "transcripts": [
+      {
+        "words": [
+          {
+            "channel": 1,
+            "start_ms": 110,
+            "end_ms": 320,
+            "text": " hello yeah"
+          },
+          {
+            "channel": 1,
+            "start_ms": 4100,
+            "end_ms": 4200,
+            "text": " world"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,8 @@
+Kai <kai@signal> [10:01] can we keep one format for decisions?
+Mina <mina@signal> [10:02] maybe next quarter
+Priya <priya@signal> [10:03] I logged it in DEC-026 anyway
+
+Action-owner: Priya
+Status: pending
+Ref: [ADR-0002-api-limits](../rfc/ADR-0002-api-limits.md)
+

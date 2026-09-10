@@ -1,0 +1,44 @@
+{
+  "case_id": "append-only-dated-log",
+  "workspace_type": "personal-vault",
+  "confidence": "high",
+  "safe_default": {
+    "folder": "meeting-log",
+    "filename": "YYYY-MM-DD topic.md"
+  },
+  "detected_patterns": [
+    "Snapshot has 10 files: meeting-log with dated notes, duplicate, append-only note, transcript snippets, plus unrelated plans/sprint-notes.txt.",
+    "enzyme scan counted 6 Markdown files, all under folder:meeting-log; frontmatter appears in dated notes and append-only.md.",
+    "Raw txt snippets explicitly say meeting-log is still the meeting home and not to invent a new scheme.",
+    "Minor drift exists: duplicate 2026-06-14, malformed/incomplete frontmatter in 2026-06-17, legacy append-only.md."
+  ],
+  "do_not_do": [
+    "move existing files",
+    "rename old notes",
+    "rewrite tool state",
+    "block capture until cleanup"
+  ],
+  "next_actions": [
+    "start_capture",
+    "choose_destination",
+    "build_private_search_cache_optional",
+    "import_or_cleanup_optional"
+  ],
+  "retrieval_risks": [
+    {
+      "name": "No material setup failure",
+      "severity": "low",
+      "confidence": "high"
+    },
+    {
+      "name": "Duplicate/history drift",
+      "severity": "low",
+      "confidence": "medium"
+    },
+    {
+      "name": "Malformed metadata",
+      "severity": "low",
+      "confidence": "medium"
+    }
+  ]
+}

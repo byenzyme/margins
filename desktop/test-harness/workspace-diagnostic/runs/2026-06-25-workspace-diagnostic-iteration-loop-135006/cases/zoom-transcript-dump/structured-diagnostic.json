@@ -1,0 +1,46 @@
+{
+  "case_id": "zoom-transcript-dump",
+  "workspace_type": "zoom-transcript-dump",
+  "confidence": "high",
+  "detected_patterns": [
+    "Snapshot has 9 files: one manual note, five transcript files, zoom manifest, export log, and cache state.",
+    "enzyme scan counted only 1 Markdown file under folder:notes; transcript .txt/.vtt, CSV, and JSON state were absent from scan entities.",
+    "Evidence: zoom-export-log.json says status partial and lists missing speaker names plus truncated customer checkin.",
+    "import/zoom-manifest.csv shows mixed TXT/VTT/copy/partial formats."
+  ],
+  "safe_default": {
+    "folder": "notes/meetings",
+    "filename": "YYYY-MM-DD topic.md",
+    "reason": "smallest additive destination for future meeting notes without changing existing files"
+  },
+  "do_not_do": [
+    "move existing files",
+    "rename old notes",
+    "rewrite cache/import state",
+    "create people/project folders without evidence",
+    "block capture until import or cleanup"
+  ],
+  "next_actions": [
+    "start_capture",
+    "choose_destination",
+    "build_private_search_cache_optional",
+    "import_past_notes_optional"
+  ],
+  "retrieval_risks": [
+    {
+      "name": "Transcript pile invisible to setup scan",
+      "severity": "high",
+      "confidence": "high"
+    },
+    {
+      "name": "Raw speech is weak decision evidence",
+      "severity": "medium",
+      "confidence": "high"
+    },
+    {
+      "name": "Duplicate format collision",
+      "severity": "medium",
+      "confidence": "medium"
+    }
+  ]
+}

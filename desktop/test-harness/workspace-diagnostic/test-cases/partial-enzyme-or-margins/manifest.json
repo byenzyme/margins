@@ -1,0 +1,21 @@
+{
+  "id": "partial-enzyme-or-margins",
+  "title": "Partially migrated vault with leftover `.enzyme` and `.margins` state",
+  "workspace_type": "partial-enzyme-or-margins",
+  "scale": "medium",
+  "simulated_total_files": 32,
+  "date_conventions": ["filename", "frontmatter", "none"],
+  "metadata_conventions": ["yaml-frontmatter", "inline-notes", "stale-cache-metadata"],
+  "meeting_material": ["notes", "transcripts", "import-state"],
+  "entity_signals": ["wikilinks", "names-in-filenames", "stale-version-markers"],
+  "margins_fit": "needs-destination-choice",
+  "expected_safe_default": {
+    "folder": "notes/meeting-notes",
+    "filename": "YYYY-MM-DD meeting-title.md"
+  },
+  "must_not_suggest": [
+    "repair or rewrite existing tool state files",
+    "move notes into `.enzyme` or `.margins` directories",
+    "delete stale cache artifacts"
+  ]
+}

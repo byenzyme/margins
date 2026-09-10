@@ -1,0 +1,242 @@
+{
+  "case_id": "daily-notes-vault",
+  "title": "Daily-notes vault with ad-hoc meeting drops",
+  "manifest_workspace_type": "obsidian-vault",
+  "manifest_simulated_total_files": 33,
+  "actual_file_count": 11,
+  "actual_directory_count": 7,
+  "extensions": {
+    ".json": 1,
+    ".md": 9,
+    ".txt": 1
+  },
+  "hidden_dirs": [
+    ".obsidian"
+  ],
+  "directory_tree": [
+    ".",
+    "  .obsidian/",
+    "    daily-notes.json",
+    "  Daily/",
+    "    2026-06-09.md",
+    "    2026-06-10.md",
+    "    2026-06-13.md",
+    "    2026-06-14.md",
+    "    Daily Note - 6-11-2026.md",
+    "  People/",
+    "    Jordan.md",
+    "  Projects/",
+    "    Atlas/",
+    "      project-log-2026-06-12.md",
+    "  Templates/",
+    "    Daily Template.md",
+    "  meetings/",
+    "    2026-06-11 product sync.md",
+    "    notes-raw.txt"
+  ],
+  "largest_files": [
+    {
+      "path": "Daily/2026-06-14.md",
+      "bytes": 447
+    },
+    {
+      "path": "Daily/Daily Note - 6-11-2026.md",
+      "bytes": 210
+    },
+    {
+      "path": "Daily/2026-06-10.md",
+      "bytes": 206
+    },
+    {
+      "path": "meetings/2026-06-11 product sync.md",
+      "bytes": 186
+    },
+    {
+      "path": "Daily/2026-06-13.md",
+      "bytes": 165
+    },
+    {
+      "path": "People/Jordan.md",
+      "bytes": 150
+    },
+    {
+      "path": "Daily/2026-06-09.md",
+      "bytes": 140
+    },
+    {
+      "path": "Projects/Atlas/project-log-2026-06-12.md",
+      "bytes": 137
+    }
+  ],
+  "likely_relevant_files": [
+    {
+      "path": "Daily/2026-06-09.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "2026-06-09 ### Notes - shipped notes sync - got pulled into client kickoff call ### Questions - what counts as meeting note vs task note?"
+    },
+    {
+      "path": "Daily/2026-06-10.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- title: \"2026-06-10\" date: 2026-06-10 tags: [worklog] --- # Daily Note Mina: joined design review 11:00 Riley: follow-up with legal pending ## Meetings - Product sync at 2pm (notes not yet captured)"
+    },
+    {
+      "path": "Daily/2026-06-13.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- title: 2026-06-13 tags: [daily No timestamp but has a lot of action items from yesterday. - draft pitch notes - maybe convert into project-level capture later"
+    },
+    {
+      "path": "Daily/2026-06-14.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "--- title: 2026-06-14 date: 2026/06/14 --- 2026-06-14 ## Meeting notes (embedded) Mina, [[People/Jordan]], and the Atlas team met at 3:00pm with support. ### attendees - Mina (minute taker) - [[People/Jordan]] - [[Projects/Atlas/project-log-2026-06-12]] ## Not"
+    },
+    {
+      "path": "Daily/Daily Note - 6-11-2026.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "date: 6/11/26 people: Mina, jordan, legal-team ## What happened - caught up with support and support - maybe should have used Daily/2026-06-11.md like everyone else ### Tasks - send summary to `client-calls`"
+    },
+    {
+      "path": "meetings/2026-06-11 product sync.md",
+      "score": 6,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "name_date_signal",
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "Product Sync Date: 2026/06/11 Attendees: \"Mina\", \"Riley\", \"jordan@company\" ### Summary Decided to keep calls lightweight; notes can stay in daily for now. No explicit folder strategy."
+    },
+    {
+      "path": ".obsidian/daily-notes.json",
+      "score": 4,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "{ \"folder\": \"Daily\", \"template\": \"Templates/Daily Template.md\", \"dateFormat\": \"YYYY-MM-DD\" }"
+    },
+    {
+      "path": "Templates/Daily Template.md",
+      "score": 4,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "--- date: {{date}} --- # Daily Journal ## Top priorities ## Meetings ## Snags"
+    },
+    {
+      "path": "meetings/notes-raw.txt",
+      "score": 4,
+      "signals": [
+        "name_meeting_or_import_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "Transcript draft attached: Mina: please add an action item section Jordan: we should include next steps at top ... audio ended at 38:12"
+    },
+    {
+      "path": "People/Jordan.md",
+      "score": 3,
+      "signals": [
+        "body_meeting_or_import_signal",
+        "body_date_signal"
+      ],
+      "snippet": "name: Jordan ## Notes - Meeting regular: tracks call actions mainly in Daily notes. - frequently appears as attendee in `2026-06-11 product sync`."
+    },
+    {
+      "path": "Projects/Atlas/project-log-2026-06-12.md",
+      "score": 3,
+      "signals": [
+        "name_date_signal",
+        "body_meeting_or_import_signal"
+      ],
+      "snippet": "Project Atlas notes: - status: active - meeting notes usually under Daily files instead of per-project folders ## people - Mina - Riley"
+    }
+  ],
+  "all_files": [
+    {
+      "path": ".obsidian/daily-notes.json",
+      "bytes": 99,
+      "extension": ".json"
+    },
+    {
+      "path": "Daily/2026-06-09.md",
+      "bytes": 140,
+      "extension": ".md"
+    },
+    {
+      "path": "Daily/2026-06-10.md",
+      "bytes": 206,
+      "extension": ".md"
+    },
+    {
+      "path": "Daily/2026-06-13.md",
+      "bytes": 165,
+      "extension": ".md"
+    },
+    {
+      "path": "Daily/2026-06-14.md",
+      "bytes": 447,
+      "extension": ".md"
+    },
+    {
+      "path": "Daily/Daily Note - 6-11-2026.md",
+      "bytes": 210,
+      "extension": ".md"
+    },
+    {
+      "path": "People/Jordan.md",
+      "bytes": 150,
+      "extension": ".md"
+    },
+    {
+      "path": "Projects/Atlas/project-log-2026-06-12.md",
+      "bytes": 137,
+      "extension": ".md"
+    },
+    {
+      "path": "Templates/Daily Template.md",
+      "bytes": 83,
+      "extension": ".md"
+    },
+    {
+      "path": "meetings/2026-06-11 product sync.md",
+      "bytes": 186,
+      "extension": ".md"
+    },
+    {
+      "path": "meetings/notes-raw.txt",
+      "bytes": 136,
+      "extension": ".txt"
+    }
+  ],
+  "mutation_guard": "snapshot only; fixture workspace not modified by this run"
+}

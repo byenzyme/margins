@@ -1,0 +1,41 @@
+{
+  "case_id": "rfc-decision-log",
+  "active_skill_revision": "skill-revisions/v002-import-narrative-and-language.md",
+  "workspace_type": "codebase-with-docs",
+  "confidence": "medium",
+  "detected_patterns": [
+    "codebase with docs",
+    "dates in metadata",
+    "dates in filenames",
+    "dates in note bodies",
+    "YAML metadata",
+    "status owner blocks",
+    "inline tags",
+    "inconsistent metadata",
+    "summaries present",
+    "notes present",
+    "transcripts present"
+  ],
+  "safe_default": {
+    "folder": "docs/meeting-notes",
+    "filename": "YYYY-MM-DD meeting-title.md",
+    "reason": "least surprising next-note destination from fixture evidence; preserves existing files and separates import/cache/repair from first capture"
+  },
+  "competing_destinations": [
+    "The RFC/decision folders are useful context, but new meeting notes should stay separate from formal decisions."
+  ],
+  "import_history": "I see existing notes or history signals such as notes/2026-03-11-architecture-review.md, decisions/DEC-026-security-thread.md, rfc/0001-api-contract.md, rfc/0002-retry-policy.md, rfc/rfc-appendix.txt, notes/meeting-sync-jan.md. They are useful context later, not setup work required now.",
+  "do_not_do": [
+    "move existing files",
+    "rename RFC names",
+    "create people folders without evidence",
+    "merge decision log and meeting notes automatically"
+  ],
+  "next_actions": [
+    "start_capture",
+    "choose_destination",
+    "build_private_search_cache_later",
+    "import_past_notes_later"
+  ],
+  "revision_notes": "v002 rerun: case-specific import/cache/export prose, outcome-language convention labels, active revision trace."
+}

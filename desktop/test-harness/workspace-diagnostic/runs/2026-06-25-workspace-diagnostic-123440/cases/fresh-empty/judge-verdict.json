@@ -1,0 +1,26 @@
+{
+  "case_id": "fresh-empty",
+  "overall_score": 3,
+  "scores": {
+    "workspace_classification": 3,
+    "safe_default": 3,
+    "non_mutation_boundary": 3,
+    "capture_not_blocked": 3,
+    "import_history_handling": 3,
+    "language_fit": 3,
+    "uncertainty_honesty": 3,
+    "evidence_grounding": 3
+  },
+  "passes": true,
+  "findings": [
+    "Correctly classifies empty-folder and refuses to invent structure (evidence: 'None observed').",
+    "Safe default meeting-notes/ matches expected and DESIGN start-fresh stance.",
+    "Non-mutation and capture-now both explicit; adversarial log confirms no folder pre-creation required."
+  ],
+  "regressions": [],
+  "expected_diagnostic_issue": false,
+  "fixture_issue": false,
+  "skill_issue": false,
+  "app_ux_issue": false,
+  "recommended_next_agent": "memory_synthesis"
+}

@@ -1,0 +1,17 @@
+{
+  "case_id": "zoom-transcript-dump",
+  "active_revision": "skill-revisions/v000-baseline.md",
+  "pass": "product-translation",
+  "passed": true,
+  "score": 3,
+  "evidence": [
+    "Preserves Margins promise and matches expected tone: 'You can start now and capture new meetings without restructuring this dump.'",
+    "Explicit destination 'Use notes/meetings/YYYY-MM-DD topic.md for new notes' matches manifest expected_safe_default.",
+    "Keeps the transcript-vs-notes failure mode alive without watering it down: 'Do not convert all transcripts into finished notes on first run' and 'importing transcript history is a later explicit action.'",
+    "Separates actions: 'choosing the folder, reading workspace shape, building a private search cache, and importing history are separate actions.'"
+  ],
+  "failures": [],
+  "failed_pass_area": null,
+  "patch_recommendation": "None.",
+  "risk_notes": "Capture not blocked; no mechanism-first language; real failure mode carried into product copy. Strong."
+}

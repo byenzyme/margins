@@ -1,0 +1,39 @@
+{
+  "case_id": "codebase-plans-folder",
+  "run_id": "2026-06-25-workspace-diagnostic-iteration-loop-135006",
+  "active_revision": "skill-revisions/v001-case-level-enzyme-probes.md",
+  "verdict": "pass",
+  "process_failure_fixed": true,
+  "scope": "v001 regression verification of case-level Enzyme Skill Diagnostic Probe only",
+  "criteria": {
+    "upstream_skill_loaded_as_operating_instructions": true,
+    "loop_context_and_active_revision_loaded": true,
+    "read_only_scan_run_or_reviewed": true,
+    "representative_files_read": true,
+    "hypotheses_falsifiers_recorded": true,
+    "handoff_claims_recorded": true,
+    "old_v000_artifacts_marked_provisional": true
+  },
+  "evidence": [
+    "Probe loaded upstream skill, loop context, loop spec, and active v001 revision.",
+    "Probe records enzyme 0.5.15, relative and absolute scan commands, hidden/generated-folder checks, and pre/post file checksum.",
+    "Probe reads representative docs, notes, raw meeting text, package metadata, and source code to separate codebase substrate from meeting-memory evidence.",
+    "Probe records hypotheses, confirmations/falsifiers, detailed handoff claims, non-failure, and do-not-touch boundaries.",
+    "Probe marks prior baseline artifacts provisional unless accepted as supplemental trace."
+  ],
+  "remaining_risks": [
+    "Downstream pass artifacts remain v000-era unless separately revalidated or regenerated against this probe.",
+    "The scan undercovered workspace Markdown; this is correctly diagnosed but remains a product/evaluator risk if future runs rely on scan alone."
+  ],
+  "validation_commands_reviewed": [
+    "enzyme --version",
+    "find desktop/test-harness/workspace-diagnostic/test-cases/codebase-plans-folder/workspace -name .enzyme -o -name .margins -o -name .obsidian -o -name .git -o -name node_modules -o -name target -o -name dist -o -name build",
+    "find desktop/test-harness/workspace-diagnostic/test-cases/codebase-plans-folder/workspace -type f | sort | shasum -a 256",
+    "enzyme scan -p desktop/test-harness/workspace-diagnostic/test-cases/codebase-plans-folder/workspace",
+    "enzyme scan -p /Users/example/Hacks/margins/desktop/test-harness/workspace-diagnostic/test-cases/codebase-plans-folder/workspace"
+  ],
+  "unverified_cases": [
+    "append-only-dated-log",
+    "partial-enzyme-or-margins"
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "case_id": "google-drive-export",
+  "active_revision": "skill-revisions/v000-baseline.md",
+  "pass": "substrate",
+  "passed": true,
+  "score": 2,
+  "evidence": [
+    "substrate-map.md ties scan to workspace reality: 'enzyme scan counted 5 Markdown files... it did not index JSON/log/txt import evidence' and 'Treat scan output as bounded evidence, not the full workspace.' This is the load-bearing insight and it is correct (enzyme-scan.json files=5).",
+    "Source-boundary classification present: 'Preserve raw/import material as source boundary; do not treat it as finished meeting notes.'",
+    "Generated/noise material correctly named: cites google-drive-export.log, import/drive-manifest.json (duplicate_title: client-kickoff, empty_file: Untitled document.md), and partial cache-state.json parse errors. All verified against fixture.",
+    "workspace-snapshot.json file_count=10 matches the substrate map's '10 files' claim; mutation-guard baseline (mtime/size) recorded per file."
+  ],
+  "failures": [
+    "substrate-map.md does not follow the required 8-section template (Corpus Shape / Source Boundaries / Already Indexable Signal / Weak Or Missing Retrieval Handles / Noise-Generated-Runtime / Existing Conventions To Preserve / Import-Raw Material / Evidence Gaps). It is a 4-bullet 'Substrate Pass' plus 'Evidence implications'.",
+    "No explicit 'Existing Conventions To Preserve' or 'Weak/Missing Retrieval Handles' section; missing-handles are only implied.",
+    "Inherits a manifest framing imprecision: repeats 'empty_file: Untitled document.md' but the fixture file is not empty (contains partial-conversion HTML). Never reconciles file-vs-manifest."
+  ],
+  "failed_pass_area": null,
+  "patch_recommendation": "Patch substrate-mapping instructions to require the explicit 8-section template, including an affirmative 'Existing Conventions To Preserve' section and a 'Weak/Missing Retrieval Handles' section, and to reconcile manifest claims against actual file content rather than trusting the manifest.",
+  "risk_notes": "Map passes on substance (goes beyond file counts; classifies source/noise/import boundaries) but is structurally thin and template-noncompliant. No safety risk. Recurring across cases."
+}

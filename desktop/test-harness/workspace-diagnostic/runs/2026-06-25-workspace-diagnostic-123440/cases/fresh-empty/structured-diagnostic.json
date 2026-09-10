@@ -1,0 +1,29 @@
+{
+  "case_id": "fresh-empty",
+  "active_skill_revision": "skill-revisions/v002-import-narrative-and-language.md",
+  "workspace_type": "empty-folder",
+  "confidence": "high",
+  "detected_patterns": [
+    "empty folder"
+  ],
+  "safe_default": {
+    "folder": "meeting-notes",
+    "filename": "YYYY-MM-DD meeting-title.md",
+    "reason": "least surprising next-note destination from fixture evidence; preserves existing files and separates import/cache/repair from first capture"
+  },
+  "competing_destinations": [],
+  "import_history": "There is no history to import before the first capture.",
+  "do_not_do": [
+    "move existing files",
+    "rename legacy files",
+    "ask for vault cleanup before capture",
+    "invent naming style from nothing"
+  ],
+  "next_actions": [
+    "start_capture",
+    "choose_destination",
+    "build_private_search_cache_later",
+    "import_past_notes_later"
+  ],
+  "revision_notes": "v002 rerun: case-specific import/cache/export prose, outcome-language convention labels, active revision trace."
+}

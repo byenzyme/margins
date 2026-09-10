@@ -1,0 +1,21 @@
+{
+  "case_id": "codebase-plans-folder",
+  "active_revision": "skill-revisions/v000-baseline.md",
+  "pass": "failure-model",
+  "passed": true,
+  "score": 2,
+  "evidence": [
+    "Three modes fit the codebase case: 'Codebase corpus dominance' (medium/high) — 'Source/package files and planning docs can make Margins look like it should diagnose a repo instead of choosing a meeting-note destination.' This is exactly the codebase-vs-vault trap.",
+    "'Meeting convention split' (medium/high) — 'Meeting-like content appears in docs/plans, docs/notes, README transcript, and raw-meeting.txt.' Matches the duplicated meeting-2026-04-01.md across docs/plans and docs/notes.",
+    "'Scan undercoverage' (medium/medium) — 'using scan alone would miss docs/plans and docs/notes evidence.' Honest about its own tool limit; good falsifier.",
+    "Falsifiers present and non-moralizing 'Do not infer' guards on each."
+  ],
+  "failures": [
+    "No '## Non-Failures' / '## Ambiguities' sections; e.g. the existing docs/ structure and dated meeting-2026-04-01.md are reasonable signals that should be named as non-failures.",
+    "Templated identical 'Retrieval impact' line on all three modes.",
+    "Malformed-frontmatter (manifest lists 'malformed-frontmatter' convention; incident-playbook.md has a YAML code block) is not named as a distinct retrieval mode."
+  ],
+  "failed_pass_area": "failure-taxonomy-and-evidence-rules",
+  "patch_recommendation": "Mandate Non-Failures/Ambiguities and per-mode retrieval impact; add malformed-frontmatter coverage when fixture flags it.",
+  "risk_notes": "Gate passes; modes are correct and codebase-specific. Same recurring templating gap."
+}

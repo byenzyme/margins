@@ -1,0 +1,369 @@
+/* Margo lives inside the existing transparent capture-circle window. Only the
+   actual mark, more button, grip, and expanded panel are native-interactive. */
+
+:root {
+  color-scheme: light dark;
+  --mark: 56px;
+  --look-x: 0px;
+  --look-y: 0px;
+  --ring: #8a8f98;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  font: 13px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+#circle-root {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.grip {
+  -webkit-app-region: no-drag;
+  position: relative;
+  width: 46px;
+  height: 16px;
+  margin: 2px 0 2px;
+  background: transparent;
+  cursor: grab;
+  flex: 0 0 auto;
+}
+
+.grip::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 6px;
+  width: 28px;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(82, 76, 68, 0.46);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+#circle-root.dragging .grip,
+.grip:active {
+  cursor: grabbing;
+}
+
+.mark-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+/* Growing the transparent window must not move the primary circular target. */
+#circle-root.expanded .mark-row {
+  align-self: flex-start;
+  margin-left: 12px;
+}
+
+#circle-root.expanded .grip {
+  align-self: flex-start;
+  margin-left: 33px;
+}
+
+.mark {
+  -webkit-app-region: no-drag;
+  appearance: none;
+  position: relative;
+  width: var(--mark);
+  height: var(--mark);
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: #f5ecde;
+  box-shadow: 0 5px 15px rgba(45, 38, 29, 0.3);
+  cursor: pointer;
+  isolation: isolate;
+}
+
+.mark-viewport {
+  position: absolute;
+  inset: 0;
+  display: block;
+  overflow: hidden;
+  border-radius: 50%;
+}
+
+.margo-art {
+  position: absolute;
+  width: 132%;
+  height: 132%;
+  left: -16%;
+  top: -16%;
+  transform-origin: 53% 58%;
+  transition: transform 210ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  will-change: transform;
+}
+
+.mark:hover .margo-art {
+  transform: translateY(-0.5px) rotate(1.15deg) scale(1.01);
+}
+
+.mark:active .margo-art {
+  transform: translateY(0.35px) scale(0.97);
+  transition-duration: 90ms;
+}
+
+.margo-paper,
+.margo-face {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.margo-paper {
+  object-fit: contain;
+}
+
+.margo-face[hidden] {
+  display: none;
+}
+
+.eyes {
+  transform: translate(var(--look-x), var(--look-y));
+  transition: transform 120ms ease-out;
+}
+
+.eye-unit {
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.mark:hover .eye-unit {
+  transform: translateY(-0.65px) scaleX(1.006);
+}
+
+.eye {
+  fill: #2b2a28;
+}
+
+.eye-fleck {
+  fill: #f1e7d7;
+  opacity: 0.46;
+}
+
+.lower-lid {
+  --lid-rest: 0px;
+  --lid-response: 0px;
+  transform-box: view-box;
+  transform-origin: center;
+  transform: translateY(calc(var(--lid-rest) + var(--lid-response)));
+  transition: transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.mark:hover .lower-lid {
+  --lid-response: -2px;
+}
+
+#circle-root[data-phase="paused"] .lower-lid {
+  --lid-rest: -5px;
+}
+
+.lower-lid-cover {
+  fill: #f3e9da;
+  fill-opacity: 0.99;
+}
+
+.lower-lid-rim {
+  fill: none;
+  stroke: #6e6459;
+  stroke-linecap: round;
+  stroke-width: 3;
+  opacity: 0.1;
+}
+
+.eyes.blinking .lower-lid {
+  animation: lower-lid-blink 200ms ease-in-out both;
+}
+
+@keyframes lower-lid-blink {
+  0%, 14%, 86%, 100% {
+    transform: translateY(calc(var(--lid-rest) + var(--lid-response)));
+  }
+  46%, 56% {
+    transform: translateY(calc(var(--lid-rest) + var(--lid-response) - 42px));
+  }
+}
+
+.mouth {
+  fill: none;
+  stroke: #282827;
+  stroke-linecap: round;
+  stroke-width: 17;
+  transition: opacity 130ms ease;
+}
+
+.mouth-soft {
+  opacity: 0;
+}
+
+#circle-root.pointer-near .mouth-neutral,
+.mark:hover .mouth-neutral {
+  opacity: 0;
+}
+
+#circle-root.pointer-near .mouth-soft,
+.mark:hover .mouth-soft {
+  opacity: 1;
+}
+
+.mark::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  z-index: 4;
+  border: 2px solid var(--ring);
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+#circle-root[data-phase="starting"] {
+  --ring: #8a8f98;
+}
+
+#circle-root[data-phase="recording"] {
+  --ring: #2f9e5b;
+}
+
+#circle-root[data-phase="paused"] {
+  --ring: #c9922e;
+}
+
+#circle-root[data-phase="finalizing"] {
+  --ring: #4b7bec;
+}
+
+#circle-root[data-phase="needs_attention"] {
+  --ring: #d9534f;
+}
+
+#circle-root[data-phase="recording"] .mark::after {
+  animation: phase-ring-pulse 2.8s ease-in-out infinite;
+}
+
+@keyframes phase-ring-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(47, 158, 91, 0); }
+  50% { box-shadow: 0 0 0 3px rgba(47, 158, 91, 0.12); }
+}
+
+.mark:focus-visible,
+.more:focus-visible,
+.controls button:focus-visible {
+  outline: 3px solid #ffffff;
+  outline-offset: 2px;
+}
+
+.more {
+  -webkit-app-region: no-drag;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+  background: rgba(28, 30, 34, 0.86);
+  color: #f4f5f7;
+  font-size: 15px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.controls {
+  -webkit-app-region: no-drag;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 6px;
+  width: 150px;
+  border-radius: 12px;
+  background: rgba(28, 30, 34, 0.96);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.28);
+  box-sizing: border-box;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(-5px) scale(0.985);
+  transform-origin: top center;
+  transition:
+    opacity 140ms ease,
+    transform 160ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    visibility 0s linear 160ms;
+}
+
+#circle-root.controls-open .controls {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateY(0) scale(1);
+  transition-delay: 0s;
+}
+
+.controls button {
+  -webkit-app-region: no-drag;
+  appearance: none;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+  color: #f4f5f7;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.controls button:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .eyes,
+  .eye-unit,
+  .lower-lid,
+  .mouth,
+  .margo-art,
+  .controls {
+    transition: none !important;
+  }
+
+  .mark:hover .margo-art,
+  .mark:active .margo-art {
+    transform: none;
+  }
+
+  .eyes.blinking .lower-lid,
+  #circle-root[data-phase="recording"] .mark::after {
+    animation: none !important;
+  }
+}

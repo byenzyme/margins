@@ -1,0 +1,26 @@
+{
+  "case_id": "sparse-random-notes",
+  "overall_score": 2,
+  "scores": {
+    "workspace_classification": 3,
+    "safe_default": 3,
+    "non_mutation_boundary": 3,
+    "capture_not_blocked": 3,
+    "import_history_handling": 2,
+    "language_fit": 2,
+    "uncertainty_honesty": 3,
+    "evidence_grounding": 3
+  },
+  "passes": true,
+  "findings": [
+    "Resists people/client folders despite Acme/Orbit signals; do-not-do list is case-specific and correct.",
+    "Uncertainty section restates manifest convention tags ('inline-tags, body-labels') rather than plain-language signal vs. weak-signal reasoning.",
+    "Import handling is the shared generic boilerplate; does not specifically reassure about the plain-text transcript."
+  ],
+  "regressions": [],
+  "expected_diagnostic_issue": false,
+  "fixture_issue": false,
+  "skill_issue": true,
+  "app_ux_issue": false,
+  "recommended_next_agent": "skill_surgeon"
+}
