@@ -92,6 +92,29 @@ pub struct SessionArtifactPathUpdate {
     pub new_path: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NoteAssociation {
+    pub session_name: String,
+    pub source_id: String,
+    pub relative_path: String,
+    pub observed_content_hash: Option<String>,
+    pub revision: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ProcessingJob {
+    pub job_id: String,
+    pub session_name: String,
+    pub operation: String,
+    pub input_revision: String,
+    pub attempt: u64,
+    pub status: String,
+    pub progress: Option<f64>,
+    pub result_ref: Option<String>,
+    pub failure: Option<String>,
+    pub failed_stage: Option<String>,
+}
+
 pub fn database_path(dir: &Path) -> PathBuf {
     dir.join("sessions.sqlite")
 }
@@ -104,6 +127,7 @@ pub(crate) fn open_db(dir: &Path) -> Result<Connection> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     init_schema(&conn)?;
     migrate_json_metadata_if_needed(&mut conn, dir)?;
+    migrate_application_records_if_needed(&mut conn, dir)?;
     Ok(conn)
 }
 
@@ -192,6 +216,34 @@ fn init_schema(conn: &Connection) -> Result<()> {
             deleted_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS session_note_associations (
+            session_name TEXT PRIMARY KEY NOT NULL,
+            source_id TEXT NOT NULL,
+            relative_path TEXT NOT NULL,
+            observed_content_hash TEXT,
+            revision INTEGER NOT NULL,
+            linked_at TEXT NOT NULL,
+            FOREIGN KEY (session_name) REFERENCES sessions(name) ON DELETE CASCADE,
+            UNIQUE (source_id, relative_path)
+        );
+
+        CREATE TABLE IF NOT EXISTS session_processing_jobs (
+            job_id TEXT PRIMARY KEY NOT NULL,
+            session_name TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            input_revision TEXT NOT NULL,
+            attempt INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            progress REAL,
+            result_ref TEXT,
+            failure TEXT,
+            failed_stage TEXT,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (session_name) REFERENCES sessions(name) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_processing_jobs_session
+            ON session_processing_jobs(session_name, updated_at DESC);
 
         CREATE INDEX IF NOT EXISTS idx_session_segments_session
             ON session_segments(session_name, segment_index);
@@ -288,6 +340,72 @@ fn migrate_json_metadata_if_needed(conn: &mut Connection, dir: &Path) -> Result<
         let _ = std::fs::rename(&path, backup);
     }
 
+    Ok(())
+}
+
+/// Additively projects pre-refactor overloaded session columns into their new
+/// independent records. Original columns remain as a recoverable source copy.
+fn migrate_application_records_if_needed(conn: &mut Connection, dir: &Path) -> Result<()> {
+    let Some(workspace) = dir.parent() else {
+        return Ok(());
+    };
+    let rows = {
+        let mut statement = conn.prepare(
+            "SELECT name, vault_note_path, note_error, processing_state, failed_stage, created_at
+             FROM sessions
+             WHERE typeof(name) = 'text'
+               AND (vault_note_path IS NULL OR typeof(vault_note_path) = 'text')
+               AND (note_error IS NULL OR typeof(note_error) = 'text')
+               AND typeof(processing_state) = 'text'
+               AND (failed_stage IS NULL OR typeof(failed_stage) = 'text')
+               AND typeof(created_at) = 'text'",
+        )?;
+        let mapped = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let tx = conn.transaction()?;
+    for (name, note_path, error, processing_state, failed_stage, created_at) in rows {
+        if let Some(note_path) = note_path {
+            let path = Path::new(&note_path);
+            if let Ok(relative) = path.strip_prefix(workspace) {
+                if let Some(relative) = relative.to_str() {
+                    if validate_note_reference("workspace", relative).is_ok() {
+                        tx.execute(
+                            "INSERT OR IGNORE INTO session_note_associations (session_name, source_id, relative_path, observed_content_hash, revision, linked_at) VALUES (?1, 'workspace', ?2, NULL, 1, ?3)",
+                            params![name, relative, created_at],
+                        )?;
+                    }
+                }
+            }
+        }
+        if processing_state != "none"
+            || error
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+        {
+            let status = if error.is_some() || processing_state == "failed" {
+                "failed"
+            } else if processing_state == "done" {
+                "complete"
+            } else {
+                "running"
+            };
+            tx.execute(
+                "INSERT OR IGNORE INTO session_processing_jobs (job_id, session_name, operation, input_revision, attempt, status, progress, result_ref, failure, failed_stage, updated_at) VALUES (?1, ?2, 'legacy_note', 'legacy-session-columns', 0, ?3, ?4, NULL, ?5, ?6, ?7)",
+                params![format!("legacy:{name}"), name, status, (status == "complete").then_some(1.0), error, failed_stage, created_at],
+            )?;
+        }
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -753,6 +871,34 @@ pub fn get_session_meta(dir: &Path, name: &str) -> Result<SessionMeta> {
         )
         .optional()?;
 
+    if let Some(association) = get_note_association(dir, name)? {
+        if association.source_id == "workspace" {
+            if let Some(root) = dir.parent() {
+                meta.vault_note_path = Some(
+                    root.join(association.relative_path)
+                        .to_string_lossy()
+                        .to_string(),
+                );
+            }
+        }
+    }
+    if let Some(job) = latest_processing_job(dir, name)? {
+        meta.processing_state = Some(
+            match job.status.as_str() {
+                "queued" => "none",
+                "running" if job.failed_stage.as_deref() == Some("transcribe") => "transcribing",
+                "running" => "distilling",
+                "complete" => "done",
+                "failed" => "failed",
+                "cancelled" => "none",
+                other => other,
+            }
+            .to_string(),
+        );
+        meta.note_error = job.failure;
+        meta.failed_stage = job.failed_stage;
+    }
+
     Ok(meta)
 }
 
@@ -939,62 +1085,124 @@ pub fn delete_session_artifacts_registry_rows(
     Ok(changed)
 }
 
-pub fn set_vault_note_path(dir: &Path, name: &str, vault_path: &str) -> Result<()> {
-    let mut conn = open_db(dir)?;
-    let tx = conn.transaction()?;
-    if session_tombstone_exists_tx(&tx, name)? {
-        anyhow::bail!("session '{name}' has been deleted");
+fn validate_note_reference(source_id: &str, relative_path: &str) -> Result<()> {
+    if source_id.trim().is_empty() {
+        anyhow::bail!("note source id cannot be empty");
     }
-    upsert_vault_note_tx(&tx, vault_path, Some(name))?;
-    tx.execute(
-        r#"
-        UPDATE sessions
-        SET vault_note_path = ?1,
-            note_error = NULL,
-            note_error_at = NULL,
-            processing_state = 'done',
-            failed_stage = NULL
-        WHERE name = ?2
-        "#,
-        params![vault_path, name],
-    )?;
-    tx.commit()?;
+    let path = Path::new(relative_path);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        anyhow::bail!("note path must be source-relative and cannot contain traversal");
+    }
     Ok(())
 }
 
-pub fn sync_session_note_metadata(
+pub fn get_note_association(dir: &Path, name: &str) -> Result<Option<NoteAssociation>> {
+    let conn = open_db(dir)?;
+    conn.query_row(
+        "SELECT session_name, source_id, relative_path, observed_content_hash, revision FROM session_note_associations WHERE session_name = ?1",
+        params![name],
+        |row| {
+            let revision: i64 = row.get(4)?;
+            Ok(NoteAssociation {
+                session_name: row.get(0)?,
+                source_id: row.get(1)?,
+                relative_path: row.get(2)?,
+                observed_content_hash: row.get(3)?,
+                revision: revision.max(0) as u64,
+            })
+        },
+    ).optional().map_err(Into::into)
+}
+
+pub fn link_note(
     dir: &Path,
     name: &str,
-    vault_path: &str,
-    title: Option<&str>,
-    people: &[String],
-    sync_people: bool,
-) -> Result<()> {
+    source_id: &str,
+    relative_path: &str,
+    observed_content_hash: Option<&str>,
+    expected_revision: u64,
+) -> Result<NoteAssociation> {
+    validate_note_reference(source_id, relative_path)?;
     let mut conn = open_db(dir)?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if session_tombstone_exists_tx(&tx, name)? {
         anyhow::bail!("session '{name}' has been deleted");
     }
-    upsert_vault_note_tx(&tx, vault_path, Some(name))?;
-    let cleaned_title = title
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    tx.execute(
-        r#"
-        UPDATE sessions
-        SET vault_note_path = ?1,
-            title = COALESCE(?2, title),
-            note_error = NULL,
-            note_error_at = NULL,
-            processing_state = 'done',
-            failed_stage = NULL
-        WHERE name = ?3
-        "#,
-        params![vault_path, cleaned_title, name],
-    )?;
-    if sync_people {
-        replace_people_tx(&tx, name, people)?;
+    let exists: Option<i64> = tx
+        .query_row(
+            "SELECT 1 FROM sessions WHERE name = ?1",
+            params![name],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if exists.is_none() {
+        anyhow::bail!("session '{name}' not found");
     }
+    let current: Option<(String, String, Option<String>, i64)> = tx.query_row(
+        "SELECT source_id, relative_path, observed_content_hash, revision FROM session_note_associations WHERE session_name = ?1",
+        params![name],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).optional()?;
+    if let Some((current_source, current_path, current_hash, revision)) = &current {
+        if current_source == source_id
+            && current_path == relative_path
+            && current_hash.as_deref() == observed_content_hash
+        {
+            return Ok(NoteAssociation {
+                session_name: name.to_string(),
+                source_id: current_source.clone(),
+                relative_path: current_path.clone(),
+                observed_content_hash: current_hash.clone(),
+                revision: (*revision).max(0) as u64,
+            });
+        }
+    }
+    let current_revision = current.as_ref().map_or(0, |value| value.3.max(0) as u64);
+    if current_revision != expected_revision {
+        anyhow::bail!("note association revision conflict: expected {expected_revision}, found {current_revision}");
+    }
+    let revision = current_revision + 1;
+    tx.execute(
+        "INSERT INTO session_note_associations (session_name, source_id, relative_path, observed_content_hash, revision, linked_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(session_name) DO UPDATE SET source_id = excluded.source_id, relative_path = excluded.relative_path, observed_content_hash = excluded.observed_content_hash, revision = excluded.revision, linked_at = excluded.linked_at",
+        params![name, source_id, relative_path, observed_content_hash, revision as i64, Local::now().to_rfc3339()],
+    )?;
+    tx.commit()?;
+    Ok(NoteAssociation {
+        session_name: name.to_string(),
+        source_id: source_id.to_string(),
+        relative_path: relative_path.to_string(),
+        observed_content_hash: observed_content_hash.map(ToOwned::to_owned),
+        revision,
+    })
+}
+
+pub fn unlink_note(dir: &Path, name: &str, expected_revision: u64) -> Result<()> {
+    let mut conn = open_db(dir)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current: Option<i64> = tx
+        .query_row(
+            "SELECT revision FROM session_note_associations WHERE session_name = ?1",
+            params![name],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(current) = current else {
+        return Ok(());
+    };
+    if current.max(0) as u64 != expected_revision {
+        anyhow::bail!(
+            "note association revision conflict: expected {expected_revision}, found {}",
+            current.max(0)
+        );
+    }
+    tx.execute(
+        "DELETE FROM session_note_associations WHERE session_name = ?1",
+        params![name],
+    )?;
     tx.commit()?;
     Ok(())
 }
@@ -1075,27 +1283,6 @@ pub fn get_session_grounding(dir: &Path, name: &str) -> Result<Vec<SessionGround
     Ok(grounding)
 }
 
-pub fn move_session_vault_note_path(
-    dir: &Path,
-    name: &str,
-    old_path: &str,
-    new_path: &str,
-) -> Result<()> {
-    let mut conn = open_db(dir)?;
-    let tx = conn.transaction()?;
-    tx.execute(
-        "DELETE FROM vault_notes WHERE absolute_path = ?1 AND procured_by = 'margins'",
-        params![old_path],
-    )?;
-    upsert_vault_note_tx(&tx, new_path, Some(name))?;
-    tx.execute(
-        "UPDATE sessions SET vault_note_path = ?1 WHERE name = ?2",
-        params![new_path, name],
-    )?;
-    tx.commit()?;
-    Ok(())
-}
-
 pub fn move_vault_note_path_by_id(
     dir: &Path,
     id: &str,
@@ -1110,70 +1297,217 @@ pub fn move_vault_note_path_by_id(
     Ok(())
 }
 
-pub fn clear_vault_note_path(dir: &Path, name: &str) -> Result<()> {
-    let conn = open_db(dir)?;
-    conn.execute(
-        "UPDATE sessions SET vault_note_path = NULL WHERE name = ?1",
-        params![name],
-    )?;
-    Ok(())
+fn load_processing_job(conn: &Connection, job_id: &str) -> Result<Option<ProcessingJob>> {
+    conn.query_row(
+        "SELECT job_id, session_name, operation, input_revision, attempt, status, progress, result_ref, failure, failed_stage FROM session_processing_jobs WHERE job_id = ?1",
+        params![job_id],
+        |row| {
+            let attempt: i64 = row.get(4)?;
+            Ok(ProcessingJob {
+                job_id: row.get(0)?, session_name: row.get(1)?, operation: row.get(2)?,
+                input_revision: row.get(3)?, attempt: attempt.max(0) as u64,
+                status: row.get(5)?, progress: row.get(6)?, result_ref: row.get(7)?,
+                failure: row.get(8)?, failed_stage: row.get(9)?,
+            })
+        },
+    ).optional().map_err(Into::into)
 }
 
-pub fn set_note_error(dir: &Path, name: &str, message: &str) -> Result<()> {
-    set_note_failure(dir, name, message, None)
-}
-
-pub fn set_note_failure(
+pub fn begin_processing_job(
     dir: &Path,
     name: &str,
-    message: &str,
-    failed_stage: Option<&str>,
-) -> Result<()> {
-    let conn = open_db(dir)?;
-    let now = Local::now().to_rfc3339();
-    conn.execute(
-        r#"
-        UPDATE sessions
-        SET note_error = ?1,
-            note_error_at = ?2,
-            processing_state = 'failed',
-            failed_stage = ?3
-        WHERE name = ?4
-        "#,
-        params![message, now, failed_stage, name],
+    job_id: &str,
+    operation: &str,
+    input_revision: &str,
+) -> Result<ProcessingJob> {
+    let mut conn = open_db(dir)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if session_tombstone_exists_tx(&tx, name)? {
+        anyhow::bail!("session '{name}' has been deleted");
+    }
+    let current = load_processing_job(&tx, job_id)?;
+    if let Some(current) = &current {
+        if current.session_name != name || current.operation != operation {
+            anyhow::bail!("processing job id was already used for different input");
+        }
+        if current.input_revision == input_revision
+            && matches!(current.status.as_str(), "queued" | "running")
+        {
+            return Ok(current.clone());
+        }
+    }
+    let attempt = current.as_ref().map_or(1, |job| job.attempt + 1);
+    tx.execute(
+        "INSERT INTO session_processing_jobs (job_id, session_name, operation, input_revision, attempt, status, progress, result_ref, failure, failed_stage, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', 0.0, NULL, NULL, NULL, ?6) ON CONFLICT(job_id) DO UPDATE SET input_revision = excluded.input_revision, attempt = excluded.attempt, status = 'queued', progress = 0.0, result_ref = NULL, failure = NULL, failed_stage = NULL, updated_at = excluded.updated_at",
+        params![job_id, name, operation, input_revision, attempt as i64, Local::now().to_rfc3339()],
     )?;
-    Ok(())
+    tx.commit()?;
+    Ok(ProcessingJob {
+        job_id: job_id.to_string(),
+        session_name: name.to_string(),
+        operation: operation.to_string(),
+        input_revision: input_revision.to_string(),
+        attempt,
+        status: "queued".to_string(),
+        progress: Some(0.0),
+        result_ref: None,
+        failure: None,
+        failed_stage: None,
+    })
 }
 
-pub fn clear_note_error(dir: &Path, name: &str) -> Result<()> {
+pub fn get_processing_job(dir: &Path, job_id: &str) -> Result<Option<ProcessingJob>> {
     let conn = open_db(dir)?;
-    conn.execute(
-        r#"
-        UPDATE sessions
-        SET note_error = NULL,
-            note_error_at = NULL,
-            failed_stage = NULL,
-            processing_state = CASE
-                WHEN processing_state = 'failed' THEN 'none'
-                ELSE processing_state
-            END
-        WHERE name = ?1
-        "#,
-        params![name],
-    )?;
-    Ok(())
+    load_processing_job(&conn, job_id)
 }
 
-pub fn set_processing_state(
+pub fn latest_processing_job(dir: &Path, name: &str) -> Result<Option<ProcessingJob>> {
+    let conn = open_db(dir)?;
+    let job_id: Option<String> = conn.query_row(
+        "SELECT job_id FROM session_processing_jobs WHERE session_name = ?1 ORDER BY updated_at DESC, job_id DESC LIMIT 1",
+        params![name], |row| row.get(0),
+    ).optional()?;
+    job_id.map_or(Ok(None), |job_id| load_processing_job(&conn, &job_id))
+}
+
+pub fn update_processing_job(
     dir: &Path,
-    name: &str,
-    processing_state: &str,
+    job_id: &str,
+    attempt: u64,
+    status: &str,
+    progress: Option<f64>,
+    result_ref: Option<&str>,
+    failure: Option<&str>,
     failed_stage: Option<&str>,
-) -> Result<()> {
+) -> Result<ProcessingJob> {
+    if !matches!(
+        status,
+        "queued" | "running" | "failed" | "cancelled" | "complete"
+    ) {
+        anyhow::bail!("invalid processing job status '{status}'");
+    }
+    if progress.is_some_and(|value| !(0.0..=1.0).contains(&value)) {
+        anyhow::bail!("processing progress must be between zero and one");
+    }
+    let mut conn = open_db(dir)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current = load_processing_job(&tx, job_id)?
+        .ok_or_else(|| anyhow::anyhow!("processing job '{job_id}' not found"))?;
+    if current.attempt != attempt {
+        anyhow::bail!("processing job attempt was superseded");
+    }
+    if session_tombstone_exists_tx(&tx, &current.session_name)? {
+        anyhow::bail!("session '{}' has been deleted", current.session_name);
+    }
+    if matches!(current.status.as_str(), "failed" | "cancelled" | "complete")
+        && current.status != status
+    {
+        anyhow::bail!("late processing result rejected after {}", current.status);
+    }
+    tx.execute(
+        "UPDATE session_processing_jobs SET status = ?1, progress = ?2, result_ref = ?3, failure = ?4, failed_stage = ?5, updated_at = ?6 WHERE job_id = ?7 AND attempt = ?8",
+        params![status, progress, result_ref, failure, failed_stage, Local::now().to_rfc3339(), job_id, attempt as i64],
+    )?;
+    tx.commit()?;
+    get_processing_job(dir, job_id)?
+        .ok_or_else(|| anyhow::anyhow!("updated processing job disappeared"))
+}
+
+/// Publish a generated note and complete the exact processing attempt in one
+/// transaction. This is the coordinator seam between otherwise-independent
+/// job and note-association records: a cancelled, superseded, or deleted job
+/// can never resurrect an association with a late result.
+pub fn complete_processing_job_with_note(
+    dir: &Path,
+    job_id: &str,
+    attempt: u64,
+    source_id: &str,
+    relative_path: &str,
+    observed_content_hash: Option<&str>,
+    expected_association_revision: u64,
+) -> Result<NoteAssociation> {
+    validate_note_reference(source_id, relative_path)?;
+    let mut conn = open_db(dir)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current = load_processing_job(&tx, job_id)?
+        .ok_or_else(|| anyhow::anyhow!("processing job '{job_id}' not found"))?;
+    if current.attempt != attempt {
+        anyhow::bail!("processing job attempt was superseded");
+    }
+    if session_tombstone_exists_tx(&tx, &current.session_name)? {
+        anyhow::bail!("session '{}' has been deleted", current.session_name);
+    }
+
+    let association: Option<(String, String, Option<String>, i64)> = tx
+        .query_row(
+            "SELECT source_id, relative_path, observed_content_hash, revision FROM session_note_associations WHERE session_name = ?1",
+            params![current.session_name],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let exact_association =
+        association
+            .as_ref()
+            .is_some_and(|(current_source, current_path, current_hash, _)| {
+                current_source == source_id
+                    && current_path == relative_path
+                    && current_hash.as_deref() == observed_content_hash
+            });
+    if current.status == "complete" && exact_association {
+        let (_, _, _, revision) = association.expect("checked above");
+        return Ok(NoteAssociation {
+            session_name: current.session_name,
+            source_id: source_id.to_string(),
+            relative_path: relative_path.to_string(),
+            observed_content_hash: observed_content_hash.map(ToOwned::to_owned),
+            revision: revision.max(0) as u64,
+        });
+    }
+    if !matches!(current.status.as_str(), "queued" | "running") {
+        anyhow::bail!("late processing result rejected after {}", current.status);
+    }
+
+    let current_revision = association
+        .as_ref()
+        .map_or(0, |value| value.3.max(0) as u64);
+    let revision = if exact_association {
+        current_revision
+    } else {
+        if current_revision != expected_association_revision {
+            anyhow::bail!(
+                "note association revision conflict: expected {expected_association_revision}, found {current_revision}"
+            );
+        }
+        let revision = current_revision + 1;
+        tx.execute(
+            "INSERT INTO session_note_associations (session_name, source_id, relative_path, observed_content_hash, revision, linked_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(session_name) DO UPDATE SET source_id = excluded.source_id, relative_path = excluded.relative_path, observed_content_hash = excluded.observed_content_hash, revision = excluded.revision, linked_at = excluded.linked_at",
+            params![current.session_name, source_id, relative_path, observed_content_hash, revision as i64, Local::now().to_rfc3339()],
+        )?;
+        revision
+    };
+    tx.execute(
+        "UPDATE session_processing_jobs SET status = 'complete', progress = 1.0, result_ref = ?1, failure = NULL, failed_stage = NULL, updated_at = ?2 WHERE job_id = ?3 AND attempt = ?4",
+        params![relative_path, Local::now().to_rfc3339(), job_id, attempt as i64],
+    )?;
+    tx.commit()?;
+    Ok(NoteAssociation {
+        session_name: current.session_name,
+        source_id: source_id.to_string(),
+        relative_path: relative_path.to_string(),
+        observed_content_hash: observed_content_hash.map(ToOwned::to_owned),
+        revision,
+    })
+}
+
+pub fn cancel_processing_job(dir: &Path, job_id: &str, attempt: u64) -> Result<ProcessingJob> {
+    update_processing_job(dir, job_id, attempt, "cancelled", None, None, None, None)
+}
+
+pub fn dismiss_processing_job_failure(dir: &Path, job_id: &str) -> Result<()> {
     let conn = open_db(dir)?;
     conn.execute(
-        "UPDATE sessions SET processing_state = ?1, failed_stage = ?2 WHERE name = ?3",
-        params![processing_state, failed_stage, name],
+        "UPDATE session_processing_jobs SET failure = NULL, updated_at = ?1 WHERE job_id = ?2 AND status = 'failed'",
+        params![Local::now().to_rfc3339(), job_id],
     )?;
     Ok(())
 }
@@ -1273,6 +1607,20 @@ pub fn vault_note_path_by_id(dir: &Path, id: &str) -> Result<Option<String>> {
     .map_err(Into::into)
 }
 
+/// Register a standalone note discovered outside a session association.
+/// Session-owned notes use [`link_note`] instead.
+pub fn register_capture_note(
+    dir: &Path,
+    path: &str,
+    source_session_name: Option<&str>,
+) -> Result<String> {
+    let mut conn = open_db(dir)?;
+    let tx = conn.transaction()?;
+    let id = upsert_vault_note_tx(&tx, path, source_session_name)?;
+    tx.commit()?;
+    Ok(id)
+}
+
 pub fn remove_vault_note_by_id(dir: &Path, id: &str) -> Result<bool> {
     let conn = open_db(dir)?;
     let changed = conn.execute(
@@ -1312,7 +1660,15 @@ mod tests {
         )
         .unwrap();
         set_title(&margins_dir, "meet", Some("Weekly sync".to_string())).unwrap();
-        set_vault_note_path(&margins_dir, "meet", "/vault/inbox/Weekly sync.md").unwrap();
+        link_note(
+            &margins_dir,
+            "meet",
+            "workspace",
+            "inbox/Weekly sync.md",
+            None,
+            0,
+        )
+        .unwrap();
 
         let meta = get_session_meta(&margins_dir, "meet").unwrap();
         assert_eq!(meta.name, "meet");
@@ -1322,7 +1678,12 @@ mod tests {
         assert_eq!(meta.segments[0].duration_secs, Some(12.5));
         assert_eq!(
             meta.vault_note_path.as_deref(),
-            Some("/vault/inbox/Weekly sync.md")
+            Some(
+                dir.path()
+                    .join("inbox/Weekly sync.md")
+                    .to_string_lossy()
+                    .as_ref()
+            )
         );
         assert!(database_path(&margins_dir).exists());
         assert!(!margins_dir.join("meet.meta.json").exists());
@@ -1604,17 +1965,22 @@ mod tests {
     }
 
     #[test]
-    fn processing_failure_stage_is_persisted_and_cleared_on_success() {
+    fn processing_failure_remains_independent_when_a_note_is_linked() {
         let dir = tempdir().unwrap();
         let margins_dir = dir.path().join(".margins");
         let start = Local::now();
 
         create_session(&margins_dir, "meet", &start, "meet.md").unwrap();
-        set_processing_state(&margins_dir, "meet", "distilling", None).unwrap();
-        set_note_failure(
+        let job =
+            begin_processing_job(&margins_dir, "meet", "note:meet", "distill_note", "r1").unwrap();
+        update_processing_job(
             &margins_dir,
-            "meet",
-            "AI note distillation failed",
+            &job.job_id,
+            job.attempt,
+            "failed",
+            None,
+            None,
+            Some("AI note distillation failed"),
             Some("distill"),
         )
         .unwrap();
@@ -1627,11 +1993,14 @@ mod tests {
             Some("AI note distillation failed")
         );
 
-        set_vault_note_path(&margins_dir, "meet", "/vault/meet.md").unwrap();
-        let done = get_session_meta(&margins_dir, "meet").unwrap();
-        assert_eq!(done.processing_state.as_deref(), Some("done"));
-        assert_eq!(done.failed_stage, None);
-        assert_eq!(done.note_error, None);
+        link_note(&margins_dir, "meet", "workspace", "meet.md", None, 0).unwrap();
+        let still_failed = get_session_meta(&margins_dir, "meet").unwrap();
+        assert_eq!(still_failed.processing_state.as_deref(), Some("failed"));
+        assert_eq!(still_failed.failed_stage.as_deref(), Some("distill"));
+        assert_eq!(
+            still_failed.note_error.as_deref(),
+            Some("AI note distillation failed")
+        );
     }
 
     #[test]
@@ -1643,7 +2012,7 @@ mod tests {
         create_session(&margins_dir, "meet", &start, "meet.md").unwrap();
         begin_delete_session(&margins_dir, "meet").unwrap();
 
-        let err = set_vault_note_path(&margins_dir, "meet", "/vault/meet.md")
+        let err = link_note(&margins_dir, "meet", "workspace", "meet.md", None, 0)
             .expect_err("deleted sessions must not accept note links");
         assert!(err.to_string().contains("deleted"));
     }
@@ -1770,14 +2139,6 @@ mod tests {
     fn list_vault_notes_rejects_malformed_rows() {
         let dir = tempdir().unwrap();
         let margins_dir = dir.path().join(".margins");
-        let good_path = dir.path().join("good.md");
-        set_vault_note_path(
-            &margins_dir,
-            "missing-session",
-            &good_path.to_string_lossy(),
-        )
-        .unwrap();
-
         let conn = open_db(&margins_dir).unwrap();
         conn.execute(
             r#"

@@ -42,7 +42,20 @@ fn opening_a_populated_legacy_database_is_additive_and_idempotent() {
     legacy::create_session(&margins_dir, "kept", &start, "kept.md").unwrap();
     legacy::add_segment(&margins_dir, "kept", 0, "kept.wav", 17, Some(2.25)).unwrap();
     legacy::set_title(&margins_dir, "kept", Some("Exact title".to_string())).unwrap();
-    legacy::set_note_failure(&margins_dir, "kept", "retry me", Some("distill")).unwrap();
+    let job =
+        legacy::begin_processing_job(&margins_dir, "kept", "note:kept", "distill_note", "input-1")
+            .unwrap();
+    legacy::update_processing_job(
+        &margins_dir,
+        &job.job_id,
+        job.attempt,
+        "failed",
+        None,
+        None,
+        Some("retry me"),
+        Some("distill"),
+    )
+    .unwrap();
     legacy::set_session_grounding(
         &margins_dir,
         "kept",
