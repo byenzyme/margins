@@ -657,6 +657,31 @@ fn check_transcription_model(settings: &Settings) -> (bool, String, Option<Strin
     );
 }
 
+/// Report whether this process can actually construct the configured ASR
+/// backend. This is deliberately stricter than a Cargo feature check: hosted
+/// clients use it during capability negotiation before starting a device.
+pub(crate) fn transcription_runtime_available(settings: &Settings) -> bool {
+    let (model_ready, _, _) = check_transcription_model(settings);
+    if !model_ready {
+        return false;
+    }
+
+    #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
+    return true;
+
+    #[cfg(all(
+        not(all(feature = "coreml-asr", target_os = "macos")),
+        feature = "parakeet-asr"
+    ))]
+    return margins::asr::parakeet::ParakeetAsr::runtime_available().is_ok();
+
+    #[cfg(not(any(
+        all(feature = "coreml-asr", target_os = "macos"),
+        feature = "parakeet-asr"
+    )))]
+    false
+}
+
 #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
 fn check_fluid_coreml_model() -> (bool, String, Option<String>) {
     (

@@ -5271,6 +5271,7 @@ dependencies = [
  "margins-cli",
  "margins-core",
  "margins-media",
+ "margins-meeting-protocol",
  "margins-store",
  "margins-workflows",
  "ratatui",

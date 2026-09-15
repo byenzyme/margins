@@ -56,6 +56,14 @@ pub mod parakeet {
     const ENCODER_STRIDE: usize = 8;
 
     impl ParakeetAsr {
+        /// Validate that this build's ONNX Runtime can be initialized without
+        /// loading model weights. Hosted capability negotiation uses this with
+        /// the model-file probe so a dynamically linked build never advertises
+        /// ASR merely because the feature was compiled in.
+        pub fn runtime_available() -> Result<()> {
+            ensure_dynamic_ort_runtime()
+        }
+
         pub fn from_dir(model_dir: impl AsRef<Path>, kind: AsrModelKind) -> Result<Self> {
             if kind != AsrModelKind::Tdt {
                 bail!("Margins's in-process Windows ASR currently supports Parakeet TDT ONNX only");

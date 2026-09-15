@@ -1845,8 +1845,9 @@ fn run_remote_native_capture(
     };
     use margins_workflows::remote_workspace::{
         deliver_available, deliver_transfer, list_transfers, native_create_session_command,
-        transfer_root, DurableTransferSpool, NativePcmLane, NativePcmTransfer, RemoteConnection,
-        NATIVE_PCM_RATE_HZ,
+        pending_capture_reservations, transfer_root, CaptureReservationIntentV1,
+        CaptureReservationRequestV1, DurableTransferSpool, NativePcmLane, NativePcmTransfer,
+        RemoteConnection, NATIVE_PCM_RATE_HZ,
     };
 
     ensure_capture_permissions(&NativeCapturePermissionSource)?;
@@ -1865,31 +1866,58 @@ fn run_remote_native_capture(
 
     let transfer_dir = transfer_root()?;
     std::fs::create_dir_all(&transfer_dir)?;
+    let mut reservation_intent;
     let (spool, session_id, initial_offset_ms) = match command {
         Some(Command::New { title }) => {
-            let session_id = format!(
-                "remote-{}-{}",
-                Local::now().format("%Y-%m-%d-%H-%M-%S"),
-                &uuid::Uuid::new_v4().simple().to_string()[..8]
-            );
-            let transfer_id = uuid::Uuid::new_v4().to_string();
-            let create = native_create_session_command(
-                &session_id,
-                &format!("reserve-{transfer_id}"),
-                title.clone(),
-                "margins-native-cli",
-            );
-            let reservation = connection.client.reserve(&create)?;
-            let spool = DurableTransferSpool::create(
+            let pending = pending_capture_reservations(&transfer_dir)?
+                .into_iter()
+                .filter(|intent| {
+                    intent.instance_id == capabilities.instance_id.as_ref()
+                        && intent.remote_url == remote
+                        && intent.workspace_id == workspace_id
+                        && matches!(&intent.request, CaptureReservationRequestV1::Create { command }
+                            if matches!(&command.body, margins_meeting_protocol::ClientMessageBodyV1::CreateSession(create) if &create.title == title))
+                })
+                .collect::<Vec<_>>();
+            if pending.len() > 1 {
+                bail!("multiple unfinished remote session reservations match this command; inspect the transfer directory before retrying");
+            }
+            let intent = if let Some(intent) = pending.into_iter().next() {
+                intent
+            } else {
+                let session_id = format!(
+                    "remote-{}-{}",
+                    Local::now().format("%Y-%m-%d-%H-%M-%S"),
+                    &uuid::Uuid::new_v4().simple().to_string()[..8]
+                );
+                let transfer_id = uuid::Uuid::new_v4().to_string();
+                let command = native_create_session_command(
+                    &session_id,
+                    &format!("reserve-{transfer_id}"),
+                    title.clone(),
+                    "margins-native-cli",
+                );
+                CaptureReservationIntentV1 {
+                    schema: "margins.capture-reservation.v1".into(),
+                    transfer_id,
+                    instance_id: capabilities.instance_id.as_ref().into(),
+                    remote_url: remote.into(),
+                    workspace_id: workspace_id.into(),
+                    session_id,
+                    request: CaptureReservationRequestV1::Create { command },
+                }
+                .persist(&transfer_dir)?
+            };
+            let spool = remote_spool_from_reservation(
+                &connection,
+                &capabilities,
                 &transfer_dir,
-                &transfer_id,
-                capabilities.instance_id.as_ref(),
                 remote,
                 workspace_id,
-                &session_id,
-                &reservation.producer_token,
-                capabilities.limits.spool_reserve_bytes,
+                &intent,
             )?;
+            let session_id = intent.session_id.clone();
+            reservation_intent = Some(intent);
             (spool, session_id, 0)
         }
         Some(Command::Attach { session }) => {
@@ -1926,6 +1954,9 @@ fn run_remote_native_capture(
                         "remote transfer is already sealed; retry delivery instead of attaching audio"
                     );
                 }
+                reservation_intent = pending_capture_reservations(&transfer_dir)?
+                    .into_iter()
+                    .find(|intent| intent.transfer_id == spool.manifest().transfer_id);
                 let offset = spool
                     .manifest()
                     .close_commands
@@ -1940,46 +1971,85 @@ fn run_remote_native_capture(
                     .unwrap_or(0);
                 (spool, requested, offset)
             } else {
-                let summary = connection
-                    .client
-                    .session_summary(&requested)?
-                    .context("remote session was not found in the selected Workspace")?;
-                if !summary.input_finalized {
-                    bail!(
-                        "remote session has an active producer; recover it from its owning client"
-                    );
+                let pending = pending_capture_reservations(&transfer_dir)?
+                    .into_iter()
+                    .filter(|intent| {
+                        intent.instance_id == capabilities.instance_id.as_ref()
+                            && intent.remote_url == remote
+                            && intent.workspace_id == workspace_id
+                            && intent.session_id == requested
+                            && matches!(intent.request, CaptureReservationRequestV1::Attach { .. })
+                    })
+                    .collect::<Vec<_>>();
+                if pending.len() > 1 {
+                    bail!("multiple unfinished attach reservations match this session; inspect the transfer directory before retrying");
                 }
-                let offset = summary
-                    .capture_duration_ms
-                    .context("remote session lacks a durable capture boundary")?
-                    .0;
-                let transfer_id = uuid::Uuid::new_v4().to_string();
-                let attach = WorkspaceAttachV1 {
-                    request_id: uuid::Uuid::new_v4().to_string(),
-                    prior_finalize_message_id: summary
-                        .capture_finalize_message_id
-                        .context("remote session lacks a durable finalize identity")?,
-                    requested_at_unix_ms: margins_meeting_protocol::UnixMillis(
-                        Local::now().timestamp_millis().max(0) as u64,
-                    ),
-                    started_at_ms: margins_meeting_protocol::SessionMillis(offset),
-                };
-                let reservation = connection.client.attach(&requested, &attach)?;
-                let spool = DurableTransferSpool::create(
-                    &transfer_dir,
-                    &transfer_id,
-                    capabilities.instance_id.as_ref(),
-                    remote,
-                    workspace_id,
-                    &requested,
-                    &reservation.producer_token,
-                    capabilities.limits.spool_reserve_bytes,
-                )?;
-                (spool, requested, offset)
+                if let Some(intent) = pending.into_iter().next() {
+                    let spool = remote_spool_from_reservation(
+                        &connection,
+                        &capabilities,
+                        &transfer_dir,
+                        remote,
+                        workspace_id,
+                        &intent,
+                    )?;
+                    reservation_intent = Some(intent);
+                    let offset = match &reservation_intent.as_ref().unwrap().request {
+                        CaptureReservationRequestV1::Attach { request } => request.started_at_ms.0,
+                        _ => unreachable!(),
+                    };
+                    (spool, requested, offset)
+                } else {
+                    let summary = connection
+                        .client
+                        .session_summary(&requested)?
+                        .context("remote session was not found in the selected Workspace")?;
+                    if !summary.input_finalized {
+                        bail!(
+                            "remote session has an active producer; recover it from its owning client"
+                        );
+                    }
+                    let offset = summary
+                        .capture_duration_ms
+                        .context("remote session lacks a durable capture boundary")?
+                        .0;
+                    let transfer_id = uuid::Uuid::new_v4().to_string();
+                    let attach = WorkspaceAttachV1 {
+                        request_id: uuid::Uuid::new_v4().to_string(),
+                        prior_finalize_message_id: summary
+                            .capture_finalize_message_id
+                            .context("remote session lacks a durable finalize identity")?,
+                        requested_at_unix_ms: margins_meeting_protocol::UnixMillis(
+                            Local::now().timestamp_millis().max(0) as u64,
+                        ),
+                        started_at_ms: margins_meeting_protocol::SessionMillis(offset),
+                    };
+                    let intent = CaptureReservationIntentV1 {
+                        schema: "margins.capture-reservation.v1".into(),
+                        transfer_id,
+                        instance_id: capabilities.instance_id.as_ref().into(),
+                        remote_url: remote.into(),
+                        workspace_id: workspace_id.into(),
+                        session_id: requested.clone(),
+                        request: CaptureReservationRequestV1::Attach { request: attach },
+                    }
+                    .persist(&transfer_dir)?;
+                    let spool = remote_spool_from_reservation(
+                        &connection,
+                        &capabilities,
+                        &transfer_dir,
+                        remote,
+                        workspace_id,
+                        &intent,
+                    )?;
+                    reservation_intent = Some(intent);
+                    (spool, requested, offset)
+                }
             }
         }
         _ => bail!("remote native capture requires new or attach"),
     };
+    let _capture_lease = spool.acquire_capture_lease()?;
 
     let initial_memo = connection.client.memo(&session_id)?;
     let initial_revision = initial_memo.revision.clone();
@@ -2062,9 +2132,16 @@ fn run_remote_native_capture(
                             .store(crate::app::REMOTE_DELIVERY_CURRENT, Ordering::Release);
                         backoff = std::time::Duration::from_millis(50);
                     }
-                    Err(_) => {
+                    Err(error) => {
                         uploader_state
                             .store(crate::app::REMOTE_DELIVERY_PENDING, Ordering::Release);
+                        if remote_delivery_requires_credentials(&error) {
+                            // Preserve the spool and stop background retries until
+                            // the user repairs/reissues credentials. Final Stop
+                            // still releases devices first and makes one truthful
+                            // delivery attempt before returning the transfer id.
+                            break;
+                        }
                         backoff = (backoff * 2).min(std::time::Duration::from_secs(2));
                     }
                 }
@@ -2108,6 +2185,9 @@ fn run_remote_native_capture(
                     initial_offset_ms.saturating_add(capture_started.elapsed().as_millis() as u64),
                     SessionFinalizeReasonV1::Error,
                 )?;
+                if let Some(intent) = reservation_intent.take() {
+                    intent.remove(&transfer_dir)?;
+                }
                 uploader_done.store(true, Ordering::Release);
                 let _ = uploader.join();
                 let mut spool = transfer.into_spool();
@@ -2124,6 +2204,9 @@ fn run_remote_native_capture(
             announced_sources = true;
         }
         transfer.begin_segment(segment_id.clone(), offset_ms)?;
+        if let Some(intent) = reservation_intent.take() {
+            intent.remove(&transfer_dir)?;
+        }
         let recovery_path = transfer.spool().recovery_path(&segment_id)?;
         let worker_stop = stop.clone();
         let worker = std::thread::Builder::new()
@@ -2254,6 +2337,61 @@ fn run_remote_native_capture(
             "recording stopped; upload pending in transfer {transfer_id}. Retry with `margins transfers retry {transfer_id}`: {error}"
         ),
     }
+}
+
+#[cfg(feature = "audio-capture")]
+fn remote_spool_from_reservation(
+    connection: &margins_workflows::remote_workspace::RemoteConnection,
+    capabilities: &margins_meeting_protocol::WorkspaceCapabilitiesV1,
+    transfer_dir: &Path,
+    remote: &str,
+    workspace_id: &str,
+    intent: &margins_workflows::remote_workspace::CaptureReservationIntentV1,
+) -> Result<margins_workflows::remote_workspace::DurableTransferSpool> {
+    use margins_workflows::remote_workspace::{
+        promote_capture_reservation, CaptureReservationRequestV1,
+    };
+    if capabilities.instance_id.as_ref() != intent.instance_id
+        || intent.remote_url != remote
+        || intent.workspace_id != workspace_id
+    {
+        bail!("reservation intent does not match the selected remote instance and Workspace");
+    }
+    let spool = promote_capture_reservation(
+        intent,
+        transfer_dir,
+        capabilities.limits.spool_reserve_bytes,
+        || {
+            let reservation = match &intent.request {
+                CaptureReservationRequestV1::Create { command } => {
+                    connection.client.reserve(command)?
+                }
+                CaptureReservationRequestV1::Attach { request } => {
+                    connection.client.attach(&intent.session_id, request)?
+                }
+            };
+            Ok(reservation.producer_token)
+        },
+    )?;
+    if spool.manifest().finalize_command.is_some() {
+        bail!("reserved remote transfer is already sealed; retry its delivery instead of starting capture");
+    }
+    Ok(spool)
+}
+
+#[cfg(feature = "audio-capture")]
+fn remote_delivery_requires_credentials(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}").to_ascii_lowercase();
+    [
+        "unauthorized:",
+        "forbidden:",
+        "credential is invalid",
+        "credential is revoked or expired",
+        "producer token",
+        "producer_token",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 #[cfg(feature = "audio-capture")]

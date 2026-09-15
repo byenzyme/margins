@@ -125,6 +125,59 @@ pub fn run(
             ));
         }
     }
+    if let Command::Memo {
+        text,
+        expected_revision,
+        request_id,
+        observed_at_ms,
+        paused,
+        ..
+    } = &command
+    {
+        if text.is_some() && expected_revision.is_none() {
+            return Err(CliError::usage("memo --text requires --expected-revision"));
+        }
+        if text.is_none()
+            && (expected_revision.is_some()
+                || request_id.is_some()
+                || observed_at_ms.is_some()
+                || *paused)
+        {
+            return Err(CliError::usage(
+                "memo edit flags require --text; omit them to read the memo",
+            ));
+        }
+    }
+    if let Command::NoteAssociation {
+        source,
+        path,
+        hash,
+        unlink,
+        expected_revision,
+        request_id,
+        ..
+    } = &command
+    {
+        if *unlink && expected_revision.is_none() {
+            return Err(CliError::usage(
+                "note-association --unlink requires --expected-revision",
+            ));
+        }
+        if !*unlink && source.is_some() && path.is_some() && expected_revision.is_none() {
+            return Err(CliError::usage(
+                "linking a note requires --expected-revision",
+            ));
+        }
+        if !*unlink
+            && ((source.is_some() != path.is_some())
+                || (source.is_none()
+                    && (hash.is_some() || expected_revision.is_some() || request_id.is_some())))
+        {
+            return Err(CliError::usage(
+                "provide both --source and --path to link, or no mutation flags to read",
+            ));
+        }
+    }
     if !matches!(
         &command,
         Command::Capabilities
@@ -298,7 +351,7 @@ pub fn run(
                 .recall(&query, source.as_deref())
                 .map_err(CliError::from_anyhow)?,
         ),
-        Command::Note { print: _ } => {
+        Command::Note { print } => {
             // Resolve once, then pin this identity through transcript, memo,
             // artifact, recall, and optional association work. The handoff
             // deliberately contains no note bytes or remote publishing API.
@@ -309,6 +362,10 @@ pub fn run(
                 .map_err(CliError::from_anyhow)?;
             let artifacts = connection.client.artifacts(session.as_ref())
                 .map_err(CliError::from_anyhow)?;
+            if !print {
+                writeln!(stdout, "Continue in your coding agent with this pinned remote session context:")
+                    .map_err(|error| CliError::from_anyhow(error.into()))?;
+            }
             Ok(serde_json::json!({
                 "schema":"margins.remote-note-handoff.v1",
                 "remote":remote,

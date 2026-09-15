@@ -23,6 +23,10 @@ function harness(options: { heartbeatFails?: boolean } = {}) {
     experimental_callHostRpc: ({ method }) => {
       if (method === "stop") { stopped = true; return { ok: true, snapshot: null }; }
       if (method === "uploadChunk") return { ok: true };
+      if (method === "connectedNoteContext") return { ok: true, context: {
+        schema: "margins.bb.connected-note-context.v1", instanceId: "instance-1", workspaceId: "workspace-1", sessionId: "rec-1", title: "Customer call",
+        transcript: { terminal: true, live: false, updatedAtUnixMs: 10 }, memo: { revision: "memo-1", lineCount: 1 }, artifacts: [], noteAssociation: null, instructions: "Pin exact session",
+      } };
       if (method === "heartbeat" && options.heartbeatFails) return { ok: false, error: { code: "offline", message: "offline", retryable: true } };
       return { ok: true, snapshot: stopped ? null : snapshot };
     },
@@ -79,7 +83,17 @@ describe("Margins project recording server", () => {
     await expect(host.harness.behavior.callRpc("stop", input)).resolves.toMatchObject({ state: "saved" });
     await expect(host.harness.behavior.callRpc("stop", input)).resolves.toMatchObject({ state: "saved" });
     await expect(host.bb.storage.kv.get("saved:proj-1")).resolves.toBeUndefined();
-    await expect(host.harness.behavior.callRpc("getPanelState", { threadId: "thr-1", client: browser })).resolves.toMatchObject({ state: "ready" });
+    await expect(host.bb.storage.kv.get("last-session:proj-1")).resolves.toBe("rec-1");
+    await expect(host.harness.behavior.callRpc("getPanelState", { threadId: "thr-1", client: browser })).resolves.toMatchObject({ state: "ready", lastSessionId: "rec-1" });
     expect(host.harness.inspection.experimental_hostRpcCalls.filter(call => call.method === "stop")).toHaveLength(1);
+  });
+
+  it("pins connected-note context to the exact last session across remounts", async () => {
+    const host = harness();
+    await host.harness.behavior.callRpc("beginBrowserCapture", { threadId: "thr-1", client: browser, ownerId: "owner-secret" });
+    await host.harness.behavior.callRpc("stop", { threadId: "thr-1", client: browser, recordingId: "rec-1", operationId: "stop-pinned" });
+    await expect(host.harness.behavior.callRpc("connectedNoteContext", { threadId: "thr-1", sessionId: "rec-1" })).resolves.toMatchObject({ ok: true, context: { sessionId: "rec-1" } });
+    await expect(host.harness.behavior.callRpc("connectedNoteContext", { threadId: "thr-1", sessionId: "stale" })).resolves.toMatchObject({ ok: false, error: { code: "session_pin_stale" } });
+    expect(host.harness.inspection.experimental_hostRpcCalls.filter(call => call.method === "connectedNoteContext")).toHaveLength(1);
   });
 });

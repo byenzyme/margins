@@ -10,8 +10,8 @@ use margins_meeting_protocol::{
     ClientMessageBodyV1, ClientMessageV1, CloseSegmentV1, ContentDigestV1, CreateSessionV1,
     DigestAlgorithmV1, DurationMillis, FinalizeSessionV1, LaneBoundaryV1, SegmentCloseReasonV1,
     SegmentCloseReferenceV1, SessionFinalizeReasonV1, SessionId, SessionMillis,
-    WorkspaceMemoReplaceV1, WorkspaceMemoUpdateV1, WorkspaceNoteAssociationUpdateV1,
-    WorkspaceRenameV1,
+    WorkspaceAttachV1, WorkspaceMemoReplaceV1, WorkspaceMemoUpdateV1,
+    WorkspaceNoteAssociationUpdateV1, WorkspaceRenameV1,
 };
 use rand::{distributions::Alphanumeric, Rng};
 use serde::de::DeserializeOwned;
@@ -903,15 +903,21 @@ impl DurableTransferSpool {
         self.manifest
             .close_commands
             .iter()
-            .filter(|command| {
-                !self
-                    .root
-                    .join("control-acks")
-                    .join(format!("{}.ack", command.message_id.as_ref()))
-                    .is_file()
-            })
+            .filter(|command| !self.control_ack_matches(command).unwrap_or(false))
             .cloned()
             .collect()
+    }
+
+    fn control_ack_matches(&self, command: &ClientMessageV1) -> Result<bool> {
+        let receipt = self
+            .root
+            .join("control-acks")
+            .join(format!("{}.ack", command.message_id.as_ref()));
+        if !receipt.is_file() {
+            return Ok(false);
+        }
+        let encoded = serde_json::to_vec(command)?;
+        Ok(std::fs::read_to_string(receipt)? == format!("{:x}", Sha256::digest(encoded)))
     }
 
     /// Persist a control receipt locally before it may disappear from the
@@ -942,6 +948,30 @@ impl DurableTransferSpool {
         })
     }
 
+    pub fn memo_pending(&self) -> Result<bool> {
+        let Some(request) = &self.manifest.memo_intent else {
+            return Ok(false);
+        };
+        let receipt = self.root.join("control-acks/memo.ack");
+        if !receipt.is_file() {
+            return Ok(true);
+        }
+        let encoded = serde_json::to_vec(request)?;
+        Ok(std::fs::read_to_string(receipt)? != format!("{:x}", Sha256::digest(encoded)))
+    }
+
+    pub fn acknowledge_memo(&self) -> Result<()> {
+        let request = self
+            .manifest
+            .memo_intent
+            .as_ref()
+            .context("cannot acknowledge a missing memo intent")?;
+        let fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(request)?));
+        with_transfer_lock(&self.root, || {
+            atomic_bytes(&self.root.join("control-acks/memo.ack"), fingerprint.as_bytes())
+        })
+    }
+
     pub fn set_finalize(&mut self, command: ClientMessageV1) -> Result<()> {
         if !matches!(command.body, ClientMessageBodyV1::FinalizeSession(_)) {
             bail!("finalize intent requires finalize_session");
@@ -961,6 +991,7 @@ impl DurableTransferSpool {
     pub fn ready_to_finalize(&self) -> Result<bool> {
         Ok(self.pending_chunks()?.is_empty()
             && self.pending_closes().is_empty()
+            && !self.memo_pending()?
             && self.manifest.finalize_command.is_some())
     }
 
@@ -968,6 +999,13 @@ impl DurableTransferSpool {
     /// chunks, every segment close, memo state, and finalization. The producer
     /// capability is then removed; evidence and ACK receipts remain inspectable.
     pub fn mark_completed(&mut self) -> Result<()> {
+        self.complete_with(|_, _| Ok(()))
+    }
+
+    fn complete_with(
+        &mut self,
+        finalize: impl FnOnce(&TransferManifest, &str) -> Result<()>,
+    ) -> Result<()> {
         let updated = with_transfer_lock(&self.root, || {
             let mut manifest: TransferManifest =
                 serde_json::from_slice(&std::fs::read(self.root.join("manifest.json"))?)?;
@@ -978,10 +1016,14 @@ impl DurableTransferSpool {
             };
             if !view.pending_chunks_unlocked()?.is_empty()
                 || !view.pending_closes().is_empty()
+                || view.memo_pending()?
                 || manifest.finalize_command.is_none()
             {
-                bail!("cannot complete a transfer with pending input or missing finalization");
+                bail!("remote transfer still has unacknowledged audio, close, or memo input, or is missing finalization");
             }
+            let producer_token =
+                std::fs::read_to_string(self.root.join(&manifest.producer_token_ref))?;
+            finalize(&manifest, &producer_token)?;
             manifest.completed = true;
             atomic_json(&self.root.join("manifest.json"), &manifest)?;
             match std::fs::remove_file(self.root.join(&manifest.producer_token_ref)) {
@@ -1036,6 +1078,175 @@ pub fn transfer_root() -> Result<PathBuf> {
     Ok(dirs::home_dir()
         .context("could not determine home directory")?
         .join(".margins/transfers"))
+}
+
+/// Non-secret, durable identity for a session reservation whose HTTP/SSH
+/// response may be lost. The server's reservation endpoints are exact-replay
+/// safe, so reopening this intent recovers the same producer capability rather
+/// than creating a second session or capture generation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CaptureReservationRequestV1 {
+    Create { command: ClientMessageV1 },
+    Attach { request: WorkspaceAttachV1 },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CaptureReservationIntentV1 {
+    pub schema: String,
+    pub transfer_id: String,
+    pub instance_id: String,
+    pub remote_url: String,
+    pub workspace_id: String,
+    pub session_id: String,
+    pub request: CaptureReservationRequestV1,
+}
+
+impl CaptureReservationIntentV1 {
+    pub fn persist(self, transfer_root: &Path) -> Result<Self> {
+        validate_component(&self.transfer_id)?;
+        let directory = transfer_root.join("reservations");
+        std::fs::create_dir_all(&directory)?;
+        set_directory_owner_only(&directory)?;
+        with_reservation_lock(transfer_root, &self.transfer_id, || {
+            let path = directory.join(format!("{}.json", self.transfer_id));
+            atomic_json(&path, &self)?;
+            set_owner_only(&path)
+        })?;
+        Ok(self)
+    }
+
+    pub fn remove(&self, transfer_root: &Path) -> Result<()> {
+        with_reservation_lock(transfer_root, &self.transfer_id, || {
+            let path = reservation_path(transfer_root, &self.transfer_id)?;
+            match std::fs::remove_file(path) {
+                Ok(()) => sync_dir(&transfer_root.join("reservations")),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error.into()),
+            }
+        })
+    }
+}
+
+pub fn pending_capture_reservations(
+    transfer_root: &Path,
+) -> Result<Vec<CaptureReservationIntentV1>> {
+    let directory = transfer_root.join("reservations");
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+    let mut values = Vec::new();
+    for entry in std::fs::read_dir(&directory)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() || entry.path().extension().is_none_or(|v| v != "json") {
+            continue;
+        }
+        let path = entry.path();
+        let bytes = with_reservation_lock(transfer_root, &id_from_reservation_path(&path)?, || {
+            match std::fs::read(&path) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error.into()),
+            }
+        })?;
+        let Some(bytes) = bytes else { continue };
+        let value: CaptureReservationIntentV1 = serde_json::from_slice(&bytes)?;
+        validate_component(&value.transfer_id)?;
+        if entry.path() != reservation_path(transfer_root, &value.transfer_id)? {
+            bail!("reservation file identity does not match its durable content");
+        }
+        values.push(value);
+    }
+    values.sort_by(|left, right| left.transfer_id.cmp(&right.transfer_id));
+    Ok(values)
+}
+
+fn id_from_reservation_path(path: &Path) -> Result<String> {
+    let id = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .context("reservation path has no UTF-8 identity")?
+        .to_string();
+    validate_component(&id)?;
+    Ok(id)
+}
+
+fn reservation_path(root: &Path, transfer_id: &str) -> Result<PathBuf> {
+    validate_component(transfer_id)?;
+    Ok(root.join("reservations").join(format!("{transfer_id}.json")))
+}
+
+fn with_reservation_lock<T>(
+    root: &Path,
+    transfer_id: &str,
+    action: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    validate_component(transfer_id)?;
+    let directory = root.join("reservations");
+    std::fs::create_dir_all(&directory)?;
+    set_directory_owner_only(&directory)?;
+    let path = directory.join(format!("{transfer_id}.lock"));
+    let lock = File::options().create(true).append(true).open(&path)?;
+    set_owner_only(&path)?;
+    lock.lock_exclusive()?;
+    let result = action();
+    FileExt::unlock(&lock)?;
+    result
+}
+
+pub fn promote_capture_reservation(
+    intent: &CaptureReservationIntentV1,
+    transfer_root: &Path,
+    reserve_bytes: u64,
+    obtain_producer_token: impl FnOnce() -> Result<String>,
+) -> Result<DurableTransferSpool> {
+    with_reservation_lock(transfer_root, &intent.transfer_id, || {
+        let manifest = transfer_root.join(&intent.transfer_id).join("manifest.json");
+        let spool = if manifest.is_file() {
+            DurableTransferSpool::open(transfer_root, &intent.transfer_id, reserve_bytes)?
+        } else {
+            let token = obtain_producer_token()?;
+            DurableTransferSpool::create(
+                transfer_root,
+                &intent.transfer_id,
+                &intent.instance_id,
+                &intent.remote_url,
+                &intent.workspace_id,
+                &intent.session_id,
+                &token,
+                reserve_bytes,
+            )?
+        };
+        let manifest = spool.manifest();
+        if manifest.transfer_id != intent.transfer_id
+            || manifest.instance_id != intent.instance_id
+            || manifest.remote_url != intent.remote_url
+            || manifest.workspace_id != intent.workspace_id
+            || manifest.session_id != intent.session_id
+        {
+            bail!("promoted transfer identity conflicts with its reservation intent");
+        }
+        Ok(spool)
+    })
+}
+
+pub struct TransferCaptureLease {
+    _lock: File,
+}
+
+impl DurableTransferSpool {
+    /// Hold for the entire recorder lifetime. Manifest operations use their own
+    /// short lock; this lease prevents two retrying CLI processes from driving
+    /// the same producer generation concurrently.
+    pub fn acquire_capture_lease(&self) -> Result<TransferCaptureLease> {
+        let path = self.root.join("capture.lock");
+        let lock = File::options().create(true).append(true).open(&path)?;
+        set_owner_only(&path)?;
+        if !lock.try_lock_exclusive()? {
+            bail!("this remote transfer is already being captured by another process");
+        }
+        Ok(TransferCaptureLease { _lock: lock })
+    }
 }
 
 pub const NATIVE_PCM_RATE_HZ: u32 = 48_000;
@@ -1445,8 +1656,14 @@ fn deliver_memo_unchecked(
     spool: &mut DurableTransferSpool,
     client: &WorkspaceHttpClient,
 ) -> Result<()> {
-    if let Some(memo) = &spool.manifest.memo_intent {
+    if spool.memo_pending()? {
+        let memo = spool
+            .manifest
+            .memo_intent
+            .as_ref()
+            .context("pending memo has no durable intent")?;
         client.replace_memo(&spool.manifest.session_id, memo)?;
+        spool.acknowledge_memo()?;
     }
     Ok(())
 }
@@ -1463,16 +1680,14 @@ fn deliver_finalize_unchecked(
     spool: &mut DurableTransferSpool,
     client: &WorkspaceHttpClient,
 ) -> Result<()> {
-    if !spool.pending_chunks()?.is_empty() || !spool.pending_closes().is_empty() {
-        bail!("remote transfer still has unacknowledged input");
-    }
-    let producer_token = spool.producer_token()?;
-    if let Some(finalize) = &spool.manifest.finalize_command {
-        client.execute(&spool.manifest.session_id, &producer_token, finalize)?;
-    } else {
-        bail!("remote transfer has not been sealed for finalization");
-    }
-    spool.mark_completed()
+    spool.complete_with(|manifest, producer_token| {
+        let finalize = manifest
+            .finalize_command
+            .as_ref()
+            .context("remote transfer has not been sealed for finalization")?;
+        client.execute(&manifest.session_id, producer_token, finalize)?;
+        Ok(())
+    })
 }
 
 fn validate_transfer_instance(

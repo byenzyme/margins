@@ -2,6 +2,7 @@
 
 Implementation base: `4228ef5396074413cf4349365a5529132b4b956d`
 Phase 1 checkpoint: `188d29b2c`
+Native remote composition checkpoint: `46c8f6d4ed3185e6f32d9edee977f6b01212f539`
 
 This report separates implemented portable behavior from platform and deployment
 gates. “Supported” below means a production caller reaches the implementation;
@@ -21,12 +22,14 @@ tested.
 
 Phases 0–1 have a portable production cutover and parity proof. Phase 2 is wired
 for the supported read/query/import and application commands. Phase 3 composes the
-native recorder with capture-time durable delivery and recovery. Phase 4 has the typed BB capture adapter and its 28-test
-suite, but its complete same-host/remote browser journey requires a real browser
-host. Phase 5 has production multipart intake, receipts, pairing, and instructions;
+native recorder with capture-time durable delivery and recovery. Phase 4 has the
+typed BB capture adapter, exact-session agent handoff, and its 32-test suite. A real
+Chromium/fake-device journey ran against separate Vite and production service
+processes; the complete BB full-host UI journey remains environment-gated. Phase 5
+has production multipart intake, receipts, pairing, and instructions;
 the real-phone gate is unverified. Phase 6 has source-build and operator
-documentation; installation, packaging, signing, and provisioned-host gates are
-unverified.
+packaging code plus operator documentation; native release archive, installation,
+signing, and provisioned-host gates are unverified.
 
 ## Phase 0 — writer and operation map
 
@@ -63,7 +66,7 @@ and finalization with truthful incomplete state on failure.
 | BB behavior | Typed operation / authority | Portable status |
 | --- | --- | --- |
 | Project start | stable `MARGINS_INSTANCE_ID`, `MARGINS_WORKSPACE`, `MARGINS_HOME`, explicit notes/Captures provisioning | implemented |
-| Capabilities | `GET /v1/capabilities` | implemented; ASR/recall are compile-truthful |
+| Capabilities | `GET /v1/capabilities` | implemented; ASR requires configured model assets and a usable runtime, while recall reflects the available compiled lookup mode |
 | Start | `POST /v1/workspaces/{w}/browser/sessions` | implemented |
 | Browser audio | binary `PUT .../browser/sessions/{s}/chunks/{n}` | implemented; bounded browser owner retained |
 | Pause/resume/heartbeat/stop | typed browser routes | implemented; owner/generation fencing retained |
@@ -72,7 +75,7 @@ and finalization with truthful incomplete state on failure.
 | Transcript/artifacts | shared Workspace query routes | server implemented; plugin UI journey unverified |
 | Note association | typed session note-association GET/PUT/DELETE | server implemented; ordinary note bytes remain native filesystem data |
 | Processing outcome | typed latest-job query | server implemented; full plugin UI journey unverified |
-| Agent context | stable instance/Workspace/session values | server substrate implemented; plugin handoff journey unverified |
+| Agent context | exact last-session pin plus stable instance/Workspace/session values | implemented; metadata-only handoff inserts into the BB composer and instructs native note-file access |
 | Cancel/discard/recover | browser owner’s truthful discard/finalize rules; remote transfer list/retry | substrate implemented; end-to-end plugin recovery unverified |
 
 The BB saved-flag schema and dismiss RPC remain removed. No lifecycle competitor was
@@ -156,6 +159,16 @@ placeholder.
   reload and merge under lock. A deterministic stale-snapshot barrier test appends
   audio, a second close, memo, and finalize before a delayed control ACK, then reopens
   and proves no intent loss, ACK regression, frame deletion, or false completion.
+- Reservation intent is persisted before reserve/attach. Promotion is serialized by
+  a per-reservation lock, validates every immutable routing identity, and lets a
+  concurrent loser reopen the completed spool rather than recreate it. A separate
+  capture-lifetime file lease fences the loser across real processes. The regression
+  first exposed and then corrected a `try_lock_exclusive` false-result handling bug.
+- Memo receipts contain the request fingerprint. Finalization reopens the latest
+  manifest under the transfer lock and holds that ownership across readiness,
+  server finalization, and local completion, so a stale retry cannot overtake a
+  concurrently appended memo. The deterministic regression retains a pre-memo
+  snapshot and proves no finalize request is sent before the memo ACK.
 - Close is accepted only after contiguous lane boundaries; finalize follows close.
   Producer release occurs only after successful finalization. Failed delivery keeps
   bytes and identity for `transfers list/retry`.
@@ -176,7 +189,11 @@ delivery and remains capability-truthful.
 ## Phases 4–6 — adapters and operations
 
 - BB launcher selects one stable instance/Workspace and uses typed control/binary
-  browser routes. Existing 28 plugin tests pass after the adapter change.
+  browser routes. Stop durably records an independent exact last-session pointer
+  before clearing active capture. Remount restores that pin; connected-note context
+  queries that exact transcript/memo/artifact/association metadata and inserts a
+  native-filesystem-only instruction into the composer. No note, transcript, memo,
+  or artifact bytes cross the BB host handoff. All 32 plugin tests pass.
 - Scoped credential storage hashes tokens, uses an owner-only atomic file, checks
   Workspace/operation/expiry, and supports revocation. Browser routes enforce their
   specific operation scope. Shortcut credentials contain import/receipt only.
@@ -184,6 +201,10 @@ delivery and remains capability-truthful.
   file. Stable upload IDs return the original durable receipt for identical bytes
   and conflict for changed bytes. The older id-addressed binary PUT is retained as
   the resumable CLI transport, not a note/source proxy.
+- The CLI release and validation workflows build and package both `margins-private`
+  and `margins-server` for each supported source-build target. The first-party
+  headless launcher now provisions an explicit test Workspace, so the mandatory
+  routing variable does not break development startup.
 - [Remote operations](remote-workspace-operations.md) documents explicit service
   provisioning, SSH/HTTPS, backup/recovery, capability semantics, and revocation.
   [Shortcut instructions](../integrations/shortcuts/README.md) contain no credential.
@@ -212,8 +233,8 @@ Implementation checks run from the canonical worktree/origin:
 
 ```text
 scripts/cargo-lane disposable -- cargo test -p margins-workflows --test workspace_service --test remote_workspace
-  8 passed (4 service/auth + 4 transport/spool) across focused reruns, including
-  attach-generation and stale-manifest barrier coverage
+  focused suites passed, including service/auth, attach generation, six
+  transport/spool tests, stale-manifest and concurrent-promotion barriers
 
 temporary ALSA pkg-config metadata + scripts/cargo-lane disposable -- cargo check
   -p margins --no-default-features --features audio-capture
@@ -261,11 +282,20 @@ scripts/cargo-lane disposable -- cargo test --workspace --no-default-features --
   integrations_recall_sqlite_source stale-materialization failure reproduced;
   four sibling tests failed only after the shared test lock was poisoned
 
-cd integrations/bb-plugin-margins && npm ci && npm run typecheck && npm test
-  28 passed
+cd integrations/bb-plugin-margins && npm run typecheck && npm test
+  7 files, 32 tests passed
 
 cd desktop && npm ci && npm run build
   passed
+
+scripts/cargo-lane shared -- cargo check -p margins-desktop \
+  --manifest-path desktop/src-tauri/Cargo.toml --no-default-features \
+  --features hosted-web --bin margins-server
+  passed; capability probing validates configured assets and dynamic ONNX runtime
+
+temporary ALSA pkg-config metadata + scripts/cargo-lane disposable -- cargo check \
+  -p margins --no-default-features --features audio-capture --bin margins-private
+  passed; Linux type/ownership evidence only, temporary metadata removed
 ```
 
 A final rebuilt `margins-server` was started on a disposable loopback port with an
@@ -280,12 +310,46 @@ received 403 for session listing, an invalid credential received 401, and the
 revoked credential received 401. Only `sessions.sqlite` existed; no experimental
 runtime database was created.
 
+The production headless server initially exposed a composed startup failure that
+unit construction had missed: `WorkspaceService` opened libsql before the process
+initialized the shared native SQLite runtime, and libsql rejected the later
+`SQLITE_CONFIG_SERIALIZED` call. Moving runtime initialization before the canonical
+Workspace open fixed the real process; the rebuilt server then started normally.
+
+A Docker-isolated Chromium with a 30-second 437 Hz, 48 kHz mono fake microphone
+drove the real frontend through Vite to a separate production `margins-server`.
+During capture, durable WebM counters reached 5 chunks / 243,674 bytes and later
+15 / 731,664 bytes. Across a five-second pause they stayed exactly fixed; five
+seconds after resume they grew from 16 / 767,406 to 18 / 865,004. Finish preserved
+session `2026-09-15-08-41`, a 3,790,148-byte recovery WAV, canonical SQLite, and
+the capture-context artifact. With no model/runtime configured, processing failed
+truthfully while capture remained saved. Counterevidence found during this run was
+that capabilities originally advertised ASR from the compile feature alone; the
+rebuilt endpoint now reports `asr_available=false` after checking both model assets
+and the dynamic runtime (`recall_available=true` for compiled local lookup).
+
+For backup/restore, the stopped isolated state tree was copied byte-for-byte,
+restored to its exact absolute Workspace paths, and restarted. The service returned
+the same finalized session, and the restored WAV SHA-256 matched
+`b59ebd32565b0e997d801910107e7652e1631c324a5103fa39ef95678685efe6`.
+
+A portable debug archive check installed `margins` and `margins-server` under the
+same two-file topology used by CI, produced and verified a checksum, extracted both
+as executables, and then ran the official smoke script. The smoke correctly rejected
+this local no-audio binary as lacking a usable capture composition. This host has no
+linkable ALSA development library, so the native Linux release-feature archive could
+not be produced without installing system packages; that rejection is counterevidence,
+not a release result. The committed CI source builds the audio composition and server
+before packaging, while its actual release run remains unverified here.
+
 ## Robustness, latency, and burden
 
 Measured: the composed service/spool tests complete in well under one second after
 compile (service fixture 0.34 s; spool 0.01 s). The desktop parity test itself took
 0.17 s. Cold disposable compile time is not runtime latency and is reported
-separately above. BB stayed 28/28 and the frontend production build passed.
+separately above. BB increased from the prior 28-test baseline to 32/32 and the
+frontend production build passed. The browser counter measurements above are
+protocol/storage evidence, not native audio-fidelity or native latency evidence.
 
 Inferred, not measured on native hardware: the direct local path adds only canonical
 SQLite memo/session work already required for durability; it does not add network,
@@ -305,12 +369,15 @@ local capture.
 
 1. Run the exact committed private CLI on Mac for local and SSH remote `new`/`attach`,
    pause/resume/Stop, capture-time network loss, memo, recovery, and measured latency.
-2. Complete and verify the BB agent-context/note-association UI handoff journey.
-3. Run the complete BB same-host and remote real-browser journey, including remount,
-   stale callbacks, conflicts, recovery, artifacts, jobs, and agent handoff.
-4. Run real Mac microphone/system lanes and measure readiness/callback/Stop latency
+2. Run the complete BB full-host UI journey on an environment that can install/load
+   this plugin, including remote remount, stale callbacks, conflicts, recovery,
+   artifacts, jobs, and the now-wired agent handoff. Typed production host/client,
+   remount, and exact-session contract tests are complete; the full BB host UI is not.
+3. Run real Mac microphone/system lanes and measure readiness/callback/Stop latency
    (delegated to the authorized Mac verifier; no result claimed here yet).
-5. Run the real Shortcut share/retry/app-switch/lock/cellular matrix.
-6. Verify service packaging, backup restore, published clean-client install, and a
-   provisioned host. No push, merge, deployment, credential change, or release was
-   performed here.
+4. Run the real Shortcut share/retry/app-switch/lock/cellular matrix.
+5. Verify signed/published clean-client installation and supported OS service
+   installation. Portable archive topology/checksum/extraction and stopped-state
+   backup/restore are verified; the no-audio package failed the native capture smoke
+   as expected. No push, merge, production deployment, credential change, or release
+   was performed here.

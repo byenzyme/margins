@@ -12,15 +12,18 @@ import {
   type ClientCapabilities,
   type HostError,
   type HostResult,
+  type ConnectedNoteResult,
   type PanelState,
   type ProjectTarget,
 } from "./contracts.js";
 
 const CAPTURE_PREFIX = "capture:";
+const LAST_SESSION_PREFIX = "last-session:";
 const REALTIME_CHANNEL = "margins-recording";
 export const DISCONNECT_GRACE_MS = CAPTURE_DISCONNECT_GRACE_MS;
 
 function captureKey(projectId: string) { return `${CAPTURE_PREFIX}${projectId}`; }
+function lastSessionKey(projectId: string) { return `${LAST_SESSION_PREFIX}${projectId}`; }
 function meetingName(value: string | null | undefined) {
   const slug = (value || "meeting").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 90);
   return slug || "meeting";
@@ -104,6 +107,10 @@ export default function marginsPlugin(bb: BbPluginApi) {
   }
   async function saveCapture(value: CaptureRecord) { await bb.storage.kv.set(captureKey(value.projectId), value); }
   async function clearCapture(projectId: string) { await bb.storage.kv.delete(captureKey(projectId)); }
+  async function readLastSession(projectId: string) {
+    const value = await bb.storage.kv.get(lastSessionKey(projectId));
+    return typeof value === "string" && value.length > 0 ? value : null;
+  }
   async function callHost(target: ProjectTarget, method: keyof typeof marginsHostContract, input: object): Promise<any> {
     try {
       return await host.call(method as never, input as never, { hostId: target.hostId });
@@ -114,7 +121,7 @@ export default function marginsPlugin(bb: BbPluginApi) {
 
   function basePanel(projectId: string | null, state: PanelState["state"], client: ClientCapabilities, options: {
     capture?: CaptureRecord | null; notepad?: PanelState["notepad"];
-    error?: HostError | null;
+    error?: HostError | null; lastSessionId?: string | null;
   } = {}): PanelState {
     const sourceLabel = sourceFor(client);
     const copy = stateCopy(state, sourceLabel, options.error || null);
@@ -126,6 +133,7 @@ export default function marginsPlugin(bb: BbPluginApi) {
       canEditNotepad: owns && ["recording", "paused", "recovering"].includes(state),
       ownsRecording: owns, recordingId: options.capture?.recordingId || null,
       notepad: options.notepad || null,
+      lastSessionId: options.lastSessionId || null,
       error: options.error || null,
     };
   }
@@ -138,21 +146,22 @@ export default function marginsPlugin(bb: BbPluginApi) {
       return basePanel(null, "unavailable", client, { error });
     }
     const capture = await readCapture(target.projectId);
+    const lastSessionId = await readLastSession(target.projectId);
     if (capture) {
       const owns = capture.clientId === client.clientId;
-      if (!owns) return basePanel(target.projectId, "recording_elsewhere", client, { capture });
+      if (!owns) return basePanel(target.projectId, "recording_elsewhere", client, { capture, lastSessionId });
       const result = await callHost(target, "readCapture", { target, recordingId: capture.recordingId, ownerId: capture.ownerId }) as HostResult;
       if (!result.ok) {
         const withinGrace = Date.now() - capture.lastHeartbeatUnixMs <= DISCONNECT_GRACE_MS;
-        return basePanel(target.projectId, withinGrace ? "recovering" : "needs_attention", client, { capture, error: result.error });
+        return basePanel(target.projectId, withinGrace ? "recovering" : "needs_attention", client, { capture, lastSessionId, error: result.error });
       }
-      if (!result.snapshot) return basePanel(target.projectId, "saving", client, { capture });
+      if (!result.snapshot) return basePanel(target.projectId, "saving", client, { capture, lastSessionId });
       const state = result.snapshot.status === "paused" ? "paused" : result.snapshot.status === "saving" ? "saving" : "recording";
-      return basePanel(target.projectId, state, client, { capture, notepad: result.snapshot.notepad });
+      return basePanel(target.projectId, state, client, { capture, lastSessionId, notepad: result.snapshot.notepad });
     }
     if (client.platform === "macos" && !client.nativeMacCapture) return basePanel(target.projectId, "needs_setup", client);
     if (!sourceFor(client)) return basePanel(target.projectId, "unavailable", client);
-    return basePanel(target.projectId, "ready", client);
+    return basePanel(target.projectId, "ready", client, { lastSessionId });
   }
 
   async function locked<T>(projectId: string, action: () => Promise<T>): Promise<T> {
@@ -178,8 +187,12 @@ export default function marginsPlugin(bb: BbPluginApi) {
             error: { code: "operation_conflict", message: "This control operation id was already used for different content.", retryable: false },
           });
         }
+        if (operation === "stop") {
+          await bb.storage.kv.set(lastSessionKey(target.projectId), recordingId);
+          await clearCapture(target.projectId);
+        }
         return operation === "stop"
-          ? basePanel(target.projectId, "saved", client)
+          ? basePanel(target.projectId, "saved", client, { lastSessionId: recordingId })
           : getPanelState(threadId, client);
       }
     }
@@ -188,7 +201,7 @@ export default function marginsPlugin(bb: BbPluginApi) {
     const result = await callHost(target, operation, { target, recordingId, ownerId: capture.ownerId }) as HostResult;
     if (result.ok) {
       if (operation === "stop") {
-        await clearCapture(target.projectId);
+        await bb.storage.kv.set(lastSessionKey(target.projectId), recordingId);
       } else {
         capture.lastHeartbeatUnixMs = operation === "heartbeat" ? Date.now() : capture.lastHeartbeatUnixMs;
         await saveCapture(capture);
@@ -196,10 +209,11 @@ export default function marginsPlugin(bb: BbPluginApi) {
       if (operation !== "heartbeat") {
         await bb.storage.kv.set(receiptKey, { recordingId, operation, clientId: client.clientId });
       }
+      if (operation === "stop") await clearCapture(target.projectId);
     }
     bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: operation });
     if (!result.ok) return basePanel(target.projectId, "needs_attention", client, { capture, error: result.error });
-    if (operation === "stop") return basePanel(target.projectId, "saved", client);
+    if (operation === "stop") return basePanel(target.projectId, "saved", client, { lastSessionId: recordingId });
     return getPanelState(threadId, client);
   }
 
@@ -232,6 +246,14 @@ export default function marginsPlugin(bb: BbPluginApi) {
       const result = await callHost(target, "updateNotepad", { target, recordingId, ownerId: capture.ownerId, expectedRevision, text }) as HostResult;
       if (!result.ok) return basePanel(target.projectId, "needs_attention", client, { capture, error: result.error });
       return getPanelState(threadId, client);
+    },
+    async connectedNoteContext({ threadId, sessionId }): Promise<ConnectedNoteResult> {
+      const target = await targetForThread(threadId);
+      const pinned = await readLastSession(target.projectId);
+      if (pinned !== sessionId) {
+        return { ok: false as const, error: { code: "session_pin_stale", message: "The selected meeting is no longer this project's pinned latest session. Refresh before creating the note.", retryable: true } };
+      }
+      return callHost(target, "connectedNoteContext", { target, recordingId: sessionId }) as Promise<ConnectedNoteResult>;
     },
   });
 

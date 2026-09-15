@@ -13,7 +13,7 @@ function panel(changes: Partial<PanelState> = {}): PanelState {
     sourceLabel: "Microphone only", storageLabel: "Saved to this bb project",
     primaryAction: "pause", primaryLabel: "Pause", canStop: true, canEditNotepad: true,
     ownsRecording: true, recordingId: "rec-1", notepad: { text: "Pricing", revision: "v1" },
-    error: null, ...changes,
+    lastSessionId: null, error: null, ...changes,
   };
 }
 
@@ -56,13 +56,20 @@ describe("Margins recording panel", () => {
   });
 
   it("puts a natural connected-note request in the composer without sending", async () => {
-    const saved = panel({ state: "saved", title: "Meeting saved", primaryAction: "none", primaryLabel: "Meeting saved", canStop: false, canEditNotepad: false, ownsRecording: false, recordingId: null, notepad: null });
-    const slot = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-1", params: null }, { rpc: { getPanelState: () => saved }, composer: { text: "Keep this draft." } });
+    const saved = panel({ state: "saved", title: "Meeting saved", primaryAction: "none", primaryLabel: "Meeting saved", canStop: false, canEditNotepad: false, ownsRecording: false, recordingId: null, notepad: null, lastSessionId: "rec-pinned" });
+    const slot = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-1", params: null }, { rpc: {
+      getPanelState: () => saved,
+      connectedNoteContext: () => ({ ok: true, context: {
+        schema: "margins.bb.connected-note-context.v1", instanceId: "instance-1", workspaceId: "workspace-1", sessionId: "rec-pinned", title: "Pinned",
+        transcript: { terminal: true, live: false, updatedAtUnixMs: 2 }, memo: { revision: "memo-1", lineCount: 1 }, artifacts: [], noteAssociation: null, instructions: "Pin exact session",
+      } }),
+    }, composer: { text: "Keep this draft." } });
     const screen = within(slot.container);
     fireEvent.click(await screen.findByRole("button", { name: "Make connected note" }));
-    expect(slot.inspection.composer.text).toBe("Keep this draft.\n\nTurn the Margins meeting I just recorded into a connected note.");
+    await waitFor(() => expect(slot.inspection.composer.text).toContain('"sessionId":"rec-pinned"'));
+    expect(slot.inspection.composer.text).toContain("Read and write note files only through the project's native filesystem Source");
     expect(slot.inspection.composer.focusCount).toBe(1);
-    expect(slot.container.textContent).not.toContain("opaque-id");
+    expect(slot.container.textContent).not.toContain("rec-pinned");
     slot.lifecycle.unmount();
   });
 

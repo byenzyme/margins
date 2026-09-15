@@ -143,7 +143,7 @@ fn unsupported_remote_command_fails_before_transport_or_local_mutation() {
             "http://127.0.0.1:9",
             "--workspace",
             "practice",
-            "rename",
+            "process",
             "must-not-connect",
         ],
     );
@@ -152,6 +152,43 @@ fn unsupported_remote_command_fails_before_transport_or_local_mutation() {
     assert!(stdout.is_empty());
     assert!(stderr.contains("not supported by the remote adapter"));
     assert!(!temp.path().join(".margins").exists());
+}
+
+#[test]
+fn unsupported_remote_flags_fail_before_transport_or_file_intake() {
+    let temp = tempfile::tempdir().unwrap();
+    let services = services(temp.path());
+    let audio = temp.path().join("must-not-read.wav");
+    std::fs::write(&audio, b"not audio").unwrap();
+    let base = [
+        "margins",
+        "--remote",
+        "http://127.0.0.1:9",
+        "--workspace",
+        "practice",
+    ];
+    let cases = [
+        (vec!["recent", "--all"], "remote_option_unsupported"),
+        (
+            vec!["memo", "session-a", "--expected-revision", "memo-1"],
+            "usage",
+        ),
+        (
+            vec!["note-association", "session-a", "--source", "notes", "--path", "meeting.md"],
+            "usage",
+        ),
+        (
+            vec!["transcribe", audio.to_str().unwrap(), "--speakers", "2"],
+            "remote_option_unsupported",
+        ),
+    ];
+    for (suffix, expected) in cases {
+        let args = base.into_iter().chain(suffix).collect::<Vec<_>>();
+        let (result, stdout, _stderr) = invoke(&services, temp.path(), &args);
+        assert_eq!(result.unwrap_err().code(), expected);
+        assert!(stdout.is_empty());
+    }
+    assert_eq!(std::fs::read(&audio).unwrap(), b"not audio");
 }
 
 #[test]

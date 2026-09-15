@@ -108,10 +108,16 @@ function MarginsPanel({ threadId, params }: { threadId: string; params: JsonValu
   }
 
   async function stop() { await action("stop", () => browserCaptureOwner.stop()); }
-  function connectedNote() {
-    const request = "Turn the Margins meeting I just recorded into a connected note.";
-    composer.updateText((current) => current.trim() ? `${current.trimEnd()}\n\n${request}` : request);
-    composer.focus();
+  async function connectedNote() {
+    if (!state?.lastSessionId) return;
+    await action("connected-note", async () => {
+      const result = await rpc.call("connectedNoteContext", { threadId, sessionId: state.lastSessionId! });
+      if (!result.ok) throw new Error(result.error.message);
+      const context = JSON.stringify(result.context);
+      const request = `Create a connected note for the pinned Margins session below. Resolve transcript/artifact/recall data for this exact session before writing. Read and write note files only through the project's native filesystem Source; never proxy note bytes through Margins.\n\n${context}`;
+      composer.updateText((current) => current.trim() ? `${current.trimEnd()}\n\n${request}` : request);
+      composer.focus();
+    });
   }
 
   if (!state) return <section className="margins-panel"><div className="margins-empty">Checking recording…</div></section>;
@@ -145,8 +151,8 @@ function MarginsPanel({ threadId, params }: { threadId: string; params: JsonValu
       value={draft} onChange={(event) => edit(event.target.value)} onBlur={() => void saveNotepad()}
       disabled={busy === "pause" || busy === "stop"}
     />}
-    {state.state === "saved" && <div className="margins-saved-actions">
-      <button className="margins-connected-note" onClick={connectedNote}>Make connected note</button>
+    {state.lastSessionId && <div className="margins-saved-actions">
+      <button className="margins-connected-note" onClick={() => void connectedNote()} disabled={busy !== null}>Make connected note</button>
       <button className="margins-quiet" onClick={() => void action("dismiss", refresh)}>Not now</button>
     </div>}
     {state.state === "needs_setup" && <p className="margins-seam">Recording with computer audio isn’t available in this browser yet.</p>}

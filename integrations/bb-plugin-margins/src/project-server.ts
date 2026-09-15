@@ -3,13 +3,14 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, readFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
-import type { HostCaptureSnapshot, HostError, HostResult, ProjectTarget } from "./contracts.js";
+import type { ConnectedNoteResult, HostCaptureSnapshot, HostError, HostResult, ProjectTarget } from "./contracts.js";
 import { createRuntimeManager } from "./runtime-manager.js";
 
 interface ServerHandle {
   baseUrl: string;
   token: string;
   workspaceId: string;
+  instanceId: string;
   child?: ChildProcess;
 }
 
@@ -89,7 +90,7 @@ export class ProjectServerManager {
       });
       const envelope = await response.json() as {
         ok?: boolean;
-        result?: { workspace_id?: string };
+        result?: { workspace_id?: string; instance_id?: string };
         error?: { message?: string };
       };
       if (!response.ok || !envelope.ok) {
@@ -98,7 +99,8 @@ export class ProjectServerManager {
       if (envelope.result?.workspace_id !== remoteWorkspace) {
         throw new Error("remote Margins capability Workspace does not match configured Workspace");
       }
-      return { baseUrl, token: remoteToken, workspaceId: remoteWorkspace };
+      if (!envelope.result.instance_id) throw new Error("remote Margins capability response lacks an instance identity");
+      return { baseUrl, token: remoteToken, workspaceId: remoteWorkspace, instanceId: envelope.result.instance_id };
     }
     const binary = await this.runtime.ensureProjectServer({ dataDir, signal });
     const instanceDir = join(dataDir, "projects", key);
@@ -125,7 +127,7 @@ export class ProjectServerManager {
       throw error;
     });
     child.once("exit", () => this.handles.delete(key));
-    return { baseUrl, token, workspaceId: `bb-${key}`, child };
+    return { baseUrl, token, workspaceId: `bb-${key}`, instanceId: `bb-host-${target.hostId}`, child };
   }
 
   async dispose() {
@@ -215,6 +217,35 @@ export class ProjectMarginsTransport {
       return { ok: true as const };
     } catch (cause) {
       return { ok: false as const, error: hostError("audio_upload_failed", cause instanceof Error ? cause.message : String(cause)) };
+    }
+  }
+
+  async connectedNoteContext(target: ProjectTarget, dataDir: string, recordingId: string): Promise<ConnectedNoteResult> {
+    try {
+      const handle = await this.manager.ensure(target, dataDir);
+      const [sessions, transcript, memo, artifacts, noteAssociation] = await Promise.all([
+        this.request<{ sessions: Array<{ session_id: string; title: string | null }> }>(handle, "sessions?limit=100", "GET"),
+        this.request<{ terminal: boolean; live: boolean; updated_at_unix_ms: number }>(handle, `sessions/${recordingId}/transcript`, "GET"),
+        this.request<{ revision: string; lines: unknown[] }>(handle, `sessions/${recordingId}/memo`, "GET"),
+        this.request<Array<{ artifact_id: string; kind: string; retention_class: string }>>(handle, `sessions/${recordingId}/artifacts`, "GET"),
+        this.request<{ source_id: string; relative_path: string; revision: number } | null>(handle, `sessions/${recordingId}/note-association`, "GET"),
+      ]);
+      const summary = sessions.sessions.find((candidate) => candidate.session_id === recordingId);
+      if (!summary) throw new Error("Pinned Margins session is not visible in the selected Workspace");
+      return { ok: true, context: {
+        schema: "margins.bb.connected-note-context.v1",
+        instanceId: handle.instanceId,
+        workspaceId: handle.workspaceId,
+        sessionId: recordingId,
+        title: summary.title,
+        transcript: { terminal: transcript.terminal, live: transcript.live, updatedAtUnixMs: transcript.updated_at_unix_ms },
+        memo: { revision: memo.revision, lineCount: memo.lines.length },
+        artifacts: artifacts.map((artifact) => ({ artifactId: artifact.artifact_id, kind: artifact.kind, retentionClass: artifact.retention_class })),
+        noteAssociation: noteAssociation ? { sourceId: noteAssociation.source_id, relativePath: noteAssociation.relative_path, revision: noteAssociation.revision } : null,
+        instructions: "Pin this exact session before recall. Fetch its transcript/artifacts from Margins, but read and write ordinary note bytes only through the existing project Source; link only the Source-relative reference after writing.",
+      } };
+    } catch (cause) {
+      return { ok: false, error: hostError("connected_note_context_unavailable", cause instanceof Error ? cause.message : String(cause)) };
     }
   }
 

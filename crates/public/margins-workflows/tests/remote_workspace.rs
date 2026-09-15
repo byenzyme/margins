@@ -110,6 +110,17 @@ fn durable_spool_recovers_frames_and_retries_without_changing_identity() {
         }),
     };
     recovered.set_close(close.clone()).unwrap();
+    // Deliberately retain a snapshot from before memo/finalize were appended.
+    // Public retry/finalize must re-read under the manifest lock before making
+    // the remote finalization call.
+    let mut stale_finalize = DurableTransferSpool::open(temp.path(), "transfer-a", 0).unwrap();
+    recovered
+        .set_memo_intent(WorkspaceMemoReplaceV1 {
+            request_id: "memo-a".into(),
+            expected_revision: "memo-empty".into(),
+            lines: Vec::new(),
+        })
+        .unwrap();
     recovered.set_finalize(finalize).unwrap();
     let recovery = recovered.recovery_path("segment-a").unwrap();
     std::fs::write(&recovery, b"durable recovery evidence").unwrap();
@@ -118,10 +129,226 @@ fn durable_spool_recovers_frames_and_retries_without_changing_identity() {
     recovered.acknowledge(&last).unwrap();
     assert!(!recovered.ready_to_finalize().unwrap());
     recovered.acknowledge_control(&close).unwrap();
+    assert!(!recovered.ready_to_finalize().unwrap());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let server_requests = requests.clone();
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        use std::io::{Read as _, Write as _};
+        let capabilities = WorkspaceCapabilitiesV1 {
+            protocol_version: ProtocolVersionV1,
+            instance_id: "instance-a".into(),
+            workspace_id: "workspace-a".into(),
+            limits: WorkspaceLimitsV1 {
+                max_chunk_bytes: 1024,
+                max_in_flight_chunks: 1,
+                max_event_page: 10,
+                max_import_bytes: 1024,
+                spool_reserve_bytes: 0,
+            },
+            capture_formats: Vec::new(),
+            operations: Vec::new(),
+            asr_available: false,
+            recall_available: false,
+        };
+        while stop_rx.try_recv().is_err() {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    server_requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let mut request = [0_u8; 4096];
+                    let _ = stream.read(&mut request);
+                    let body = serde_json::to_vec(&serde_json::json!({
+                        "ok": true,
+                        "result": capabilities,
+                    }))
+                    .unwrap();
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .unwrap();
+                    stream.write_all(&body).unwrap();
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                Err(error) => panic!("fixture server failed: {error}"),
+            }
+        }
+    });
+    let client = WorkspaceHttpClient::new(
+        url::Url::parse(&format!("http://{address}/")).unwrap(),
+        "scoped-token",
+        "workspace-a",
+        None,
+    )
+    .unwrap();
+    let error = deliver_finalize(&mut stale_finalize, &client).unwrap_err();
+    assert!(error.to_string().contains("memo input"));
+    stop_tx.send(()).unwrap();
+    server.join().unwrap();
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(!recovered.manifest().completed);
+    recovered.acknowledge_memo().unwrap();
     assert!(recovered.ready_to_finalize().unwrap());
     recovered.mark_completed().unwrap();
     assert!(!recovery.exists());
     assert!(!recovered.root().join("producer-token").exists());
+}
+
+#[test]
+fn reservation_intent_survives_lost_response_and_promotes_without_secret_leak() {
+    let temp = tempfile::tempdir().unwrap();
+    let command = native_create_session_command(
+        "session-a",
+        "reserve-transfer-a",
+        Some("Durable reservation".into()),
+        "test",
+    );
+    let intent = CaptureReservationIntentV1 {
+        schema: "margins.capture-reservation.v1".into(),
+        transfer_id: "transfer-a".into(),
+        instance_id: "instance-a".into(),
+        remote_url: "https://margins.example.test".into(),
+        workspace_id: "workspace-a".into(),
+        session_id: "session-a".into(),
+        request: CaptureReservationRequestV1::Create { command: command.clone() },
+    }
+    .persist(temp.path())
+    .unwrap();
+
+    // Simulate a server commit followed by a lost response/crash. Reopen uses
+    // the exact request identity and contains no returned producer capability.
+    drop(intent);
+    let recovered = pending_capture_reservations(temp.path()).unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].request, CaptureReservationRequestV1::Create { command });
+    let json = std::fs::read_to_string(temp.path().join("reservations/transfer-a.json")).unwrap();
+    assert!(!json.contains("producer-secret"));
+
+    DurableTransferSpool::create(
+        temp.path(),
+        "transfer-a",
+        "instance-a",
+        "https://margins.example.test",
+        "workspace-a",
+        "session-a",
+        "producer-secret",
+        0,
+    )
+    .unwrap();
+    recovered[0].remove(temp.path()).unwrap();
+    assert!(pending_capture_reservations(temp.path()).unwrap().is_empty());
+    assert_eq!(
+        DurableTransferSpool::open(temp.path(), "transfer-a", 0)
+            .unwrap()
+            .producer_token()
+            .unwrap(),
+        "producer-secret"
+    );
+}
+
+#[test]
+fn concurrent_reservation_promotion_creates_once_and_capture_lease_fences_loser() {
+    if let Ok(root) = std::env::var("MARGINS_TEST_CAPTURE_LEASE_ROOT") {
+        let spool = DurableTransferSpool::open(std::path::Path::new(&root), "promotion-race", 0)
+            .unwrap();
+        assert!(spool.acquire_capture_lease().is_err());
+        return;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().to_path_buf();
+    let intent = CaptureReservationIntentV1 {
+        schema: "margins.capture-reservation.v1".into(),
+        transfer_id: "promotion-race".into(),
+        instance_id: "instance-a".into(),
+        remote_url: "https://margins.example.test".into(),
+        workspace_id: "workspace-a".into(),
+        session_id: "session-a".into(),
+        request: CaptureReservationRequestV1::Create {
+            command: native_create_session_command(
+                "session-a",
+                "reserve-promotion-race",
+                None,
+                "test",
+            ),
+        },
+    }
+    .persist(&root)
+    .unwrap();
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let first_root = root.clone();
+    let first_intent = intent.clone();
+    let first_calls = calls.clone();
+    let first = std::thread::spawn(move || {
+        promote_capture_reservation(&first_intent, &first_root, 0, || {
+            first_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok("producer-secret".into())
+        })
+        .unwrap()
+    });
+    entered_rx.recv().unwrap();
+    let second_root = root.clone();
+    let second_intent = intent.clone();
+    let second_calls = calls.clone();
+    let second = std::thread::spawn(move || {
+        promote_capture_reservation(&second_intent, &second_root, 0, || {
+            second_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok("must-not-replace".into())
+        })
+        .unwrap()
+    });
+    release_tx.send(()).unwrap();
+    let mut owner = first.join().unwrap();
+    let reopened = second.join().unwrap();
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(owner.producer_token().unwrap(), "producer-secret");
+    assert_eq!(reopened.producer_token().unwrap(), "producer-secret");
+
+    let lease = owner.acquire_capture_lease().unwrap();
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "concurrent_reservation_promotion_creates_once_and_capture_lease_fences_loser",
+        ])
+        .env("MARGINS_TEST_CAPTURE_LEASE_ROOT", &root)
+        .output()
+        .unwrap();
+    assert!(
+        child.status.success(),
+        "capture lease subprocess failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr)
+    );
+    let close = ClientMessageV1 {
+        protocol_version: ProtocolVersionV1,
+        message_id: "promotion-close".into(),
+        session_id: "session-a".into(),
+        sent_at_unix_ms: UnixMillis(1_800_000_000_000),
+        body: ClientMessageBodyV1::CloseSegment(CloseSegmentV1 {
+            segment_id: "segment-a".into(),
+            ended_at_ms: SessionMillis(0),
+            lane_boundaries: Vec::new(),
+            reason: SegmentCloseReasonV1::Error,
+        }),
+    };
+    owner.set_close(close.clone()).unwrap();
+    drop(lease);
+    assert!(reopened.acquire_capture_lease().is_ok());
+    let final_reopen = promote_capture_reservation(&intent, &root, 0, || {
+        panic!("completed promotion must not reserve again")
+    })
+    .unwrap();
+    assert_eq!(final_reopen.manifest().close_commands, vec![close]);
 }
 
 #[test]

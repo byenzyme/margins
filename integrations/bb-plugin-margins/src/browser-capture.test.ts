@@ -10,7 +10,7 @@ describe("browser capture ownership", () => {
     state: "recording", title: "Recording", detail: "Microphone only", sourceLabel: "Microphone only",
     storageLabel: "Saved to this bb project", primaryAction: "pause", primaryLabel: "Pause",
     canStop: true, canEditNotepad: true, ownsRecording: true, recordingId: "rec-1",
-    notepad: null, error: null, ...value,
+    notepad: null, lastSessionId: null, error: null, ...value,
   });
 
   it("only renews the local lease for a host-acknowledged active recording", () => {

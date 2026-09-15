@@ -35,6 +35,22 @@ export const hostResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), snapshot: hostCaptureSnapshotSchema.nullable() }).strict(),
   z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
 ]);
+export const connectedNoteContextSchema = z.object({
+  schema: z.literal("margins.bb.connected-note-context.v1"),
+  instanceId: z.string().min(1),
+  workspaceId: z.string().min(1),
+  sessionId: z.string().min(1),
+  title: z.string().nullable(),
+  transcript: z.object({ terminal: z.boolean(), live: z.boolean(), updatedAtUnixMs: z.number().int().nonnegative() }).strict(),
+  memo: z.object({ revision: z.string().min(1), lineCount: z.number().int().nonnegative() }).strict(),
+  artifacts: z.array(z.object({ artifactId: z.string().min(1), kind: z.string().min(1), retentionClass: z.string().min(1) }).strict()),
+  noteAssociation: z.object({ sourceId: z.string().min(1), relativePath: z.string().min(1), revision: z.number().int().nonnegative() }).strict().nullable(),
+  instructions: z.string().min(1),
+}).strict();
+export const connectedNoteResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), context: connectedNoteContextSchema }).strict(),
+  z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
+]);
 
 const ownedCaptureInputSchema = z.object({ target: projectTargetSchema }).extend({
   recordingId: z.string().min(1), ownerId: z.string().min(1),
@@ -57,6 +73,10 @@ export const marginsHostContract = defineRpcContract({
     input: ownedCaptureInputSchema.extend({ sequence: z.number().int().nonnegative(), bytesBase64: z.string() }).strict(),
     output: z.object({ ok: z.boolean(), error: hostErrorSchema.optional() }).strict(),
   },
+  connectedNoteContext: {
+    input: z.object({ target: projectTargetSchema, recordingId: z.string().min(1) }).strict(),
+    output: connectedNoteResultSchema,
+  },
 });
 export const hostSignals = {
   changed: { payload: z.object({
@@ -77,6 +97,7 @@ export const panelStateSchema = z.object({
   primaryAction: primaryActionSchema, primaryLabel: z.string().min(1),
   canStop: z.boolean(), canEditNotepad: z.boolean(), ownsRecording: z.boolean(),
   recordingId: z.string().nullable(), notepad: notepadSchema.nullable(),
+  lastSessionId: z.string().nullable(),
   error: hostErrorSchema.nullable(),
 }).strict();
 
@@ -101,6 +122,10 @@ export const marginsRpcContract = defineRpcContract({
     input: captureClientInputSchema.extend({ expectedRevision: z.string().min(1), text: z.string().max(100_000) }).strict(),
     output: panelStateSchema,
   },
+  connectedNoteContext: {
+    input: z.object({ threadId: z.string().min(1), sessionId: z.string().min(1) }).strict(),
+    output: connectedNoteResultSchema,
+  },
 });
 
 export type ClientCapabilities = z.infer<typeof clientCapabilitiesSchema>;
@@ -110,5 +135,7 @@ export type ProjectTarget = z.infer<typeof projectTargetSchema>;
 export type HostError = z.infer<typeof hostErrorSchema>;
 export type HostCaptureSnapshot = z.infer<typeof hostCaptureSnapshotSchema>;
 export type HostResult = z.infer<typeof hostResultSchema>;
+export type ConnectedNoteContext = z.infer<typeof connectedNoteContextSchema>;
+export type ConnectedNoteResult = z.infer<typeof connectedNoteResultSchema>;
 export type CaptureRecord = z.infer<typeof captureRecordSchema>;
 export type PanelState = z.infer<typeof panelStateSchema>;

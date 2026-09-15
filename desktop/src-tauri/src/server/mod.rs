@@ -38,6 +38,11 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 async fn run_async() -> anyhow::Result<()> {
+    // WorkspaceService opens the canonical sessions.sqlite before AppState is
+    // constructed. Initialize libsql's shared native SQLite runtime first;
+    // build_app_state is now too late for the composed hosted process.
+    margins::initialize_sqlite_runtime()
+        .map_err(|error| anyhow::anyhow!("failed to initialize shared SQLite runtime: {error}"))?;
     crate::settings::configure_pi_agent_dir();
 
     match crate::webm_opus::HostedWebmFinalizer::from_env() {
@@ -127,7 +132,7 @@ async fn run_async() -> anyhow::Result<()> {
     let workspace_service = Arc::new(WorkspaceService::open_with_capabilities(
         std::env::var("MARGINS_INSTANCE_ID").unwrap_or_else(|_| "local".to_string()),
         workspace,
-        cfg!(feature = "parakeet-asr"),
+        crate::speech_models::transcription_runtime_available(&settings),
         cfg!(feature = "recall"),
     )?);
 
