@@ -10,7 +10,7 @@ interface ServerHandle {
   baseUrl: string;
   token: string;
   workspaceId: string;
-  child: ChildProcess;
+  child?: ChildProcess;
 }
 
 function hostError(code: string, message: string, retryable = true): HostError {
@@ -69,6 +69,37 @@ export class ProjectServerManager {
   }
 
   private async start(target: ProjectTarget, dataDir: string, key: string, signal?: AbortSignal) {
+    const remoteUrl = process.env.MARGINS_BB_REMOTE_URL?.trim();
+    const remoteToken = process.env.MARGINS_BB_REMOTE_TOKEN?.trim();
+    const remoteWorkspace = process.env.MARGINS_BB_REMOTE_WORKSPACE?.trim();
+    if (remoteUrl || remoteToken || remoteWorkspace) {
+      if (!remoteUrl || !remoteToken || !remoteWorkspace) {
+        throw new Error("remote Margins selection requires URL, token, and Workspace together");
+      }
+      const parsed = new URL(remoteUrl);
+      const loopback = parsed.protocol === "http:"
+        && ["127.0.0.1", "localhost", "::1"].includes(parsed.hostname);
+      if (parsed.protocol !== "https:" && !loopback) {
+        throw new Error("remote Margins requires HTTPS or loopback HTTP");
+      }
+      const baseUrl = remoteUrl.replace(/\/$/, "");
+      const response = await fetch(`${baseUrl}/v1/capabilities`, {
+        signal,
+        headers: { authorization: `Bearer ${remoteToken}` },
+      });
+      const envelope = await response.json() as {
+        ok?: boolean;
+        result?: { workspace_id?: string };
+        error?: { message?: string };
+      };
+      if (!response.ok || !envelope.ok) {
+        throw new Error(envelope.error?.message || `remote Margins capability check failed (${response.status})`);
+      }
+      if (envelope.result?.workspace_id !== remoteWorkspace) {
+        throw new Error("remote Margins capability Workspace does not match configured Workspace");
+      }
+      return { baseUrl, token: remoteToken, workspaceId: remoteWorkspace };
+    }
     const binary = await this.runtime.ensureProjectServer({ dataDir, signal });
     const instanceDir = join(dataDir, "projects", key);
     await mkdir(instanceDir, { recursive: true });
@@ -99,7 +130,7 @@ export class ProjectServerManager {
 
   async dispose() {
     for (const handle of await Promise.allSettled(this.handles.values())) {
-      if (handle.status === "fulfilled" && handle.value.child.exitCode === null) handle.value.child.kill("SIGTERM");
+      if (handle.status === "fulfilled" && handle.value.child?.exitCode === null) handle.value.child.kill("SIGTERM");
     }
     this.handles.clear();
   }

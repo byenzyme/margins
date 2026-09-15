@@ -159,6 +159,28 @@ fn composed_service_is_the_same_canonical_store_across_retry_and_restart() {
             chunk("capture-a", "forged", "mic", 0)
         )
         .is_err());
+    let link = WorkspaceNoteAssociationUpdateV1 {
+        request_id: "note-link-1".into(),
+        source_id: "home".into(),
+        relative_path: "meetings/capture-a.md".into(),
+        observed_content_hash: Some("observed-hash".into()),
+        expected_revision: 0,
+    };
+    let associated = service
+        .link_note(&owner, &SessionId("capture-a".into()), &link)
+        .unwrap();
+    assert_eq!(
+        service
+            .link_note(&owner, &SessionId("capture-a".into()), &link)
+            .unwrap(),
+        associated
+    );
+    assert_eq!(associated.relative_path, "meetings/capture-a.md");
+    assert!(service
+        .latest_job(&owner, &SessionId("capture-a".into()))
+        .unwrap()
+        .is_none());
+    assert!(!notes.join("meetings/capture-a.md").exists());
     // Out of order, followed by an exact retry standing in for a lost ACK.
     service
         .execute_capture(
@@ -194,9 +216,16 @@ fn composed_service_is_the_same_canonical_store_across_retry_and_restart() {
 
     drop(service);
     let restarted = WorkspaceService::open("host-a", workspace).unwrap();
-    restarted
-        .execute_capture(&owner, &reservation.producer_token, finalize("capture-a"))
+    let final_command = finalize("capture-a");
+    let finalized = restarted
+        .execute_capture(&owner, &reservation.producer_token, final_command.clone())
         .unwrap();
+    let lost_ack_replay = restarted
+        .execute_capture(&owner, &reservation.producer_token, final_command)
+        .unwrap();
+    assert!(!finalized.idempotent_replay);
+    assert!(lost_ack_replay.idempotent_replay);
+    assert_eq!(finalized.messages, lost_ack_replay.messages);
 
     let page = restarted.sessions(&owner, None, 10).unwrap();
     assert_eq!(page.sessions.len(), 1);
@@ -236,6 +265,128 @@ fn composed_service_is_the_same_canonical_store_across_retry_and_restart() {
 }
 
 #[test]
+fn finalized_session_attach_is_generation_fenced_and_retry_safe() {
+    let temp = tempfile::tempdir().unwrap();
+    let notes = temp.path().join("notes");
+    let captures = temp.path().join("captures");
+    std::fs::create_dir_all(&notes).unwrap();
+    let workspace =
+        ensure_service_workspace(&temp.path().join("state"), "team", None, &notes, &captures)
+            .unwrap();
+    let service = WorkspaceService::open("host-a", workspace).unwrap();
+    let owner = ServicePrincipal::full("owner", "team");
+    let first = service
+        .reserve_session(&owner, create("capture-a"))
+        .unwrap();
+    for lane in ["mic", "system"] {
+        for sequence in 0..2 {
+            service
+                .execute_capture(
+                    &owner,
+                    &first.producer_token,
+                    chunk("capture-a", &format!("{lane}-{sequence}"), lane, sequence),
+                )
+                .unwrap();
+        }
+    }
+    service
+        .execute_capture(&owner, &first.producer_token, close("capture-a"))
+        .unwrap();
+    service
+        .execute_capture(&owner, &first.producer_token, finalize("capture-a"))
+        .unwrap();
+
+    let request = WorkspaceAttachV1 {
+        request_id: "8cc97936-9cb3-4d27-853f-9818cbe9ea72".into(),
+        prior_finalize_message_id: "finalize-1".into(),
+        requested_at_unix_ms: UnixMillis(BASE + 200),
+        started_at_ms: SessionMillis(200),
+    };
+    let second = service
+        .attach_session(&owner, &SessionId("capture-a".into()), &request)
+        .unwrap();
+    let replay = service
+        .attach_session(&owner, &SessionId("capture-a".into()), &request)
+        .unwrap();
+    assert_eq!(second.producer_token, replay.producer_token);
+    assert!(replay.response.idempotent_replay);
+
+    let second_chunk = |lane: &str| {
+        let payload = vec![if lane == "mic" { 0x31 } else { 0x42 }; 9_600];
+        command(
+            "capture-a",
+            &format!("second-{lane}-0"),
+            ClientMessageBodyV1::AudioChunk(AudioChunkV1 {
+                segment_id: "segment-2".into(),
+                lane_id: lane.into(),
+                sequence: 0,
+                starts_at_ms: SessionMillis(200),
+                duration_ms: DurationMillis(100),
+                payload_digest: ContentDigestV1 {
+                    algorithm: DigestAlgorithmV1::Sha256,
+                    hex: format!("{:x}", Sha256::digest(&payload)),
+                },
+                payload,
+            }),
+        )
+    };
+    assert!(service
+        .execute_capture(&owner, &first.producer_token, second_chunk("mic"))
+        .is_err());
+    for lane in ["mic", "system"] {
+        service
+            .execute_capture(&owner, &second.producer_token, second_chunk(lane))
+            .unwrap();
+    }
+    let close = command(
+        "capture-a",
+        "close-2",
+        ClientMessageBodyV1::CloseSegment(CloseSegmentV1 {
+            segment_id: "segment-2".into(),
+            ended_at_ms: SessionMillis(300),
+            lane_boundaries: ["mic", "system"]
+                .into_iter()
+                .map(|lane| LaneBoundaryV1 {
+                    lane_id: lane.into(),
+                    next_sequence: 1,
+                })
+                .collect(),
+            reason: SegmentCloseReasonV1::Stop,
+        }),
+    );
+    service
+        .execute_capture(&owner, &second.producer_token, close)
+        .unwrap();
+    let finalize = command(
+        "capture-a",
+        "finalize-2",
+        ClientMessageBodyV1::FinalizeSession(FinalizeSessionV1 {
+            ended_at_ms: SessionMillis(300),
+            segment_closes: vec![SegmentCloseReferenceV1 {
+                segment_id: "segment-2".into(),
+                close_message_id: "close-2".into(),
+            }],
+            reason: SessionFinalizeReasonV1::Completed,
+        }),
+    );
+    service
+        .execute_capture(&owner, &second.producer_token, finalize)
+        .unwrap();
+    let page = service.sessions(&owner, None, 10).unwrap();
+    assert_eq!(
+        page.sessions[0].capture_duration_ms,
+        Some(DurationMillis(300))
+    );
+    assert_eq!(
+        page.sessions[0]
+            .capture_finalize_message_id
+            .as_ref()
+            .map(|id| id.as_ref()),
+        Some("finalize-2")
+    );
+}
+
+#[test]
 fn memo_source_and_import_authorization_are_independent_and_retry_safe() {
     let temp = tempfile::tempdir().unwrap();
     let notes = temp.path().join("notes");
@@ -271,10 +422,13 @@ fn memo_source_and_import_authorization_are_independent_and_retry_safe() {
         .link_note(
             &owner,
             &SessionId("capture-a".into()),
-            "home",
-            "../escape.md",
-            None,
-            0
+            &WorkspaceNoteAssociationUpdateV1 {
+                request_id: "bad-link".into(),
+                source_id: "home".into(),
+                relative_path: "../escape.md".into(),
+                observed_content_hash: None,
+                expected_revision: 0,
+            },
         )
         .is_err());
 

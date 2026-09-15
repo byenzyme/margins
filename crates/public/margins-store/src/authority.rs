@@ -90,6 +90,16 @@ impl SqliteWorkspaceAuthorityStorage {
                 created_at_ms INTEGER NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES sessions(name) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS workspace_session_mutation_receipts (
+                session_id TEXT NOT NULL,
+                principal_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                response_json TEXT NOT NULL,
+                PRIMARY KEY (session_id, principal_id, operation, request_id),
+                FOREIGN KEY (session_id) REFERENCES sessions(name) ON DELETE CASCADE
+            );
             "#,
         )?;
         Ok(connection)
@@ -115,7 +125,15 @@ impl SqliteWorkspaceAuthorityStorage {
             if owner == principal_id && hash == token_hash && state != "released" {
                 return Ok(());
             }
-            bail!("session already has a capture producer");
+            if state != "released" {
+                bail!("session already has a capture producer");
+            }
+            tx.execute(
+                "UPDATE workspace_session_producers SET principal_id = ?1, producer_token_hash = ?2, state = 'active', updated_at_ms = ?3 WHERE session_id = ?4 AND state = 'released'",
+                params![principal_id, token_hash, now_ms(), session_id],
+            )?;
+            tx.commit()?;
+            return Ok(());
         }
         tx.execute(
             "INSERT INTO workspace_session_producers (session_id, principal_id, producer_token_hash, state, updated_at_ms) VALUES (?1, ?2, ?3, 'active', ?4)",
@@ -142,19 +160,198 @@ impl SqliteWorkspaceAuthorityStorage {
         let Some((owner, hash, state)) = expected else {
             bail!("capture producer is not reserved");
         };
-        if owner != principal_id || hash != digest(producer_token.as_bytes()) || state == "released"
-        {
+        if owner != principal_id || hash != digest(producer_token.as_bytes()) {
             bail!("capture producer authorization failed");
         }
+        // A released producer may repeat its exact final command after losing
+        // the response. The runtime receipt decides whether it is an
+        // idempotent replay and rejects any new post-finalization mutation.
+        let _ = state;
         Ok(())
     }
 
-    pub fn release_producer(&self, session_id: &str) -> Result<()> {
+    pub fn rename_session(
+        &self,
+        session_id: &str,
+        principal_id: &str,
+        request_id: &str,
+        title: &str,
+    ) -> Result<String> {
+        validate_request_id(request_id)?;
+        let title = title.trim();
+        if title.is_empty() {
+            bail!("title must not be empty");
+        }
+        let fingerprint = digest(title.as_bytes());
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let prior: Option<(String, String)> = tx
+            .query_row(
+                "SELECT fingerprint, response_json FROM workspace_session_mutation_receipts WHERE session_id = ?1 AND principal_id = ?2 AND operation = 'rename' AND request_id = ?3",
+                params![session_id, principal_id, request_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((prior_fingerprint, response)) = prior {
+            if prior_fingerprint != fingerprint {
+                bail!("rename request id was reused with different content");
+            }
+            return Ok(serde_json::from_str(&response)?);
+        }
+        let changed = tx.execute(
+            "UPDATE sessions SET title = ?1 WHERE name = ?2",
+            params![title, session_id],
+        )?;
+        if changed == 0 {
+            bail!("session not found");
+        }
+        let response = serde_json::to_string(title)?;
+        tx.execute(
+            "INSERT INTO workspace_session_mutation_receipts (session_id, principal_id, operation, request_id, fingerprint, response_json) VALUES (?1, ?2, 'rename', ?3, ?4, ?5)",
+            params![session_id, principal_id, request_id, fingerprint, response],
+        )?;
+        tx.commit()?;
+        Ok(title.to_string())
+    }
+
+    pub fn link_note(
+        &self,
+        session_id: &str,
+        principal_id: &str,
+        request_id: &str,
+        source_id: &str,
+        relative_path: &str,
+        observed_hash: Option<&str>,
+        expected_revision: u64,
+    ) -> Result<canonical::NoteAssociation> {
+        validate_request_id(request_id)?;
+        let fingerprint = digest(
+            format!(
+                "{source_id}\0{relative_path}\0{}\0{expected_revision}",
+                observed_hash.unwrap_or_default()
+            )
+            .as_bytes(),
+        );
+        if let Some(response) = self.mutation_receipt(
+            session_id,
+            principal_id,
+            "note_link",
+            request_id,
+            &fingerprint,
+        )? {
+            return Ok(serde_json::from_str(&response)?);
+        }
+        let association = canonical::link_note(
+            &self.directory,
+            session_id,
+            source_id,
+            relative_path,
+            observed_hash,
+            expected_revision,
+        )?;
+        self.record_mutation_receipt(
+            session_id,
+            principal_id,
+            "note_link",
+            request_id,
+            &fingerprint,
+            &serde_json::to_string(&association)?,
+        )?;
+        Ok(association)
+    }
+
+    pub fn unlink_note(
+        &self,
+        session_id: &str,
+        principal_id: &str,
+        request_id: &str,
+        expected_revision: u64,
+    ) -> Result<()> {
+        validate_request_id(request_id)?;
+        let fingerprint = digest(expected_revision.to_string().as_bytes());
+        if self
+            .mutation_receipt(
+                session_id,
+                principal_id,
+                "note_unlink",
+                request_id,
+                &fingerprint,
+            )?
+            .is_some()
+        {
+            return Ok(());
+        }
+        canonical::unlink_note(&self.directory, session_id, expected_revision)?;
+        self.record_mutation_receipt(
+            session_id,
+            principal_id,
+            "note_unlink",
+            request_id,
+            &fingerprint,
+            "null",
+        )
+    }
+
+    fn mutation_receipt(
+        &self,
+        session_id: &str,
+        principal_id: &str,
+        operation: &str,
+        request_id: &str,
+        fingerprint: &str,
+    ) -> Result<Option<String>> {
+        let connection = self.connection()?;
+        let stored: Option<(String, String)> = connection
+            .query_row(
+                "SELECT fingerprint, response_json FROM workspace_session_mutation_receipts WHERE session_id = ?1 AND principal_id = ?2 AND operation = ?3 AND request_id = ?4",
+                params![session_id, principal_id, operation, request_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((stored_fingerprint, response)) = stored {
+            if stored_fingerprint != fingerprint {
+                bail!("mutation request id was reused with different content");
+            }
+            Ok(Some(response))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn record_mutation_receipt(
+        &self,
+        session_id: &str,
+        principal_id: &str,
+        operation: &str,
+        request_id: &str,
+        fingerprint: &str,
+        response: &str,
+    ) -> Result<()> {
         let connection = self.connection()?;
         connection.execute(
-            "UPDATE workspace_session_producers SET state = 'released', updated_at_ms = ?1 WHERE session_id = ?2",
-            params![now_ms(), session_id],
+            "INSERT OR IGNORE INTO workspace_session_mutation_receipts (session_id, principal_id, operation, request_id, fingerprint, response_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![session_id, principal_id, operation, request_id, fingerprint, response],
         )?;
+        Ok(())
+    }
+
+    pub fn release_producer(
+        &self,
+        session_id: &str,
+        principal_id: &str,
+        producer_token: &str,
+    ) -> Result<()> {
+        let connection = self.connection()?;
+        let changed = connection.execute(
+            "UPDATE workspace_session_producers SET state = 'released', updated_at_ms = ?1 WHERE session_id = ?2 AND principal_id = ?3 AND producer_token_hash = ?4 AND state = 'active'",
+            params![now_ms(), session_id, principal_id, digest(producer_token.as_bytes())],
+        )?;
+        if changed == 0 {
+            // Exact finalize replays after the matching producer was already
+            // released are successful; a stale generation must not release a
+            // newer producer.
+            self.authorize_producer(session_id, principal_id, producer_token)?;
+        }
         Ok(())
     }
 
@@ -417,7 +614,7 @@ impl SqliteWorkspaceAuthorityStorage {
         let stored_path = format!(".margins/imports/{stored_name}");
         let connection = self.connection()?;
         connection.execute(
-            "INSERT INTO workspace_import_receipts (upload_id, principal_id, digest, session_id, size_bytes, stored_path, original_filename, processing_state, created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8)",
+            "INSERT INTO workspace_import_receipts (upload_id, principal_id, digest, session_id, size_bytes, stored_path, original_filename, processing_state, created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'durable_received', ?8)",
             params![upload_id, principal_id, digest, session_id, i64::try_from(bytes.len()).context("import too large")?, stored_path, sanitize_filename(original_filename), now_ms()],
         )?;
         Ok(ImportReceipt {
@@ -426,7 +623,7 @@ impl SqliteWorkspaceAuthorityStorage {
             digest,
             size_bytes: bytes.len() as u64,
             stored_path,
-            processing_state: "queued".to_string(),
+            processing_state: "durable_received".to_string(),
             replayed: false,
         })
     }

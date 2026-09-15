@@ -9,11 +9,14 @@ use anyhow::{bail, Context, Result};
 use fs4::fs_std::FileExt;
 use margins_core::SessionRepository;
 use margins_meeting_protocol::{
-    ArtifactId, AudioCodecV1, AudioContainerV1, AudioFormatV1, ClientMessageBodyV1,
-    ClientMessageV1, InstanceId, ProtocolVersionV1, SequenceRangeV1, SessionId,
-    WorkspaceArtifactV1, WorkspaceCapabilitiesV1, WorkspaceId, WorkspaceLimitsV1,
-    WorkspaceMemoLineV1, WorkspaceMemoUpdateV1, WorkspaceMemoV1, WorkspaceSessionPageV1,
-    WorkspaceSessionSummaryV1, WorkspaceSummaryV1, WorkspaceTranscriptV1,
+    ArtifactId, AudioCodecV1, AudioContainerV1, AudioFormatV1, BeginCaptureGenerationV1,
+    ClientMessageBodyV1, ClientMessageV1, DurationMillis, InstanceId, ProtocolVersionV1,
+    SequenceRangeV1, ServerMessageBodyV1, SessionId, WorkspaceArtifactV1,
+    WorkspaceAttachV1, WorkspaceCapabilitiesV1, WorkspaceId, WorkspaceLimitsV1,
+    WorkspaceMemoLineV1, WorkspaceMemoReplaceV1, WorkspaceMemoUpdateV1, WorkspaceMemoV1,
+    WorkspaceNoteAssociationUpdateV1, WorkspaceNoteAssociationV1, WorkspaceProcessingJobV1,
+    WorkspaceRenameV1, WorkspaceSessionPageV1, WorkspaceSessionSummaryV1, WorkspaceSummaryV1,
+    WorkspaceTranscriptV1,
 };
 use margins_meeting_runtime::{MeetingRuntime, MeetingRuntimeStorage, RuntimeResponseV1};
 use margins_store::{
@@ -35,6 +38,7 @@ pub const DEFAULT_SPOOL_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
 pub const OP_WORKSPACE_READ: &str = "workspace.read";
 pub const OP_SESSION_READ: &str = "session.read";
 pub const OP_SESSION_CREATE: &str = "session.create";
+pub const OP_SESSION_WRITE: &str = "session.write";
 pub const OP_CAPTURE_WRITE: &str = "capture.write";
 pub const OP_MEMO_WRITE: &str = "memo.write";
 pub const OP_NOTE_ASSOCIATE: &str = "note.associate";
@@ -70,6 +74,7 @@ impl ServicePrincipal {
                 OP_WORKSPACE_READ,
                 OP_SESSION_READ,
                 OP_SESSION_CREATE,
+                OP_SESSION_WRITE,
                 OP_CAPTURE_WRITE,
                 OP_MEMO_WRITE,
                 OP_NOTE_ASSOCIATE,
@@ -428,6 +433,58 @@ impl WorkspaceService {
         })
     }
 
+    pub fn attach_session(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+        request: &WorkspaceAttachV1,
+    ) -> Result<SessionReservation> {
+        principal.require(self.workspace_id(), OP_SESSION_CREATE)?;
+        if request.request_id.len() < 20 || request.request_id.chars().any(char::is_whitespace) {
+            bail!("attach request identity must contain at least 20 non-space characters");
+        }
+        let command = ClientMessageV1 {
+            protocol_version: ProtocolVersionV1,
+            message_id: format!("attach-{}", request.request_id).into(),
+            session_id: session_id.clone(),
+            sent_at_unix_ms: request.requested_at_unix_ms,
+            body: ClientMessageBodyV1::BeginCaptureGeneration(BeginCaptureGenerationV1 {
+                prior_finalize_message_id: request.prior_finalize_message_id.clone(),
+                started_at_ms: request.started_at_ms,
+            }),
+        };
+        let response = self
+            .runtime
+            .handle(command)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        ensure_runtime_accepted(&response)?;
+        // The high-entropy request identity makes this deterministic across a
+        // lost response without storing a replayable producer secret in the
+        // application database.
+        let producer_token = format!(
+            "{:x}",
+            Sha256::digest(
+                format!(
+                    "margins.attach.v1\0{}\0{}\0{}\0{}\0{}",
+                    self.instance_id.as_ref(),
+                    self.workspace_id(),
+                    principal.id,
+                    session_id.as_ref(),
+                    request.request_id
+                )
+                .as_bytes()
+            )
+        );
+        self.authority
+            .reserve_producer(session_id.as_ref(), &principal.id, &producer_token)?;
+        self.authority
+            .set_current(&principal.id, self.workspace_id(), session_id.as_ref())?;
+        Ok(SessionReservation {
+            response,
+            producer_token,
+        })
+    }
+
     pub fn execute_capture(
         &self,
         principal: &ServicePrincipal,
@@ -449,19 +506,20 @@ impl WorkspaceService {
             }
         }
         let finalized = matches!(command.body, ClientMessageBodyV1::FinalizeSession(_));
+        let session_id = command.session_id.clone();
         let response = self
             .runtime
             .handle(command)
             .map_err(|error| anyhow::anyhow!(error))?;
-        if finalized {
-            self.authority.release_producer(
-                response
-                    .messages
-                    .first()
-                    .context("finalize response was empty")?
-                    .session_id
-                    .as_ref(),
-            )?;
+        ensure_runtime_accepted(&response)?;
+        if finalized
+            && response
+                .messages
+                .iter()
+                .any(|message| matches!(message.body, ServerMessageBodyV1::SessionFinalized(_)))
+        {
+            self.authority
+                .release_producer(session_id.as_ref(), &principal.id, producer_token)?;
         }
         Ok(response)
     }
@@ -482,7 +540,16 @@ impl WorkspaceService {
     ) -> Result<WorkspaceSessionPageV1> {
         principal.require(self.workspace_id(), OP_SESSION_READ)?;
         let limit = limit.clamp(1, 100);
-        let all = canonical::list_sessions(&self.margins_dir)?;
+        // Empty reservations are retained for audit/retry but are not ordinary
+        // meetings. A segment or registered artifact makes the session visible.
+        let all = canonical::list_sessions(&self.margins_dir)?
+            .into_iter()
+            .filter(|session| {
+                session.segment_count > 0
+                    || canonical::list_session_artifacts(&self.margins_dir, &session.name)
+                        .is_ok_and(|artifacts| !artifacts.is_empty())
+            })
+            .collect::<Vec<_>>();
         let start = after
             .and_then(|cursor| all.iter().position(|session| session.name == cursor))
             .map_or(0, |position| position + 1);
@@ -492,41 +559,47 @@ impl WorkspaceService {
             .flatten();
         let sessions = page
             .into_iter()
-            .map(|session| {
-                let meta = canonical::get_session_meta(&self.margins_dir, &session.name)?;
-                let runtime = self
-                    .runtime
-                    .storage()
-                    .load_session(&SessionId(session.name.clone()))?;
-                // The bounded remote runtime owns its explicit finalize bit. Existing
-                // local/native writers publish the same fact by completing every
-                // canonical segment duration. Reading both representations here keeps
-                // one authoritative session listing while those capture adapters use
-                // their native, direct-device stop paths.
-                let input_finalized = runtime
-                    .as_ref()
-                    .is_some_and(|value| value.input_finalized())
-                    || (!meta.segments.is_empty()
-                        && meta
-                            .segments
-                            .iter()
-                            .all(|segment| segment.duration_secs.is_some()))
-                    || canonical::list_session_artifacts(&self.margins_dir, &session.name)?
-                        .iter()
-                        .any(|artifact| artifact.kind == "original_audio");
-                Ok(WorkspaceSessionSummaryV1 {
-                    session_id: SessionId(session.name.clone()),
-                    title: meta.title,
-                    started_at: session.start_time.clone(),
-                    segment_count: session.segment_count.max(0) as u64,
-                    input_finalized,
-                    processing_state: meta.processing_state.unwrap_or_else(|| "none".to_string()),
-                })
-            })
+            .map(|session| self.session_summary(&session.name))
             .collect::<Result<Vec<_>>>()?;
         Ok(WorkspaceSessionPageV1 {
             sessions,
             next_cursor,
+        })
+    }
+
+    fn session_summary(&self, session_id: &str) -> Result<WorkspaceSessionSummaryV1> {
+        let session = canonical::list_sessions(&self.margins_dir)?
+            .into_iter()
+            .find(|value| value.name == session_id)
+            .context("session not found")?;
+        let meta = canonical::get_session_meta(&self.margins_dir, session_id)?;
+        let runtime = self
+            .runtime
+            .storage()
+            .load_session(&SessionId(session_id.to_string()))?;
+        let input_finalized = runtime
+            .as_ref()
+            .is_some_and(|value| value.input_finalized())
+            || (!meta.segments.is_empty()
+                && meta
+                    .segments
+                    .iter()
+                    .all(|segment| segment.duration_secs.is_some()))
+            || canonical::list_session_artifacts(&self.margins_dir, session_id)?
+                .iter()
+                .any(|artifact| artifact.kind == "original_audio");
+        let finalized_input = runtime.as_ref().and_then(|value| value.finalized_input());
+        let capture_duration_ms = finalized_input.map(|(_, ended)| DurationMillis(ended.0));
+        let capture_finalize_message_id = finalized_input.map(|(message, _)| message.clone());
+        Ok(WorkspaceSessionSummaryV1 {
+            session_id: SessionId(session_id.to_string()),
+            title: meta.title,
+            started_at: session.start_time,
+            segment_count: session.segment_count.max(0) as u64,
+            input_finalized,
+            capture_duration_ms,
+            capture_finalize_message_id,
+            processing_state: meta.processing_state.unwrap_or_else(|| "none".to_string()),
         })
     }
 
@@ -671,62 +744,115 @@ impl WorkspaceService {
         })
     }
 
+    pub fn replace_memo(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+        request: &WorkspaceMemoReplaceV1,
+    ) -> Result<WorkspaceMemoV1> {
+        principal.require(self.workspace_id(), OP_MEMO_WRITE)?;
+        ensure_session(&self.margins_dir, session_id.as_ref())?;
+        let lines = request
+            .lines
+            .iter()
+            .cloned()
+            .map(timed_memo_line)
+            .collect::<Vec<_>>();
+        let memo = self.authority.replace_memo_lines(
+            session_id.as_ref(),
+            &principal.id,
+            &request.request_id,
+            &request.expected_revision,
+            &lines,
+        )?;
+        Ok(WorkspaceMemoV1 {
+            session_id: session_id.clone(),
+            revision: memo.revision,
+            lines: memo.lines.into_iter().map(memo_line).collect(),
+        })
+    }
+
+    pub fn rename_session(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+        request: &WorkspaceRenameV1,
+    ) -> Result<WorkspaceSessionSummaryV1> {
+        principal.require(self.workspace_id(), OP_SESSION_WRITE)?;
+        ensure_session(&self.margins_dir, session_id.as_ref())?;
+        self.authority.rename_session(
+            session_id.as_ref(),
+            &principal.id,
+            &request.request_id,
+            &request.title,
+        )?;
+        self.session_summary(session_id.as_ref())
+    }
+
     pub fn link_note(
         &self,
         principal: &ServicePrincipal,
         session_id: &SessionId,
-        source_id: &str,
-        relative_path: &str,
-        observed_hash: Option<&str>,
-        expected_revision: u64,
-    ) -> Result<canonical::NoteAssociation> {
+        request: &WorkspaceNoteAssociationUpdateV1,
+    ) -> Result<WorkspaceNoteAssociationV1> {
         principal.require(self.workspace_id(), OP_NOTE_ASSOCIATE)?;
         let source = self
             .workspace
             .config
             .bindings
-            .get(source_id)
+            .get(&request.source_id)
             .context("note Source is not declared in this Workspace")?;
         if !matches!(source, WorkspaceBinding::NativeMarkdown { .. }) {
             bail!("note associations require a native notes Source");
         }
-        validate_relative_path(relative_path)?;
-        canonical::link_note(
-            &self.margins_dir,
-            session_id.as_ref(),
-            source_id,
-            relative_path,
-            observed_hash,
-            expected_revision,
-        )
+        validate_relative_path(&request.relative_path)?;
+        self.authority
+            .link_note(
+                session_id.as_ref(),
+                &principal.id,
+                &request.request_id,
+                &request.source_id,
+                &request.relative_path,
+                request.observed_content_hash.as_deref(),
+                request.expected_revision,
+            )
+            .map(note_association)
     }
 
     pub fn note_association(
         &self,
         principal: &ServicePrincipal,
         session_id: &SessionId,
-    ) -> Result<Option<canonical::NoteAssociation>> {
+    ) -> Result<Option<WorkspaceNoteAssociationV1>> {
         principal.require(self.workspace_id(), OP_SESSION_READ)?;
         canonical::get_note_association(&self.margins_dir, session_id.as_ref())
+            .map(|value| value.map(note_association))
     }
 
     pub fn unlink_note(
         &self,
         principal: &ServicePrincipal,
         session_id: &SessionId,
+        request_id: &str,
         expected_revision: u64,
     ) -> Result<()> {
         principal.require(self.workspace_id(), OP_NOTE_ASSOCIATE)?;
-        canonical::unlink_note(&self.margins_dir, session_id.as_ref(), expected_revision)
+        self.authority.unlink_note(
+            session_id.as_ref(),
+            &principal.id,
+            request_id,
+            expected_revision,
+        )
     }
 
     pub fn latest_job(
         &self,
         principal: &ServicePrincipal,
         session_id: &SessionId,
-    ) -> Result<Option<canonical::ProcessingJob>> {
+    ) -> Result<Option<WorkspaceProcessingJobV1>> {
         principal.require(self.workspace_id(), OP_JOB_READ)?;
         canonical::latest_processing_job(&self.margins_dir, session_id.as_ref())
+            .map(|value| value.map(processing_job))
     }
 
     pub fn import_finished_file(
@@ -798,6 +924,24 @@ impl WorkspaceService {
     }
 }
 
+fn ensure_runtime_accepted(response: &RuntimeResponseV1) -> Result<()> {
+    if let Some(rejection) = response
+        .messages
+        .iter()
+        .find_map(|message| match &message.body {
+            ServerMessageBodyV1::CommandRejected(rejection) => Some(rejection),
+            _ => None,
+        })
+    {
+        bail!(
+            "capture command rejected ({}): {}",
+            rejection.code,
+            rejection.message.as_deref().unwrap_or("no detail")
+        );
+    }
+    Ok(())
+}
+
 fn ensure_session(directory: &Path, session_id: &str) -> Result<()> {
     if !canonical::session_exists(directory, session_id)? {
         bail!("session not found");
@@ -839,6 +983,42 @@ fn memo_line(line: margins_core::TimedMemoLine) -> WorkspaceMemoLineV1 {
         draft_started_secs: line.draft_started_secs,
         audio_pending_at_mark: line.audio_pending_at_mark,
         block_ordinal: line.block_ordinal,
+    }
+}
+
+fn timed_memo_line(line: WorkspaceMemoLineV1) -> margins_core::TimedMemoLine {
+    margins_core::TimedMemoLine {
+        text: line.text,
+        created_secs: line.created_secs,
+        edited_secs: line.edited_secs,
+        draft_started_secs: line.draft_started_secs,
+        audio_pending_at_mark: line.audio_pending_at_mark,
+        block_ordinal: line.block_ordinal,
+    }
+}
+
+fn note_association(value: canonical::NoteAssociation) -> WorkspaceNoteAssociationV1 {
+    WorkspaceNoteAssociationV1 {
+        session_id: SessionId(value.session_name),
+        source_id: value.source_id,
+        relative_path: value.relative_path,
+        observed_content_hash: value.observed_content_hash,
+        revision: value.revision,
+    }
+}
+
+fn processing_job(value: canonical::ProcessingJob) -> WorkspaceProcessingJobV1 {
+    WorkspaceProcessingJobV1 {
+        job_id: value.job_id,
+        session_id: SessionId(value.session_name),
+        operation: value.operation,
+        input_revision: value.input_revision,
+        attempt: value.attempt,
+        status: value.status,
+        progress: value.progress,
+        result_ref: value.result_ref,
+        failure: value.failure,
+        failed_stage: value.failed_stage,
     }
 }
 

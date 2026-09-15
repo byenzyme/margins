@@ -1,4 +1,5 @@
 pub mod archive;
+pub mod application;
 pub mod artifacts;
 pub mod capabilities;
 pub mod capture;

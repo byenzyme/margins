@@ -23,6 +23,8 @@ const stateRoot = args["state-dir"]
   : await mkdtemp(resolve(tmpdir(), "margins-ux-real-"));
 const homeDir = resolve(stateRoot, "home");
 const dataDir = resolve(stateRoot, "server-data");
+const marginsHome = resolve(stateRoot, "margins-home");
+const workDir = resolve(homeDir, "Documents", "margins");
 const commonGitDir = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
   cwd: desktopDir,
   encoding: "utf8",
@@ -35,6 +37,7 @@ const children = [];
 try {
   await mkdir(homeDir, { recursive: true });
   await mkdir(dataDir, { recursive: true });
+  await mkdir(workDir, { recursive: true });
 
   await runProcess("cargo", ["build", "--quiet", "--no-default-features", "--features", "hosted-web", "--bin", "margins-server"], {
     cwd: tauriDir,
@@ -53,6 +56,11 @@ try {
       MARGINS_HOST: host,
       MARGINS_PORT: String(serverPort),
       MARGINS_DATA_DIR: dataDir,
+      MARGINS_HOME: marginsHome,
+      MARGINS_WORKSPACE: "ux-real-cdp",
+      MARGINS_WORK_DIR: workDir,
+      MARGINS_INSTANCE_ID: "ux-real-cdp",
+      MARGINS_SERVICE_PROVISION: "1",
       MARGINS_PROFILE: "ux-real-cdp",
       MARGINS_DISABLE_KEYCHAIN: "1",
     },

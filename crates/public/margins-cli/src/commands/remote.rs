@@ -1,8 +1,13 @@
-use crate::args::{Command, ServiceCommand, TransfersCommand};
+use crate::args::{Command, ServiceCommand, TranscriptFormat, TransfersCommand};
 use crate::error::CliError;
+use margins_meeting_protocol::{
+    SessionId, SessionMillis, WorkspaceMemoUpdateV1, WorkspaceNoteAssociationUpdateV1,
+    WorkspaceRenameV1,
+};
 use margins_workflows::{
     remote_workspace::{
-        list_transfers, DurableTransferSpool, RemoteConnection, ServiceDiscoveryV1, ServiceStateV1,
+        deliver_transfer, list_transfers, DurableTransferSpool, RemoteConnection,
+        ServiceDiscoveryV1, ServiceStateV1,
     },
     workspace_service::{ScopedCredentialStore, ServicePrincipal},
 };
@@ -14,7 +19,11 @@ pub fn service(
     workspace_selector: Option<&str>,
     stdout: &mut dyn Write,
 ) -> Result<(), CliError> {
-    let data_dir = service_data_dir()?;
+    let explicit_data_dir = match &command {
+        ServiceCommand::Discover { data_dir, .. } => data_dir.clone(),
+        _ => None,
+    };
+    let data_dir = service_data_dir(explicit_data_dir)?;
     let state: ServiceStateV1 = serde_json::from_slice(
         &std::fs::read(data_dir.join("service.json"))
             .map_err(|error| CliError::from_anyhow(error.into()))?,
@@ -34,9 +43,19 @@ pub fn service(
     let credentials = ScopedCredentialStore::open(data_dir.join("credentials.json"))
         .map_err(CliError::from_anyhow)?;
     let output = match command {
-        ServiceCommand::Discover { json: _ } => {
-            let principal =
-                ServicePrincipal::full(format!("ssh-{}", std::process::id()), selected.clone());
+        ServiceCommand::Discover {
+            json: _,
+            data_dir: _,
+        } => {
+            // The SSH transport has already authenticated the remote OS user.
+            // Keep its client-scoped current pointer stable across invocations;
+            // a per-process id would make bare `attach` select nothing on the
+            // very next CLI run.
+            let ssh_user = std::env::var("USER")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "unknown".to_string());
+            let principal = ServicePrincipal::full(format!("ssh-{ssh_user}"), selected.clone());
             let credential = credentials
                 .issue(
                     &principal.id,
@@ -92,12 +111,31 @@ pub fn run(
     // Reject placeholder commands before opening a socket, starting SSH, or
     // reading any local input. A command is supported remotely only when this
     // adapter has a complete production implementation for it.
+    if matches!(&command, Command::Recent { all: true }) {
+        return Err(CliError::new(
+            "remote_option_unsupported",
+            "remote recent --all requires an instance-wide authorization endpoint; no request was sent",
+        ));
+    }
+    if let Command::Transcribe { memo, speakers, .. } = &command {
+        if memo.is_some() || speakers.is_some() {
+            return Err(CliError::new(
+                "remote_option_unsupported",
+                "remote file intake does not run memo alignment or speaker processing; no file was read",
+            ));
+        }
+    }
     if !matches!(
         &command,
         Command::Capabilities
+            | Command::Note { .. }
             | Command::Current
             | Command::Ls
             | Command::Recent { .. }
+            | Command::Rename { .. }
+            | Command::Memo { .. }
+            | Command::NoteAssociation { .. }
+            | Command::ProcessingStatus { .. }
             | Command::Transcript { .. }
             | Command::Artifacts { .. }
             | Command::Recall { .. }
@@ -118,7 +156,7 @@ pub fn run(
                 .capabilities()
                 .map_err(CliError::from_anyhow)?,
         ),
-        Command::Ls | Command::Recent { .. } => serde_json::to_value(
+        Command::Ls | Command::Recent { all: false } => serde_json::to_value(
             connection
                 .client
                 .sessions(None, 100)
@@ -127,24 +165,162 @@ pub fn run(
         Command::Current => {
             serde_json::to_value(connection.client.current().map_err(CliError::from_anyhow)?)
         }
-        Command::Transcript { meeting_id, .. } => serde_json::to_value(
-            connection
+        Command::Rename { title } => {
+            let session = resolve_session(&connection.client, None)?;
+            serde_json::to_value(
+                connection.client.rename(
+                    session.as_ref(),
+                    &WorkspaceRenameV1 {
+                        request_id: operation_id("rename"),
+                        title,
+                    },
+                ).map_err(CliError::from_anyhow)?,
+            )
+        }
+        Command::Memo {
+            meeting_id,
+            text,
+            expected_revision,
+            request_id,
+            observed_at_ms,
+            paused,
+        } => {
+            let session = resolve_session(&connection.client, meeting_id.as_deref())?;
+            if let Some(text) = text {
+                let expected_revision = expected_revision.ok_or_else(|| {
+                    CliError::usage("memo --text requires --expected-revision")
+                })?;
+                serde_json::to_value(
+                    connection.client.update_memo(
+                        session.as_ref(),
+                        &WorkspaceMemoUpdateV1 {
+                            request_id: request_id.unwrap_or_else(|| operation_id("memo")),
+                            expected_revision,
+                            observed_at_ms: SessionMillis(observed_at_ms.unwrap_or(0)),
+                            paused,
+                            text,
+                        },
+                    ).map_err(CliError::from_anyhow)?,
+                )
+            } else {
+                if expected_revision.is_some() || request_id.is_some() || observed_at_ms.is_some() || paused {
+                    return Err(CliError::usage(
+                        "memo edit flags require --text; omit them to read the memo",
+                    ));
+                }
+                serde_json::to_value(
+                    connection.client.memo(session.as_ref()).map_err(CliError::from_anyhow)?,
+                )
+            }
+        }
+        Command::NoteAssociation {
+            meeting_id,
+            source,
+            path,
+            hash,
+            unlink,
+            expected_revision,
+            request_id,
+        } => {
+            let session = resolve_session(&connection.client, meeting_id.as_deref())?;
+            if unlink {
+                let revision = expected_revision.ok_or_else(|| {
+                    CliError::usage("note-association --unlink requires --expected-revision")
+                })?;
+                connection.client.unlink_note(
+                    session.as_ref(),
+                    &request_id.unwrap_or_else(|| operation_id("note-unlink")),
+                    revision,
+                )
+                    .map_err(CliError::from_anyhow)?;
+                Ok(serde_json::json!({"session_id":session, "association":null}))
+            } else if let (Some(source_id), Some(relative_path)) =
+                (source.as_deref(), path.as_deref())
+            {
+                let revision = expected_revision.ok_or_else(|| {
+                    CliError::usage("linking a note requires --expected-revision")
+                })?;
+                serde_json::to_value(
+                    connection.client.link_note(
+                        session.as_ref(),
+                        &WorkspaceNoteAssociationUpdateV1 {
+                            request_id: request_id.unwrap_or_else(|| operation_id("note-link")),
+                            source_id: source_id.to_string(),
+                            relative_path: relative_path.to_string(),
+                            observed_content_hash: hash,
+                            expected_revision: revision,
+                        },
+                    ).map_err(CliError::from_anyhow)?,
+                )
+            } else {
+                if source.is_some() || path.is_some() || hash.is_some() || expected_revision.is_some() || request_id.is_some() {
+                    return Err(CliError::usage(
+                        "provide both --source and --path to link, or no mutation flags to read",
+                    ));
+                }
+                serde_json::to_value(
+                    connection.client.note_association(session.as_ref())
+                        .map_err(CliError::from_anyhow)?,
+                )
+            }
+        }
+        Command::ProcessingStatus { meeting_id } => {
+            let session = resolve_session(&connection.client, meeting_id.as_deref())?;
+            serde_json::to_value(
+                connection.client.latest_job(session.as_ref()).map_err(CliError::from_anyhow)?,
+            )
+        }
+        Command::Transcript { meeting_id, format } => {
+            let session = resolve_session(&connection.client, meeting_id.as_deref().or(Some("latest")))?;
+            let transcript = connection
                 .client
-                .transcript(meeting_id.as_deref().unwrap_or("latest"))
-                .map_err(CliError::from_anyhow)?,
-        ),
-        Command::Artifacts { meeting_id } => serde_json::to_value(
-            connection
-                .client
-                .artifacts(&meeting_id)
-                .map_err(CliError::from_anyhow)?,
-        ),
+                .transcript(session.as_ref())
+                .map_err(CliError::from_anyhow)?;
+            if format == TranscriptFormat::Text {
+                writeln!(stdout, "{}", transcript.body)
+                    .map_err(|error| CliError::from_anyhow(error.into()))?;
+                return Ok(());
+            }
+            serde_json::to_value(transcript)
+        }
+        Command::Artifacts { meeting_id } => {
+            let session = resolve_session(&connection.client, Some(&meeting_id))?;
+            serde_json::to_value(
+                connection
+                    .client
+                    .artifacts(session.as_ref())
+                    .map_err(CliError::from_anyhow)?,
+            )
+        }
         Command::Recall { query, source } => serde_json::to_value(
             connection
                 .client
                 .recall(&query, source.as_deref())
                 .map_err(CliError::from_anyhow)?,
         ),
+        Command::Note { print: _ } => {
+            // Resolve once, then pin this identity through transcript, memo,
+            // artifact, recall, and optional association work. The handoff
+            // deliberately contains no note bytes or remote publishing API.
+            let session = resolve_session(&connection.client, Some("latest"))?;
+            let transcript = connection.client.transcript(session.as_ref())
+                .map_err(CliError::from_anyhow)?;
+            let memo = connection.client.memo(session.as_ref())
+                .map_err(CliError::from_anyhow)?;
+            let artifacts = connection.client.artifacts(session.as_ref())
+                .map_err(CliError::from_anyhow)?;
+            Ok(serde_json::json!({
+                "schema":"margins.remote-note-handoff.v1",
+                "remote":remote,
+                "workspace_id":workspace,
+                "session_id":session,
+                "transcript":transcript,
+                "memo":memo,
+                "artifacts":artifacts,
+                "local_notes_root":std::env::var("MARGINS_NOTES_ROOT").ok(),
+                "instructions":"Keep this session id pinned. Use remote Margins recall for declared Sources, read and write ordinary note files through the locally synced native Source, then optionally link only its Source-relative reference with note-association. Do not send note bytes to Margins."
+            }))
+        }
         Command::Transcribe {
             audio_path, name, ..
         } => {
@@ -156,8 +332,7 @@ pub fn run(
                 .unwrap_or("recording");
             let session =
                 name.unwrap_or_else(|| format!("import-{}", chrono::Utc::now().timestamp_millis()));
-            serde_json::to_value(
-                connection
+            let receipt = connection
                     .client
                     .import(
                         &format!("upload-{session}"),
@@ -166,14 +341,54 @@ pub fn run(
                         Some(&session),
                         bytes,
                     )
-                    .map_err(CliError::from_anyhow)?,
-            )
+                    .map_err(CliError::from_anyhow)?;
+            serde_json::to_value(serde_json::json!({
+                "schema":"margins.remote-file-intake.v1",
+                "receipt":receipt,
+                "processing_outcome":"not_started",
+                "message":"Original audio is durable. File intake does not start processing, so this command has not produced a transcript. Query processing-status after an explicitly supported server-side processing request."
+            }))
         }
         _ => unreachable!("remote command was checked before transport setup"),
     }
     .map_err(|error| CliError::from_anyhow(error.into()))?;
     writeln!(stdout, "{}", serde_json::to_string(&value).unwrap())
         .map_err(|error| CliError::from_anyhow(error.into()))
+}
+
+fn resolve_session(
+    client: &margins_workflows::remote_workspace::WorkspaceHttpClient,
+    requested: Option<&str>,
+) -> Result<SessionId, CliError> {
+    match requested.unwrap_or("current") {
+        "current" => client
+            .current()
+            .map_err(CliError::from_anyhow)?
+            .ok_or_else(|| {
+                CliError::new(
+                    "current_session_unavailable",
+                    "no current session is selected for this client and Workspace",
+                )
+            }),
+        "latest" => client
+            .latest_session()
+            .map_err(CliError::from_anyhow)?
+            .ok_or_else(|| {
+                CliError::new(
+                    "latest_session_unavailable",
+                    "this Workspace has no completed or visible sessions",
+                )
+            }),
+        value => Ok(value.to_string().into()),
+    }
+}
+
+fn operation_id(prefix: &str) -> String {
+    format!(
+        "{prefix}-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_millis()
+    )
 }
 
 pub fn transfers(command: TransfersCommand, stdout: &mut dyn Write) -> Result<(), CliError> {
@@ -193,7 +408,7 @@ pub fn transfers(command: TransfersCommand, stdout: &mut dyn Write) -> Result<()
             .map_err(|error| CliError::from_anyhow(error.into()))
         }
         TransfersCommand::Retry { transfer_id } => {
-            let spool = DurableTransferSpool::open(&root, &transfer_id, 0)
+            let mut spool = DurableTransferSpool::open(&root, &transfer_id, 0)
                 .map_err(CliError::from_anyhow)?;
             let manifest = spool.manifest().clone();
             let token = std::env::var("MARGINS_REMOTE_TOKEN").ok();
@@ -203,42 +418,17 @@ pub fn transfers(command: TransfersCommand, stdout: &mut dyn Write) -> Result<()
                 token.as_deref(),
             )
             .map_err(CliError::from_anyhow)?;
-            let capabilities = connection
-                .client
-                .capabilities()
-                .map_err(CliError::from_anyhow)?;
-            if capabilities.instance_id.as_ref() != manifest.instance_id {
-                return Err(CliError::new(
-                    "remote_instance_changed",
-                    "remote instance identity changed; preserved transfer was not sent",
-                ));
-            }
-            for chunk in spool.pending_chunks().map_err(CliError::from_anyhow)? {
-                connection
-                    .client
-                    .upload_chunk(&manifest.producer_token, &chunk.command)
-                    .map_err(CliError::from_anyhow)?;
-                spool.acknowledge(&chunk).map_err(CliError::from_anyhow)?;
-            }
-            if let Some(close) = &manifest.close_command {
-                connection
-                    .client
-                    .execute(&manifest.session_id, &manifest.producer_token, close)
-                    .map_err(CliError::from_anyhow)?;
-            }
-            if let Some(finalize) = &manifest.finalize_command {
-                connection
-                    .client
-                    .execute(&manifest.session_id, &manifest.producer_token, finalize)
-                    .map_err(CliError::from_anyhow)?;
-            }
+            deliver_transfer(&mut spool, &connection.client).map_err(CliError::from_anyhow)?;
             writeln!(stdout, "transfer {transfer_id} delivered")
                 .map_err(|error| CliError::from_anyhow(error.into()))
         }
     }
 }
 
-fn service_data_dir() -> Result<PathBuf, CliError> {
+fn service_data_dir(explicit: Option<PathBuf>) -> Result<PathBuf, CliError> {
+    if let Some(value) = explicit {
+        return Ok(value);
+    }
     if let Some(value) = std::env::var_os("MARGINS_DATA_DIR") {
         return Ok(PathBuf::from(value));
     }

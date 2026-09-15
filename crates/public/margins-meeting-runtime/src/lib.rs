@@ -6,11 +6,12 @@
 #![forbid(unsafe_code)]
 
 use margins_meeting_protocol::{
-    AppendProvenanceHopV1, AudioAcknowledgementV1, AudioChunkV1, CaptureDiscontinuityV1,
-    CaptureHealthV1, CaptureProvenanceHopV1, ClientMessageBodyV1, ClientMessageV1, CloseSegmentV1,
-    CommandRejectedV1, CreateSessionV1, DigestAlgorithmV1, DurationMillis, FinalizeSessionV1,
-    LaneId, LiveErrorV1, LiveMutationResponseV1, LiveOperationId, LiveSessionRequestV1,
-    LiveSnapshotV1, LiveStartRequestV1, LiveUpdateNotepadRequestV1, MessageId, ProtocolVersionV1,
+    AppendProvenanceHopV1, AudioAcknowledgementV1, AudioChunkV1, BeginCaptureGenerationV1,
+    CaptureDiscontinuityV1, CaptureGenerationStartedV1, CaptureHealthV1, CaptureProvenanceHopV1,
+    ClientMessageBodyV1, ClientMessageV1, CloseSegmentV1, CommandRejectedV1, CreateSessionV1,
+    DigestAlgorithmV1, DurationMillis, FinalizeSessionV1, LaneId, LiveErrorV1,
+    LiveMutationResponseV1, LiveOperationId, LiveSessionRequestV1, LiveSnapshotV1,
+    LiveStartRequestV1, LiveUpdateNotepadRequestV1, MessageId, ProtocolVersionV1,
     ProvenanceHopRecordedV1, ReplayCompletedV1, SegmentFinalizedV1, SequenceRangeV1,
     ServerMessageBodyV1, ServerMessageV1, SessionCreatedV1, SessionFinalizedV1, SessionId,
     SessionMillis, UnixMillis, ValidationErrorV1, MAX_SAFE_JSON_INTEGER,
@@ -432,7 +433,16 @@ impl StoredSessionV1 {
     }
 
     pub fn input_finalized(&self) -> bool {
-        self.finalize.as_ref().is_some_and(|record| record.finalized)
+        self.finalize
+            .as_ref()
+            .is_some_and(|record| record.finalized)
+    }
+
+    pub fn finalized_input(&self) -> Option<(&MessageId, SessionMillis)> {
+        self.finalize
+            .as_ref()
+            .filter(|record| record.finalized)
+            .map(|record| (&record.message_id, record.command.ended_at_ms))
     }
 
     pub fn next_event_sequence(&self) -> u64 {
@@ -876,6 +886,9 @@ fn apply_command(
             "conflict",
             "session_id or create idempotency key was already used",
         ),
+        ClientMessageBodyV1::BeginCaptureGeneration(begin) => {
+            apply_begin_capture_generation(session, message, begin)
+        }
         ClientMessageBodyV1::ResumeSession(resume) => {
             let watermark = session.next_event_sequence.checked_sub(1);
             if resume
@@ -951,6 +964,47 @@ fn apply_command(
             apply_finalize(session, message, finalize, known_close_commands)
         }
     }
+}
+
+fn apply_begin_capture_generation(
+    session: &mut StoredSessionV1,
+    message: &ClientMessageV1,
+    begin: &BeginCaptureGenerationV1,
+) -> Vec<ServerMessageV1> {
+    let Some(prior) = session.finalize.as_ref() else {
+        return reject(
+            session,
+            message,
+            "invalid_transition",
+            "capture generation can begin only after durable finalization",
+        );
+    };
+    if !prior.finalized || prior.message_id != begin.prior_finalize_message_id {
+        return reject(
+            session,
+            message,
+            "generation_mismatch",
+            "prior finalize identity does not match the durable session generation",
+        );
+    }
+    if begin.started_at_ms < prior.command.ended_at_ms {
+        return reject(
+            session,
+            message,
+            "invalid_transition",
+            "new capture generation starts before the prior finalized boundary",
+        );
+    }
+    session.finalize = None;
+    vec![append_event(
+        session,
+        message.sent_at_unix_ms,
+        ServerMessageBodyV1::CaptureGenerationStarted(CaptureGenerationStartedV1 {
+            begin_message_id: message.message_id.clone(),
+            prior_finalize_message_id: begin.prior_finalize_message_id.clone(),
+            started_at_ms: begin.started_at_ms,
+        }),
+    )]
 }
 
 fn apply_chunk(
@@ -1456,11 +1510,10 @@ fn apply_finalize(
             )
         })
         .collect();
-    if session
-        .segments
-        .keys()
-        .any(|segment_id| !declared.contains_key(segment_id.as_str()))
-    {
+    if session.segments.iter().any(|(segment_id, segment)| {
+        !segment.close.as_ref().is_some_and(|close| close.finalized)
+            && !declared.contains_key(segment_id.as_str())
+    }) {
         return reject(
             session,
             message,
@@ -1495,6 +1548,9 @@ fn apply_finalize(
     }
     for (segment_id, segment) in &session.segments {
         if let Some(close) = &segment.close {
+            if close.finalized && !declared.contains_key(segment_id.as_str()) {
+                continue;
+            }
             if declared.get(segment_id.as_str()).copied() != Some(close.message_id.as_ref()) {
                 return reject(
                     session,

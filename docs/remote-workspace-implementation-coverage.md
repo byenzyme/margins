@@ -20,9 +20,8 @@ tested.
    remaining platform gates without inferring them.
 
 Phases 0–1 have a portable production cutover and parity proof. Phase 2 is wired
-for the supported read/query/import commands. Phase 3 has the durable delivery
-substrate, but the native recorder-to-remote command journey remains an explicit
-implementation gate. Phase 4 has the typed BB capture adapter and its 28-test
+for the supported read/query/import and application commands. Phase 3 composes the
+native recorder with capture-time durable delivery and recovery. Phase 4 has the typed BB capture adapter and its 28-test
 suite, but its complete same-host/remote browser journey requires a real browser
 host. Phase 5 has production multipart intake, receipts, pairing, and instructions;
 the real-phone gate is unverified. Phase 6 has source-build and operator
@@ -125,17 +124,20 @@ artifacts, and exactly 200 ms duration after service restart.
   the tunnel uses fixed forward/keepalive arguments; URL usernames, paths, shell
   commands, and arbitrary options are rejected.
 - Remote CLI production support is wired for capabilities, `current`, `ls`,
-  `recent` (including the single authorized Workspace interpretation of `--all`),
-  transcript, artifacts, recall, and finished-file import. Recall evidence exposes
+  single-Workspace `recent`, rename, memo, note association, processing status,
+  transcript, artifacts, recall, note handoff, and finished-file intake. `recent
+  --all` is rejected before transport because no instance-wide authorization endpoint
+  exists. Recall evidence exposes
   Source identity and Source-relative paths, never a source-file proxy.
 - Unsupported commands return `remote_command_unsupported` before local mutation.
   The adapter now rejects them before opening HTTPS/SSH or reading a local input.
 
-Not yet claimed supported: remote interactive `new`/`attach` native capture,
-rename, note handoff generation, and CLI note-association syntax. The service
-protocol primitives exist for reservation/capture/memo/association, but advertising
-those CLI journeys without composing the native device loop would be a placeholder.
-This is a remaining implementation gate, not a platform-verification claim.
+Private native composition routes remote `new` and `attach` through reservation,
+the durable spool, capture-time delivery, timed memo, explicit segment close, and
+finalization. A normal attach starts a new generation only from the exact prior
+finalize identity; recovery attach retains the existing producer. The actual Mac
+device/terminal journey remains a platform-verification gate, not an implementation
+placeholder.
 
 ## Phase 3 — durable delivery
 
@@ -148,15 +150,28 @@ This is a remaining implementation gate, not a platform-verification claim.
 - Disk reserve, advertised chunk and in-flight limits, producer ownership, and
   immutable receipt replay are enforced. ACK evidence is fsynced before a frame is
   unlinked. Restart scans complete remaining frames; exact retries keep identity.
+- One owner-only transfer lock serializes manifest merge, frame publication, ACK
+  publication, and completion across capture and retry processes. Capture-time
+  delivery writes only per-frame/per-control ACK deltas; close/memo/finalize setters
+  reload and merge under lock. A deterministic stale-snapshot barrier test appends
+  audio, a second close, memo, and finalize before a delayed control ACK, then reopens
+  and proves no intent loss, ACK regression, frame deletion, or false completion.
 - Close is accepted only after contiguous lane boundaries; finalize follows close.
   Producer release occurs only after successful finalization. Failed delivery keeps
   bytes and identity for `transfers list/retry`.
-- Default local capture never constructs this spool.
+- Native remote capture uploads current chunks while recording with bounded retry,
+  reports delivery-current versus locally pending bytes, and keeps Pause/Stop device
+  release independent of network. Recorder recovery WAVs live inside the transfer
+  directory and survive failed ACK/finalization; successful durable completion
+  removes that duplicate and the producer credential. Default local capture never
+  constructs this spool.
 
 Portable tests cover restart before finalize, duplicate/lost-ACK replay, different
-bytes under the same identity, producer fencing, two lanes, out-of-order arrival,
-and service reopen. A real native recorder-to-remote delivery loop is still the CLI
-composition gate listed above.
+bytes under the same identity, producer/generation fencing, two sample-exact 48 kHz
+mono s16 lanes, out-of-order arrival, normal attach after finalization, and service
+reopen. The deterministic transport example exposes durable stops after spool,
+chunk, close, or memo for cross-process fault injection. ASR is not part of capture
+delivery and remains capability-truthful.
 
 ## Phases 4–6 — adapters and operations
 
@@ -197,7 +212,13 @@ Implementation checks run from the canonical worktree/origin:
 
 ```text
 scripts/cargo-lane disposable -- cargo test -p margins-workflows --test workspace_service --test remote_workspace
-  5 passed (3 service/auth + 2 transport/spool) after final auth test addition
+  8 passed (4 service/auth + 4 transport/spool) across focused reruns, including
+  attach-generation and stale-manifest barrier coverage
+
+temporary ALSA pkg-config metadata + scripts/cargo-lane disposable -- cargo check
+  -p margins --no-default-features --features audio-capture
+  passed; this is only a Linux type/ownership check, not an audio or linker claim;
+  temporary metadata was removed immediately afterward
 
 scripts/cargo-lane disposable -- cargo test -p margins-store -p margins-workflows
   passed after cutover: store suites unchanged at 13/5/3/3/5/2/6;
@@ -282,13 +303,13 @@ local capture.
 
 ## Remaining gates
 
-1. Compose the private native terminal recorder with reservation/spool/upload so
-   remote `new`/`attach`, pause/resume/Stop, memo, and recovery form one user journey.
-2. Add remote rename/note-handoff CLI syntax and complete note-association/client
-   command coverage; run distillation pin-before-recall behavior.
+1. Run the exact committed private CLI on Mac for local and SSH remote `new`/`attach`,
+   pause/resume/Stop, capture-time network loss, memo, recovery, and measured latency.
+2. Complete and verify the BB agent-context/note-association UI handoff journey.
 3. Run the complete BB same-host and remote real-browser journey, including remount,
    stale callbacks, conflicts, recovery, artifacts, jobs, and agent handoff.
-4. Run real Mac microphone/system lanes and measure readiness/callback/Stop latency.
+4. Run real Mac microphone/system lanes and measure readiness/callback/Stop latency
+   (delegated to the authorized Mac verifier; no result claimed here yet).
 5. Run the real Shortcut share/retry/app-switch/lock/cellular matrix.
 6. Verify service packaging, backup restore, published clean-client install, and a
    provisioned host. No push, merge, deployment, credential change, or release was

@@ -409,6 +409,7 @@ impl ClientMessageV1 {
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum ClientMessageBodyV1 {
     CreateSession(CreateSessionV1),
+    BeginCaptureGeneration(BeginCaptureGenerationV1),
     ResumeSession(ResumeSessionV1),
     AppendProvenanceHop(AppendProvenanceHopV1),
     AudioChunk(AudioChunkV1),
@@ -422,6 +423,7 @@ impl ClientMessageBodyV1 {
     fn validate(&self) -> Result<(), ValidationErrorV1> {
         match self {
             Self::CreateSession(value) => value.validate(),
+            Self::BeginCaptureGeneration(value) => value.validate(),
             Self::ResumeSession(value) => value.validate(),
             Self::AppendProvenanceHop(value) => value.validate(),
             Self::AudioChunk(value) => value.validate(),
@@ -461,6 +463,7 @@ impl ServerMessageV1 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerMessageBodyV1 {
     SessionCreated(SessionCreatedV1),
+    CaptureGenerationStarted(CaptureGenerationStartedV1),
     ReplayCompleted(ReplayCompletedV1),
     ProvenanceHopRecorded(ProvenanceHopRecordedV1),
     CommandRejected(CommandRejectedV1),
@@ -498,6 +501,7 @@ impl ServerMessageBodyV1 {
                 validate_id("create_message_id", value.create_message_id.as_ref())?;
                 validate_json_integer("created_at_unix_ms", value.created_at_unix_ms.0)
             }
+            Self::CaptureGenerationStarted(value) => value.validate(),
             Self::ReplayCompleted(value) => value.validate(),
             Self::ProvenanceHopRecorded(value) => value.validate(),
             Self::CommandRejected(value) => value.validate(),
@@ -519,6 +523,7 @@ impl Serialize for ServerMessageBodyV1 {
         }
         match self {
             Self::SessionCreated(value) => known!("session_created", value),
+            Self::CaptureGenerationStarted(value) => known!("capture_generation_started", value),
             Self::ReplayCompleted(value) => known!("replay_completed", value),
             Self::ProvenanceHopRecorded(value) => known!("provenance_hop_recorded", value),
             Self::CommandRejected(value) => known!("command_rejected", value),
@@ -562,6 +567,7 @@ impl<'de> Deserialize<'de> for ServerMessageBodyV1 {
         let wire = WireBody::deserialize(deserializer)?;
         Ok(match wire.message_type.as_str() {
             "session_created" => Self::SessionCreated(payload(wire.payload)?),
+            "capture_generation_started" => Self::CaptureGenerationStarted(payload(wire.payload)?),
             "replay_completed" => Self::ReplayCompleted(payload(wire.payload)?),
             "provenance_hop_recorded" => Self::ProvenanceHopRecorded(payload(wire.payload)?),
             "command_rejected" => Self::CommandRejected(payload(wire.payload)?),
@@ -647,6 +653,43 @@ impl CreateSessionV1 {
 pub struct SessionCreatedV1 {
     pub create_message_id: MessageId,
     pub created_at_unix_ms: UnixMillis,
+}
+
+/// Starts another capture generation for a session whose prior input was
+/// durably finalized. This is distinct from `ResumeSessionV1`, which only
+/// replays the event stream after a transport reconnect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeginCaptureGenerationV1 {
+    pub prior_finalize_message_id: MessageId,
+    pub started_at_ms: SessionMillis,
+}
+
+impl BeginCaptureGenerationV1 {
+    pub fn validate(&self) -> Result<(), ValidationErrorV1> {
+        validate_id(
+            "prior_finalize_message_id",
+            self.prior_finalize_message_id.as_ref(),
+        )?;
+        validate_json_integer("started_at_ms", self.started_at_ms.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureGenerationStartedV1 {
+    pub begin_message_id: MessageId,
+    pub prior_finalize_message_id: MessageId,
+    pub started_at_ms: SessionMillis,
+}
+
+impl CaptureGenerationStartedV1 {
+    fn validate(&self) -> Result<(), ValidationErrorV1> {
+        validate_id("begin_message_id", self.begin_message_id.as_ref())?;
+        validate_id(
+            "prior_finalize_message_id",
+            self.prior_finalize_message_id.as_ref(),
+        )?;
+        validate_json_integer("started_at_ms", self.started_at_ms.0)
+    }
 }
 
 /// Requests replay of server events after a reconnect.
@@ -1165,6 +1208,8 @@ pub struct WorkspaceSessionSummaryV1 {
     pub started_at: String,
     pub segment_count: u64,
     pub input_finalized: bool,
+    pub capture_duration_ms: Option<DurationMillis>,
+    pub capture_finalize_message_id: Option<MessageId>,
     pub processing_state: String,
 }
 
@@ -1222,6 +1267,65 @@ pub struct WorkspaceMemoUpdateV1 {
     pub observed_at_ms: SessionMillis,
     pub paused: bool,
     pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceAttachV1 {
+    /// Stable, client-generated retry identity with at least UUID entropy.
+    pub request_id: String,
+    /// Fences the generation against a stale current/session snapshot.
+    pub prior_finalize_message_id: MessageId,
+    pub requested_at_unix_ms: UnixMillis,
+    /// Absolute offset on the existing session's capture timeline.
+    pub started_at_ms: SessionMillis,
+}
+
+/// Replaces a complete timestamped memo. Native capture records the timestamps
+/// on the device; the Workspace authority applies the replacement with CAS and
+/// a durable request identity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceMemoReplaceV1 {
+    pub request_id: String,
+    pub expected_revision: String,
+    pub lines: Vec<WorkspaceMemoLineV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRenameV1 {
+    pub request_id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceNoteAssociationV1 {
+    pub session_id: SessionId,
+    pub source_id: String,
+    pub relative_path: String,
+    pub observed_content_hash: Option<String>,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceNoteAssociationUpdateV1 {
+    pub request_id: String,
+    pub source_id: String,
+    pub relative_path: String,
+    pub observed_content_hash: Option<String>,
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceProcessingJobV1 {
+    pub job_id: String,
+    pub session_id: SessionId,
+    pub operation: String,
+    pub input_revision: String,
+    pub attempt: u64,
+    pub status: String,
+    pub progress: Option<f64>,
+    pub result_ref: Option<String>,
+    pub failure: Option<String>,
+    pub failed_stage: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

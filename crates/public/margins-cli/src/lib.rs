@@ -524,6 +524,11 @@ fn run_inner(
             Some(Command::Rename { title }) => {
                 commands::sessions::rename(services, &capture_root, &title, stdout)
             }
+            Some(command @ Command::Memo { .. })
+            | Some(command @ Command::NoteAssociation { .. })
+            | Some(command @ Command::ProcessingStatus { .. }) => {
+                commands::application::run(workspace, command, stdout)
+            }
             Some(Command::Process {
                 session,
                 speakers,
@@ -586,6 +591,11 @@ fn run_inner(
         Some(Command::Rename { title }) => {
             commands::sessions::rename(services, work_dir, &title, stdout)
         }
+        Some(Command::Memo { .. })
+        | Some(Command::NoteAssociation { .. })
+        | Some(Command::ProcessingStatus { .. }) => Err(CliError::usage(
+            "memo, note-association, and processing-status require an explicit Workspace",
+        )),
         Some(Command::Recent { all }) => {
             if all {
                 let vaults = services.projects.list().map_err(CliError::from_anyhow)?;

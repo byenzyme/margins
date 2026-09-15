@@ -19,7 +19,8 @@ use axum::{
 use margins_meeting_protocol::{
     AudioChunkV1, ClientMessageBodyV1, ClientMessageV1, ContentDigestV1, DigestAlgorithmV1,
     DurationMillis, MessageId, ProtocolVersionV1, SessionId, SessionMillis, UnixMillis,
-    WorkspaceErrorV1, WorkspaceMemoUpdateV1, WorkspaceResponseV1,
+    WorkspaceAttachV1, WorkspaceErrorV1, WorkspaceMemoReplaceV1, WorkspaceMemoUpdateV1,
+    WorkspaceNoteAssociationUpdateV1, WorkspaceRenameV1, WorkspaceResponseV1,
 };
 use margins_workflows::workspace_service::{
     ScopedCredentialStore, ServicePrincipal, WorkspaceService, OP_CAPTURE_WRITE, OP_MEMO_WRITE,
@@ -77,6 +78,14 @@ pub fn build_router(state: ServerState) -> Router {
             post(workspace_session_command),
         )
         .route(
+            "/v1/workspaces/:workspace/sessions/:session/attach",
+            post(workspace_attach_session),
+        )
+        .route(
+            "/v1/workspaces/:workspace/sessions/:session/title",
+            put(workspace_rename_session),
+        )
+        .route(
             "/v1/workspaces/:workspace/sessions/:session/segments/:segment/lanes/:lane/chunks/:sequence",
             put(workspace_audio_chunk),
         )
@@ -99,6 +108,10 @@ pub fn build_router(state: ServerState) -> Router {
         .route(
             "/v1/workspaces/:workspace/sessions/:session/memo",
             get(workspace_memo).put(workspace_update_memo),
+        )
+        .route(
+            "/v1/workspaces/:workspace/sessions/:session/memo/replace",
+            post(workspace_replace_memo),
         )
         .route(
             "/v1/workspaces/:workspace/sessions/:session/note-association",
@@ -428,6 +441,40 @@ async fn workspace_session_command(
         .unwrap_or_else(service_error)
 }
 
+async fn workspace_attach_session(
+    State(state): State<ServerState>,
+    Path((workspace, session)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(request): Json<WorkspaceAttachV1>,
+) -> Response {
+    let principal = match workspace_auth(&state, &headers, Some(&workspace)) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    state
+        .workspace_service
+        .attach_session(&principal, &SessionId(session), &request)
+        .map(workspace_ok)
+        .unwrap_or_else(service_error)
+}
+
+async fn workspace_rename_session(
+    State(state): State<ServerState>,
+    Path((workspace, session)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(request): Json<WorkspaceRenameV1>,
+) -> Response {
+    let principal = match workspace_auth(&state, &headers, Some(&workspace)) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    state
+        .workspace_service
+        .rename_session(&principal, &SessionId(session), &request)
+        .map(workspace_ok)
+        .unwrap_or_else(service_error)
+}
+
 async fn workspace_audio_chunk(
     State(state): State<ServerState>,
     Path((workspace, session, segment, lane, sequence)): Path<(
@@ -639,17 +686,27 @@ async fn workspace_update_memo(
         .unwrap_or_else(service_error)
 }
 
-#[derive(serde::Deserialize)]
-struct NoteAssociationBody {
-    source_id: String,
-    relative_path: String,
-    observed_content_hash: Option<String>,
-    expected_revision: u64,
+async fn workspace_replace_memo(
+    State(state): State<ServerState>,
+    Path((workspace, session)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(request): Json<WorkspaceMemoReplaceV1>,
+) -> Response {
+    let principal = match workspace_auth(&state, &headers, Some(&workspace)) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    state
+        .workspace_service
+        .replace_memo(&principal, &SessionId(session), &request)
+        .map(workspace_ok)
+        .unwrap_or_else(service_error)
 }
 
 #[derive(serde::Deserialize)]
 struct RevisionQuery {
     expected_revision: u64,
+    request_id: String,
 }
 
 async fn workspace_note_association(
@@ -672,7 +729,7 @@ async fn workspace_link_note(
     State(state): State<ServerState>,
     Path((workspace, session)): Path<(String, String)>,
     headers: HeaderMap,
-    Json(request): Json<NoteAssociationBody>,
+    Json(request): Json<WorkspaceNoteAssociationUpdateV1>,
 ) -> Response {
     let principal = match workspace_auth(&state, &headers, Some(&workspace)) {
         Ok(value) => value,
@@ -680,14 +737,7 @@ async fn workspace_link_note(
     };
     state
         .workspace_service
-        .link_note(
-            &principal,
-            &SessionId(session),
-            &request.source_id,
-            &request.relative_path,
-            request.observed_content_hash.as_deref(),
-            request.expected_revision,
-        )
+        .link_note(&principal, &SessionId(session), &request)
         .map(workspace_ok)
         .unwrap_or_else(service_error)
 }
@@ -704,7 +754,12 @@ async fn workspace_unlink_note(
     };
     state
         .workspace_service
-        .unlink_note(&principal, &SessionId(session), request.expected_revision)
+        .unlink_note(
+            &principal,
+            &SessionId(session),
+            &request.request_id,
+            request.expected_revision,
+        )
         .map(|()| workspace_ok(serde_json::json!({"unlinked": true})))
         .unwrap_or_else(service_error)
 }

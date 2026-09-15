@@ -81,6 +81,54 @@ pub enum Command {
     Ls,
     /// Change the current session's display title
     Rename { title: String },
+    /// Read or revision-check an edit to the remote timed memo
+    Memo {
+        /// Stable meeting id; defaults to the client-scoped current session
+        meeting_id: Option<String>,
+        /// Whole notepad text to reconcile at the observed capture time
+        #[arg(long, requires = "expected_revision")]
+        text: Option<String>,
+        /// Revision returned by the preceding memo read
+        #[arg(long)]
+        expected_revision: Option<String>,
+        /// Stable retry identity; generated when omitted
+        #[arg(long)]
+        request_id: Option<String>,
+        /// Capture-timeline observation time for this edit
+        #[arg(long)]
+        observed_at_ms: Option<u64>,
+        /// Record this edit as occurring while capture was paused
+        #[arg(long)]
+        paused: bool,
+    },
+    /// Read, link, or unlink a Source-relative session note reference
+    NoteAssociation {
+        /// Stable meeting id; defaults to the client-scoped current session
+        meeting_id: Option<String>,
+        /// Declared logical Source id for a new association
+        #[arg(long, requires = "path")]
+        source: Option<String>,
+        /// Source-relative Markdown path; note bytes stay in native sync
+        #[arg(long, requires = "source")]
+        path: Option<String>,
+        /// Optional hash observed by the client that wrote the note
+        #[arg(long)]
+        hash: Option<String>,
+        /// Remove the current association
+        #[arg(long, conflicts_with_all = ["source", "path", "hash"])]
+        unlink: bool,
+        /// Revision returned by the preceding association read
+        #[arg(long)]
+        expected_revision: Option<u64>,
+        /// Stable retry identity for a link operation
+        #[arg(long)]
+        request_id: Option<String>,
+    },
+    /// Show the latest Margins processing job independently of note links
+    ProcessingStatus {
+        /// Stable meeting id; defaults to the client-scoped current session
+        meeting_id: Option<String>,
+    },
     /// List recent Margins meetings as XML
     Recent {
         /// List meetings across every registered vault, not just this one
@@ -205,6 +253,9 @@ pub enum ServiceCommand {
     Discover {
         #[arg(long, required = true)]
         json: bool,
+        /// Explicit service state directory for isolated provisioning/verification
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
     },
     /// Issue a revocable upload-only credential for a Shortcut installation
     PairShortcut {

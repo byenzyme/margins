@@ -13,6 +13,9 @@ pub const LIVE_TRANSCRIPTION_OFF: u8 = 0;
 pub const LIVE_TRANSCRIPTION_WARMING: u8 = 1;
 pub const LIVE_TRANSCRIPTION_READY: u8 = 2;
 pub const LIVE_TRANSCRIPTION_DEGRADED: u8 = 3;
+pub const REMOTE_DELIVERY_LOCAL: u8 = 0;
+pub const REMOTE_DELIVERY_CURRENT: u8 = 1;
+pub const REMOTE_DELIVERY_PENDING: u8 = 2;
 
 #[derive(PartialEq, Eq)]
 pub enum AppMode {
@@ -41,6 +44,11 @@ pub struct App {
     pub spk_frames: Arc<AtomicU64>,
     pub spk_rate: u32,
     pub live_transcription_status: Arc<AtomicU8>,
+    pub capture_paused: bool,
+    pub remote_delivery_state: Arc<AtomicU8>,
+    pub remote_pending_chunks: Arc<AtomicU64>,
+    pub remote_pending_bytes: Arc<AtomicU64>,
+    pause_block_ordinal: u32,
     workspace_authority: Option<(PathBuf, String)>,
 }
 
@@ -67,6 +75,11 @@ impl App {
             spk_frames: Arc::new(AtomicU64::new(0)),
             spk_rate: 0,
             live_transcription_status: Arc::new(AtomicU8::new(LIVE_TRANSCRIPTION_OFF)),
+            capture_paused: false,
+            remote_delivery_state: Arc::new(AtomicU8::new(REMOTE_DELIVERY_LOCAL)),
+            remote_pending_chunks: Arc::new(AtomicU64::new(0)),
+            remote_pending_bytes: Arc::new(AtomicU64::new(0)),
+            pause_block_ordinal: 0,
             workspace_authority: None,
         }
     }
@@ -105,6 +118,11 @@ impl App {
             spk_frames: Arc::new(AtomicU64::new(0)),
             spk_rate: 0,
             live_transcription_status: Arc::new(AtomicU8::new(LIVE_TRANSCRIPTION_OFF)),
+            capture_paused: false,
+            remote_delivery_state: Arc::new(AtomicU8::new(REMOTE_DELIVERY_LOCAL)),
+            remote_pending_chunks: Arc::new(AtomicU64::new(0)),
+            remote_pending_bytes: Arc::new(AtomicU64::new(0)),
+            pause_block_ordinal: 0,
             workspace_authority: None,
         }
     }
@@ -139,7 +157,23 @@ impl App {
     }
 
     fn moment(&self, ts: DateTime<Local>) -> MemoMoment {
-        MemoMoment::recording(elapsed_between(self.start_time, ts))
+        let elapsed = elapsed_between(self.start_time, ts);
+        if self.capture_paused {
+            MemoMoment::paused(elapsed, self.pause_block_ordinal)
+        } else {
+            MemoMoment::recording(elapsed)
+        }
+    }
+
+    pub fn set_capture_paused(&mut self, paused: bool) {
+        if self.capture_paused == paused {
+            return;
+        }
+        self.commit_uncommitted_at(Local::now());
+        if paused {
+            self.pause_block_ordinal = self.pause_block_ordinal.saturating_add(1);
+        }
+        self.capture_paused = paused;
     }
 
     pub fn display_ts(&self, i: usize) -> Option<(f64, bool)> {
@@ -553,8 +587,7 @@ mod tests {
         type_text(&mut app, "authoritative memo");
         app.save().unwrap();
 
-        let authority =
-            margins_store::SqliteWorkspaceAuthorityStorage::open(&margins_dir).unwrap();
+        let authority = margins_store::SqliteWorkspaceAuthorityStorage::open(&margins_dir).unwrap();
         let memo = authority.memo("native-session").unwrap();
         assert_eq!(memo.lines[0].text, "authoritative memo");
         assert_eq!(
