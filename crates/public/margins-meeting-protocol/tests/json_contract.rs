@@ -11,18 +11,18 @@ fn desktop_live_golden_fixture_is_emitted_by_the_rust_contract() {
     let fixture: Value =
         serde_json::from_str(include_str!("fixtures/desktop-live-v1.json")).unwrap();
 
-    let discovery = DesktopLiveDiscoveryV1 {
+    let discovery = LiveDiscoveryV1 {
         protocol_version: ProtocolVersionV1,
-        runtime: DesktopLiveRuntimeV1::MarginsCli,
+        runtime: LiveRuntimeV1::MarginsCli,
         profile: "default".to_string(),
         pid: 42,
         base_url: "http://127.0.0.1:49152".to_string(),
         token: "a".repeat(64),
-        permissions: DesktopLivePermissionsV1 {
+        permissions: LivePermissionsV1 {
             loopback_only: true,
             private_file: true,
         },
-        endpoints: DesktopLiveEndpointsV1 {
+        endpoints: LiveEndpointsV1 {
             snapshot: "/v1/live/snapshot".to_string(),
             start: "/v1/live/start".to_string(),
             pause: "/v1/live/pause".to_string(),
@@ -32,44 +32,44 @@ fn desktop_live_golden_fixture_is_emitted_by_the_rust_contract() {
         },
         generated_at_unix_ms: UnixMillis(1_800_000_000_000),
     };
-    let snapshot = DesktopLiveSnapshotV1 {
+    let snapshot = LiveSnapshotV1 {
         protocol_version: ProtocolVersionV1,
         server_unix_ms: UnixMillis(1_800_000_000_100),
-        session: Some(DesktopLiveSessionV1 {
+        session: Some(LiveSessionV1 {
             session_id: "customer-call".into(),
             status: LiveSessionStatusV1::Recording,
             elapsed_ms: DurationMillis(12_345),
             generation: 2,
         }),
-        health: DesktopLiveHealthV1 {
+        health: LiveHealthV1 {
             capture_phase: "recording".to_string(),
             tap_status: "ok".to_string(),
             tap_warning: None,
             system_audio_expected: true,
             system_audio_observed: true,
-            transcript_freshness: Some(DesktopLiveTranscriptFreshnessV1 {
+            transcript_freshness: Some(LiveTranscriptFreshnessV1 {
                 decoded_until_ms: DurationMillis(11_000),
                 committed_until_ms: DurationMillis(10_000),
                 updated_at_unix_ms: UnixMillis(1_800_000_000_000),
                 age_ms: DurationMillis(100),
             }),
         },
-        rolling_transcript: vec![DesktopLiveTranscriptLineV1 {
+        rolling_transcript: vec![LiveTranscriptLineV1 {
             at_ms: Some(SessionMillis(10_000)),
             text: "[00:10] user: hello".to_string(),
         }],
-        memo_lines: vec![DesktopLiveMemoLineV1 {
+        memo_lines: vec![LiveMemoLineV1 {
             index: 0,
             at_ms: Some(SessionMillis(12_345)),
             text: "Follow up".to_string(),
         }],
         notepad_revision: "v1-abc".to_string(),
     };
-    let idle = DesktopLiveSnapshotV1 {
+    let idle = LiveSnapshotV1 {
         protocol_version: ProtocolVersionV1,
         server_unix_ms: UnixMillis(1_800_000_000_100),
         session: None,
-        health: DesktopLiveHealthV1 {
+        health: LiveHealthV1 {
             capture_phase: "idle".to_string(),
             tap_status: "not_expected".to_string(),
             tap_warning: None,
@@ -86,7 +86,7 @@ fn desktop_live_golden_fixture_is_emitted_by_the_rust_contract() {
     assert_eq!(as_json(&snapshot), fixture["recording_snapshot"]);
     assert_eq!(as_json(&idle), fixture["idle_snapshot"]);
     assert_eq!(
-        as_json(&DesktopLiveStartRequestV1 {
+        as_json(&LiveStartRequestV1 {
             operation_id: "op_start_1".into(),
             name: "Customer call".to_string(),
             project_id: Some("project-1".to_string()),
@@ -94,7 +94,7 @@ fn desktop_live_golden_fixture_is_emitted_by_the_rust_contract() {
         fixture["start_request"]
     );
     assert_eq!(
-        as_json(&DesktopLiveSessionRequestV1 {
+        as_json(&LiveSessionRequestV1 {
             operation_id: "pause-1".into(),
             session_id: "customer-call".into(),
             expected_generation: Some(2),
@@ -102,7 +102,7 @@ fn desktop_live_golden_fixture_is_emitted_by_the_rust_contract() {
         fixture["session_request"]
     );
     assert_eq!(
-        as_json(&DesktopLiveUpdateNotepadRequestV1 {
+        as_json(&LiveUpdateNotepadRequestV1 {
             operation_id: "notepad-1".into(),
             session_id: "customer-call".into(),
             expected_generation: Some(2),
@@ -115,18 +115,18 @@ fn desktop_live_golden_fixture_is_emitted_by_the_rust_contract() {
 
 #[test]
 fn desktop_live_discovery_json_shape_is_stable() {
-    let discovery = DesktopLiveDiscoveryV1 {
+    let discovery = LiveDiscoveryV1 {
         protocol_version: ProtocolVersionV1,
-        runtime: DesktopLiveRuntimeV1::MarginsDesktop,
+        runtime: LiveRuntimeV1::MarginsDesktop,
         profile: "default".to_string(),
         pid: 42,
         base_url: "http://127.0.0.1:49152".to_string(),
         token: "a".repeat(64),
-        permissions: DesktopLivePermissionsV1 {
+        permissions: LivePermissionsV1 {
             loopback_only: true,
             private_file: true,
         },
-        endpoints: DesktopLiveEndpointsV1 {
+        endpoints: LiveEndpointsV1 {
             snapshot: "/v1/live/snapshot".to_string(),
             start: "/v1/live/start".to_string(),
             pause: "/v1/live/pause".to_string(),
@@ -165,33 +165,33 @@ fn desktop_live_discovery_json_shape_is_stable() {
 
 #[test]
 fn desktop_live_snapshot_json_shape_is_stable_and_bounded_fields_are_plain() {
-    let snapshot = DesktopLiveSnapshotV1 {
+    let snapshot = LiveSnapshotV1 {
         protocol_version: ProtocolVersionV1,
         server_unix_ms: UnixMillis(1_800_000_000_100),
-        session: Some(DesktopLiveSessionV1 {
+        session: Some(LiveSessionV1 {
             session_id: "customer-call".into(),
             status: LiveSessionStatusV1::Recording,
             elapsed_ms: DurationMillis(12_345),
             generation: 2,
         }),
-        health: DesktopLiveHealthV1 {
+        health: LiveHealthV1 {
             capture_phase: "recording".to_string(),
             tap_status: "ok".to_string(),
             tap_warning: None,
             system_audio_expected: true,
             system_audio_observed: true,
-            transcript_freshness: Some(DesktopLiveTranscriptFreshnessV1 {
+            transcript_freshness: Some(LiveTranscriptFreshnessV1 {
                 decoded_until_ms: DurationMillis(11_000),
                 committed_until_ms: DurationMillis(10_000),
                 updated_at_unix_ms: UnixMillis(1_800_000_000_000),
                 age_ms: DurationMillis(100),
             }),
         },
-        rolling_transcript: vec![DesktopLiveTranscriptLineV1 {
+        rolling_transcript: vec![LiveTranscriptLineV1 {
             at_ms: Some(SessionMillis(10_000)),
             text: "[00:10] user: hello".to_string(),
         }],
-        memo_lines: vec![DesktopLiveMemoLineV1 {
+        memo_lines: vec![LiveMemoLineV1 {
             index: 0,
             at_ms: Some(SessionMillis(12_345)),
             text: "Follow up".to_string(),
@@ -238,11 +238,11 @@ fn desktop_live_snapshot_json_shape_is_stable_and_bounded_fields_are_plain() {
 
 #[test]
 fn desktop_live_idle_snapshot_keeps_required_null_session() {
-    let snapshot = DesktopLiveSnapshotV1 {
+    let snapshot = LiveSnapshotV1 {
         protocol_version: ProtocolVersionV1,
         server_unix_ms: UnixMillis(1_800_000_000_100),
         session: None,
-        health: DesktopLiveHealthV1 {
+        health: LiveHealthV1 {
             capture_phase: "idle".to_string(),
             tap_status: "not_expected".to_string(),
             tap_warning: None,
@@ -274,28 +274,28 @@ fn desktop_live_idle_snapshot_keeps_required_null_session() {
 
 #[test]
 fn desktop_live_requests_validate_ids_generation_and_text() {
-    DesktopLiveStartRequestV1 {
+    LiveStartRequestV1 {
         operation_id: "op".into(),
         name: "meeting".to_string(),
         project_id: None,
     }
     .validate()
     .unwrap();
-    assert!(DesktopLiveStartRequestV1 {
+    assert!(LiveStartRequestV1 {
         operation_id: "".into(),
         name: "meeting".to_string(),
         project_id: None,
     }
     .validate()
     .is_err());
-    assert!(DesktopLiveSessionRequestV1 {
+    assert!(LiveSessionRequestV1 {
         operation_id: "op".into(),
         session_id: "session".into(),
         expected_generation: Some(MAX_SAFE_JSON_INTEGER + 1),
     }
     .validate()
     .is_err());
-    DesktopLiveUpdateNotepadRequestV1 {
+    LiveUpdateNotepadRequestV1 {
         operation_id: "op".into(),
         session_id: "session".into(),
         expected_generation: None,

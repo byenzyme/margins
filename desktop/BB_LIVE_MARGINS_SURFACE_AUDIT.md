@@ -5,7 +5,7 @@
 > particular, the shipped panel does not need or add a `margins live` CLI family.
 >
 > Implementation update, 2026-09-04: the local HTTP adapter now depends on the
-> transport-neutral `margins-live-runtime::LiveRuntime` seam rather than being
+> transport-neutral `margins-meeting-runtime::LiveRuntime` seam rather than being
 > the seam itself. Tauri is the first adapter only. The target owner is a
 > CLI-installed background runtime. That runtime is now composed as the
 > windowless `margins-live` binary beside the normal `margins` command; the
@@ -29,7 +29,7 @@ HTTP `/api/invoke/:command`, raw live snapshot files, or `RecordingStatus` shape
 Those are private desktop implementation details.
 
 The smallest durable boundary is a tokened host-local Margins live API, backed by
-the `margins-live-runtime` read/command port and versioned DTOs. The current public
+the `margins-meeting-runtime` read/command port and versioned DTOs. The current public
 CLI/shared crates already provide useful building blocks, especially transcript
 JSON, session IDs, capture lifecycle vocabulary, event envelopes, and store
 repositories, but they do not expose a stable live capture owner. CLI JSON

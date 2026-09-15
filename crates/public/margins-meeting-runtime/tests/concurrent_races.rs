@@ -133,7 +133,7 @@ fn concurrent_multilane_chunks_close_and_finalize_commit_once_without_lost_updat
         .snapshot(&SessionId::from("race-session"))
         .unwrap()
         .unwrap();
-    assert_eq!(snapshot.audio_chunks().count(), 32);
+    assert_eq!(snapshot.audio_chunk_count(), 32);
     assert_eq!(
         snapshot
             .events()
@@ -227,7 +227,7 @@ fn concurrent_conflicting_writers_linearize_to_one_chunk_and_one_rejection() {
             .snapshot(&SessionId::from("race-session"))
             .unwrap()
             .unwrap();
-        assert_eq!(snapshot.audio_chunks().count(), 1);
+        assert_eq!(snapshot.audio_chunk_count(), 1);
         assert_eq!(snapshot.events().len(), 3);
     }
 }

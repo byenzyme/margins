@@ -172,33 +172,33 @@ pub struct DurationMillis(pub u64);
 /// The token is only safe because the discovery file is written with private
 /// file permissions by the local runtime.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DesktopLiveDiscoveryV1 {
+pub struct LiveDiscoveryV1 {
     pub protocol_version: ProtocolVersionV1,
-    pub runtime: DesktopLiveRuntimeV1,
+    pub runtime: LiveRuntimeV1,
     pub profile: String,
     pub pid: u32,
     pub base_url: String,
     pub token: String,
-    pub permissions: DesktopLivePermissionsV1,
-    pub endpoints: DesktopLiveEndpointsV1,
+    pub permissions: LivePermissionsV1,
+    pub endpoints: LiveEndpointsV1,
     pub generated_at_unix_ms: UnixMillis,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DesktopLiveRuntimeV1 {
+pub enum LiveRuntimeV1 {
     MarginsDesktop,
     MarginsCli,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DesktopLivePermissionsV1 {
+pub struct LivePermissionsV1 {
     pub loopback_only: bool,
     pub private_file: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DesktopLiveEndpointsV1 {
+pub struct LiveEndpointsV1 {
     pub snapshot: String,
     pub start: String,
     pub pause: String,
@@ -219,15 +219,15 @@ pub enum LiveSessionStatusV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DesktopLiveSnapshotV1 {
+pub struct LiveSnapshotV1 {
     pub protocol_version: ProtocolVersionV1,
     pub server_unix_ms: UnixMillis,
-    pub session: Option<DesktopLiveSessionV1>,
-    pub health: DesktopLiveHealthV1,
+    pub session: Option<LiveSessionV1>,
+    pub health: LiveHealthV1,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub rolling_transcript: Vec<DesktopLiveTranscriptLineV1>,
+    pub rolling_transcript: Vec<LiveTranscriptLineV1>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub memo_lines: Vec<DesktopLiveMemoLineV1>,
+    pub memo_lines: Vec<LiveMemoLineV1>,
     /// Opaque identity for the complete timestamped memo behind `memo_lines`.
     /// Clients send it back when replacing the visible notepad text so an old
     /// browser view cannot silently overwrite newer notes.
@@ -235,7 +235,7 @@ pub struct DesktopLiveSnapshotV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DesktopLiveSessionV1 {
+pub struct LiveSessionV1 {
     pub session_id: SessionId,
     pub status: LiveSessionStatusV1,
     pub elapsed_ms: DurationMillis,
@@ -243,7 +243,7 @@ pub struct DesktopLiveSessionV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DesktopLiveHealthV1 {
+pub struct LiveHealthV1 {
     pub capture_phase: String,
     pub tap_status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -251,11 +251,11 @@ pub struct DesktopLiveHealthV1 {
     pub system_audio_expected: bool,
     pub system_audio_observed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transcript_freshness: Option<DesktopLiveTranscriptFreshnessV1>,
+    pub transcript_freshness: Option<LiveTranscriptFreshnessV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DesktopLiveTranscriptFreshnessV1 {
+pub struct LiveTranscriptFreshnessV1 {
     pub decoded_until_ms: DurationMillis,
     pub committed_until_ms: DurationMillis,
     pub updated_at_unix_ms: UnixMillis,
@@ -263,14 +263,14 @@ pub struct DesktopLiveTranscriptFreshnessV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DesktopLiveTranscriptLineV1 {
+pub struct LiveTranscriptLineV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at_ms: Option<SessionMillis>,
     pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DesktopLiveMemoLineV1 {
+pub struct LiveMemoLineV1 {
     pub index: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at_ms: Option<SessionMillis>,
@@ -278,14 +278,14 @@ pub struct DesktopLiveMemoLineV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DesktopLiveStartRequestV1 {
+pub struct LiveStartRequestV1 {
     pub operation_id: LiveOperationId,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
 }
 
-impl DesktopLiveStartRequestV1 {
+impl LiveStartRequestV1 {
     pub fn validate(&self) -> Result<(), ValidationErrorV1> {
         validate_id("operation_id", self.operation_id.as_ref())?;
         if self.name.trim().is_empty() {
@@ -297,14 +297,14 @@ impl DesktopLiveStartRequestV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DesktopLiveSessionRequestV1 {
+pub struct LiveSessionRequestV1 {
     pub operation_id: LiveOperationId,
     pub session_id: SessionId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_generation: Option<u64>,
 }
 
-impl DesktopLiveSessionRequestV1 {
+impl LiveSessionRequestV1 {
     pub fn validate(&self) -> Result<(), ValidationErrorV1> {
         validate_id("operation_id", self.operation_id.as_ref())?;
         validate_id("session_id", self.session_id.as_ref())?;
@@ -316,7 +316,7 @@ impl DesktopLiveSessionRequestV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DesktopLiveUpdateNotepadRequestV1 {
+pub struct LiveUpdateNotepadRequestV1 {
     pub operation_id: LiveOperationId,
     pub session_id: SessionId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -325,7 +325,7 @@ pub struct DesktopLiveUpdateNotepadRequestV1 {
     pub text: String,
 }
 
-impl DesktopLiveUpdateNotepadRequestV1 {
+impl LiveUpdateNotepadRequestV1 {
     pub fn validate(&self) -> Result<(), ValidationErrorV1> {
         validate_id("operation_id", self.operation_id.as_ref())?;
         validate_id("session_id", self.session_id.as_ref())?;
@@ -337,17 +337,17 @@ impl DesktopLiveUpdateNotepadRequestV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DesktopLiveMutationResponseV1 {
+pub struct LiveMutationResponseV1 {
     pub protocol_version: ProtocolVersionV1,
     pub idempotent_replay: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopped_session_id: Option<SessionId>,
-    pub snapshot: DesktopLiveSnapshotV1,
+    pub snapshot: LiveSnapshotV1,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DesktopLiveErrorCodeV1 {
+pub enum LiveErrorCodeV1 {
     Unauthorized,
     BadRequest,
     NoActiveSession,
@@ -361,14 +361,14 @@ pub enum DesktopLiveErrorCodeV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DesktopLiveErrorV1 {
-    pub code: DesktopLiveErrorCodeV1,
+pub struct LiveErrorV1 {
+    pub code: LiveErrorCodeV1,
     pub message: String,
     pub retryable: bool,
 }
 
-impl DesktopLiveErrorV1 {
-    pub fn new(code: DesktopLiveErrorCodeV1, message: impl Into<String>, retryable: bool) -> Self {
+impl LiveErrorV1 {
+    pub fn new(code: LiveErrorCodeV1, message: impl Into<String>, retryable: bool) -> Self {
         Self {
             code,
             message: message.into(),

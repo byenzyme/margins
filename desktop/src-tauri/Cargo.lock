@@ -204,6 +204,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "220a2c618ab466efe41d0eace94dfeff1c35e3aa47891bdb95e1c0fefffd3c99"
 
 [[package]]
+name = "arrayvec"
+version = "0.7.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+
+[[package]]
 name = "ascii"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -724,6 +730,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
 dependencies = [
  "digest 0.10.7",
+]
+
+[[package]]
+name = "blake3"
+version = "1.8.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d9e454fc11f76977dc803893aff6304ed33d6a26efae8696573bea74baa27ae"
+dependencies = [
+ "arrayvec",
+ "cc",
+ "cfg-if",
+ "constant_time_eq",
+ "cpufeatures 0.3.0",
 ]
 
 [[package]]
@@ -1317,6 +1336,12 @@ name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+
+[[package]]
+name = "constant_time_eq"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "convert_case"
@@ -5312,8 +5337,8 @@ dependencies = [
  "libc",
  "libsql-rusqlite",
  "margins",
- "margins-live-runtime",
  "margins-meeting-protocol",
+ "margins-meeting-runtime",
  "margins-workflows",
  "matroska-demuxer",
  "notify",
@@ -5343,13 +5368,6 @@ dependencies = [
  "tower-http 0.5.2",
  "window-vibrancy 0.8.0",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "margins-live-runtime"
-version = "0.1.0"
-dependencies = [
- "margins-meeting-protocol",
 ]
 
 [[package]]
@@ -5383,6 +5401,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "margins-meeting-runtime"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "margins-meeting-protocol",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "margins-store"
 version = "0.1.0"
 dependencies = [
@@ -5390,8 +5419,11 @@ dependencies = [
  "chrono",
  "libsql-rusqlite",
  "margins-core",
+ "margins-meeting-protocol",
+ "margins-meeting-runtime",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

@@ -12,7 +12,9 @@
 
 pub mod index;
 pub mod legacy;
+mod meeting_runtime;
 mod sqlite;
 
 pub use index::{list_session_index, SessionIndexEntry, SessionIndexQuery};
+pub use meeting_runtime::{MeetingRuntimeStorageStats, SqliteMeetingRuntimeStorage};
 pub use sqlite::SqliteSessionRepository;

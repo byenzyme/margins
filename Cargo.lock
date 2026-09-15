@@ -3282,13 +3282,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "margins-live-runtime"
-version = "0.1.0"
-dependencies = [
- "margins-meeting-protocol",
-]
-
-[[package]]
 name = "margins-media"
 version = "0.1.0"
 dependencies = [
@@ -3338,8 +3331,11 @@ dependencies = [
  "chrono",
  "libsql-rusqlite",
  "margins-core",
+ "margins-meeting-protocol",
+ "margins-meeting-runtime",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 

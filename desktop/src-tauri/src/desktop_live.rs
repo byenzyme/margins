@@ -1,17 +1,17 @@
 use crate::{recording, transcript_store, AppState, MemoLine};
 use margins::core::{MemoMoment, TimedMemoDocument, TimedMemoLine};
 #[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
-use margins_live_runtime::{LiveRuntime, LiveRuntimeCommandV1, LiveRuntimeFuture};
+use margins_meeting_runtime::{LiveRuntime, LiveRuntimeCommandV1, LiveRuntimeFuture};
 #[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
 use margins_meeting_protocol::{
-    DesktopLiveDiscoveryV1, DesktopLiveEndpointsV1, DesktopLivePermissionsV1, DesktopLiveRuntimeV1,
-    DesktopLiveSessionRequestV1, DesktopLiveStartRequestV1, DesktopLiveUpdateNotepadRequestV1,
+    LiveDiscoveryV1, LiveEndpointsV1, LivePermissionsV1, LiveRuntimeV1,
+    LiveSessionRequestV1, LiveStartRequestV1, LiveUpdateNotepadRequestV1,
     DESKTOP_LIVE_API_PREFIX_V1,
 };
 use margins_meeting_protocol::{
-    DesktopLiveErrorCodeV1, DesktopLiveErrorV1, DesktopLiveHealthV1, DesktopLiveMemoLineV1,
-    DesktopLiveMutationResponseV1, DesktopLiveSessionV1, DesktopLiveSnapshotV1,
-    DesktopLiveTranscriptFreshnessV1, DesktopLiveTranscriptLineV1, DurationMillis, LiveOperationId,
+    LiveErrorCodeV1, LiveErrorV1, LiveHealthV1, LiveMemoLineV1,
+    LiveMutationResponseV1, LiveSessionV1, LiveSnapshotV1,
+    LiveTranscriptFreshnessV1, LiveTranscriptLineV1, DurationMillis, LiveOperationId,
     LiveSessionStatusV1, ProtocolVersionV1, SessionId, SessionMillis, UnixMillis,
 };
 #[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
@@ -36,7 +36,7 @@ const DISCOVERY_FILENAME: &str = "desktop-live.v1.json";
 #[derive(Clone)]
 struct OperationRecord {
     fingerprint: Vec<u8>,
-    response: DesktopLiveMutationResponseV1,
+    response: LiveMutationResponseV1,
 }
 
 #[derive(Default)]
@@ -50,7 +50,7 @@ impl OperationReplays {
         &self,
         operation_id: &LiveOperationId,
         fingerprint: &[u8],
-    ) -> Result<Option<DesktopLiveMutationResponseV1>, DesktopLiveErrorV1> {
+    ) -> Result<Option<LiveMutationResponseV1>, LiveErrorV1> {
         let Some(record) = self.records.get(operation_id) else {
             return Ok(None);
         };
@@ -60,7 +60,7 @@ impl OperationReplays {
             Ok(Some(response))
         } else {
             Err(live_error(
-                DesktopLiveErrorCodeV1::BadRequest,
+                LiveErrorCodeV1::BadRequest,
                 "This operation id was already used for a different request.",
                 false,
             ))
@@ -71,7 +71,7 @@ impl OperationReplays {
         &mut self,
         operation_id: LiveOperationId,
         fingerprint: Vec<u8>,
-        response: DesktopLiveMutationResponseV1,
+        response: LiveMutationResponseV1,
     ) {
         if self.records.contains_key(&operation_id) {
             return;
@@ -93,16 +93,16 @@ impl OperationReplays {
 }
 
 #[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
-struct DesktopLiveApiHandle {
+struct LiveApiHandle {
     discovery_path: PathBuf,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 #[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
-static LIVE_API_HANDLE: OnceLock<Mutex<Option<DesktopLiveApiHandle>>> = OnceLock::new();
+static LIVE_API_HANDLE: OnceLock<Mutex<Option<LiveApiHandle>>> = OnceLock::new();
 
 #[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
-fn live_api_handle() -> &'static Mutex<Option<DesktopLiveApiHandle>> {
+fn live_api_handle() -> &'static Mutex<Option<LiveApiHandle>> {
     LIVE_API_HANDLE.get_or_init(|| Mutex::new(None))
 }
 
@@ -131,7 +131,7 @@ impl LiveRuntime for NativeLiveRuntime {
     fn snapshot(
         &self,
         session_id: Option<&str>,
-    ) -> Result<DesktopLiveSnapshotV1, DesktopLiveErrorV1> {
+    ) -> Result<LiveSnapshotV1, LiveErrorV1> {
         snapshot_for_state(&self.app_state, session_id)
     }
 
@@ -140,7 +140,7 @@ impl LiveRuntime for NativeLiveRuntime {
         Box::pin(async move {
             command
                 .validate()
-                .map_err(|error| live_error(DesktopLiveErrorCodeV1::BadRequest, error, false))?;
+                .map_err(|error| live_error(LiveErrorCodeV1::BadRequest, error, false))?;
             match command {
                 LiveRuntimeCommandV1::Start(request) => {
                     let ctx = crate::ctx::Ctx::no_emit(Arc::clone(&app_state));
@@ -150,7 +150,7 @@ impl LiveRuntime for NativeLiveRuntime {
                     .await
                     .map_err(|error| {
                         live_error(
-                            DesktopLiveErrorCodeV1::Internal,
+                            LiveErrorCodeV1::Internal,
                             format!("Start failed: {error}"),
                             true,
                         )
@@ -209,7 +209,7 @@ impl LiveRuntime for NativeLiveRuntime {
 pub(crate) fn start_loopback_api(state: Arc<AppState>) -> Result<(), String> {
     start_loopback_api_for_runtime(
         Arc::new(NativeLiveRuntime::new(state)),
-        DesktopLiveRuntimeV1::MarginsDesktop,
+        LiveRuntimeV1::MarginsDesktop,
     )
 }
 
@@ -217,14 +217,14 @@ pub(crate) fn start_loopback_api(state: Arc<AppState>) -> Result<(), String> {
 pub(crate) fn start_cli_loopback_api(state: Arc<AppState>) -> Result<(), String> {
     start_loopback_api_for_runtime(
         Arc::new(NativeLiveRuntime::new(state)),
-        DesktopLiveRuntimeV1::MarginsCli,
+        LiveRuntimeV1::MarginsCli,
     )
 }
 
 #[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
 fn start_loopback_api_for_runtime(
     runtime: Arc<dyn LiveRuntime>,
-    runtime_kind: DesktopLiveRuntimeV1,
+    runtime_kind: LiveRuntimeV1,
 ) -> Result<(), String> {
     shutdown_loopback_api();
 
@@ -267,7 +267,7 @@ fn start_loopback_api_for_runtime(
         }
         let _ = std::fs::remove_file(cleanup_path);
     });
-    *live_api_handle().lock().unwrap() = Some(DesktopLiveApiHandle {
+    *live_api_handle().lock().unwrap() = Some(LiveApiHandle {
         discovery_path,
         shutdown: Some(shutdown_tx),
     });
@@ -332,7 +332,7 @@ fn unauthorized() -> axum::response::Response {
     (
         axum::http::StatusCode::UNAUTHORIZED,
         axum::Json(live_error(
-            DesktopLiveErrorCodeV1::Unauthorized,
+            LiveErrorCodeV1::Unauthorized,
             "Unauthorized",
             false,
         )),
@@ -341,20 +341,20 @@ fn unauthorized() -> axum::response::Response {
 }
 
 #[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
-fn error_response(error: DesktopLiveErrorV1) -> axum::response::Response {
+fn error_response(error: LiveErrorV1) -> axum::response::Response {
     use axum::response::IntoResponse;
 
     let status = match error.code {
-        DesktopLiveErrorCodeV1::Unauthorized => axum::http::StatusCode::UNAUTHORIZED,
-        DesktopLiveErrorCodeV1::BadRequest => axum::http::StatusCode::BAD_REQUEST,
-        DesktopLiveErrorCodeV1::NoActiveSession => axum::http::StatusCode::NOT_FOUND,
-        DesktopLiveErrorCodeV1::SessionMismatch
-        | DesktopLiveErrorCodeV1::GenerationMismatch
-        | DesktopLiveErrorCodeV1::NotepadChanged => axum::http::StatusCode::CONFLICT,
-        DesktopLiveErrorCodeV1::AlreadyRecording
-        | DesktopLiveErrorCodeV1::Busy
-        | DesktopLiveErrorCodeV1::NotReady => axum::http::StatusCode::CONFLICT,
-        DesktopLiveErrorCodeV1::Internal => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        LiveErrorCodeV1::Unauthorized => axum::http::StatusCode::UNAUTHORIZED,
+        LiveErrorCodeV1::BadRequest => axum::http::StatusCode::BAD_REQUEST,
+        LiveErrorCodeV1::NoActiveSession => axum::http::StatusCode::NOT_FOUND,
+        LiveErrorCodeV1::SessionMismatch
+        | LiveErrorCodeV1::GenerationMismatch
+        | LiveErrorCodeV1::NotepadChanged => axum::http::StatusCode::CONFLICT,
+        LiveErrorCodeV1::AlreadyRecording
+        | LiveErrorCodeV1::Busy
+        | LiveErrorCodeV1::NotReady => axum::http::StatusCode::CONFLICT,
+        LiveErrorCodeV1::Internal => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
     };
     (status, axum::Json(error)).into_response()
 }
@@ -383,7 +383,7 @@ async fn snapshot_handler(
 async fn start_handler(
     axum::extract::State(state): axum::extract::State<LiveHttpState>,
     headers: axum::http::HeaderMap,
-    axum::Json(request): axum::Json<DesktopLiveStartRequestV1>,
+    axum::Json(request): axum::Json<LiveStartRequestV1>,
 ) -> axum::response::Response {
     if !check_bearer(&headers, &state.token) {
         return unauthorized();
@@ -402,7 +402,7 @@ async fn start_handler(
 async fn pause_handler(
     axum::extract::State(state): axum::extract::State<LiveHttpState>,
     headers: axum::http::HeaderMap,
-    axum::Json(request): axum::Json<DesktopLiveSessionRequestV1>,
+    axum::Json(request): axum::Json<LiveSessionRequestV1>,
 ) -> axum::response::Response {
     if !check_bearer(&headers, &state.token) {
         return unauthorized();
@@ -421,7 +421,7 @@ async fn pause_handler(
 async fn resume_handler(
     axum::extract::State(state): axum::extract::State<LiveHttpState>,
     headers: axum::http::HeaderMap,
-    axum::Json(request): axum::Json<DesktopLiveSessionRequestV1>,
+    axum::Json(request): axum::Json<LiveSessionRequestV1>,
 ) -> axum::response::Response {
     if !check_bearer(&headers, &state.token) {
         return unauthorized();
@@ -440,7 +440,7 @@ async fn resume_handler(
 async fn stop_handler(
     axum::extract::State(state): axum::extract::State<LiveHttpState>,
     headers: axum::http::HeaderMap,
-    axum::Json(request): axum::Json<DesktopLiveSessionRequestV1>,
+    axum::Json(request): axum::Json<LiveSessionRequestV1>,
 ) -> axum::response::Response {
     if !check_bearer(&headers, &state.token) {
         return unauthorized();
@@ -459,7 +459,7 @@ async fn stop_handler(
 async fn update_notepad_handler(
     axum::extract::State(state): axum::extract::State<LiveHttpState>,
     headers: axum::http::HeaderMap,
-    axum::Json(request): axum::Json<DesktopLiveUpdateNotepadRequestV1>,
+    axum::Json(request): axum::Json<LiveUpdateNotepadRequestV1>,
 ) -> axum::response::Response {
     if !check_bearer(&headers, &state.token) {
         return unauthorized();
@@ -490,7 +490,7 @@ where
         Ok(value) => value,
         Err(error) => {
             return error_response(live_error(
-                DesktopLiveErrorCodeV1::BadRequest,
+                LiveErrorCodeV1::BadRequest,
                 format!("Bad request: {error}"),
                 false,
             ));
@@ -521,8 +521,8 @@ where
 fn mutation_response(
     state: &Arc<AppState>,
     stopped_session_id: Option<SessionId>,
-) -> Result<DesktopLiveMutationResponseV1, DesktopLiveErrorV1> {
-    Ok(DesktopLiveMutationResponseV1 {
+) -> Result<LiveMutationResponseV1, LiveErrorV1> {
+    Ok(LiveMutationResponseV1 {
         protocol_version: ProtocolVersionV1,
         idempotent_replay: false,
         stopped_session_id,
@@ -533,7 +533,7 @@ fn mutation_response(
 fn snapshot_for_state(
     state: &Arc<AppState>,
     explicit_session_id: Option<&str>,
-) -> Result<DesktopLiveSnapshotV1, DesktopLiveErrorV1> {
+) -> Result<LiveSnapshotV1, LiveErrorV1> {
     let now = unix_ms_now();
     let active = {
         let mut guard = state.recording.lock().unwrap();
@@ -558,7 +558,7 @@ fn snapshot_for_state(
     else {
         if explicit_session_id.is_some() {
             return Err(live_error(
-                DesktopLiveErrorCodeV1::NoActiveSession,
+                LiveErrorCodeV1::NoActiveSession,
                 "There is no active recording.",
                 true,
             ));
@@ -568,7 +568,7 @@ fn snapshot_for_state(
 
     if explicit_session_id.is_some_and(|expected| expected != session_name) {
         return Err(live_error(
-            DesktopLiveErrorCodeV1::SessionMismatch,
+            LiveErrorCodeV1::SessionMismatch,
             "That recording is not the active recording.",
             true,
         ));
@@ -579,7 +579,7 @@ fn snapshot_for_state(
     let (transcript, freshness) = if let Some(context) = live_context {
         (
             context.transcript,
-            Some(DesktopLiveTranscriptFreshnessV1 {
+            Some(LiveTranscriptFreshnessV1 {
                 decoded_until_ms: DurationMillis(context.decoded_until_ms),
                 committed_until_ms: DurationMillis(context.committed_until_ms),
                 updated_at_unix_ms: UnixMillis(now),
@@ -596,7 +596,7 @@ fn snapshot_for_state(
                 .as_ref()
                 .map(|snapshot| snapshot.transcript.clone())
                 .unwrap_or_default(),
-            watermark.map(|watermark| DesktopLiveTranscriptFreshnessV1 {
+            watermark.map(|watermark| LiveTranscriptFreshnessV1 {
                 decoded_until_ms: DurationMillis(watermark.decoded_until_ms),
                 committed_until_ms: DurationMillis(watermark.committed_until_ms),
                 updated_at_unix_ms: UnixMillis(watermark.updated_unix_ms),
@@ -605,16 +605,16 @@ fn snapshot_for_state(
         )
     };
 
-    Ok(DesktopLiveSnapshotV1 {
+    Ok(LiveSnapshotV1 {
         protocol_version: ProtocolVersionV1,
         server_unix_ms: UnixMillis(now),
-        session: Some(DesktopLiveSessionV1 {
+        session: Some(LiveSessionV1 {
             session_id: SessionId(session_name),
             status: session_status(&status),
             elapsed_ms: DurationMillis(elapsed_ms),
             generation,
         }),
-        health: DesktopLiveHealthV1 {
+        health: LiveHealthV1 {
             capture_phase: status.capture_phase,
             tap_status: status.tap_status,
             tap_warning: status.tap_warning,
@@ -628,12 +628,12 @@ fn snapshot_for_state(
     })
 }
 
-fn idle_snapshot(now: u64) -> DesktopLiveSnapshotV1 {
-    DesktopLiveSnapshotV1 {
+fn idle_snapshot(now: u64) -> LiveSnapshotV1 {
+    LiveSnapshotV1 {
         protocol_version: ProtocolVersionV1,
         server_unix_ms: UnixMillis(now),
         session: None,
-        health: DesktopLiveHealthV1 {
+        health: LiveHealthV1 {
             capture_phase: "idle".to_string(),
             tap_status: "not_expected".to_string(),
             tap_warning: None,
@@ -662,25 +662,25 @@ fn ensure_generation(
     state: &Arc<AppState>,
     session_id: &str,
     expected_generation: Option<u64>,
-) -> Result<(), DesktopLiveErrorV1> {
+) -> Result<(), LiveErrorV1> {
     let guard = state.recording.lock().unwrap();
     let Some(rec) = guard.as_ref() else {
         return Err(live_error(
-            DesktopLiveErrorCodeV1::NoActiveSession,
+            LiveErrorCodeV1::NoActiveSession,
             "There is no active recording.",
             true,
         ));
     };
     if rec.session_name != session_id {
         return Err(live_error(
-            DesktopLiveErrorCodeV1::SessionMismatch,
+            LiveErrorCodeV1::SessionMismatch,
             "That recording is not the active recording.",
             true,
         ));
     }
     if expected_generation.is_some_and(|expected| expected != rec.live_generation) {
         return Err(live_error(
-            DesktopLiveErrorCodeV1::GenerationMismatch,
+            LiveErrorCodeV1::GenerationMismatch,
             "The recording changed; read the latest state and try again.",
             true,
         ));
@@ -693,11 +693,11 @@ fn append_memo_text(
     session_id: &str,
     expected_generation: Option<u64>,
     text: String,
-) -> Result<(), DesktopLiveErrorV1> {
+) -> Result<(), LiveErrorV1> {
     let text = text.trim().to_string();
     if text.is_empty() {
         return Err(live_error(
-            DesktopLiveErrorCodeV1::BadRequest,
+            LiveErrorCodeV1::BadRequest,
             "Memo text cannot be empty.",
             false,
         ));
@@ -705,21 +705,21 @@ fn append_memo_text(
     let mut guard = state.recording.lock().unwrap();
     let rec = guard.as_mut().ok_or_else(|| {
         live_error(
-            DesktopLiveErrorCodeV1::NoActiveSession,
+            LiveErrorCodeV1::NoActiveSession,
             "There is no active recording.",
             true,
         )
     })?;
     if rec.session_name != session_id {
         return Err(live_error(
-            DesktopLiveErrorCodeV1::SessionMismatch,
+            LiveErrorCodeV1::SessionMismatch,
             "That recording is not the active recording.",
             true,
         ));
     }
     if expected_generation.is_some_and(|expected| expected != rec.live_generation) {
         return Err(live_error(
-            DesktopLiveErrorCodeV1::GenerationMismatch,
+            LiveErrorCodeV1::GenerationMismatch,
             "The recording changed; read the latest state and try again.",
             true,
         ));
@@ -730,7 +730,7 @@ fn append_memo_text(
     lines.push(line);
     crate::persist_live_memo(&rec.work_dir, &rec.session_name, &lines).map_err(|error| {
         live_error(
-            DesktopLiveErrorCodeV1::Internal,
+            LiveErrorCodeV1::Internal,
             format!("Could not save memo: {error}"),
             true,
         )
@@ -745,10 +745,10 @@ fn update_notepad_text(
     expected_generation: Option<u64>,
     expected_notepad_revision: &str,
     text: String,
-) -> Result<(), DesktopLiveErrorV1> {
+) -> Result<(), LiveErrorV1> {
     if text.chars().count() > MAX_NOTEPAD_CHARS {
         return Err(live_error(
-            DesktopLiveErrorCodeV1::BadRequest,
+            LiveErrorCodeV1::BadRequest,
             "The notepad is too large.",
             false,
         ));
@@ -760,7 +760,7 @@ fn update_notepad_text(
         > MAX_NOTEPAD_LINES
     {
         return Err(live_error(
-            DesktopLiveErrorCodeV1::BadRequest,
+            LiveErrorCodeV1::BadRequest,
             "The notepad has too many lines.",
             false,
         ));
@@ -769,28 +769,28 @@ fn update_notepad_text(
     let mut guard = state.recording.lock().unwrap();
     let rec = guard.as_mut().ok_or_else(|| {
         live_error(
-            DesktopLiveErrorCodeV1::NoActiveSession,
+            LiveErrorCodeV1::NoActiveSession,
             "There is no active recording.",
             true,
         )
     })?;
     if rec.session_name != session_id {
         return Err(live_error(
-            DesktopLiveErrorCodeV1::SessionMismatch,
+            LiveErrorCodeV1::SessionMismatch,
             "That recording is not the active recording.",
             true,
         ));
     }
     if expected_generation.is_some_and(|expected| expected != rec.live_generation) {
         return Err(live_error(
-            DesktopLiveErrorCodeV1::GenerationMismatch,
+            LiveErrorCodeV1::GenerationMismatch,
             "The recording changed; read the latest state and try again.",
             true,
         ));
     }
     if expected_notepad_revision != notepad_revision(&rec.memo_lines) {
         return Err(live_error(
-            DesktopLiveErrorCodeV1::NotepadChanged,
+            LiveErrorCodeV1::NotepadChanged,
             "The notepad changed somewhere else. Review the latest text and try again.",
             true,
         ));
@@ -803,7 +803,7 @@ fn update_notepad_text(
         .into_lines();
     crate::persist_live_memo(&rec.work_dir, &rec.session_name, &lines).map_err(|error| {
         live_error(
-            DesktopLiveErrorCodeV1::Internal,
+            LiveErrorCodeV1::Internal,
             format!("Could not save notepad: {error}"),
             true,
         )
@@ -858,11 +858,11 @@ fn memo_session_ms(line: &MemoLine) -> Option<SessionMillis> {
         .then(|| SessionMillis((line.created_secs.max(0.0) * 1_000.0).round() as u64))
 }
 
-fn live_memo_lines(lines: &[MemoLine]) -> Vec<DesktopLiveMemoLineV1> {
+fn live_memo_lines(lines: &[MemoLine]) -> Vec<LiveMemoLineV1> {
     lines
         .iter()
         .enumerate()
-        .map(|(index, line)| DesktopLiveMemoLineV1 {
+        .map(|(index, line)| LiveMemoLineV1 {
             index: index as u32,
             at_ms: memo_session_ms(line),
             text: line.text.clone(),
@@ -870,7 +870,7 @@ fn live_memo_lines(lines: &[MemoLine]) -> Vec<DesktopLiveMemoLineV1> {
         .collect()
 }
 
-fn bounded_transcript_lines(transcript: &str) -> Vec<DesktopLiveTranscriptLineV1> {
+fn bounded_transcript_lines(transcript: &str) -> Vec<LiveTranscriptLineV1> {
     let mut total_chars = 0usize;
     let mut out = Vec::new();
     for text in transcript
@@ -884,7 +884,7 @@ fn bounded_transcript_lines(transcript: &str) -> Vec<DesktopLiveTranscriptLineV1
             break;
         }
         total_chars = next_total;
-        out.push(DesktopLiveTranscriptLineV1 {
+        out.push(LiveTranscriptLineV1 {
             at_ms: parse_context_line_ms(text).map(SessionMillis),
             text: text.to_string(),
         });
@@ -913,34 +913,34 @@ fn parse_elapsed_to_ms(value: &str) -> Option<u64> {
     Some(seconds * 1_000)
 }
 
-fn classify_runtime_error(error: String) -> DesktopLiveErrorV1 {
+fn classify_runtime_error(error: String) -> LiveErrorV1 {
     let code = if error.contains("Already recording") {
-        DesktopLiveErrorCodeV1::AlreadyRecording
+        LiveErrorCodeV1::AlreadyRecording
     } else if error.contains("already finalizing")
         || error.contains("already starting")
         || error.contains("still being finalized")
     {
-        DesktopLiveErrorCodeV1::Busy
+        LiveErrorCodeV1::Busy
     } else if error.contains("Not recording") || error.contains("no active capture") {
-        DesktopLiveErrorCodeV1::NoActiveSession
+        LiveErrorCodeV1::NoActiveSession
     } else {
-        DesktopLiveErrorCodeV1::Internal
+        LiveErrorCodeV1::Internal
     };
     let retryable = matches!(
         code,
-        DesktopLiveErrorCodeV1::Busy
-            | DesktopLiveErrorCodeV1::NoActiveSession
-            | DesktopLiveErrorCodeV1::Internal
+        LiveErrorCodeV1::Busy
+            | LiveErrorCodeV1::NoActiveSession
+            | LiveErrorCodeV1::Internal
     );
     live_error(code, error, retryable)
 }
 
 fn live_error(
-    code: DesktopLiveErrorCodeV1,
+    code: LiveErrorCodeV1,
     message: impl ToString,
     retryable: bool,
-) -> DesktopLiveErrorV1 {
-    DesktopLiveErrorV1::new(code, message.to_string(), retryable)
+) -> LiveErrorV1 {
+    LiveErrorV1::new(code, message.to_string(), retryable)
 }
 
 #[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
@@ -952,20 +952,20 @@ fn discovery_path() -> PathBuf {
 fn discovery_document(
     base_url: &str,
     token: &str,
-    runtime: DesktopLiveRuntimeV1,
-) -> DesktopLiveDiscoveryV1 {
-    DesktopLiveDiscoveryV1 {
+    runtime: LiveRuntimeV1,
+) -> LiveDiscoveryV1 {
+    LiveDiscoveryV1 {
         protocol_version: ProtocolVersionV1,
         runtime,
         profile: crate::settings::profile_name(),
         pid: std::process::id(),
         base_url: base_url.to_string(),
         token: token.to_string(),
-        permissions: DesktopLivePermissionsV1 {
+        permissions: LivePermissionsV1 {
             loopback_only: true,
             private_file: true,
         },
-        endpoints: DesktopLiveEndpointsV1 {
+        endpoints: LiveEndpointsV1 {
             snapshot: format!("{DESKTOP_LIVE_API_PREFIX_V1}/snapshot"),
             start: format!("{DESKTOP_LIVE_API_PREFIX_V1}/start"),
             pause: format!("{DESKTOP_LIVE_API_PREFIX_V1}/pause"),
@@ -1175,7 +1175,7 @@ mod tests {
     #[test]
     fn operation_replay_rejects_reused_id_for_different_body() {
         let operation_id: LiveOperationId = "op".into();
-        let response = DesktopLiveMutationResponseV1 {
+        let response = LiveMutationResponseV1 {
             protocol_version: ProtocolVersionV1,
             idempotent_replay: false,
             stopped_session_id: None,
@@ -1186,7 +1186,7 @@ mod tests {
 
         assert!(replays.get(&operation_id, b"first").unwrap().is_some());
         let error = replays.get(&operation_id, b"second").unwrap_err();
-        assert_eq!(error.code, DesktopLiveErrorCodeV1::BadRequest);
+        assert_eq!(error.code, LiveErrorCodeV1::BadRequest);
     }
 
     #[cfg(all(feature = "tauri-app", unix))]
@@ -1203,16 +1203,16 @@ mod tests {
         let document = discovery_document(
             "http://127.0.0.1:1",
             &"a".repeat(64),
-            DesktopLiveRuntimeV1::MarginsDesktop,
+            LiveRuntimeV1::MarginsDesktop,
         );
 
         write_private_json(&path, &document).unwrap();
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
-        let parsed: DesktopLiveDiscoveryV1 =
+        let parsed: LiveDiscoveryV1 =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(parsed.runtime, DesktopLiveRuntimeV1::MarginsDesktop);
+        assert_eq!(parsed.runtime, LiveRuntimeV1::MarginsDesktop);
         assert!(parsed.permissions.loopback_only);
         std::fs::remove_dir_all(dir).unwrap();
     }
