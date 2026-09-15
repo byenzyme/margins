@@ -39,8 +39,9 @@ Workspace config, Captures `.margins/sessions.sqlite`, `.margins/artifacts/`,
 directories. A durable server receipt is not an independent backup.
 
 New native remote captures resample each enabled mono lane to 16 kHz off the audio
-callback, encode 20 ms Opus frames at a 24 kbps target, and fsync immutable
-100 ms packet-stream commands before delivery. A separate 16 kHz PCM recovery
+callback, encode 20 ms Opus frames at a 24 kbps target per lane, and fsync immutable
+500 ms packet-stream commands before delivery (terminal blocks may be shorter).
+A separate 16 kHz PCM recovery
 journal is checkpointed at least every 100 ms while a segment is open so a client
 crash can reconstruct a decodable terminal stream; it is removed only after the
 compressed chunks and close intent are durable. Packet commands are aggregated

@@ -11,6 +11,9 @@ docs/
 /docs/*
 !/docs/remote-workspace-implementation.md
 !/docs/capture-refactor-and-testing.md
+!/docs/ssh-remote-onboarding.md
+!/docs/mac-audio-transport-verification.md
+!/docs/remote-integration-status.md
 .enzyme/
 .enzyme-embeddings/
 node_modules/
