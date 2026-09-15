@@ -13,7 +13,8 @@ use margins_meeting_protocol::{
     SegmentCloseReasonV1, SegmentCloseReferenceV1, SessionFinalizeReasonV1, SessionId,
     SessionMillis, WorkspaceAttachV1, WorkspaceMemoReplaceV1, WorkspaceMemoUpdateV1,
     WorkspaceNoteAssociationUpdateV1, WorkspaceRenameV1, AUDIO_CHUNK_BATCH_CONTENT_TYPE_V1,
-    OPUS_PACKET_FRAME_SAMPLES_V1, OPUS_PACKET_MAX_BYTES_V1, OPUS_PACKET_STREAM_SAMPLE_RATE_HZ_V1,
+    OPUS_PACKET_FRAME_SAMPLES_V1, OPUS_PACKET_MAX_BYTES_V1,
+    OPUS_PACKET_STREAM_MAX_PACKETS_PER_BLOCK_V1, OPUS_PACKET_STREAM_SAMPLE_RATE_HZ_V1,
 };
 use rand::{distributions::Alphanumeric, Rng};
 use ropus::{Application, Bitrate, Channels, DecodeMode, Decoder, Encoder, Signal};
@@ -1437,12 +1438,17 @@ impl DurableTransferSpool {
 /// capture never constructs this encoder or transfer spool.
 pub const NATIVE_REMOTE_RATE_HZ: u32 = OPUS_PACKET_STREAM_SAMPLE_RATE_HZ_V1;
 pub const NATIVE_OPUS_BITRATE_BPS: u32 = 24_000;
-/// Five 20 ms packets keep durable audio commands at 10/s/lane. The recovery
-/// journal is checkpointed independently every 100 ms, so request aggregation
-/// never widens the crash-recoverable source window.
-pub const NATIVE_OPUS_DURABLE_PACKETS: usize = 5;
-pub const NATIVE_OPUS_DURABLE_FRAMES: usize =
-    NATIVE_OPUS_DURABLE_PACKETS * OPUS_PACKET_FRAME_SAMPLES_V1 as usize;
+/// Recovery PCM and its durable source-length marker are fsynced every 100 ms.
+/// Network command framing is deliberately independent: one command carries
+/// 500 ms so server-side receipt/fsync work has ample headroom over two-lane
+/// real-time ingress on a measured SSH tunnel.
+pub const NATIVE_OPUS_CHECKPOINT_PACKETS: usize = 5;
+pub const NATIVE_OPUS_CHECKPOINT_FRAMES: usize =
+    NATIVE_OPUS_CHECKPOINT_PACKETS * OPUS_PACKET_FRAME_SAMPLES_V1 as usize;
+pub const NATIVE_OPUS_NETWORK_PACKETS: usize = 25;
+pub const NATIVE_OPUS_NETWORK_FRAMES: usize =
+    NATIVE_OPUS_NETWORK_PACKETS * OPUS_PACKET_FRAME_SAMPLES_V1 as usize;
+const NATIVE_OPUS_LEGACY_NETWORK_PACKETS: usize = 5;
 const NATIVE_RESAMPLE_INPUT_FRAMES: usize = 1_024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1594,7 +1600,7 @@ impl NativeResampledPcmStream {
             emitted_frames: 0,
             input_pending: Vec::with_capacity(NATIVE_RESAMPLE_INPUT_FRAMES * 2),
             output_pending: Vec::new(),
-            pcm_pending: Vec::with_capacity(NATIVE_OPUS_DURABLE_FRAMES * 4),
+            pcm_pending: Vec::with_capacity(NATIVE_OPUS_CHECKPOINT_FRAMES * 4),
             resampler,
             delay_to_trim,
         })
@@ -1735,12 +1741,25 @@ struct NativeOpenSegmentV1 {
     segment_id: String,
     starts_at_ms: u64,
     bitrate_bps: u32,
+    /// Absent in the first PacketStream writer, which used five packets per
+    /// command. Preserve that exact framing when recovering an old open spool
+    /// so already-persisted payload identities remain replayable.
+    #[serde(default)]
+    network_packets: Option<usize>,
 }
 
 struct NativeRemoteSegment {
     id: String,
     starts_at_ms: u64,
+    network_packets: usize,
+    replay_index: Option<BTreeMap<(NativeRemoteLane, u64), NativeReplayIdentity>>,
     lanes: BTreeMap<NativeRemoteLane, NativeOpusLaneStream>,
+}
+
+#[derive(Clone, Default)]
+struct NativeReplayIdentity {
+    pending: Option<SpoolChunk>,
+    ack_digest: Option<String>,
 }
 
 struct PendingOpusPacket {
@@ -1763,6 +1782,7 @@ struct NativeOpusLaneStream {
     durable_length_path: PathBuf,
     durable_recovery_bytes: u64,
     reserve_bytes: u64,
+    network_packets: usize,
 }
 
 impl NativeOpusLaneStream {
@@ -1772,7 +1792,11 @@ impl NativeOpusLaneStream {
         recovery_path: PathBuf,
         replay: bool,
         reserve_bytes: u64,
+        network_packets: usize,
     ) -> Result<Self> {
+        if network_packets == 0 || network_packets > OPUS_PACKET_STREAM_MAX_PACKETS_PER_BLOCK_V1 {
+            bail!("native Opus network packet aggregation is out of bounds");
+        }
         let mut encoder =
             Encoder::builder(NATIVE_REMOTE_RATE_HZ, Channels::Mono, Application::Voip)
                 .bitrate(Bitrate::try_bits(bitrate_bps).context("invalid native Opus bitrate")?)
@@ -1826,12 +1850,13 @@ impl NativeOpusLaneStream {
             encoded_packet_count: 0,
             next_sequence: 0,
             pcm_frame_pending: Vec::with_capacity(OPUS_PACKET_FRAME_SAMPLES_V1 as usize * 2),
-            packet_pending: Vec::with_capacity(NATIVE_OPUS_DURABLE_PACKETS + 2),
+            packet_pending: Vec::with_capacity(network_packets + 2),
             recovery,
             recovery_path,
             durable_length_path,
             durable_recovery_bytes,
             reserve_bytes,
+            network_packets,
         })
     }
 
@@ -1982,8 +2007,8 @@ impl NativeOpusLaneStream {
             }
             return Ok(blocks);
         }
-        while self.packet_pending.len() > NATIVE_OPUS_DURABLE_PACKETS {
-            blocks.push(self.take_block(NATIVE_OPUS_DURABLE_PACKETS, false)?);
+        while self.packet_pending.len() > self.network_packets {
+            blocks.push(self.take_block(self.network_packets, false)?);
         }
         Ok(blocks)
     }
@@ -2090,11 +2115,14 @@ impl NativeRemoteTransfer {
             segment_id: segment_id.clone(),
             starts_at_ms,
             bitrate_bps: self.bitrate_bps,
+            network_packets: Some(NATIVE_OPUS_NETWORK_PACKETS),
         };
         atomic_json(&self.open_segment_path(), &open)?;
         self.segment = Some(NativeRemoteSegment {
             id: segment_id,
             starts_at_ms,
+            network_packets: NATIVE_OPUS_NETWORK_PACKETS,
+            replay_index: None,
             lanes: BTreeMap::new(),
         });
         Ok(())
@@ -2120,6 +2148,12 @@ impl NativeRemoteTransfer {
             bail!("native recovery segment codec identity changed");
         }
         validate_component(&open.segment_id)?;
+        let network_packets = open
+            .network_packets
+            .unwrap_or(NATIVE_OPUS_LEGACY_NETWORK_PACKETS);
+        if network_packets == 0 || network_packets > OPUS_PACKET_STREAM_MAX_PACKETS_PER_BLOCK_V1 {
+            bail!("native recovery segment has invalid network packet aggregation");
+        }
         if let Some(close) = self
             .spool
             .manifest
@@ -2139,9 +2173,12 @@ impl NativeRemoteTransfer {
             self.clear_open_segment_files(&open.segment_id)?;
             return Ok(Some(close));
         }
+        let replay_index = self.build_native_replay_index(&open.segment_id)?;
         self.segment = Some(NativeRemoteSegment {
             id: open.segment_id.clone(),
             starts_at_ms: open.starts_at_ms,
+            network_packets,
+            replay_index: Some(replay_index),
             lanes: BTreeMap::new(),
         });
         let mut recovered_any = false;
@@ -2174,6 +2211,7 @@ impl NativeRemoteTransfer {
                 recovery_path,
                 true,
                 self.spool.reserve_bytes,
+                network_packets,
             )?;
             let blocks = stream.replay_s16le(&bytes)?;
             self.segment
@@ -2203,7 +2241,7 @@ impl NativeRemoteTransfer {
         if close.segment_id.as_ref() != segment_id {
             bail!("native recovery close intent names a different segment");
         }
-        let pending = self.spool.pending_chunks()?;
+        let replay_index = self.build_native_replay_index(segment_id)?;
         let mut lane_boundaries = BTreeMap::new();
         for boundary in &close.lane_boundaries {
             if lane_boundaries
@@ -2218,32 +2256,27 @@ impl NativeRemoteTransfer {
                 .get(lane.id())
                 .copied()
                 .context("native recovery close is missing a declared lane")?;
-            let lane_pending = pending
-                .iter()
-                .filter_map(|pending| match &pending.command.body {
-                    ClientMessageBodyV1::AudioChunk(chunk)
-                        if chunk.segment_id.as_ref() == segment_id
-                            && chunk.lane_id.as_ref() == lane.id() =>
-                    {
-                        Some(chunk)
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            if lane_pending
-                .iter()
-                .any(|chunk| chunk.sequence >= next_sequence)
-            {
+            if replay_index.keys().any(|(candidate_lane, sequence)| {
+                *candidate_lane == lane && *sequence >= next_sequence
+            }) {
                 bail!("native recovery has audio beyond its durable close boundary");
             }
             let mut all_payloads_local = true;
             let mut local_stream = Vec::new();
             for sequence in 0..next_sequence {
-                let chunk = lane_pending
-                    .iter()
-                    .find(|chunk| chunk.sequence == sequence)
-                    .copied();
-                let ack = self.durable_ack_digest(segment_id, lane.id(), sequence)?;
+                let identity = replay_index
+                    .get(&(lane, sequence))
+                    .cloned()
+                    .unwrap_or_default();
+                let chunk =
+                    identity
+                        .pending
+                        .as_ref()
+                        .and_then(|pending| match &pending.command.body {
+                            ClientMessageBodyV1::AudioChunk(chunk) => Some(chunk),
+                            _ => None,
+                        });
+                let ack = identity.ack_digest;
                 let local_chunk = match (chunk, ack) {
                     (Some(chunk), Some(ack)) => {
                         // ACK is fsynced before the frame is unlinked. A crash
@@ -2268,11 +2301,7 @@ impl NativeRemoteTransfer {
                         bail!("native recovery command contains multiple Opus blocks");
                     }
                     let block = &blocks[0];
-                    if block.source_start_frame
-                        != sequence
-                            .checked_mul(NATIVE_OPUS_DURABLE_FRAMES as u64)
-                            .context("native recovery source sequence overflowed")?
-                        || block.stream_start != (sequence == 0)
+                    if block.stream_start != (sequence == 0)
                         || block.stream_end != (sequence + 1 == next_sequence)
                     {
                         bail!("native recovery Opus stream markers conflict with its close");
@@ -2287,34 +2316,70 @@ impl NativeRemoteTransfer {
         Ok(())
     }
 
-    fn durable_ack_digest(
+    /// Build the only replay identity view with one bounded directory pass.
+    /// Normal monotonic capture never scans prior frames or ACKs; a crash/open
+    /// recovery pays this cost once, then performs O(log n) sequence lookups.
+    fn build_native_replay_index(
         &self,
         segment_id: &str,
-        lane_id: &str,
-        sequence: u64,
-    ) -> Result<Option<String>> {
-        let prefix = format!(
-            "{}-{}-{sequence:020}-",
-            safe_name(segment_id),
-            safe_name(lane_id)
-        );
-        let mut digest = None;
+    ) -> Result<BTreeMap<(NativeRemoteLane, u64), NativeReplayIdentity>> {
+        let mut index = BTreeMap::<(NativeRemoteLane, u64), NativeReplayIdentity>::new();
+        for pending in self.spool.pending_chunks()? {
+            let ClientMessageBodyV1::AudioChunk(chunk) = &pending.command.body else {
+                continue;
+            };
+            if chunk.segment_id.as_ref() != segment_id {
+                continue;
+            }
+            let lane = match chunk.lane_id.as_ref() {
+                "mic" => NativeRemoteLane::Microphone,
+                "system" => NativeRemoteLane::System,
+                _ => bail!("native recovery frame names an unknown lane"),
+            };
+            let identity = index.entry((lane, chunk.sequence)).or_default();
+            if identity.pending.replace(pending).is_some() {
+                bail!("native recovery sequence has multiple pending identities");
+            }
+        }
         for entry in std::fs::read_dir(self.spool.root.join("acks"))? {
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with(&prefix) && name.ends_with(".ack") {
-                if digest.is_some() {
-                    bail!("native recovery sequence has multiple durable ACK identities");
-                }
-                let value = std::fs::read_to_string(entry.path())?;
-                if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                    bail!("native recovery ACK digest is corrupt");
-                }
-                digest = Some(value);
+            let Some((lane, remainder)) = [
+                (NativeRemoteLane::Microphone, "mic"),
+                (NativeRemoteLane::System, "system"),
+            ]
+            .into_iter()
+            .find_map(|(lane, lane_id)| {
+                let prefix = format!("{}-{lane_id}-", safe_name(segment_id));
+                name.strip_prefix(&prefix)
+                    .map(|rest| (lane, rest.to_string()))
+            }) else {
+                continue;
+            };
+            if !remainder.ends_with(".ack") || remainder.len() < 22 {
+                bail!("native recovery ACK filename is corrupt");
+            }
+            let (sequence, message_suffix) = remainder
+                .split_once('-')
+                .context("native recovery ACK filename has no message identity")?;
+            if sequence.len() != 20
+                || !sequence.bytes().all(|byte| byte.is_ascii_digit())
+                || message_suffix == ".ack"
+            {
+                bail!("native recovery ACK filename is corrupt");
+            }
+            let sequence = sequence.parse::<u64>()?;
+            let value = std::fs::read_to_string(entry.path())?;
+            if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                bail!("native recovery ACK digest is corrupt");
+            }
+            let identity = index.entry((lane, sequence)).or_default();
+            if identity.ack_digest.replace(value).is_some() {
+                bail!("native recovery sequence has multiple durable ACK identities");
             }
         }
-        Ok(digest)
+        Ok(index)
     }
 
     pub fn append_f32(
@@ -2356,7 +2421,7 @@ impl NativeRemoteTransfer {
     }
 
     fn ensure_lane(&mut self, lane: NativeRemoteLane, input_rate_hz: u32) -> Result<()> {
-        let (segment_id, path) = {
+        let (segment_id, path, network_packets) = {
             let segment = self
                 .segment
                 .as_ref()
@@ -2364,6 +2429,7 @@ impl NativeRemoteTransfer {
             (
                 segment.id.clone(),
                 self.lane_recovery_path(&segment.id, lane)?,
+                segment.network_packets,
             )
         };
         let segment = self.segment.as_mut().unwrap();
@@ -2376,6 +2442,7 @@ impl NativeRemoteTransfer {
                     path,
                     false,
                     self.spool.reserve_bytes,
+                    network_packets,
                 )?,
             );
         }
@@ -2426,21 +2493,31 @@ impl NativeRemoteTransfer {
                     payload,
                 }),
             };
-            self.append_or_validate_replay(&command)?;
+            if let Some(replay_index) = &segment.replay_index {
+                let identity = replay_index
+                    .get(&(lane, sequence))
+                    .cloned()
+                    .unwrap_or_default();
+                self.append_or_validate_replay(&command, identity)?;
+            } else {
+                // The capture lease and lane stream own a strictly monotonic
+                // sequence. Do not rescan every historical frame and ACK on
+                // this hot path; that made sustained capture quadratic.
+                self.spool.append_chunk(&command)?;
+            }
         }
         Ok(())
     }
 
-    fn append_or_validate_replay(&self, command: &ClientMessageV1) -> Result<()> {
+    fn append_or_validate_replay(
+        &self,
+        command: &ClientMessageV1,
+        identity: NativeReplayIdentity,
+    ) -> Result<()> {
         let ClientMessageBodyV1::AudioChunk(expected) = &command.body else {
             unreachable!();
         };
-        if let Some(existing) = self.spool.pending_chunks()?.into_iter().find(|candidate| {
-            matches!(&candidate.command.body, ClientMessageBodyV1::AudioChunk(chunk)
-                if chunk.segment_id == expected.segment_id
-                    && chunk.lane_id == expected.lane_id
-                    && chunk.sequence == expected.sequence)
-        }) {
+        if let Some(existing) = identity.pending {
             let ClientMessageBodyV1::AudioChunk(actual) = existing.command.body else {
                 unreachable!();
             };
@@ -2449,12 +2526,7 @@ impl NativeRemoteTransfer {
             }
             return Ok(());
         }
-        let ack_digest = self.durable_ack_digest(
-            expected.segment_id.as_ref(),
-            expected.lane_id.as_ref(),
-            expected.sequence,
-        )?;
-        if let Some(digest) = ack_digest {
+        if let Some(digest) = identity.ack_digest {
             if digest != expected.payload_digest.hex {
                 bail!("re-encoded native recovery block conflicts with its durable ACK");
             }
@@ -2785,9 +2857,9 @@ fn deliver_chunks_unchecked(
     let producer_token = spool.producer_token()?;
     let chunks = spool.pending_chunks()?;
     let batch_limit = client.max_batch_commands.load(Ordering::Acquire).max(1) as usize;
-    // Persistence remains at the 100 ms command boundary. Waiting up to 500 ms
-    // only aggregates already-durable commands and gives SSH enough fixed-cost
-    // amortization for two live lanes.
+    // The recoverable PCM/source marker remains durable at 100 ms while each
+    // immutable network command carries 500 ms. This extra wait coalesces
+    // commands from both lanes without widening the crash-recovery window.
     const MAX_CAPTURE_BATCH_AGE: std::time::Duration = std::time::Duration::from_millis(500);
     if !force_partial && chunks.len() < batch_limit {
         let old_enough = chunks.first().is_some_and(|chunk| {
@@ -3030,6 +3102,48 @@ mod native_opus_durability_tests {
     use super::*;
 
     #[test]
+    fn legacy_five_packet_open_spool_reencodes_existing_payload_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let spool = DurableTransferSpool::create(
+            temp.path(),
+            "legacy-open",
+            "instance-a",
+            "https://example.test",
+            "workspace-a",
+            "session-a",
+            "producer-secret",
+            0,
+        )
+        .unwrap();
+        let mut transfer = NativeRemoteTransfer::new(spool);
+        transfer.begin_segment("legacy-segment".into(), 0).unwrap();
+        transfer.segment.as_mut().unwrap().network_packets = NATIVE_OPUS_LEGACY_NETWORK_PACKETS;
+        let open_path = transfer.open_segment_path();
+        let mut open: NativeOpenSegmentV1 =
+            serde_json::from_slice(&std::fs::read(&open_path).unwrap()).unwrap();
+        open.network_packets = None;
+        atomic_json(&open_path, &open).unwrap();
+        transfer
+            .append_s16le(NativeRemoteLane::Microphone, 16_000, &vec![3; 6_400])
+            .unwrap();
+        let before = transfer.spool().pending_chunks().unwrap();
+        assert_eq!(before.len(), 1);
+        let first_digest = before[0].payload_digest.clone();
+        drop(transfer);
+
+        let spool = DurableTransferSpool::open(temp.path(), "legacy-open", 0).unwrap();
+        let mut recovered = NativeRemoteTransfer::new(spool);
+        recovered
+            .recover_interrupted_segment(SegmentCloseReasonV1::Error)
+            .unwrap()
+            .expect("legacy open stream should close its durable prefix");
+        let mut after = recovered.spool().pending_chunks().unwrap();
+        after.sort_by(|left, right| left.path.cmp(&right.path));
+        assert_eq!(after.len(), 2);
+        assert_eq!(after[0].payload_digest, first_digest);
+    }
+
+    #[test]
     fn one_large_append_advances_recovery_checkpoint_at_most_every_100_ms() {
         let temp = tempfile::tempdir().unwrap();
         let recovery = temp.path().join("large-append.s16le");
@@ -3039,6 +3153,7 @@ mod native_opus_durability_tests {
             recovery.clone(),
             false,
             0,
+            NATIVE_OPUS_NETWORK_PACKETS,
         )
         .unwrap();
         let bytes = vec![7u8; (NATIVE_REMOTE_RATE_HZ as usize * 2 * 350) / 1_000];

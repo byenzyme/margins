@@ -318,7 +318,7 @@ fn paced_two_lane_delivery_batches_requests_without_serializing_the_producer() {
     stopped.store(true, Ordering::Release);
     server.join().unwrap();
     assert!(capture_elapsed >= Duration::from_millis(1_980));
-    // The producer must not inherit the 40 * 160 ms per-command network cost.
+    // The producer must not inherit the 8 * 160 ms per-command network cost.
     // Leave debug-host fsync/scheduling out of this assertion; the separately
     // reported paced metrics are the performance evidence.
     assert!(capture_elapsed < Duration::from_secs(5));
@@ -329,13 +329,12 @@ fn paced_two_lane_delivery_batches_requests_without_serializing_the_producer() {
         pending_at_stop <= max_pending_chunks + 2,
         "pending at stop: {pending_at_stop}, capture max: {max_pending_chunks}"
     );
-    // One full 16-command request can remain on disk until its durable ACKs are
-    // written while the independent producer adds more blocks. Eight commands
-    // is 400 ms of two-lane 100 ms durable ingress headroom, over twice the
-    // fixture's deliberate 160 ms service delay. This bounds the observed queue
-    // without equating it to the per-request admission ceiling.
+    // The finite two-second fixture produces exactly eight 500 ms lane blocks.
+    // Requiring the observed capture-time backlog to remain below that total
+    // proves delivery makes progress while production continues; the separate
+    // service regression proves the per-request 16-command admission ceiling.
     assert!(
-        max_pending_chunks <= DEFAULT_MAX_IN_FLIGHT_CHUNKS as usize + 8,
+        max_pending_chunks < 8,
         "max pending: {max_pending_chunks}"
     );
     assert!(max_pending_bytes < 25_000, "max bytes: {max_pending_bytes}");
@@ -357,10 +356,13 @@ fn paced_two_lane_delivery_batches_requests_without_serializing_the_producer() {
         metrics.http_batch_requests
     );
     // Exact cadence varies with debug-host fsync speed: a slower producer ages
-    // partial batches sooner. Require a substantial reduction from 40 one-command
-    // requests; the service test independently verifies the 16-command ceiling.
-    assert!(metrics.http_batch_requests <= 8, "metrics: {metrics:?}");
-    assert!(metrics.durable_audio_commands >= 40, "metrics: {metrics:?}");
+    // partial batches sooner. Still require at least one request to carry both
+    // lanes rather than accepting the eight-command unbatched baseline.
+    assert!(
+        metrics.http_batch_requests < metrics.durable_audio_commands,
+        "metrics: {metrics:?}"
+    );
+    assert_eq!(metrics.durable_audio_commands, 8, "metrics: {metrics:?}");
     assert_eq!(
         metrics.durable_audio_commands,
         metrics.durable_audio_receipts
@@ -734,17 +736,17 @@ fn native_opus_adapter_preserves_lane_identity_source_count_and_duration() {
         close
             .lane_boundaries
             .iter()
-            .all(|boundary| boundary.next_sequence == 2)
+            .all(|boundary| boundary.next_sequence == 1)
     );
 
     let chunks = transfer.spool().pending_chunks().unwrap();
-    assert_eq!(chunks.len(), 4);
+    assert_eq!(chunks.len(), 2);
     let mut encoded = std::collections::BTreeMap::new();
     for chunk in chunks {
         let ClientMessageBodyV1::AudioChunk(audio) = chunk.command.body else {
             panic!("expected audio");
         };
-        assert!(matches!(audio.starts_at_ms.0, 250 | 350));
+        assert_eq!(audio.starts_at_ms.0, 250);
         encoded
             .entry(audio.lane_id.0)
             .or_insert_with(Vec::new)
@@ -763,6 +765,55 @@ fn native_opus_adapter_preserves_lane_identity_source_count_and_duration() {
         3_200
     );
     assert_ne!(encoded["mic"], encoded["system"]);
+}
+
+#[test]
+fn normal_opus_append_does_not_rescan_historical_spool_directories() {
+    let temp = tempfile::tempdir().unwrap();
+    let spool = DurableTransferSpool::create(
+        temp.path(),
+        "linear-append",
+        "instance-a",
+        "https://margins.example.test/",
+        "workspace-a",
+        "session-a",
+        "producer-secret",
+        0,
+    )
+    .unwrap();
+    // These belong to an unrelated, already-damaged historical sequence. The
+    // monotonic capture owner must publish its next command without decoding or
+    // linearly walking either directory. Delivery/recovery still validates the
+    // directories when it takes ownership of them.
+    std::fs::write(spool.root().join("chunks/historical.frame"), b"broken").unwrap();
+    for sequence in 0..2_000_u64 {
+        std::fs::write(
+            spool
+                .root()
+                .join("acks")
+                .join(format!("old-mic-{sequence:020}-message.ack")),
+            b"not-a-digest",
+        )
+        .unwrap();
+    }
+
+    let mut transfer = NativeRemoteTransfer::new(spool);
+    transfer.begin_segment("current".into(), 0).unwrap();
+    // 520 ms emits the first nonterminal 500 ms network block.
+    assert_eq!(
+        transfer
+            .append_s16le(NativeRemoteLane::Microphone, 16_000, &vec![0; 16_640])
+            .unwrap(),
+        8_320
+    );
+    assert!(transfer
+        .spool()
+        .root()
+        .join("chunks")
+        .read_dir()
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|entry| entry.file_name().to_string_lossy().starts_with("current-mic-")));
 }
 
 #[test]
@@ -836,7 +887,7 @@ fn native_stream_for_frames(frames: usize) -> (Vec<u8>, CloseSegmentV1) {
 }
 
 #[test]
-fn native_opus_uses_real_16k_lookahead_and_handles_exact_durable_multiples_and_tail() {
+fn native_opus_uses_real_16k_lookahead_and_handles_exact_network_multiples_and_tail() {
     let encoder = Encoder::builder(16_000, Channels::Mono, Application::Voip)
         .bitrate(Bitrate::Bits(24_000))
         .build()
@@ -847,7 +898,17 @@ fn native_opus_uses_real_16k_lookahead_and_handles_exact_durable_multiples_and_t
         "ropus lookahead is in input-rate frames"
     );
 
-    for frames in [1_280_usize, 2_560, 1_403, 1_600, 3_200, 1_723] {
+    for frames in [
+        1_280_usize,
+        2_560,
+        1_403,
+        1_600,
+        3_200,
+        1_723,
+        8_000,
+        16_000,
+        16_123,
+    ] {
         let (stream, close) = native_stream_for_frames(frames);
         let blocks = decode_opus_packet_blocks_v1(&stream).unwrap();
         let summary = validate_opus_packet_stream_v1(&stream).unwrap();
@@ -969,9 +1030,17 @@ fn native_opus_crash_recovery_closes_durable_prefix_and_next_segment_is_contiguo
         .append_s16le(NativeRemoteLane::Microphone, 16_000, &vec![3; 3_200])
         .unwrap();
     // The 100 ms source checkpoint is already fsynced even though the first
-    // five-packet Opus block is still held for terminal-tail-safe framing.
+    // network block is still held for terminal-tail-safe framing.
     assert!(transfer.spool().pending_chunks().unwrap().is_empty());
     drop(transfer);
+    // First-generation native Opus open markers did not record their five-
+    // packet command cadence. Recovery must preserve that legacy framing rather
+    // than re-encode under the current 25-packet identity.
+    let open_path = root.join("crash/open-native-segment.json");
+    let mut open: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&open_path).unwrap()).unwrap();
+    open.as_object_mut().unwrap().remove("network_packets");
+    std::fs::write(&open_path, serde_json::to_vec(&open).unwrap()).unwrap();
 
     let spool = DurableTransferSpool::open(root, "crash", 0).unwrap();
     let mut recovered = NativeRemoteTransfer::new(spool);

@@ -88,20 +88,23 @@ fn main() -> Result<()> {
             .to_path_buf();
         let transfer_id = spool.manifest().transfer_id.clone();
         let reserve_bytes = capabilities.limits.spool_reserve_bytes;
+        let batch_limit = capabilities.limits.max_in_flight_chunks.max(1) as usize;
         let client = connection.client.clone();
         let done = uploader_done.clone();
         Some(std::thread::spawn(move || {
             let mut backoff = Duration::from_millis(50);
             while !done.load(Ordering::Acquire) {
-                let attempt = (|| -> Result<()> {
+                let attempt = (|| -> Result<bool> {
                     let mut delivery =
                         DurableTransferSpool::open(&parent, &transfer_id, reserve_bytes)?;
-                    deliver_available(&mut delivery, &client)
+                    let catching_up = delivery.pending_chunks()?.len() >= batch_limit;
+                    deliver_available(&mut delivery, &client)?;
+                    Ok(catching_up)
                 })();
-                backoff = if attempt.is_ok() {
-                    Duration::from_millis(50)
-                } else {
-                    (backoff * 2).min(Duration::from_secs(2))
+                backoff = match attempt {
+                    Ok(true) => Duration::from_millis(1),
+                    Ok(false) => Duration::from_millis(50),
+                    Err(_) => (backoff * 2).min(Duration::from_secs(2)),
                 };
                 std::thread::sleep(backoff);
             }

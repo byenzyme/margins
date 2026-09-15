@@ -608,11 +608,18 @@ impl WorkspaceService {
                         bail!("each durable native Opus command must contain exactly one block");
                     }
                     let block = &blocks[0];
-                    let expected_start = chunk
+                    let legacy_start = chunk
                         .sequence
-                        .checked_mul(crate::remote_workspace::NATIVE_OPUS_DURABLE_FRAMES as u64)
-                        .context("native Opus source start overflowed")?;
-                    if block.source_start_frame != expected_start {
+                        .checked_mul(crate::remote_workspace::NATIVE_OPUS_CHECKPOINT_FRAMES as u64);
+                    let current_start = chunk
+                        .sequence
+                        .checked_mul(crate::remote_workspace::NATIVE_OPUS_NETWORK_FRAMES as u64);
+                    if !matches!(
+                        (legacy_start, current_start),
+                        (Some(legacy), Some(current))
+                            if block.source_start_frame == legacy
+                                || block.source_start_frame == current
+                    ) {
                         bail!("native Opus block source start does not match its sequence");
                     }
                     if chunk.sequence == 0 {

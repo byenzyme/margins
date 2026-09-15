@@ -347,11 +347,11 @@ fn composed_service_validates_and_finalizes_native_opus_without_relabeling() {
     .unwrap();
     let mut transfer = NativeRemoteTransfer::new(spool);
     transfer.begin_segment("segment-opus".into(), 0).unwrap();
-    let mic = (0..3_200)
+    let mic = (0..9_600)
         .map(|index| ((index * 271) % 30_000) as i16 - 15_000)
         .flat_map(i16::to_le_bytes)
         .collect::<Vec<_>>();
-    let system = vec![0_u8; 6_400];
+    let system = vec![0_u8; 19_200];
     transfer
         .append_s16le(NativeRemoteLane::Microphone, 16_000, &mic)
         .unwrap();
@@ -362,9 +362,9 @@ fn composed_service_validates_and_finalizes_native_opus_without_relabeling() {
     let ClientMessageBodyV1::CloseSegment(close_body) = &close.body else {
         panic!("expected close");
     };
-    assert_eq!(close_body.ended_at_ms.0, 200);
+    assert_eq!(close_body.ended_at_ms.0, 600);
     let finalize = transfer
-        .seal_session(200, SessionFinalizeReasonV1::Completed)
+        .seal_session(600, SessionFinalizeReasonV1::Completed)
         .unwrap();
     let commands = transfer
         .spool()
@@ -385,7 +385,16 @@ fn composed_service_validates_and_finalizes_native_opus_without_relabeling() {
         .to_string()
         .contains("duration"));
 
-    let mut wrong_source_start = commands[0].clone();
+    let mut wrong_source_start = commands
+        .iter()
+        .find(|command| {
+            matches!(
+                &command.body,
+                ClientMessageBodyV1::AudioChunk(chunk) if chunk.sequence == 1
+            )
+        })
+        .expect("600 ms input should produce a terminal sequence-one block")
+        .clone();
     let ClientMessageBodyV1::AudioChunk(chunk) = &mut wrong_source_start.body else {
         unreachable!();
     };
@@ -432,11 +441,11 @@ fn composed_service_validates_and_finalizes_native_opus_without_relabeling() {
             validate_opus_packet_stream_v1(&bytes)
                 .unwrap()
                 .source_frame_count,
-            3_200
+            9_600
         );
         assert_eq!(
             remote_opus_packet_stream_for_asr(&bytes).unwrap().len(),
-            3_200
+            9_600
         );
     }
     let summary = service
@@ -444,7 +453,7 @@ fn composed_service_validates_and_finalizes_native_opus_without_relabeling() {
         .unwrap()
         .sessions
         .remove(0);
-    assert_eq!(summary.capture_duration_ms, Some(DurationMillis(200)));
+    assert_eq!(summary.capture_duration_ms, Some(DurationMillis(600)));
 }
 
 #[test]

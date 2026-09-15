@@ -2158,6 +2158,7 @@ fn run_remote_native_capture(
     let uploader_id = transfer.spool().manifest().transfer_id.clone();
     let uploader_client = connection.client.clone();
     let uploader_reserve = capabilities.limits.spool_reserve_bytes;
+    let uploader_batch_limit = capabilities.limits.max_in_flight_chunks.max(1) as usize;
     let uploader_done_flag = uploader_done.clone();
     let uploader = std::thread::Builder::new()
         .name("margins-remote-delivery".into())
@@ -2167,7 +2168,7 @@ fn run_remote_native_capture(
                 if uploader_done_flag.load(Ordering::Acquire) {
                     break;
                 }
-                let result = (|| -> Result<bool> {
+                let result = (|| -> Result<(bool, bool)> {
                     let mut spool = DurableTransferSpool::open(
                         &uploader_parent,
                         &uploader_id,
@@ -2180,16 +2181,25 @@ fn run_remote_native_capture(
                         Ordering::Release,
                     );
                     let has_work = !chunks.is_empty() || !spool.pending_closes().is_empty();
+                    let catching_up = chunks.len() >= uploader_batch_limit;
                     if has_work {
                         deliver_available(&mut spool, &uploader_client)?;
                     }
-                    Ok(has_work)
+                    Ok((has_work, catching_up))
                 })();
                 match result {
-                    Ok(_) => {
+                    Ok((_, catching_up)) => {
                         uploader_state
                             .store(crate::app::REMOTE_DELIVERY_CURRENT, Ordering::Release);
-                        backoff = std::time::Duration::from_millis(50);
+                        // A full batch means durable ingress is outrunning the
+                        // last request. Continue promptly until below the
+                        // advertised catch-up threshold; partial/idle polling
+                        // remains relaxed and never busy-spins.
+                        backoff = if catching_up {
+                            std::time::Duration::from_millis(1)
+                        } else {
+                            std::time::Duration::from_millis(50)
+                        };
                     }
                     Err(error) => {
                         uploader_state
