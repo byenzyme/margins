@@ -337,6 +337,17 @@ input raw s16 files; mic SHA-256 was
 and system SHA-256 was
 `c7963073a991ed19c81f06c4174c51062250f5c02a076793bba5c40a0637c1c9`.
 
+Mac candidate preparation found that Cargo could reuse the CLI build script's output
+after a linked-worktree branch switch, leaving a new executable labeled with an old
+branch, commit, and build time. The build script now watches the absolute per-worktree
+`HEAD` and index plus the symbolic ref target and common `packed-refs`. A command
+contract regression compares the embedded commit with the checkout's real Git HEAD
+when Git is available. On the shared target, an initial build embedded clean commit
+`50b61ab8e37d1e35d9f56992de1bef45a4b6a4e8` at `09:12:51Z`; advancing the ref to
+`b7c7d08da0ed18cb007f9b06cc4877cb850e7df1` and rebuilding without cleaning caused
+Cargo to recompile `margins-cli` and embed that exact new commit at `09:13:12Z`.
+The prior Mac binary whose metadata still named `46c8f6d4e` is rejected as evidence.
+
 For backup/restore, the stopped isolated state tree was copied byte-for-byte,
 restored to its exact absolute Workspace paths, and restarted. The service returned
 the same finalized session, and the restored WAV SHA-256 matched

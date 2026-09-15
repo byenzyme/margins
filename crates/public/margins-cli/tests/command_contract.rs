@@ -26,6 +26,23 @@ use std::time::Duration;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+#[test]
+fn embedded_build_commit_matches_checkout_head_when_git_is_available() {
+    let output = match std::process::Command::new("git")
+        .args(["-C", env!("CARGO_MANIFEST_DIR"), "rev-parse", "HEAD"])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return,
+    };
+    let head = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        margins_cli::build_info::get().commit,
+        head.trim(),
+        "Cargo reused build metadata from a different checkout revision"
+    );
+}
+
 #[derive(Clone)]
 struct FixedProject(PathBuf);
 
