@@ -18,13 +18,15 @@ use std::path::Path;
 #[cfg(feature = "audio-capture")]
 use std::path::PathBuf;
 #[cfg(any(test, feature = "audio-capture"))]
+use std::sync::atomic::AtomicBool;
+#[cfg(feature = "audio-capture")]
+use std::sync::atomic::AtomicU32;
+#[cfg(any(test, feature = "audio-capture"))]
 use std::sync::atomic::AtomicU64;
 #[cfg(any(test, feature = "audio-capture"))]
 use std::sync::atomic::AtomicU8;
 #[cfg(any(test, feature = "audio-capture"))]
 use std::sync::atomic::Ordering;
-#[cfg(feature = "audio-capture")]
-use std::sync::atomic::{AtomicBool, AtomicU32};
 #[cfg(feature = "audio-capture")]
 use std::sync::Mutex;
 #[cfg(any(test, feature = "audio-capture"))]
@@ -1833,6 +1835,53 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
     }
 }
 
+#[cfg(any(test, feature = "audio-capture"))]
+fn cleanup_failed_remote_recorder_start<F>(
+    mut transfer: margins_workflows::remote_workspace::NativeRemoteTransfer,
+    ended_at_ms: u64,
+    reservation_intent: &mut Option<
+        margins_workflows::remote_workspace::CaptureReservationIntentV1,
+    >,
+    transfer_dir: &Path,
+    uploader_done: &AtomicBool,
+    uploader: std::thread::JoinHandle<()>,
+    deliver: F,
+) -> Vec<String>
+where
+    F: FnOnce(&mut margins_workflows::remote_workspace::DurableTransferSpool) -> Result<()>,
+{
+    let mut errors = Vec::new();
+    let abort_sealed = match transfer.seal_session(
+        ended_at_ms,
+        margins_meeting_protocol::SessionFinalizeReasonV1::Error,
+    ) {
+        Ok(_) => true,
+        Err(error) => {
+            errors.push(format!("could not persist abort intent: {error}"));
+            false
+        }
+    };
+    if let Some(intent) = reservation_intent.take() {
+        if let Err(error) = intent.remove(transfer_dir) {
+            errors.push(format!("could not dispose capture reservation: {error}"));
+        }
+    }
+    uploader_done.store(true, Ordering::Release);
+    if uploader.join().is_err() {
+        errors.push("remote delivery worker panicked during abort".into());
+    }
+    let mut spool = transfer.into_spool();
+    if abort_sealed {
+        if let Err(error) = deliver(&mut spool) {
+            errors.push(format!(
+                "abort delivery remains pending in transfer {}: {error}",
+                spool.manifest().transfer_id
+            ));
+        }
+    }
+    errors
+}
+
 #[cfg(feature = "audio-capture")]
 fn run_remote_native_capture(
     remote: &str,
@@ -1845,23 +1894,23 @@ fn run_remote_native_capture(
     };
     use margins_workflows::remote_workspace::{
         deliver_available, deliver_transfer, list_transfers, native_create_session_command,
-        pending_capture_reservations, transfer_root, CaptureReservationIntentV1,
-        CaptureReservationRequestV1, DurableTransferSpool, NativePcmLane, NativePcmTransfer,
-        RemoteConnection, NATIVE_PCM_RATE_HZ,
+        pending_capture_reservations, transfer_root, validate_native_opus_capture_lanes,
+        CaptureReservationIntentV1, CaptureReservationRequestV1, DurableTransferSpool,
+        NativeRemoteLane, NativeRemoteTransfer, RemoteConnection, NATIVE_REMOTE_RATE_HZ,
     };
 
     ensure_capture_permissions(&NativeCapturePermissionSource)?;
     let token = std::env::var("MARGINS_REMOTE_TOKEN").ok();
     let connection = RemoteConnection::connect(remote, workspace_id, token.as_deref())?;
-    let capabilities = connection.client.capabilities()?;
-    let pcm_supported = capabilities.capture_formats.iter().any(|format| {
-        format.codec == margins_meeting_protocol::AudioCodecV1::PcmS16Le
-            && format.container == margins_meeting_protocol::AudioContainerV1::Raw
-            && format.sample_rate_hz == NATIVE_PCM_RATE_HZ
+    let capabilities = &connection.capabilities;
+    let opus_supported = capabilities.capture_formats.iter().any(|format| {
+        format.codec == margins_meeting_protocol::AudioCodecV1::Opus
+            && format.container == margins_meeting_protocol::AudioContainerV1::PacketStream
+            && format.sample_rate_hz == NATIVE_REMOTE_RATE_HZ
             && format.channel_count == 1
     });
-    if !pcm_supported {
-        bail!("remote instance does not advertise native mono PCM capture");
+    if !opus_supported {
+        bail!("remote instance does not advertise native mono Opus packet-stream capture");
     }
 
     let transfer_dir = transfer_root()?;
@@ -1932,6 +1981,11 @@ fn run_remote_native_capture(
                         )?
                         .0,
                 };
+            let target_summary = connection
+                .client
+                .session_summary(&requested)?
+                .context("remote session was not found in the selected Workspace")?;
+            validate_native_opus_capture_lanes(&target_summary.capture_lanes)?;
             let mut found = None;
             for transfer_id in list_transfers(&transfer_dir)? {
                 let candidate = DurableTransferSpool::open(
@@ -2000,23 +2054,19 @@ fn run_remote_native_capture(
                     };
                     (spool, requested, offset)
                 } else {
-                    let summary = connection
-                        .client
-                        .session_summary(&requested)?
-                        .context("remote session was not found in the selected Workspace")?;
-                    if !summary.input_finalized {
+                    if !target_summary.input_finalized {
                         bail!(
                             "remote session has an active producer; recover it from its owning client"
                         );
                     }
-                    let offset = summary
+                    let offset = target_summary
                         .capture_duration_ms
                         .context("remote session lacks a durable capture boundary")?
                         .0;
                     let transfer_id = uuid::Uuid::new_v4().to_string();
                     let attach = WorkspaceAttachV1 {
                         request_id: uuid::Uuid::new_v4().to_string(),
-                        prior_finalize_message_id: summary
+                        prior_finalize_message_id: target_summary
                             .capture_finalize_message_id
                             .context("remote session lacks a durable finalize identity")?,
                         requested_at_unix_ms: margins_meeting_protocol::UnixMillis(
@@ -2051,11 +2101,21 @@ fn run_remote_native_capture(
     };
     let _capture_lease = spool.acquire_capture_lease()?;
 
+    // Recovery establishes the only truthful media boundary for the next
+    // generation. Do this before constructing the memo clock or capture origin;
+    // otherwise a recovered interrupted segment can overlap the new one.
+    let mut transfer = NativeRemoteTransfer::new(spool);
+    transfer.recover_interrupted_segment(SegmentCloseReasonV1::Error)?;
+    let initial_offset_ms = transfer
+        .last_closed_ended_at_ms()
+        .unwrap_or(initial_offset_ms)
+        .max(initial_offset_ms);
+
     let initial_memo = connection.client.memo(&session_id)?;
     let initial_revision = initial_memo.revision.clone();
     let started_at = Local::now()
         - chrono::Duration::milliseconds(initial_offset_ms.min(i64::MAX as u64) as i64);
-    let draft_path = spool.root().join("memo-draft.md");
+    let draft_path = transfer.spool().root().join("memo-draft.md");
     let document = if draft_path.is_file() {
         margins_core::TimedMemoDocument::parse_markdown(&std::fs::read_to_string(&draft_path)?)
     } else {
@@ -2082,7 +2142,6 @@ fn run_remote_native_capture(
         started_at,
         mic_name,
     );
-    let mut transfer = NativePcmTransfer::new(spool);
     let uploader_done = Arc::new(AtomicBool::new(false));
     let uploader_state = Arc::new(AtomicU8::new(crate::app::REMOTE_DELIVERY_CURRENT));
     let uploader_pending_chunks = Arc::new(AtomicU64::new(0));
@@ -2170,7 +2229,7 @@ fn run_remote_native_capture(
             mic_dropped_samples: Arc::new(AtomicU64::new(0)),
             system_dropped_samples: Arc::new(AtomicU64::new(0)),
             queued_samples: queued_samples.clone(),
-            queue_max_samples: u64::from(NATIVE_PCM_RATE_HZ) * 10 * 2,
+            queue_max_samples: u64::from(NATIVE_REMOTE_RATE_HZ) * 10 * 2,
         };
         let recorder = match crate::recorder::RecorderHandle::start_with_live_audio(
             stop.clone(),
@@ -2180,19 +2239,23 @@ fn run_remote_native_capture(
             Ok(recorder) => recorder,
             Err(error) => {
                 // A reservation is not a successful capture. Seal it aborted,
-                // retaining the transfer if the server cannot acknowledge.
-                transfer.seal_session(
-                    initial_offset_ms.saturating_add(capture_started.elapsed().as_millis() as u64),
-                    SessionFinalizeReasonV1::Error,
-                )?;
-                if let Some(intent) = reservation_intent.take() {
-                    intent.remove(&transfer_dir)?;
+                // retaining the transfer if the server cannot acknowledge. No
+                // cleanup step may short-circuit the later steps: in particular,
+                // stop/join the uploader and dispose the reservation even if the
+                // durable abort intent itself fails.
+                let cleanup_errors = cleanup_failed_remote_recorder_start(
+                    transfer,
+                    initial_offset_ms,
+                    &mut reservation_intent,
+                    &transfer_dir,
+                    &uploader_done,
+                    uploader,
+                    |spool| deliver_transfer(spool, &connection.client),
+                );
+                if cleanup_errors.is_empty() {
+                    return Err(error);
                 }
-                uploader_done.store(true, Ordering::Release);
-                let _ = uploader.join();
-                let mut spool = transfer.into_spool();
-                let _ = deliver_transfer(&mut spool, &connection.client);
-                return Err(error);
+                return Err(error.context(cleanup_errors.join("; ")));
             }
         };
         if !announced_sources {
@@ -2217,8 +2280,8 @@ fn run_remote_native_capture(
                     while let Ok(chunk) = receiver.recv() {
                         let count = chunk.samples.len() as u64;
                         let lane = match chunk.channel {
-                            crate::recorder::LiveAudioChannel::Mic => NativePcmLane::Microphone,
-                            crate::recorder::LiveAudioChannel::System => NativePcmLane::System,
+                            crate::recorder::LiveAudioChannel::Mic => NativeRemoteLane::Microphone,
+                            crate::recorder::LiveAudioChannel::System => NativeRemoteLane::System,
                         };
                         let append = transfer.append_f32(lane, chunk.sample_rate, &chunk.samples);
                         queued_samples.fetch_sub(count, Ordering::Relaxed);
@@ -2295,6 +2358,11 @@ fn run_remote_native_capture(
             crate::tui::TuiAction::Resume => bail!("resume requested while capture was active"),
         }
     }
+    // Pin the media boundary before any uploader join, memo write, or server
+    // work. Stop drain latency must never inflate recorded duration.
+    let final_ended_at_ms = transfer
+        .last_closed_ended_at_ms()
+        .context("remote capture stopped without a durable media boundary")?;
     uploader_done.store(true, Ordering::Release);
     uploader
         .join()
@@ -2322,10 +2390,7 @@ fn run_remote_native_capture(
             expected_revision: initial_revision,
             lines,
         })?;
-    transfer.seal_session(
-        initial_offset_ms.saturating_add(capture_started.elapsed().as_millis() as u64),
-        SessionFinalizeReasonV1::Completed,
-    )?;
+    transfer.seal_session(final_ended_at_ms, SessionFinalizeReasonV1::Completed)?;
     let transfer_id = transfer.spool().manifest().transfer_id.clone();
     let mut spool = transfer.into_spool();
     match deliver_transfer(&mut spool, &connection.client) {
@@ -3345,6 +3410,90 @@ mod tests {
     use std::sync::Mutex;
 
     static PROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn remote_recorder_start_failure_seals_abort_removes_reservation_and_joins_uploader() {
+        use margins_meeting_protocol::{ClientMessageBodyV1, SessionFinalizeReasonV1};
+        use margins_workflows::remote_workspace::{
+            native_create_session_command, CaptureReservationIntentV1, CaptureReservationRequestV1,
+            DurableTransferSpool, NativeRemoteTransfer,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let intent = CaptureReservationIntentV1 {
+            schema: "margins.capture-reservation.v1".into(),
+            transfer_id: "start-failure".into(),
+            instance_id: "instance-a".into(),
+            remote_url: "https://example.test".into(),
+            workspace_id: "workspace-a".into(),
+            session_id: "session-a".into(),
+            request: CaptureReservationRequestV1::Create {
+                command: native_create_session_command(
+                    "session-a",
+                    "reserve-start-failure",
+                    Some("start failure".into()),
+                    "test",
+                ),
+            },
+        }
+        .persist(temp.path())
+        .unwrap();
+        let spool = DurableTransferSpool::create(
+            temp.path(),
+            "start-failure",
+            "instance-a",
+            "https://example.test",
+            "workspace-a",
+            "session-a",
+            "producer-secret",
+            0,
+        )
+        .unwrap();
+        let transfer = NativeRemoteTransfer::new(spool);
+        let done = Arc::new(AtomicBool::new(false));
+        let worker_done = done.clone();
+        let (joined_tx, joined_rx) = mpsc::channel();
+        let uploader = std::thread::spawn(move || {
+            while !worker_done.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            joined_tx.send(()).unwrap();
+        });
+        let mut reservation = Some(intent);
+        let delivered = Arc::new(AtomicBool::new(false));
+        let delivered_flag = delivered.clone();
+        let errors = cleanup_failed_remote_recorder_start(
+            transfer,
+            0,
+            &mut reservation,
+            temp.path(),
+            done.as_ref(),
+            uploader,
+            move |spool| {
+                let finalize = spool
+                    .manifest()
+                    .finalize_command
+                    .as_ref()
+                    .expect("no-media abort must be durable before delivery");
+                let ClientMessageBodyV1::FinalizeSession(finalize) = &finalize.body else {
+                    panic!("expected finalize");
+                };
+                assert_eq!(finalize.reason, SessionFinalizeReasonV1::Error);
+                assert_eq!(finalize.ended_at_ms.0, 0);
+                delivered_flag.store(true, Ordering::Release);
+                Ok(())
+            },
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(reservation.is_none());
+        assert!(done.load(Ordering::Acquire));
+        joined_rx.try_recv().unwrap();
+        assert!(delivered.load(Ordering::Acquire));
+        assert!(!temp.path().join("reservations/start-failure.json").exists());
+        let reopened = DurableTransferSpool::open(temp.path(), "start-failure", 0).unwrap();
+        assert!(reopened.manifest().finalize_command.is_some());
+        assert!(reopened.pending_chunks().unwrap().is_empty());
+    }
 
     #[test]
     fn cli_error_boundary_rewords_transport_and_engine_internals() {

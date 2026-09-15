@@ -1,5 +1,9 @@
 use margins_meeting_protocol::*;
 use margins_workflows::{
+    remote_workspace::{
+        native_create_session_command, remote_opus_packet_stream_for_asr, DurableTransferSpool,
+        NativeRemoteLane, NativeRemoteTransfer,
+    },
     workspace::ensure_service_workspace,
     workspace_service::{
         ScopedCredentialStore, ServicePrincipal, WorkspaceService, OP_IMPORT_WRITE, OP_SESSION_READ,
@@ -171,6 +175,27 @@ fn composed_service_is_the_same_canonical_store_across_retry_and_restart() {
             chunk("capture-a", "forged", "mic", 0)
         )
         .is_err());
+    let mut odd_pcm = chunk("capture-a", "odd-pcm", "mic", 0);
+    let ClientMessageBodyV1::AudioChunk(odd) = &mut odd_pcm.body else {
+        unreachable!();
+    };
+    odd.payload.pop();
+    odd.payload_digest.hex = format!("{:x}", Sha256::digest(&odd.payload));
+    assert!(service
+        .execute_capture(&owner, &reservation.producer_token, odd_pcm)
+        .unwrap_err()
+        .to_string()
+        .contains("partial sample"));
+    let mut wrong_duration = chunk("capture-a", "wrong-duration", "mic", 0);
+    let ClientMessageBodyV1::AudioChunk(wrong) = &mut wrong_duration.body else {
+        unreachable!();
+    };
+    wrong.duration_ms = DurationMillis(99);
+    assert!(service
+        .execute_capture(&owner, &reservation.producer_token, wrong_duration)
+        .unwrap_err()
+        .to_string()
+        .contains("duration"));
     let link = WorkspaceNoteAssociationUpdateV1 {
         request_id: "note-link-1".into(),
         source_id: "home".into(),
@@ -243,6 +268,11 @@ fn composed_service_is_the_same_canonical_store_across_retry_and_restart() {
     assert_eq!(page.sessions.len(), 1);
     assert_eq!(page.sessions[0].session_id.as_ref(), "capture-a");
     assert!(page.sessions[0].input_finalized);
+    assert_eq!(page.sessions[0].capture_lanes.len(), 2);
+    assert!(page.sessions[0]
+        .capture_lanes
+        .iter()
+        .all(|lane| lane.format.codec == AudioCodecV1::PcmS16Le));
     let record = restarted
         .repository_record(&owner, &SessionId("capture-a".to_string()))
         .unwrap()
@@ -275,6 +305,142 @@ fn composed_service_is_the_same_canonical_store_across_retry_and_restart() {
     assert!(captures.join(".margins/sessions.sqlite").is_file());
     assert!(!captures.join(".margins/meeting-runtime.sqlite").exists());
     assert!(!temp.path().join("unrelated/.margins").exists());
+}
+
+#[test]
+fn composed_service_validates_and_finalizes_native_opus_without_relabeling() {
+    let temp = tempfile::tempdir().unwrap();
+    let notes = temp.path().join("notes");
+    let captures = temp.path().join("captures");
+    std::fs::create_dir_all(&notes).unwrap();
+    let workspace = ensure_service_workspace(
+        &temp.path().join("state"),
+        "team",
+        Some("Team"),
+        &notes,
+        &captures,
+    )
+    .unwrap();
+    let service = WorkspaceService::open("host-opus", workspace).unwrap();
+    let owner = ServicePrincipal::full("client-a", "team");
+    let create = native_create_session_command(
+        "opus-a",
+        "reserve-opus-a",
+        Some("Opus composition".into()),
+        "service-test",
+    );
+    let reservation = service.reserve_session(&owner, create).unwrap();
+    let spool = DurableTransferSpool::create(
+        temp.path(),
+        "opus-transfer",
+        "host-opus",
+        "https://example.test",
+        "team",
+        "opus-a",
+        &reservation.producer_token,
+        0,
+    )
+    .unwrap();
+    let mut transfer = NativeRemoteTransfer::new(spool);
+    transfer.begin_segment("segment-opus".into(), 0).unwrap();
+    let mic = (0..3_200)
+        .map(|index| ((index * 271) % 30_000) as i16 - 15_000)
+        .flat_map(i16::to_le_bytes)
+        .collect::<Vec<_>>();
+    let system = vec![0_u8; 6_400];
+    transfer
+        .append_s16le(NativeRemoteLane::Microphone, 16_000, &mic)
+        .unwrap();
+    transfer
+        .append_s16le(NativeRemoteLane::System, 16_000, &system)
+        .unwrap();
+    let close = transfer.close_segment(SegmentCloseReasonV1::Stop).unwrap();
+    let ClientMessageBodyV1::CloseSegment(close_body) = &close.body else {
+        panic!("expected close");
+    };
+    assert_eq!(close_body.ended_at_ms.0, 200);
+    let finalize = transfer
+        .seal_session(200, SessionFinalizeReasonV1::Completed)
+        .unwrap();
+    let commands = transfer
+        .spool()
+        .pending_chunks()
+        .unwrap()
+        .into_iter()
+        .map(|chunk| chunk.command)
+        .collect::<Vec<_>>();
+
+    let mut wrong_duration = commands[0].clone();
+    let ClientMessageBodyV1::AudioChunk(chunk) = &mut wrong_duration.body else {
+        unreachable!();
+    };
+    chunk.duration_ms.0 += 1;
+    assert!(service
+        .execute_capture(&owner, &reservation.producer_token, wrong_duration)
+        .unwrap_err()
+        .to_string()
+        .contains("duration"));
+
+    let mut wrong_source_start = commands[0].clone();
+    let ClientMessageBodyV1::AudioChunk(chunk) = &mut wrong_source_start.body else {
+        unreachable!();
+    };
+    let mut blocks = decode_opus_packet_blocks_v1(&chunk.payload).unwrap();
+    blocks[0].source_start_frame += 1;
+    chunk.payload = blocks[0].encode().unwrap();
+    chunk.payload_digest.hex = format!("{:x}", Sha256::digest(&chunk.payload));
+    assert!(service
+        .execute_capture(&owner, &reservation.producer_token, wrong_source_start)
+        .unwrap_err()
+        .to_string()
+        .contains("source start"));
+
+    service
+        .execute_audio_batch(
+            &owner,
+            &reservation.producer_token,
+            &SessionId("opus-a".into()),
+            commands,
+        )
+        .unwrap();
+    service
+        .execute_capture(&owner, &reservation.producer_token, close)
+        .unwrap();
+    service
+        .execute_capture(&owner, &reservation.producer_token, finalize)
+        .unwrap();
+
+    let artifacts = service.artifacts(&owner, "opus-a").unwrap();
+    assert_eq!(artifacts.len(), 2);
+    let stored =
+        margins_store::canonical::list_session_artifacts(&captures.join(".margins"), "opus-a")
+            .unwrap();
+    for lane in ["mic", "system"] {
+        assert!(artifacts
+            .iter()
+            .any(|artifact| artifact.kind == format!("audio_{lane}_opus")));
+        let artifact = stored
+            .iter()
+            .find(|artifact| artifact.kind == format!("audio_{lane}_opus"))
+            .unwrap();
+        let bytes = std::fs::read(captures.join(&artifact.path)).unwrap();
+        assert_eq!(
+            validate_opus_packet_stream_v1(&bytes)
+                .unwrap()
+                .source_frame_count,
+            3_200
+        );
+        assert_eq!(
+            remote_opus_packet_stream_for_asr(&bytes).unwrap().len(),
+            3_200
+        );
+    }
+    let summary = service
+        .sessions(&owner, None, 10)
+        .unwrap()
+        .sessions
+        .remove(0);
+    assert_eq!(summary.capture_duration_ms, Some(DurationMillis(200)));
 }
 
 #[test]

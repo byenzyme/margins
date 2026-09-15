@@ -5,15 +5,18 @@
 use anyhow::{bail, Context, Result};
 use fs4::fs_std::FileExt;
 use margins_meeting_protocol::{
-    AudioChunkV1, AudioCodecV1, AudioContainerV1, AudioFormatV1, CaptureLaneV1, CaptureModeV1,
+    decode_opus_packet_blocks_v1, validate_opus_packet_stream_v1, AudioChunkBatchV1, AudioChunkV1,
+    AudioCodecV1, AudioContainerV1, AudioFormatV1, CaptureLaneV1, CaptureModeV1,
     CaptureProvenanceHopV1, CaptureProvenanceV1, CaptureSourceKindV1, CaptureSourceV1,
     ClientMessageBodyV1, ClientMessageV1, CloseSegmentV1, ContentDigestV1, CreateSessionV1,
-    DigestAlgorithmV1, DurationMillis, FinalizeSessionV1, LaneBoundaryV1, SegmentCloseReasonV1,
-    SegmentCloseReferenceV1, SessionFinalizeReasonV1, SessionId, SessionMillis, WorkspaceAttachV1,
-    WorkspaceMemoReplaceV1, WorkspaceMemoUpdateV1, WorkspaceNoteAssociationUpdateV1,
-    WorkspaceRenameV1,
+    DigestAlgorithmV1, DurationMillis, FinalizeSessionV1, LaneBoundaryV1, OpusPacketBlockV1,
+    SegmentCloseReasonV1, SegmentCloseReferenceV1, SessionFinalizeReasonV1, SessionId,
+    SessionMillis, WorkspaceAttachV1, WorkspaceMemoReplaceV1, WorkspaceMemoUpdateV1,
+    WorkspaceNoteAssociationUpdateV1, WorkspaceRenameV1, AUDIO_CHUNK_BATCH_CONTENT_TYPE_V1,
+    OPUS_PACKET_FRAME_SAMPLES_V1, OPUS_PACKET_MAX_BYTES_V1, OPUS_PACKET_STREAM_SAMPLE_RATE_HZ_V1,
 };
 use rand::{distributions::Alphanumeric, Rng};
+use ropus::{Application, Bitrate, Channels, DecodeMode, Decoder, Encoder, Signal};
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
@@ -24,6 +27,10 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicU32, AtomicU64, Ordering},
+    Arc, Mutex,
+};
 
 pub const DEFAULT_SERVICE_PORT: u16 = 8787;
 
@@ -52,10 +59,37 @@ pub struct WorkspaceHttpClient {
     workspace_id: String,
     expected_instance_id: Option<String>,
     client: reqwest::blocking::Client,
+    max_chunk_bytes: Arc<AtomicU64>,
+    max_batch_commands: Arc<AtomicU32>,
+    observed_instance_id: Arc<Mutex<Option<String>>>,
+    delivery_metrics: Arc<DeliveryMetrics>,
+}
+
+#[derive(Debug, Default)]
+struct DeliveryMetrics {
+    http_batch_requests: AtomicU64,
+    durable_audio_commands: AtomicU64,
+    durable_audio_receipts: AtomicU64,
+    encoded_payload_bytes: AtomicU64,
+    batch_body_bytes: AtomicU64,
+    batch_request_micros: AtomicU64,
+    last_batch_ack_unix_ms: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub struct DeliveryMetricsSnapshot {
+    pub http_batch_requests: u64,
+    pub durable_audio_commands: u64,
+    pub durable_audio_receipts: u64,
+    pub encoded_payload_bytes: u64,
+    pub batch_body_bytes: u64,
+    pub batch_request_micros: u64,
+    pub last_batch_ack_unix_ms: u64,
 }
 
 pub struct RemoteConnection {
     pub client: WorkspaceHttpClient,
+    pub capabilities: margins_meeting_protocol::WorkspaceCapabilitiesV1,
     tunnel: Option<std::process::Child>,
 }
 
@@ -65,9 +99,10 @@ impl RemoteConnection {
             RemoteEndpoint::Https(url) | RemoteEndpoint::LoopbackHttp(url) => {
                 let token = https_token.context("MARGINS_REMOTE_TOKEN is required for HTTPS")?;
                 let client = WorkspaceHttpClient::new(url, token, workspace_id, None)?;
-                client.capabilities()?;
+                let capabilities = client.capabilities()?;
                 Ok(Self {
                     client,
+                    capabilities,
                     tunnel: None,
                 })
             }
@@ -115,12 +150,12 @@ impl RemoteConnection {
                     Some(discovery.instance_id),
                 )?;
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-                loop {
+                let capabilities = loop {
                     if let Some(status) = tunnel.try_wait()? {
                         bail!("SSH tunnel exited before readiness ({status})");
                     }
                     match client.capabilities() {
-                        Ok(_) => break,
+                        Ok(capabilities) => break capabilities,
                         Err(_) if std::time::Instant::now() < deadline => {
                             std::thread::sleep(std::time::Duration::from_millis(50));
                         }
@@ -129,9 +164,10 @@ impl RemoteConnection {
                             bail!("SSH tunnel did not become ready: {error}");
                         }
                     }
-                }
+                };
                 Ok(Self {
                     client,
+                    capabilities,
                     tunnel: Some(tunnel),
                 })
             }
@@ -170,6 +206,10 @@ impl WorkspaceHttpClient {
             workspace_id: workspace_id.into(),
             expected_instance_id,
             client,
+            max_chunk_bytes: Arc::new(AtomicU64::new(1_048_576)),
+            max_batch_commands: Arc::new(AtomicU32::new(1)),
+            observed_instance_id: Arc::new(Mutex::new(None)),
+            delivery_metrics: Arc::new(DeliveryMetrics::default()),
         })
     }
 
@@ -186,7 +226,49 @@ impl WorkspaceHttpClient {
         {
             bail!("server instance identity changed");
         }
+        self.max_chunk_bytes
+            .store(value.limits.max_chunk_bytes, Ordering::Release);
+        self.max_batch_commands
+            .store(value.limits.max_in_flight_chunks.max(1), Ordering::Release);
+        *self
+            .observed_instance_id
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Workspace client instance cache is poisoned"))? =
+            Some(value.instance_id.0.clone());
         Ok(value)
+    }
+
+    pub fn delivery_metrics(&self) -> DeliveryMetricsSnapshot {
+        DeliveryMetricsSnapshot {
+            http_batch_requests: self
+                .delivery_metrics
+                .http_batch_requests
+                .load(Ordering::Acquire),
+            durable_audio_commands: self
+                .delivery_metrics
+                .durable_audio_commands
+                .load(Ordering::Acquire),
+            durable_audio_receipts: self
+                .delivery_metrics
+                .durable_audio_receipts
+                .load(Ordering::Acquire),
+            encoded_payload_bytes: self
+                .delivery_metrics
+                .encoded_payload_bytes
+                .load(Ordering::Acquire),
+            batch_body_bytes: self
+                .delivery_metrics
+                .batch_body_bytes
+                .load(Ordering::Acquire),
+            batch_request_micros: self
+                .delivery_metrics
+                .batch_request_micros
+                .load(Ordering::Acquire),
+            last_batch_ack_unix_ms: self
+                .delivery_metrics
+                .last_batch_ack_unix_ms
+                .load(Ordering::Acquire),
+        }
     }
 
     pub fn sessions(
@@ -284,15 +366,15 @@ impl WorkspaceHttpClient {
         session: &str,
         request: &WorkspaceMemoReplaceV1,
     ) -> Result<margins_meeting_protocol::WorkspaceMemoV1> {
-        self.request_json(
-            self.client
-                .post(self.url(&format!(
-                    "v1/workspaces/{}/sessions/{}/memo/replace",
-                    self.workspace_id,
-                    urlencoding(session)
-                ))?)
-                .json(request),
-        )
+        let request_builder = self
+            .client
+            .post(self.url(&format!(
+                "v1/workspaces/{}/sessions/{}/memo/replace",
+                self.workspace_id,
+                urlencoding(session)
+            ))?)
+            .json(request);
+        self.request_json(self.capture_request(request_builder)?)
     }
 
     pub fn note_association(
@@ -389,27 +471,27 @@ impl WorkspaceHttpClient {
         producer_token: &str,
         command: &ClientMessageV1,
     ) -> Result<margins_meeting_runtime::RuntimeResponseV1> {
-        self.request_json(
-            self.client
-                .post(self.url(&format!(
-                    "v1/workspaces/{}/sessions/{}/commands",
-                    self.workspace_id,
-                    urlencoding(session)
-                ))?)
-                .header("X-Margins-Producer-Token", producer_token)
-                .json(command),
-        )
+        let request = self
+            .client
+            .post(self.url(&format!(
+                "v1/workspaces/{}/sessions/{}/commands",
+                self.workspace_id,
+                urlencoding(session)
+            ))?)
+            .header("X-Margins-Producer-Token", producer_token)
+            .json(command);
+        self.request_json(self.capture_request(request)?)
     }
 
     pub fn reserve(
         &self,
         command: &ClientMessageV1,
     ) -> Result<crate::workspace_service::SessionReservation> {
-        self.request_json(
-            self.client
-                .post(self.url(&format!("v1/workspaces/{}/sessions", self.workspace_id))?)
-                .json(command),
-        )
+        let request = self
+            .client
+            .post(self.url(&format!("v1/workspaces/{}/sessions", self.workspace_id))?)
+            .json(command);
+        self.request_json(self.capture_request(request)?)
     }
 
     pub fn attach(
@@ -417,44 +499,86 @@ impl WorkspaceHttpClient {
         session: &str,
         request: &margins_meeting_protocol::WorkspaceAttachV1,
     ) -> Result<crate::workspace_service::SessionReservation> {
-        self.request_json(
-            self.client
-                .post(self.url(&format!(
-                    "v1/workspaces/{}/sessions/{}/attach",
-                    self.workspace_id,
-                    urlencoding(session)
-                ))?)
-                .json(request),
-        )
+        let request_builder = self
+            .client
+            .post(self.url(&format!(
+                "v1/workspaces/{}/sessions/{}/attach",
+                self.workspace_id,
+                urlencoding(session)
+            ))?)
+            .json(request);
+        self.request_json(self.capture_request(request_builder)?)
     }
 
-    pub fn upload_chunk(
+    pub fn upload_chunks(
         &self,
         producer_token: &str,
-        command: &ClientMessageV1,
-    ) -> Result<margins_meeting_runtime::RuntimeResponseV1> {
-        let ClientMessageBodyV1::AudioChunk(chunk) = &command.body else {
-            bail!("upload_chunk requires audio_chunk");
-        };
-        let path = format!(
-            "v1/workspaces/{}/sessions/{}/segments/{}/lanes/{}/chunks/{}",
-            self.workspace_id,
-            urlencoding(command.session_id.as_ref()),
-            urlencoding(chunk.segment_id.as_ref()),
-            urlencoding(chunk.lane_id.as_ref()),
-            chunk.sequence
-        );
-        self.request_json(
-            self.client
-                .put(self.url(&path)?)
-                .header("X-Margins-Producer-Token", producer_token)
-                .header("X-Margins-Message-Id", command.message_id.as_ref())
-                .header("X-Margins-Starts-At-Ms", chunk.starts_at_ms.0)
-                .header("X-Margins-Duration-Ms", chunk.duration_ms.0)
-                .header("X-Margins-Sha256", &chunk.payload_digest.hex)
-                .header("X-Margins-Sent-At-Unix-Ms", command.sent_at_unix_ms.0)
-                .body(chunk.payload.clone()),
-        )
+        commands: &[ClientMessageV1],
+    ) -> Result<usize> {
+        let session = commands
+            .first()
+            .context("upload_chunks requires at least one audio command")?
+            .session_id
+            .clone();
+        if commands.iter().any(|command| command.session_id != session) {
+            bail!("audio chunk batch crosses session identity");
+        }
+        let max_commands = self.max_batch_commands.load(Ordering::Acquire).max(1) as usize;
+        let max_chunk_bytes = self.max_chunk_bytes.load(Ordering::Acquire);
+        let body = AudioChunkBatchV1 {
+            commands: commands.to_vec(),
+        }
+        .encode(max_commands, max_chunk_bytes)
+        .map_err(anyhow::Error::msg)?;
+        let body_bytes = body.len();
+        let payload_bytes = commands
+            .iter()
+            .filter_map(|command| match &command.body {
+                ClientMessageBodyV1::AudioChunk(chunk) => Some(chunk.payload.len() as u64),
+                _ => None,
+            })
+            .sum::<u64>();
+        self.delivery_metrics
+            .http_batch_requests
+            .fetch_add(1, Ordering::AcqRel);
+        self.delivery_metrics
+            .durable_audio_commands
+            .fetch_add(commands.len() as u64, Ordering::AcqRel);
+        self.delivery_metrics
+            .encoded_payload_bytes
+            .fetch_add(payload_bytes, Ordering::AcqRel);
+        self.delivery_metrics
+            .batch_body_bytes
+            .fetch_add(body_bytes as u64, Ordering::AcqRel);
+        let started = std::time::Instant::now();
+        let request = self
+            .client
+            .post(self.url(&format!(
+                "v1/workspaces/{}/sessions/{}/audio-chunks",
+                self.workspace_id,
+                urlencoding(session.as_ref())
+            ))?)
+            .header("X-Margins-Producer-Token", producer_token)
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                AUDIO_CHUNK_BATCH_CONTENT_TYPE_V1,
+            )
+            .body(body);
+        let responses: Vec<margins_meeting_runtime::RuntimeResponseV1> =
+            self.request_json(self.capture_request(request)?)?;
+        self.delivery_metrics
+            .batch_request_micros
+            .fetch_add(started.elapsed().as_micros() as u64, Ordering::AcqRel);
+        self.delivery_metrics
+            .last_batch_ack_unix_ms
+            .store(unix_ms(), Ordering::Release);
+        if responses.len() != commands.len() {
+            bail!("audio chunk batch response count does not match its commands");
+        }
+        self.delivery_metrics
+            .durable_audio_receipts
+            .fetch_add(responses.len() as u64, Ordering::AcqRel);
+        Ok(body_bytes)
     }
 
     pub fn import(
@@ -489,6 +613,30 @@ impl WorkspaceHttpClient {
         self.base_url
             .join(path)
             .context("invalid Workspace API path")
+    }
+
+    fn capture_instance_id(&self) -> Result<String> {
+        if let Some(instance_id) = self
+            .observed_instance_id
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Workspace client instance cache is poisoned"))?
+            .clone()
+        {
+            return Ok(instance_id);
+        }
+        self.capabilities()?;
+        self.observed_instance_id
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Workspace client instance cache is poisoned"))?
+            .clone()
+            .context("Workspace capabilities omitted instance identity")
+    }
+
+    fn capture_request(
+        &self,
+        request: reqwest::blocking::RequestBuilder,
+    ) -> Result<reqwest::blocking::RequestBuilder> {
+        Ok(request.header("X-Margins-Instance-Id", self.capture_instance_id()?))
     }
 
     fn request_json<T: DeserializeOwned>(
@@ -1047,7 +1195,9 @@ impl DurableTransferSpool {
                 || view.memo_pending()?
                 || manifest.finalize_command.is_none()
             {
-                bail!("remote transfer still has unacknowledged audio, close, or memo input, or is missing finalization");
+                bail!(
+                    "remote transfer still has unacknowledged audio, close, or memo input, or is missing finalization"
+                );
             }
             let producer_token =
                 std::fs::read_to_string(self.root.join(&manifest.producer_token_ref))?;
@@ -1282,26 +1432,60 @@ impl DurableTransferSpool {
     }
 }
 
-/// New native remote captures negotiate the same 16 kHz representation used by
-/// the local durable archive and the offline ASR backend. Existing spools keep
-/// their command-declared rate and are replayed without reinterpretation.
-pub const NATIVE_PCM_RATE_HZ: u32 = 16_000;
-pub const NATIVE_PCM_CHUNK_FRAMES: usize = 1_600;
+/// New native remote captures negotiate the same 16 kHz decoded representation
+/// used by the local archive and offline ASR. Opus is remote-only; normal local
+/// capture never constructs this encoder or transfer spool.
+pub const NATIVE_REMOTE_RATE_HZ: u32 = OPUS_PACKET_STREAM_SAMPLE_RATE_HZ_V1;
+pub const NATIVE_OPUS_BITRATE_BPS: u32 = 24_000;
+/// Five 20 ms packets keep durable audio commands at 10/s/lane. The recovery
+/// journal is checkpointed independently every 100 ms, so request aggregation
+/// never widens the crash-recoverable source window.
+pub const NATIVE_OPUS_DURABLE_PACKETS: usize = 5;
+pub const NATIVE_OPUS_DURABLE_FRAMES: usize =
+    NATIVE_OPUS_DURABLE_PACKETS * OPUS_PACKET_FRAME_SAMPLES_V1 as usize;
 const NATIVE_RESAMPLE_INPUT_FRAMES: usize = 1_024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum NativePcmLane {
+pub enum NativeRemoteLane {
     Microphone,
     System,
 }
 
-impl NativePcmLane {
+impl NativeRemoteLane {
     pub fn id(self) -> &'static str {
         match self {
             Self::Microphone => "mic",
             Self::System => "system",
         }
     }
+}
+
+/// Require the immutable lane graph used by the native remote adapter. Attach
+/// never guesses from instance capabilities because a session can outlive a
+/// server format migration.
+pub fn validate_native_opus_capture_lanes(lanes: &[CaptureLaneV1]) -> Result<()> {
+    for required in [NativeRemoteLane::Microphone, NativeRemoteLane::System] {
+        let lane = lanes
+            .iter()
+            .find(|lane| lane.lane_id.as_ref() == required.id())
+            .with_context(|| {
+                format!("remote session does not declare the {} lane", required.id())
+            })?;
+        if lane.format.codec != AudioCodecV1::Opus
+            || lane.format.container != AudioContainerV1::PacketStream
+            || lane.format.sample_rate_hz != NATIVE_REMOTE_RATE_HZ
+            || lane.format.channel_count != 1
+        {
+            bail!(
+                "remote session lane {} is not native 16 kHz mono Opus packet-stream; retry its existing transfer instead of attaching with this recorder",
+                required.id()
+            );
+        }
+    }
+    if lanes.len() != 2 {
+        bail!("remote session capture graph is incompatible with the native two-lane recorder");
+    }
+    Ok(())
 }
 
 pub fn native_create_session_command(
@@ -1329,9 +1513,9 @@ pub fn native_create_session_command(
             source_ids: vec![id.into()],
             label: None,
             format: AudioFormatV1 {
-                codec: AudioCodecV1::PcmS16Le,
-                container: AudioContainerV1::Raw,
-                sample_rate_hz: NATIVE_PCM_RATE_HZ,
+                codec: AudioCodecV1::Opus,
+                container: AudioContainerV1::PacketStream,
+                sample_rate_hz: NATIVE_REMOTE_RATE_HZ,
                 channel_count: 1,
             },
         })
@@ -1354,24 +1538,23 @@ pub fn native_create_session_command(
                     producer_version: option_env!("CARGO_PKG_VERSION").map(str::to_string),
                     mode: CaptureModeV1::Live,
                     observed_at_unix_ms: margins_meeting_protocol::UnixMillis(now),
-                    attributes: BTreeMap::new(),
+                    attributes: BTreeMap::from([
+                        (
+                            "opus.target_bitrate_per_lane_bps".to_string(),
+                            NATIVE_OPUS_BITRATE_BPS.to_string(),
+                        ),
+                        ("opus.frame_ms".to_string(), "20".to_string()),
+                    ]),
                 }],
             },
         }),
     }
 }
 
-struct NativePcmSegment {
-    id: String,
-    starts_at_ms: u64,
-    lanes: BTreeMap<NativePcmLane, NativePcmLaneStream>,
-}
-
-struct NativePcmLaneStream {
+struct NativeResampledPcmStream {
     input_rate_hz: u32,
     input_frames: u64,
     emitted_frames: u64,
-    next_sequence: u64,
     input_pending: Vec<f32>,
     output_pending: Vec<f32>,
     pcm_pending: Vec<u8>,
@@ -1379,12 +1562,12 @@ struct NativePcmLaneStream {
     delay_to_trim: usize,
 }
 
-impl NativePcmLaneStream {
+impl NativeResampledPcmStream {
     fn new(input_rate_hz: u32) -> Result<Self> {
         if input_rate_hz == 0 {
             bail!("native input sample rate must be nonzero");
         }
-        let (resampler, delay_to_trim) = if input_rate_hz == NATIVE_PCM_RATE_HZ {
+        let (resampler, delay_to_trim) = if input_rate_hz == NATIVE_REMOTE_RATE_HZ {
             (None, 0)
         } else {
             let parameters = SincInterpolationParameters {
@@ -1395,7 +1578,7 @@ impl NativePcmLaneStream {
                 window: WindowFunction::BlackmanHarris2,
             };
             let resampler = SincFixedIn::<f32>::new(
-                f64::from(NATIVE_PCM_RATE_HZ) / f64::from(input_rate_hz),
+                f64::from(NATIVE_REMOTE_RATE_HZ) / f64::from(input_rate_hz),
                 1.0,
                 parameters,
                 NATIVE_RESAMPLE_INPUT_FRAMES,
@@ -1409,10 +1592,9 @@ impl NativePcmLaneStream {
             input_rate_hz,
             input_frames: 0,
             emitted_frames: 0,
-            next_sequence: 0,
             input_pending: Vec::with_capacity(NATIVE_RESAMPLE_INPUT_FRAMES * 2),
             output_pending: Vec::new(),
-            pcm_pending: Vec::with_capacity(NATIVE_PCM_CHUNK_FRAMES * 4),
+            pcm_pending: Vec::with_capacity(NATIVE_OPUS_DURABLE_FRAMES * 4),
             resampler,
             delay_to_trim,
         })
@@ -1453,7 +1635,7 @@ impl NativePcmLaneStream {
         if bytes.len() % 2 != 0 {
             bail!("s16 PCM fixture has a partial sample");
         }
-        if self.input_rate_hz == NATIVE_PCM_RATE_HZ {
+        if self.input_rate_hz == NATIVE_REMOTE_RATE_HZ {
             self.input_frames = self.input_frames.saturating_add((bytes.len() / 2) as u64);
             self.pcm_pending.extend_from_slice(bytes);
             return Ok(bytes.len() / 2);
@@ -1527,7 +1709,7 @@ impl NativePcmLaneStream {
     }
 
     fn target_output_frames(&self, finishing: bool) -> u64 {
-        let numerator = u128::from(self.input_frames) * u128::from(NATIVE_PCM_RATE_HZ);
+        let numerator = u128::from(self.input_frames) * u128::from(NATIVE_REMOTE_RATE_HZ);
         let denominator = u128::from(self.input_rate_hz);
         if finishing {
             numerator.div_ceil(denominator) as u64
@@ -1540,35 +1722,344 @@ impl NativePcmLaneStream {
         self.pcm_pending.len() / 2
     }
 
-    fn take_pcm_chunks(&mut self, include_partial: bool) -> Vec<(u64, u64, Vec<u8>)> {
-        let mut chunks = Vec::new();
-        while self.pcm_pending.len() >= NATIVE_PCM_CHUNK_FRAMES * 2
-            || (include_partial && !self.pcm_pending.is_empty())
-        {
-            let byte_count = self.pcm_pending.len().min(NATIVE_PCM_CHUNK_FRAMES * 2);
-            let payload = self.pcm_pending.drain(..byte_count).collect::<Vec<_>>();
-            let frames = (payload.len() / 2) as u64;
-            let frame_start = self.emitted_frames;
-            let sequence = self.next_sequence;
-            self.emitted_frames = self.emitted_frames.saturating_add(frames);
-            self.next_sequence = self.next_sequence.saturating_add(1);
-            chunks.push((sequence, frame_start, payload));
-        }
-        chunks
+    fn take_pcm_s16le(&mut self) -> Vec<u8> {
+        let bytes = std::mem::take(&mut self.pcm_pending);
+        self.emitted_frames = self.emitted_frames.saturating_add((bytes.len() / 2) as u64);
+        bytes
     }
 }
 
-/// Converts the recorder's bounded mono f32 lane feed into durable, bounded
-/// PCM commands. This is the only adapter added to native capture; the normal
-/// local recorder path does not construct it or hash/encode transport frames.
-pub struct NativePcmTransfer {
-    spool: DurableTransferSpool,
-    segment: Option<NativePcmSegment>,
-    closes: Vec<SegmentCloseReferenceV1>,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct NativeOpenSegmentV1 {
+    schema: String,
+    segment_id: String,
+    starts_at_ms: u64,
+    bitrate_bps: u32,
 }
 
-impl NativePcmTransfer {
+struct NativeRemoteSegment {
+    id: String,
+    starts_at_ms: u64,
+    lanes: BTreeMap<NativeRemoteLane, NativeOpusLaneStream>,
+}
+
+struct PendingOpusPacket {
+    bytes: Vec<u8>,
+    source_frames: u32,
+}
+
+struct NativeOpusLaneStream {
+    pcm: NativeResampledPcmStream,
+    encoder: Encoder,
+    pre_skip_input_frames: u32,
+    source_frames: u64,
+    persisted_source_frames: u64,
+    encoded_packet_count: u64,
+    next_sequence: u64,
+    pcm_frame_pending: Vec<i16>,
+    packet_pending: Vec<PendingOpusPacket>,
+    recovery: File,
+    recovery_path: PathBuf,
+    durable_length_path: PathBuf,
+    durable_recovery_bytes: u64,
+    reserve_bytes: u64,
+}
+
+impl NativeOpusLaneStream {
+    fn new(
+        input_rate_hz: u32,
+        bitrate_bps: u32,
+        recovery_path: PathBuf,
+        replay: bool,
+        reserve_bytes: u64,
+    ) -> Result<Self> {
+        let mut encoder =
+            Encoder::builder(NATIVE_REMOTE_RATE_HZ, Channels::Mono, Application::Voip)
+                .bitrate(Bitrate::try_bits(bitrate_bps).context("invalid native Opus bitrate")?)
+                .complexity(10)
+                .signal(Signal::Voice)
+                .vbr(true)
+                .vbr_constraint(true)
+                .dtx(false)
+                .build()
+                .context("failed to construct native Opus encoder")?;
+        // ropus 0.12.18's high-level rustdoc incorrectly calls this 48 kHz
+        // units. The implementation returns input-rate samples: 104 at 16 kHz.
+        let pre_skip_input_frames = encoder.lookahead();
+        if pre_skip_input_frames == 0
+            || pre_skip_input_frames
+                .checked_mul(48_000 / NATIVE_REMOTE_RATE_HZ)
+                .is_none()
+        {
+            bail!("native Opus encoder returned an invalid lookahead");
+        }
+        // Exercise the configured encoder before publishing any durable state.
+        encoder
+            .set_bitrate(Bitrate::Bits(bitrate_bps))
+            .context("failed to apply native Opus bitrate")?;
+        let durable_length_path = recovery_path.with_extension("durable");
+        if let Some(parent) = recovery_path.parent() {
+            std::fs::create_dir_all(parent)?;
+            set_directory_owner_only(parent)?;
+        }
+        let recovery = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(&recovery_path)?;
+        set_owner_only(&recovery_path)?;
+        if !replay {
+            recovery.set_len(0)?;
+            atomic_bytes(&durable_length_path, &0u64.to_le_bytes())?;
+        }
+        let durable_recovery_bytes = if replay {
+            recovery.metadata()?.len()
+        } else {
+            0
+        };
+        Ok(Self {
+            pcm: NativeResampledPcmStream::new(input_rate_hz)?,
+            encoder,
+            pre_skip_input_frames,
+            source_frames: 0,
+            persisted_source_frames: 0,
+            encoded_packet_count: 0,
+            next_sequence: 0,
+            pcm_frame_pending: Vec::with_capacity(OPUS_PACKET_FRAME_SAMPLES_V1 as usize * 2),
+            packet_pending: Vec::with_capacity(NATIVE_OPUS_DURABLE_PACKETS + 2),
+            recovery,
+            recovery_path,
+            durable_length_path,
+            durable_recovery_bytes,
+            reserve_bytes,
+        })
+    }
+
+    fn ensure_rate(&self, input_rate_hz: u32) -> Result<()> {
+        self.pcm.ensure_rate(input_rate_hz)
+    }
+
+    fn append_f32(&mut self, samples: &[f32]) -> Result<(usize, Vec<OpusPacketBlockV1>)> {
+        let written = self.pcm.append_f32(samples)?;
+        let bytes = self.pcm.take_pcm_s16le();
+        self.consume_resampled_pcm(&bytes, false)
+            .map(|blocks| (written, blocks))
+    }
+
+    fn append_s16le(&mut self, bytes: &[u8]) -> Result<(usize, Vec<OpusPacketBlockV1>)> {
+        let written = self.pcm.append_s16le(bytes)?;
+        let bytes = self.pcm.take_pcm_s16le();
+        self.consume_resampled_pcm(&bytes, false)
+            .map(|blocks| (written, blocks))
+    }
+
+    fn replay_s16le(&mut self, bytes: &[u8]) -> Result<Vec<OpusPacketBlockV1>> {
+        if bytes.len() % 2 != 0 {
+            bail!("native Opus recovery PCM has a partial sample");
+        }
+        self.consume_pcm_without_journal(bytes, false)
+    }
+
+    fn consume_resampled_pcm(
+        &mut self,
+        bytes: &[u8],
+        finishing: bool,
+    ) -> Result<Vec<OpusPacketBlockV1>> {
+        self.consume_resampled_pcm_observing(bytes, finishing, |_| Ok(()))
+    }
+
+    fn consume_resampled_pcm_observing(
+        &mut self,
+        bytes: &[u8],
+        finishing: bool,
+        mut checkpointed: impl FnMut(u64) -> Result<()>,
+    ) -> Result<Vec<OpusPacketBlockV1>> {
+        const CHECKPOINT_OVERHEAD_BYTES: u64 = 8 * 1024;
+        const CHECKPOINT_PCM_BYTES: usize = (NATIVE_REMOTE_RATE_HZ as usize / 10) * 2;
+        let mut blocks = Vec::new();
+
+        // An adapter caller is allowed to hand us a large callback or fixture.
+        // Split internally so that crash durability never depends on that caller's
+        // chunk size. Small live callbacks still accumulate and fsync only when
+        // their combined journal growth reaches 100 ms.
+        for (index, slice) in bytes.chunks(CHECKPOINT_PCM_BYTES).enumerate() {
+            let required = (slice.len() as u64).saturating_add(CHECKPOINT_OVERHEAD_BYTES);
+            if fs4::available_space(&self.recovery_path)?.saturating_sub(required)
+                < self.reserve_bytes
+            {
+                bail!("native recovery journal would breach the spool disk reserve");
+            }
+            self.recovery.write_all(slice)?;
+            let last = (index + 1) * CHECKPOINT_PCM_BYTES >= bytes.len();
+            let produced = self.consume_pcm_without_journal(slice, finishing && last)?;
+            let journal_bytes = self.recovery.metadata()?.len();
+            let checkpoint_due = journal_bytes.saturating_sub(self.durable_recovery_bytes)
+                >= CHECKPOINT_PCM_BYTES as u64;
+            if checkpoint_due || !produced.is_empty() || (finishing && last) {
+                self.checkpoint_recovery()?;
+                checkpointed(self.durable_recovery_bytes)?;
+            }
+            blocks.extend(produced);
+        }
+
+        if bytes.is_empty() && finishing {
+            blocks.extend(self.consume_pcm_without_journal(&[], true)?);
+            self.checkpoint_recovery()?;
+            checkpointed(self.durable_recovery_bytes)?;
+        }
+        Ok(blocks)
+    }
+
+    fn consume_pcm_without_journal(
+        &mut self,
+        bytes: &[u8],
+        finishing: bool,
+    ) -> Result<Vec<OpusPacketBlockV1>> {
+        self.pcm_frame_pending.extend(
+            bytes
+                .chunks_exact(2)
+                .map(|sample| i16::from_le_bytes([sample[0], sample[1]])),
+        );
+        self.source_frames = self.source_frames.saturating_add((bytes.len() / 2) as u64);
+        while self.pcm_frame_pending.len() >= OPUS_PACKET_FRAME_SAMPLES_V1 as usize {
+            let frame = self
+                .pcm_frame_pending
+                .drain(..OPUS_PACKET_FRAME_SAMPLES_V1 as usize)
+                .collect::<Vec<_>>();
+            self.encode_packet(&frame, OPUS_PACKET_FRAME_SAMPLES_V1 as u32)?;
+        }
+        if finishing && !self.pcm_frame_pending.is_empty() {
+            let source_frames = self.pcm_frame_pending.len() as u32;
+            self.pcm_frame_pending
+                .resize(OPUS_PACKET_FRAME_SAMPLES_V1 as usize, 0);
+            let frame = std::mem::take(&mut self.pcm_frame_pending);
+            self.encode_packet(&frame, source_frames)?;
+        }
+        let mut blocks = self.take_complete_blocks(false)?;
+        if finishing && self.source_frames != 0 {
+            let required_capacity = self
+                .source_frames
+                .checked_add(u64::from(self.pre_skip_input_frames))
+                .context("native Opus source length overflowed")?;
+            while self
+                .encoded_packet_count
+                .saturating_mul(u64::from(OPUS_PACKET_FRAME_SAMPLES_V1))
+                < required_capacity
+            {
+                self.encode_packet(&[0; OPUS_PACKET_FRAME_SAMPLES_V1 as usize], 0)?;
+            }
+            blocks.extend(self.take_complete_blocks(true)?);
+        }
+        Ok(blocks)
+    }
+
+    fn finish(&mut self) -> Result<Vec<OpusPacketBlockV1>> {
+        self.pcm.finish()?;
+        let bytes = self.pcm.take_pcm_s16le();
+        self.consume_resampled_pcm(&bytes, true)
+    }
+
+    fn encode_packet(&mut self, frame: &[i16], source_frames: u32) -> Result<()> {
+        let mut packet = [0u8; OPUS_PACKET_MAX_BYTES_V1];
+        let encoded = self
+            .encoder
+            .encode(frame, &mut packet)
+            .context("native Opus encode failed")?;
+        self.packet_pending.push(PendingOpusPacket {
+            bytes: packet[..encoded].to_vec(),
+            source_frames,
+        });
+        self.encoded_packet_count = self.encoded_packet_count.saturating_add(1);
+        Ok(())
+    }
+
+    fn take_complete_blocks(&mut self, finishing: bool) -> Result<Vec<OpusPacketBlockV1>> {
+        let mut blocks = Vec::new();
+        if finishing {
+            if !self.packet_pending.is_empty() {
+                let count = self.packet_pending.len();
+                blocks.push(self.take_block(count, true)?);
+            }
+            return Ok(blocks);
+        }
+        while self.packet_pending.len() > NATIVE_OPUS_DURABLE_PACKETS {
+            blocks.push(self.take_block(NATIVE_OPUS_DURABLE_PACKETS, false)?);
+        }
+        Ok(blocks)
+    }
+
+    fn take_block(&mut self, count: usize, stream_end: bool) -> Result<OpusPacketBlockV1> {
+        let packets = self.packet_pending.drain(..count).collect::<Vec<_>>();
+        let source_frame_count = packets.iter().try_fold(0u32, |total, packet| {
+            total
+                .checked_add(packet.source_frames)
+                .context("native Opus block source length overflowed")
+        })?;
+        if source_frame_count == 0 {
+            bail!("native Opus terminal block has no source frames");
+        }
+        let stream_start = self.next_sequence == 0;
+        let pre_skip_48k = if stream_start {
+            u16::try_from(self.pre_skip_input_frames.saturating_mul(3))
+                .context("native Opus pre-skip exceeds packet framing")?
+        } else {
+            0
+        };
+        let block = OpusPacketBlockV1 {
+            stream_start,
+            stream_end,
+            pre_skip_48k,
+            sample_rate_hz: NATIVE_REMOTE_RATE_HZ,
+            source_start_frame: self.persisted_source_frames,
+            source_frame_count,
+            frame_samples: OPUS_PACKET_FRAME_SAMPLES_V1,
+            packets: packets.into_iter().map(|packet| packet.bytes).collect(),
+        };
+        self.persisted_source_frames = self
+            .persisted_source_frames
+            .saturating_add(u64::from(source_frame_count));
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        Ok(block)
+    }
+
+    fn checkpoint_recovery(&mut self) -> Result<()> {
+        self.recovery.sync_all()?;
+        self.durable_recovery_bytes = self.recovery.metadata()?.len();
+        atomic_bytes(
+            &self.durable_length_path,
+            &self.durable_recovery_bytes.to_le_bytes(),
+        )
+    }
+
+    fn remove_recovery(self) -> Result<()> {
+        drop(self.recovery);
+        for path in [self.recovery_path, self.durable_length_path] {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Remote-only native capture adapter. Resampling, recovery journaling, Opus
+/// encoding, hashing, and spool I/O all run on the bounded worker, never the
+/// device callback. The default local recorder path does not construct it.
+pub struct NativeRemoteTransfer {
+    spool: DurableTransferSpool,
+    segment: Option<NativeRemoteSegment>,
+    closes: Vec<SegmentCloseReferenceV1>,
+    bitrate_bps: u32,
+}
+
+impl NativeRemoteTransfer {
     pub fn new(spool: DurableTransferSpool) -> Self {
+        Self::new_with_bitrate(spool, NATIVE_OPUS_BITRATE_BPS)
+    }
+
+    pub fn new_with_bitrate(spool: DurableTransferSpool, bitrate_bps: u32) -> Self {
         let closes = spool
             .manifest()
             .close_commands
@@ -1585,15 +2076,23 @@ impl NativePcmTransfer {
             spool,
             segment: None,
             closes,
+            bitrate_bps,
         }
     }
 
     pub fn begin_segment(&mut self, segment_id: String, starts_at_ms: u64) -> Result<()> {
         validate_component(&segment_id)?;
-        if self.segment.is_some() {
-            bail!("the previous native segment must be closed before resume");
+        if self.segment.is_some() || self.open_segment_path().is_file() {
+            bail!("the previous native segment must be recovered or closed before resume");
         }
-        self.segment = Some(NativePcmSegment {
+        let open = NativeOpenSegmentV1 {
+            schema: "margins.native-opus-segment.v1".to_string(),
+            segment_id: segment_id.clone(),
+            starts_at_ms,
+            bitrate_bps: self.bitrate_bps,
+        };
+        atomic_json(&self.open_segment_path(), &open)?;
+        self.segment = Some(NativeRemoteSegment {
             id: segment_id,
             starts_at_ms,
             lanes: BTreeMap::new(),
@@ -1601,64 +2100,325 @@ impl NativePcmTransfer {
         Ok(())
     }
 
+    /// Re-encode an interrupted segment from its fsynced 16 kHz recovery PCM,
+    /// validating every already-published block digest, then close it before a
+    /// new capture generation begins. At most the worker's sub-100 ms
+    /// uncheckpointed tail is absent after a process/power loss.
+    pub fn recover_interrupted_segment(
+        &mut self,
+        reason: SegmentCloseReasonV1,
+    ) -> Result<Option<ClientMessageV1>> {
+        if self.segment.is_some() {
+            bail!("cannot recover while a native segment is active");
+        }
+        let path = self.open_segment_path();
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let open: NativeOpenSegmentV1 = serde_json::from_slice(&std::fs::read(&path)?)?;
+        if open.schema != "margins.native-opus-segment.v1" || open.bitrate_bps != self.bitrate_bps {
+            bail!("native recovery segment codec identity changed");
+        }
+        validate_component(&open.segment_id)?;
+        if let Some(close) = self
+            .spool
+            .manifest
+            .close_commands
+            .iter()
+            .find(|command| {
+                matches!(&command.body, ClientMessageBodyV1::CloseSegment(close)
+                    if close.segment_id.as_ref() == open.segment_id)
+            })
+            .cloned()
+        {
+            // The close manifest is committed before cleanup begins. A crash
+            // while removing per-lane PCM journals must therefore finish that
+            // cleanup, not try to synthesize a different one-lane close from
+            // whichever journal happened to survive.
+            self.validate_durable_closed_segment(&open.segment_id, &close)?;
+            self.clear_open_segment_files(&open.segment_id)?;
+            return Ok(Some(close));
+        }
+        self.segment = Some(NativeRemoteSegment {
+            id: open.segment_id.clone(),
+            starts_at_ms: open.starts_at_ms,
+            lanes: BTreeMap::new(),
+        });
+        let mut recovered_any = false;
+        for lane in [NativeRemoteLane::Microphone, NativeRemoteLane::System] {
+            let recovery_path = self.lane_recovery_path(&open.segment_id, lane)?;
+            let durable_path = recovery_path.with_extension("durable");
+            if !recovery_path.is_file() || !durable_path.is_file() {
+                continue;
+            }
+            let durable = std::fs::read(&durable_path)?;
+            if durable.len() != 8 {
+                bail!("native recovery checkpoint length is corrupt");
+            }
+            let length = u64::from_le_bytes(durable.try_into().unwrap());
+            if length == 0 {
+                continue;
+            }
+            let mut bytes = std::fs::read(&recovery_path)?;
+            if length > bytes.len() as u64 || length % 2 != 0 {
+                bail!("native recovery checkpoint exceeds its PCM journal");
+            }
+            bytes.truncate(length as usize);
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&recovery_path)?
+                .set_len(length)?;
+            let mut stream = NativeOpusLaneStream::new(
+                NATIVE_REMOTE_RATE_HZ,
+                self.bitrate_bps,
+                recovery_path,
+                true,
+                self.spool.reserve_bytes,
+            )?;
+            let blocks = stream.replay_s16le(&bytes)?;
+            self.segment
+                .as_mut()
+                .expect("recovery segment was installed")
+                .lanes
+                .insert(lane, stream);
+            self.persist_blocks(lane, blocks)?;
+            recovered_any = true;
+        }
+        if !recovered_any {
+            self.segment = None;
+            self.clear_open_segment_files(&open.segment_id)?;
+            return Ok(None);
+        }
+        self.close_segment(reason).map(Some)
+    }
+
+    fn validate_durable_closed_segment(
+        &self,
+        segment_id: &str,
+        command: &ClientMessageV1,
+    ) -> Result<()> {
+        let ClientMessageBodyV1::CloseSegment(close) = &command.body else {
+            bail!("native recovery close intent has the wrong operation");
+        };
+        if close.segment_id.as_ref() != segment_id {
+            bail!("native recovery close intent names a different segment");
+        }
+        let pending = self.spool.pending_chunks()?;
+        let mut lane_boundaries = BTreeMap::new();
+        for boundary in &close.lane_boundaries {
+            if lane_boundaries
+                .insert(boundary.lane_id.as_ref(), boundary.next_sequence)
+                .is_some()
+            {
+                bail!("native recovery close repeats a lane boundary");
+            }
+        }
+        for lane in [NativeRemoteLane::Microphone, NativeRemoteLane::System] {
+            let next_sequence = lane_boundaries
+                .get(lane.id())
+                .copied()
+                .context("native recovery close is missing a declared lane")?;
+            let lane_pending = pending
+                .iter()
+                .filter_map(|pending| match &pending.command.body {
+                    ClientMessageBodyV1::AudioChunk(chunk)
+                        if chunk.segment_id.as_ref() == segment_id
+                            && chunk.lane_id.as_ref() == lane.id() =>
+                    {
+                        Some(chunk)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if lane_pending
+                .iter()
+                .any(|chunk| chunk.sequence >= next_sequence)
+            {
+                bail!("native recovery has audio beyond its durable close boundary");
+            }
+            let mut all_payloads_local = true;
+            let mut local_stream = Vec::new();
+            for sequence in 0..next_sequence {
+                let chunk = lane_pending
+                    .iter()
+                    .find(|chunk| chunk.sequence == sequence)
+                    .copied();
+                let ack = self.durable_ack_digest(segment_id, lane.id(), sequence)?;
+                let local_chunk = match (chunk, ack) {
+                    (Some(chunk), Some(ack)) => {
+                        // ACK is fsynced before the frame is unlinked. A crash
+                        // between those operations leaves both, and is valid
+                        // only when both name the identical immutable payload.
+                        if ack != chunk.payload_digest.hex {
+                            bail!("native recovery pending frame conflicts with its durable ACK");
+                        }
+                        Some(chunk)
+                    }
+                    (None, None) => bail!("native recovery close has a missing durable sequence"),
+                    (Some(chunk), None) => Some(chunk),
+                    (None, Some(_)) => {
+                        all_payloads_local = false;
+                        None
+                    }
+                };
+                if let Some(chunk) = local_chunk {
+                    let blocks =
+                        decode_opus_packet_blocks_v1(&chunk.payload).map_err(anyhow::Error::msg)?;
+                    if blocks.len() != 1 {
+                        bail!("native recovery command contains multiple Opus blocks");
+                    }
+                    let block = &blocks[0];
+                    if block.source_start_frame
+                        != sequence
+                            .checked_mul(NATIVE_OPUS_DURABLE_FRAMES as u64)
+                            .context("native recovery source sequence overflowed")?
+                        || block.stream_start != (sequence == 0)
+                        || block.stream_end != (sequence + 1 == next_sequence)
+                    {
+                        bail!("native recovery Opus stream markers conflict with its close");
+                    }
+                    local_stream.extend_from_slice(&chunk.payload);
+                }
+            }
+            if next_sequence > 0 && all_payloads_local {
+                validate_opus_packet_stream_v1(&local_stream).map_err(anyhow::Error::msg)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn durable_ack_digest(
+        &self,
+        segment_id: &str,
+        lane_id: &str,
+        sequence: u64,
+    ) -> Result<Option<String>> {
+        let prefix = format!(
+            "{}-{}-{sequence:020}-",
+            safe_name(segment_id),
+            safe_name(lane_id)
+        );
+        let mut digest = None;
+        for entry in std::fs::read_dir(self.spool.root.join("acks"))? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(&prefix) && name.ends_with(".ack") {
+                if digest.is_some() {
+                    bail!("native recovery sequence has multiple durable ACK identities");
+                }
+                let value = std::fs::read_to_string(entry.path())?;
+                if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    bail!("native recovery ACK digest is corrupt");
+                }
+                digest = Some(value);
+            }
+        }
+        Ok(digest)
+    }
+
     pub fn append_f32(
         &mut self,
-        lane: NativePcmLane,
+        lane: NativeRemoteLane,
         input_rate_hz: u32,
         samples: &[f32],
     ) -> Result<usize> {
-        let written = {
-            let segment = self
-                .segment
-                .as_mut()
-                .context("native PCM arrived without an open segment")?;
-            if !segment.lanes.contains_key(&lane) {
-                segment
-                    .lanes
-                    .insert(lane, NativePcmLaneStream::new(input_rate_hz)?);
-            }
-            let stream = segment.lanes.get_mut(&lane).expect("lane was inserted");
-            stream.ensure_rate(input_rate_hz)?;
-            stream.append_f32(samples)?
-        };
-        self.flush_lane(lane, false)?;
+        self.ensure_lane(lane, input_rate_hz)?;
+        let (written, blocks) = self
+            .segment
+            .as_mut()
+            .unwrap()
+            .lanes
+            .get_mut(&lane)
+            .unwrap()
+            .append_f32(samples)?;
+        self.persist_blocks(lane, blocks)?;
         Ok(written)
     }
 
-    fn flush_lane(&mut self, lane: NativePcmLane, include_partial: bool) -> Result<()> {
-        let (segment_id, starts_at_ms, chunks) = {
+    pub fn append_s16le(
+        &mut self,
+        lane: NativeRemoteLane,
+        input_rate_hz: u32,
+        bytes: &[u8],
+    ) -> Result<usize> {
+        self.ensure_lane(lane, input_rate_hz)?;
+        let (written, blocks) = self
+            .segment
+            .as_mut()
+            .unwrap()
+            .lanes
+            .get_mut(&lane)
+            .unwrap()
+            .append_s16le(bytes)?;
+        self.persist_blocks(lane, blocks)?;
+        Ok(written)
+    }
+
+    fn ensure_lane(&mut self, lane: NativeRemoteLane, input_rate_hz: u32) -> Result<()> {
+        let (segment_id, path) = {
             let segment = self
                 .segment
-                .as_mut()
-                .context("native PCM arrived without an open segment")?;
-            let stream = segment
-                .lanes
-                .get_mut(&lane)
-                .context("native lane has no stream state")?;
+                .as_ref()
+                .context("native audio arrived without an open segment")?;
             (
                 segment.id.clone(),
-                segment.starts_at_ms,
-                stream.take_pcm_chunks(include_partial),
+                self.lane_recovery_path(&segment.id, lane)?,
             )
         };
-        for (sequence, frame_start, payload) in chunks {
-            let frame_count = payload.len() / 2;
+        let segment = self.segment.as_mut().unwrap();
+        if !segment.lanes.contains_key(&lane) {
+            segment.lanes.insert(
+                lane,
+                NativeOpusLaneStream::new(
+                    input_rate_hz,
+                    self.bitrate_bps,
+                    path,
+                    false,
+                    self.spool.reserve_bytes,
+                )?,
+            );
+        }
+        segment
+            .lanes
+            .get(&lane)
+            .expect("lane was inserted")
+            .ensure_rate(input_rate_hz)
+            .with_context(|| format!("native segment {segment_id} lane rate changed"))
+    }
+
+    fn persist_blocks(&self, lane: NativeRemoteLane, blocks: Vec<OpusPacketBlockV1>) -> Result<()> {
+        let segment = self
+            .segment
+            .as_ref()
+            .context("native Opus block has no segment")?;
+        let stream = segment
+            .lanes
+            .get(&lane)
+            .context("native Opus block has no lane")?;
+        let first_sequence = stream.next_sequence.saturating_sub(blocks.len() as u64);
+        for (offset, block) in blocks.into_iter().enumerate() {
+            let sequence = first_sequence + offset as u64;
+            let frame_start = block.source_start_frame;
+            let frame_end = frame_start.saturating_add(u64::from(block.source_frame_count));
+            let starts_at_ms = segment
+                .starts_at_ms
+                .saturating_add(frames_to_ms_ceil(frame_start));
+            let ends_at_ms = segment
+                .starts_at_ms
+                .saturating_add(frames_to_ms_ceil(frame_end));
+            let payload = block.encode().map_err(anyhow::Error::msg)?;
             let command = ClientMessageV1 {
                 protocol_version: Default::default(),
-                message_id: next_message_id("pcm").into(),
+                message_id: next_message_id("opus").into(),
                 session_id: self.spool.manifest.session_id.clone().into(),
                 sent_at_unix_ms: margins_meeting_protocol::UnixMillis(unix_ms()),
                 body: ClientMessageBodyV1::AudioChunk(AudioChunkV1 {
-                    segment_id: segment_id.clone().into(),
+                    segment_id: segment.id.clone().into(),
                     lane_id: lane.id().into(),
                     sequence,
-                    starts_at_ms: SessionMillis(
-                        starts_at_ms
-                            + frame_start.saturating_mul(1_000) / u64::from(NATIVE_PCM_RATE_HZ),
-                    ),
-                    duration_ms: DurationMillis(
-                        (frame_count as u64).saturating_mul(1_000) / u64::from(NATIVE_PCM_RATE_HZ),
-                    ),
+                    starts_at_ms: SessionMillis(starts_at_ms),
+                    duration_ms: DurationMillis(ends_at_ms.saturating_sub(starts_at_ms).max(1)),
                     payload_digest: ContentDigestV1 {
                         algorithm: DigestAlgorithmV1::Sha256,
                         hex: format!("{:x}", Sha256::digest(&payload)),
@@ -1666,33 +2426,42 @@ impl NativePcmTransfer {
                     payload,
                 }),
             };
-            self.spool.append_chunk(&command)?;
+            self.append_or_validate_replay(&command)?;
         }
         Ok(())
     }
 
-    pub fn append_s16le(
-        &mut self,
-        lane: NativePcmLane,
-        input_rate_hz: u32,
-        bytes: &[u8],
-    ) -> Result<usize> {
-        let written = {
-            let segment = self
-                .segment
-                .as_mut()
-                .context("native PCM arrived without an open segment")?;
-            if !segment.lanes.contains_key(&lane) {
-                segment
-                    .lanes
-                    .insert(lane, NativePcmLaneStream::new(input_rate_hz)?);
-            }
-            let stream = segment.lanes.get_mut(&lane).expect("lane was inserted");
-            stream.ensure_rate(input_rate_hz)?;
-            stream.append_s16le(bytes)?
+    fn append_or_validate_replay(&self, command: &ClientMessageV1) -> Result<()> {
+        let ClientMessageBodyV1::AudioChunk(expected) = &command.body else {
+            unreachable!();
         };
-        self.flush_lane(lane, false)?;
-        Ok(written)
+        if let Some(existing) = self.spool.pending_chunks()?.into_iter().find(|candidate| {
+            matches!(&candidate.command.body, ClientMessageBodyV1::AudioChunk(chunk)
+                if chunk.segment_id == expected.segment_id
+                    && chunk.lane_id == expected.lane_id
+                    && chunk.sequence == expected.sequence)
+        }) {
+            let ClientMessageBodyV1::AudioChunk(actual) = existing.command.body else {
+                unreachable!();
+            };
+            if actual != *expected {
+                bail!("re-encoded native recovery block conflicts with its durable frame");
+            }
+            return Ok(());
+        }
+        let ack_digest = self.durable_ack_digest(
+            expected.segment_id.as_ref(),
+            expected.lane_id.as_ref(),
+            expected.sequence,
+        )?;
+        if let Some(digest) = ack_digest {
+            if digest != expected.payload_digest.hex {
+                bail!("re-encoded native recovery block conflicts with its durable ACK");
+            }
+            return Ok(());
+        }
+        self.spool.append_chunk(command)?;
+        Ok(())
     }
 
     pub fn close_segment(&mut self, reason: SegmentCloseReasonV1) -> Result<ClientMessageV1> {
@@ -1705,25 +2474,25 @@ impl NativePcmTransfer {
             .copied()
             .collect::<Vec<_>>();
         for lane in lanes {
-            self.segment
+            let blocks = self
+                .segment
                 .as_mut()
-                .expect("checked above")
+                .unwrap()
                 .lanes
                 .get_mut(&lane)
-                .expect("lane key came from map")
+                .unwrap()
                 .finish()?;
-            self.flush_lane(lane, true)?;
+            self.persist_blocks(lane, blocks)?;
         }
         let segment = self.segment.take().expect("checked above");
-        let ended_at_ms = segment.starts_at_ms
-            + segment
+        let ended_at_ms = segment.starts_at_ms.saturating_add(frames_to_ms_ceil(
+            segment
                 .lanes
                 .values()
-                .map(|lane| lane.emitted_frames)
+                .map(|lane| lane.source_frames)
                 .max()
-                .unwrap_or(0)
-                .saturating_mul(1_000)
-                / u64::from(NATIVE_PCM_RATE_HZ);
+                .unwrap_or(0),
+        ));
         let message_id = next_message_id("close");
         let command = ClientMessageV1 {
             protocol_version: Default::default(),
@@ -1733,7 +2502,7 @@ impl NativePcmTransfer {
             body: ClientMessageBodyV1::CloseSegment(CloseSegmentV1 {
                 segment_id: segment.id.clone().into(),
                 ended_at_ms: SessionMillis(ended_at_ms),
-                lane_boundaries: [NativePcmLane::Microphone, NativePcmLane::System]
+                lane_boundaries: [NativeRemoteLane::Microphone, NativeRemoteLane::System]
                     .into_iter()
                     .map(|lane| LaneBoundaryV1 {
                         lane_id: lane.id().into(),
@@ -1746,12 +2515,45 @@ impl NativePcmTransfer {
                 reason,
             }),
         };
-        self.spool.set_close(command.clone())?;
-        self.closes.push(SegmentCloseReferenceV1 {
-            segment_id: segment.id.into(),
-            close_message_id: message_id.into(),
-        });
+        if let Some(existing) = self.spool.manifest.close_commands.iter().find(|existing| {
+            matches!(&existing.body, ClientMessageBodyV1::CloseSegment(close)
+                if close.segment_id.as_ref() == segment.id)
+        }) {
+            let ClientMessageBodyV1::CloseSegment(actual) = &existing.body else {
+                unreachable!();
+            };
+            let ClientMessageBodyV1::CloseSegment(expected) = &command.body else {
+                unreachable!();
+            };
+            if actual.ended_at_ms != expected.ended_at_ms
+                || actual.lane_boundaries != expected.lane_boundaries
+            {
+                bail!("recovered native close conflicts with its durable intent");
+            }
+        } else {
+            self.spool.set_close(command.clone())?;
+            self.closes.push(SegmentCloseReferenceV1 {
+                segment_id: segment.id.clone().into(),
+                close_message_id: message_id.into(),
+            });
+        }
+        for (_, lane) in segment.lanes {
+            lane.remove_recovery()?;
+        }
+        self.clear_open_segment_files(&segment.id)?;
         Ok(command)
+    }
+
+    pub fn last_closed_ended_at_ms(&self) -> Option<u64> {
+        self.spool
+            .manifest
+            .close_commands
+            .iter()
+            .filter_map(|command| match &command.body {
+                ClientMessageBodyV1::CloseSegment(close) => Some(close.ended_at_ms.0),
+                _ => None,
+            })
+            .max()
     }
 
     pub fn seal_session(
@@ -1759,8 +2561,17 @@ impl NativePcmTransfer {
         ended_at_ms: u64,
         reason: SessionFinalizeReasonV1,
     ) -> Result<ClientMessageV1> {
-        if self.segment.is_some() {
+        if self.segment.is_some() || self.open_segment_path().is_file() {
             bail!("native segment must be closed before session finalization");
+        }
+        match self.last_closed_ended_at_ms() {
+            Some(last_closed) if ended_at_ms != last_closed => {
+                bail!("native finalization must use the last closed media boundary")
+            }
+            None if reason != SessionFinalizeReasonV1::Error => {
+                bail!("native session has no closed media boundary")
+            }
+            _ => {}
         }
         let command = ClientMessageV1 {
             protocol_version: Default::default(),
@@ -1788,6 +2599,44 @@ impl NativePcmTransfer {
     pub fn into_spool(self) -> DurableTransferSpool {
         self.spool
     }
+
+    fn open_segment_path(&self) -> PathBuf {
+        self.spool.root.join("open-native-segment.json")
+    }
+
+    fn lane_recovery_path(&self, segment: &str, lane: NativeRemoteLane) -> Result<PathBuf> {
+        validate_component(segment)?;
+        Ok(self
+            .spool
+            .root
+            .join("recovery")
+            .join(format!("{segment}-{}.s16le", lane.id())))
+    }
+
+    fn clear_open_segment_files(&self, segment: &str) -> Result<()> {
+        match std::fs::remove_file(self.open_segment_path()) {
+            Ok(()) => sync_dir(&self.spool.root),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }?;
+        for lane in [NativeRemoteLane::Microphone, NativeRemoteLane::System] {
+            let path = self.lane_recovery_path(segment, lane)?;
+            for path in [path.clone(), path.with_extension("durable")] {
+                match std::fs::remove_file(path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn frames_to_ms_ceil(frames: u64) -> u64 {
+    frames
+        .saturating_mul(1_000)
+        .div_ceil(u64::from(NATIVE_REMOTE_RATE_HZ))
 }
 
 fn encode_pcm_s16le(samples: &[f32]) -> Vec<u8> {
@@ -1818,10 +2667,10 @@ pub fn remote_pcm_s16le_for_asr(bytes: &[u8], sample_rate_hz: u32) -> Result<Vec
         .chunks_exact(2)
         .map(|sample| i16::from_le_bytes([sample[0], sample[1]]) as f32 / 32_768.0)
         .collect::<Vec<_>>();
-    if sample_rate_hz == NATIVE_PCM_RATE_HZ {
+    if sample_rate_hz == NATIVE_REMOTE_RATE_HZ {
         return Ok(samples);
     }
-    let mut stream = NativePcmLaneStream::new(sample_rate_hz)?;
+    let mut stream = NativeResampledPcmStream::new(sample_rate_hz)?;
     stream.append_f32(&samples)?;
     stream.finish()?;
     let expected = stream.target_output_frames(true) as usize;
@@ -1836,6 +2685,43 @@ pub fn remote_pcm_s16le_for_asr(bytes: &[u8], sample_rate_hz: u32) -> Result<Vec
             output.len()
         );
     }
+    Ok(output)
+}
+
+/// Decode one complete Margins Opus packet stream to exactly the declared
+/// 16 kHz source-frame count. Encoded padding and lookahead never reach ASR.
+pub fn remote_opus_packet_stream_for_asr(bytes: &[u8]) -> Result<Vec<f32>> {
+    let summary = validate_opus_packet_stream_v1(bytes).map_err(anyhow::Error::msg)?;
+    let blocks = decode_opus_packet_blocks_v1(bytes).map_err(anyhow::Error::msg)?;
+    let mut decoder = Decoder::new(NATIVE_REMOTE_RATE_HZ, Channels::Mono)
+        .context("failed to construct native Opus decoder")?;
+    let mut decoded = vec![0i16; OPUS_PACKET_FRAME_SAMPLES_V1 as usize];
+    let mut output = Vec::with_capacity(summary.source_frame_count as usize);
+    let mut pre_skip = usize::from(summary.pre_skip_48k / 3);
+    for block in blocks {
+        for packet in block.packets {
+            let frames = decoder
+                .decode(&packet, &mut decoded, DecodeMode::Normal)
+                .context("native Opus packet decode failed")?;
+            if frames != OPUS_PACKET_FRAME_SAMPLES_V1 as usize {
+                bail!(
+                    "native Opus packet decoded {frames} frames; expected {} (20 ms)",
+                    OPUS_PACKET_FRAME_SAMPLES_V1
+                );
+            }
+            let start = pre_skip.min(frames);
+            pre_skip -= start;
+            output.extend(
+                decoded[start..frames]
+                    .iter()
+                    .map(|sample| f32::from(*sample) / 32_768.0),
+            );
+        }
+    }
+    if pre_skip != 0 || output.len() < summary.source_frame_count as usize {
+        bail!("native Opus stream ended before its declared source timeline");
+    }
+    output.truncate(summary.source_frame_count as usize);
     Ok(output)
 }
 
@@ -1864,7 +2750,7 @@ pub fn deliver_transfer(
     client: &WorkspaceHttpClient,
 ) -> Result<()> {
     validate_transfer_instance(spool, client)?;
-    deliver_chunks_unchecked(spool, client)?;
+    deliver_chunks_unchecked(spool, client, true)?;
     deliver_closes_unchecked(spool, client)?;
     deliver_memo_unchecked(spool, client)?;
     deliver_finalize_unchecked(spool, client)
@@ -1878,7 +2764,8 @@ pub fn deliver_available(
     client: &WorkspaceHttpClient,
 ) -> Result<()> {
     validate_transfer_instance(spool, client)?;
-    deliver_chunks_unchecked(spool, client)?;
+    let force_partial = !spool.pending_closes().is_empty();
+    deliver_chunks_unchecked(spool, client, force_partial)?;
     deliver_closes_unchecked(spool, client)
 }
 
@@ -1887,17 +2774,41 @@ pub fn deliver_chunks(
     client: &WorkspaceHttpClient,
 ) -> Result<()> {
     validate_transfer_instance(spool, client)?;
-    deliver_chunks_unchecked(spool, client)
+    deliver_chunks_unchecked(spool, client, true)
 }
 
 fn deliver_chunks_unchecked(
     spool: &mut DurableTransferSpool,
     client: &WorkspaceHttpClient,
+    force_partial: bool,
 ) -> Result<()> {
     let producer_token = spool.producer_token()?;
-    for chunk in spool.pending_chunks()? {
-        client.upload_chunk(&producer_token, &chunk.command)?;
-        spool.acknowledge(&chunk)?;
+    let chunks = spool.pending_chunks()?;
+    let batch_limit = client.max_batch_commands.load(Ordering::Acquire).max(1) as usize;
+    const MAX_CAPTURE_BATCH_AGE: std::time::Duration = std::time::Duration::from_millis(320);
+    if !force_partial && chunks.len() < batch_limit {
+        let old_enough = chunks.first().is_some_and(|chunk| {
+            chunk
+                .path
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age >= MAX_CAPTURE_BATCH_AGE)
+        });
+        if !old_enough {
+            return Ok(());
+        }
+    }
+    for batch in chunks.chunks(batch_limit) {
+        let commands = batch
+            .iter()
+            .map(|chunk| chunk.command.clone())
+            .collect::<Vec<_>>();
+        client.upload_chunks(&producer_token, &commands)?;
+        for chunk in batch {
+            spool.acknowledge(chunk)?;
+        }
     }
     Ok(())
 }
@@ -1969,8 +2880,7 @@ fn validate_transfer_instance(
     spool: &DurableTransferSpool,
     client: &WorkspaceHttpClient,
 ) -> Result<()> {
-    let capabilities = client.capabilities()?;
-    if capabilities.instance_id.as_ref() != spool.manifest.instance_id {
+    if client.capture_instance_id()? != spool.manifest.instance_id {
         bail!("remote instance identity changed; preserved transfer was not sent");
     }
     Ok(())
@@ -2110,4 +3020,40 @@ fn set_directory_owner_only(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn set_owner_only(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod native_opus_durability_tests {
+    use super::*;
+
+    #[test]
+    fn one_large_append_advances_recovery_checkpoint_at_most_every_100_ms() {
+        let temp = tempfile::tempdir().unwrap();
+        let recovery = temp.path().join("large-append.s16le");
+        let mut lane = NativeOpusLaneStream::new(
+            NATIVE_REMOTE_RATE_HZ,
+            NATIVE_OPUS_BITRATE_BPS,
+            recovery.clone(),
+            false,
+            0,
+        )
+        .unwrap();
+        let bytes = vec![7u8; (NATIVE_REMOTE_RATE_HZ as usize * 2 * 350) / 1_000];
+        let mut checkpoints = Vec::new();
+        let error = lane
+            .consume_resampled_pcm_observing(&bytes, false, |durable_bytes| {
+                checkpoints.push(durable_bytes);
+                if checkpoints.len() == 2 {
+                    return Err(anyhow::anyhow!("injected process loss after checkpoint"));
+                }
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("injected process loss"));
+        assert_eq!(checkpoints, vec![3_200, 6_400]);
+
+        let durable = std::fs::read(recovery.with_extension("durable")).unwrap();
+        assert_eq!(u64::from_le_bytes(durable.try_into().unwrap()), 6_400);
+        assert_eq!(std::fs::metadata(recovery).unwrap().len(), 6_400);
+    }
 }

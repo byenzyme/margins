@@ -828,6 +828,242 @@ pub enum AudioContainerV1 {
     Webm,
     Ogg,
     Mp4,
+    /// Concatenated, independently durable Margins Opus packet blocks.
+    /// Packet framing, source-frame counts, and codec delay are explicit so
+    /// upload chunking never changes the decoded timeline.
+    PacketStream,
+}
+
+pub const OPUS_PACKET_STREAM_SAMPLE_RATE_HZ_V1: u32 = 16_000;
+pub const OPUS_PACKET_FRAME_SAMPLES_V1: u16 = 320;
+pub const OPUS_PACKET_STREAM_HEADER_BYTES_V1: usize = 32;
+pub const OPUS_PACKET_STREAM_MAX_PACKETS_PER_BLOCK_V1: usize = 64;
+pub const OPUS_PACKET_MAX_BYTES_V1: usize = 1_275;
+pub const OPUS_PACKET_STREAM_MAX_BLOCK_BYTES_V1: usize = OPUS_PACKET_STREAM_HEADER_BYTES_V1
+    + OPUS_PACKET_STREAM_MAX_PACKETS_PER_BLOCK_V1 * (2 + OPUS_PACKET_MAX_BYTES_V1);
+const OPUS_PACKET_STREAM_MAGIC_V1: &[u8; 4] = b"MOP1";
+const OPUS_PACKET_STREAM_START_V1: u8 = 1;
+const OPUS_PACKET_STREAM_END_V1: u8 = 2;
+
+/// One concatenation-safe durable block in the native remote Opus stream.
+/// `source_frame_count` excludes codec lookahead and final padding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpusPacketBlockV1 {
+    pub stream_start: bool,
+    pub stream_end: bool,
+    /// RFC 7845 Opus pre-skip units (always the 48 kHz Opus clock).
+    pub pre_skip_48k: u16,
+    pub sample_rate_hz: u32,
+    pub source_start_frame: u64,
+    pub source_frame_count: u32,
+    pub frame_samples: u16,
+    pub packets: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpusPacketStreamSummaryV1 {
+    pub source_frame_count: u64,
+    pub packet_count: u64,
+    pub block_count: u64,
+    pub pre_skip_48k: u16,
+}
+
+impl OpusPacketBlockV1 {
+    pub fn encode(&self) -> Result<Vec<u8>, String> {
+        validate_opus_packet_block_structure_v1(self)?;
+        let payload_bytes = self.packets.iter().try_fold(0usize, |total, packet| {
+            total
+                .checked_add(2 + packet.len())
+                .ok_or_else(|| "Opus packet block length overflowed".to_string())
+        })?;
+        let block_bytes = OPUS_PACKET_STREAM_HEADER_BYTES_V1
+            .checked_add(payload_bytes)
+            .ok_or_else(|| "Opus packet block length overflowed".to_string())?;
+        let block_bytes_u32 =
+            u32::try_from(block_bytes).map_err(|_| "Opus packet block is too large")?;
+        let packet_count =
+            u16::try_from(self.packets.len()).map_err(|_| "too many Opus packets")?;
+        let mut encoded = Vec::with_capacity(block_bytes);
+        encoded.extend_from_slice(OPUS_PACKET_STREAM_MAGIC_V1);
+        encoded.extend_from_slice(&block_bytes_u32.to_le_bytes());
+        encoded.push(
+            u8::from(self.stream_start) * OPUS_PACKET_STREAM_START_V1
+                | u8::from(self.stream_end) * OPUS_PACKET_STREAM_END_V1,
+        );
+        encoded.push(0);
+        encoded.extend_from_slice(&self.pre_skip_48k.to_le_bytes());
+        encoded.extend_from_slice(&self.sample_rate_hz.to_le_bytes());
+        encoded.extend_from_slice(&self.source_start_frame.to_le_bytes());
+        encoded.extend_from_slice(&self.source_frame_count.to_le_bytes());
+        encoded.extend_from_slice(&packet_count.to_le_bytes());
+        encoded.extend_from_slice(&self.frame_samples.to_le_bytes());
+        for packet in &self.packets {
+            encoded.extend_from_slice(&(packet.len() as u16).to_le_bytes());
+            encoded.extend_from_slice(packet);
+        }
+        Ok(encoded)
+    }
+}
+
+/// Parse block framing without requiring a complete stream. This is used to
+/// reject malformed upload chunks before they become durable.
+pub fn decode_opus_packet_blocks_v1(bytes: &[u8]) -> Result<Vec<OpusPacketBlockV1>, String> {
+    let mut blocks = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        let remaining = bytes.len() - cursor;
+        if remaining < OPUS_PACKET_STREAM_HEADER_BYTES_V1 {
+            return Err("truncated Opus packet block header".to_string());
+        }
+        let header = &bytes[cursor..cursor + OPUS_PACKET_STREAM_HEADER_BYTES_V1];
+        if &header[..4] != OPUS_PACKET_STREAM_MAGIC_V1 {
+            return Err("Opus packet block magic/version mismatch".to_string());
+        }
+        let block_bytes = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+        if block_bytes < OPUS_PACKET_STREAM_HEADER_BYTES_V1
+            || block_bytes > OPUS_PACKET_STREAM_MAX_BLOCK_BYTES_V1
+            || block_bytes > remaining
+        {
+            return Err("truncated or invalid Opus packet block length".to_string());
+        }
+        let flags = header[8];
+        if flags & !(OPUS_PACKET_STREAM_START_V1 | OPUS_PACKET_STREAM_END_V1) != 0 || header[9] != 0
+        {
+            return Err("Opus packet block uses unsupported flags".to_string());
+        }
+        let packet_count = u16::from_le_bytes(header[28..30].try_into().unwrap()) as usize;
+        if packet_count == 0 || packet_count > OPUS_PACKET_STREAM_MAX_PACKETS_PER_BLOCK_V1 {
+            return Err("Opus packet block has an invalid packet count".to_string());
+        }
+        let mut packet_cursor = cursor + OPUS_PACKET_STREAM_HEADER_BYTES_V1;
+        let block_end = cursor + block_bytes;
+        let mut packets =
+            Vec::with_capacity(packet_count.min(OPUS_PACKET_STREAM_MAX_PACKETS_PER_BLOCK_V1));
+        for _ in 0..packet_count {
+            if block_end.saturating_sub(packet_cursor) < 2 {
+                return Err("truncated Opus packet length".to_string());
+            }
+            let packet_bytes =
+                u16::from_le_bytes(bytes[packet_cursor..packet_cursor + 2].try_into().unwrap())
+                    as usize;
+            packet_cursor += 2;
+            if packet_bytes == 0
+                || packet_bytes > OPUS_PACKET_MAX_BYTES_V1
+                || block_end.saturating_sub(packet_cursor) < packet_bytes
+            {
+                return Err("invalid or truncated Opus packet payload".to_string());
+            }
+            packets.push(bytes[packet_cursor..packet_cursor + packet_bytes].to_vec());
+            packet_cursor += packet_bytes;
+        }
+        if packet_cursor != block_end {
+            return Err("Opus packet block has trailing bytes".to_string());
+        }
+        let block = OpusPacketBlockV1 {
+            stream_start: flags & OPUS_PACKET_STREAM_START_V1 != 0,
+            stream_end: flags & OPUS_PACKET_STREAM_END_V1 != 0,
+            pre_skip_48k: u16::from_le_bytes(header[10..12].try_into().unwrap()),
+            sample_rate_hz: u32::from_le_bytes(header[12..16].try_into().unwrap()),
+            source_start_frame: u64::from_le_bytes(header[16..24].try_into().unwrap()),
+            source_frame_count: u32::from_le_bytes(header[24..28].try_into().unwrap()),
+            frame_samples: u16::from_le_bytes(header[30..32].try_into().unwrap()),
+            packets,
+        };
+        validate_opus_packet_block_structure_v1(&block)?;
+        blocks.push(block);
+        cursor = block_end;
+    }
+    if blocks.is_empty() {
+        return Err("Opus packet stream is empty".to_string());
+    }
+    Ok(blocks)
+}
+
+/// Validate one complete segment stream, including ordering, terminal framing,
+/// and enough decoded tail to cover source frames after pre-skip.
+pub fn validate_opus_packet_stream_v1(bytes: &[u8]) -> Result<OpusPacketStreamSummaryV1, String> {
+    let blocks = decode_opus_packet_blocks_v1(bytes)?;
+    let mut expected_source_start = 0u64;
+    let mut packet_count = 0u64;
+    let mut pre_skip_48k = 0u16;
+    for (index, block) in blocks.iter().enumerate() {
+        if index == 0 {
+            if !block.stream_start || block.pre_skip_48k == 0 {
+                return Err("Opus packet stream is missing its START/pre-skip".to_string());
+            }
+            if block.pre_skip_48k % 3 != 0 {
+                return Err("16 kHz Opus pre-skip is not integral in the 48 kHz clock".to_string());
+            }
+            pre_skip_48k = block.pre_skip_48k;
+        } else if block.stream_start || block.pre_skip_48k != 0 {
+            return Err("Opus packet stream has a repeated START/pre-skip".to_string());
+        }
+        if block.source_start_frame != expected_source_start {
+            return Err("Opus packet stream source frames contain a gap or overlap".to_string());
+        }
+        expected_source_start = expected_source_start
+            .checked_add(u64::from(block.source_frame_count))
+            .ok_or_else(|| "Opus packet stream source frame count overflowed".to_string())?;
+        if expected_source_start > MAX_SAFE_JSON_INTEGER {
+            return Err("Opus packet stream source frame count exceeds V1".to_string());
+        }
+        packet_count = packet_count
+            .checked_add(block.packets.len() as u64)
+            .ok_or_else(|| "Opus packet count overflowed".to_string())?;
+        if block.stream_end && index + 1 != blocks.len() {
+            return Err("Opus packet stream has bytes after END".to_string());
+        }
+        if !block.stream_end
+            && u64::from(block.source_frame_count)
+                != block.packets.len() as u64 * u64::from(block.frame_samples)
+        {
+            return Err("non-terminal Opus block does not fully represent its packets".to_string());
+        }
+    }
+    if !blocks.last().is_some_and(|block| block.stream_end) {
+        return Err("Opus packet stream is missing END".to_string());
+    }
+    let decoded_capacity = packet_count
+        .checked_mul(u64::from(OPUS_PACKET_FRAME_SAMPLES_V1))
+        .ok_or_else(|| "Opus decoded frame capacity overflowed".to_string())?;
+    let pre_skip_frames = u64::from(pre_skip_48k / 3);
+    if decoded_capacity < expected_source_start.saturating_add(pre_skip_frames) {
+        return Err(
+            "Opus packet stream tail cannot cover source frames after pre-skip".to_string(),
+        );
+    }
+    Ok(OpusPacketStreamSummaryV1 {
+        source_frame_count: expected_source_start,
+        packet_count,
+        block_count: blocks.len() as u64,
+        pre_skip_48k,
+    })
+}
+
+fn validate_opus_packet_block_structure_v1(block: &OpusPacketBlockV1) -> Result<(), String> {
+    if block.sample_rate_hz != OPUS_PACKET_STREAM_SAMPLE_RATE_HZ_V1
+        || block.frame_samples != OPUS_PACKET_FRAME_SAMPLES_V1
+    {
+        return Err("unsupported Opus packet stream rate or frame size".to_string());
+    }
+    if block.packets.is_empty() || block.packets.len() > OPUS_PACKET_STREAM_MAX_PACKETS_PER_BLOCK_V1
+    {
+        return Err("Opus packet block has an invalid packet count".to_string());
+    }
+    if block.source_frame_count == 0
+        || u64::from(block.source_frame_count)
+            > block.packets.len() as u64 * u64::from(block.frame_samples)
+    {
+        return Err("Opus packet block has an invalid source frame count".to_string());
+    }
+    if block
+        .packets
+        .iter()
+        .any(|packet| packet.is_empty() || packet.len() > OPUS_PACKET_MAX_BYTES_V1)
+    {
+        return Err("Opus packet block has an invalid packet size".to_string());
+    }
+    Ok(())
 }
 
 /// Dependency-free representation of a content digest.
@@ -953,6 +1189,120 @@ mod audio_payload {
         } else {
             deserializer.deserialize_byte_buf(AudioPayloadVisitor)
         }
+    }
+}
+
+pub const AUDIO_CHUNK_BATCH_CONTENT_TYPE_V1: &str = "application/vnd.margins.audio-chunk-batch.v1";
+const AUDIO_CHUNK_BATCH_MAGIC_V1: &[u8; 4] = b"MAB1";
+const AUDIO_CHUNK_BATCH_HEADER_BYTES_V1: usize = 8;
+const AUDIO_CHUNK_BATCH_ENTRY_HEADER_BYTES_V1: usize = 8;
+const AUDIO_CHUNK_BATCH_MAX_METADATA_BYTES_V1: usize = 64 * 1024;
+
+/// Binary HTTP envelope that amortizes request latency while preserving each
+/// durable audio command's independent identity, digest, and receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioChunkBatchV1 {
+    pub commands: Vec<ClientMessageV1>,
+}
+
+impl AudioChunkBatchV1 {
+    pub fn encode(&self, max_commands: usize, max_chunk_bytes: u64) -> Result<Vec<u8>, String> {
+        validate_audio_chunk_batch_count_v1(self.commands.len(), max_commands)?;
+        let count = u16::try_from(self.commands.len())
+            .map_err(|_| "audio chunk batch contains too many commands")?;
+        let mut output = Vec::new();
+        output.extend_from_slice(AUDIO_CHUNK_BATCH_MAGIC_V1);
+        output.extend_from_slice(&count.to_le_bytes());
+        output.extend_from_slice(&0u16.to_le_bytes());
+        for command in &self.commands {
+            let ClientMessageBodyV1::AudioChunk(chunk) = &command.body else {
+                return Err("audio chunk batch contains a non-audio command".to_string());
+            };
+            if chunk.payload.len() as u64 > max_chunk_bytes {
+                return Err("audio chunk batch payload exceeds the advertised maximum".to_string());
+            }
+            let mut metadata = command.clone();
+            let ClientMessageBodyV1::AudioChunk(metadata_chunk) = &mut metadata.body else {
+                unreachable!();
+            };
+            metadata_chunk.payload.clear();
+            let metadata = serde_json::to_vec(&metadata)
+                .map_err(|error| format!("audio chunk metadata encoding failed: {error}"))?;
+            if metadata.len() > AUDIO_CHUNK_BATCH_MAX_METADATA_BYTES_V1 {
+                return Err("audio chunk batch metadata exceeds its bound".to_string());
+            }
+            let metadata_len = u32::try_from(metadata.len())
+                .map_err(|_| "audio chunk metadata length overflowed")?;
+            let payload_len = u32::try_from(chunk.payload.len())
+                .map_err(|_| "audio chunk payload length overflowed")?;
+            output.extend_from_slice(&metadata_len.to_le_bytes());
+            output.extend_from_slice(&payload_len.to_le_bytes());
+            output.extend_from_slice(&metadata);
+            output.extend_from_slice(&chunk.payload);
+        }
+        Ok(output)
+    }
+
+    pub fn decode(bytes: &[u8], max_commands: usize, max_chunk_bytes: u64) -> Result<Self, String> {
+        if bytes.len() < AUDIO_CHUNK_BATCH_HEADER_BYTES_V1
+            || &bytes[..4] != AUDIO_CHUNK_BATCH_MAGIC_V1
+        {
+            return Err("audio chunk batch magic/version mismatch".to_string());
+        }
+        let count = u16::from_le_bytes(bytes[4..6].try_into().unwrap()) as usize;
+        if bytes[6..8] != [0, 0] {
+            return Err("audio chunk batch uses unsupported flags".to_string());
+        }
+        validate_audio_chunk_batch_count_v1(count, max_commands)?;
+        let mut cursor = AUDIO_CHUNK_BATCH_HEADER_BYTES_V1;
+        let mut commands = Vec::with_capacity(count);
+        for _ in 0..count {
+            if bytes.len().saturating_sub(cursor) < AUDIO_CHUNK_BATCH_ENTRY_HEADER_BYTES_V1 {
+                return Err("truncated audio chunk batch entry".to_string());
+            }
+            let metadata_len =
+                u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
+            let payload_len =
+                u32::from_le_bytes(bytes[cursor + 4..cursor + 8].try_into().unwrap()) as usize;
+            cursor += AUDIO_CHUNK_BATCH_ENTRY_HEADER_BYTES_V1;
+            if metadata_len == 0 || metadata_len > AUDIO_CHUNK_BATCH_MAX_METADATA_BYTES_V1 {
+                return Err("audio chunk batch metadata length is invalid".to_string());
+            }
+            if payload_len == 0 || payload_len as u64 > max_chunk_bytes {
+                return Err("audio chunk batch payload length is invalid".to_string());
+            }
+            let entry_len = metadata_len
+                .checked_add(payload_len)
+                .ok_or_else(|| "audio chunk batch entry length overflowed".to_string())?;
+            if bytes.len().saturating_sub(cursor) < entry_len {
+                return Err("truncated audio chunk batch entry bytes".to_string());
+            }
+            let mut command: ClientMessageV1 =
+                serde_json::from_slice(&bytes[cursor..cursor + metadata_len])
+                    .map_err(|error| format!("invalid audio chunk batch metadata: {error}"))?;
+            cursor += metadata_len;
+            let ClientMessageBodyV1::AudioChunk(chunk) = &mut command.body else {
+                return Err("audio chunk batch contains a non-audio command".to_string());
+            };
+            if !chunk.payload.is_empty() {
+                return Err("audio chunk batch metadata duplicates payload bytes".to_string());
+            }
+            chunk.payload = bytes[cursor..cursor + payload_len].to_vec();
+            cursor += payload_len;
+            commands.push(command);
+        }
+        if cursor != bytes.len() {
+            return Err("audio chunk batch has trailing bytes".to_string());
+        }
+        Ok(Self { commands })
+    }
+}
+
+fn validate_audio_chunk_batch_count_v1(count: usize, max_commands: usize) -> Result<(), String> {
+    if count == 0 || count > max_commands || count > u16::MAX as usize {
+        Err("audio chunk batch command count is outside its bound".to_string())
+    } else {
+        Ok(())
     }
 }
 
@@ -1206,6 +1556,9 @@ pub struct WorkspaceSessionSummaryV1 {
     pub session_id: SessionId,
     pub title: Option<String>,
     pub started_at: String,
+    /// Immutable lane declarations from the authoritative CreateSession. Empty
+    /// only for converted legacy sessions that predate capture authority.
+    pub capture_lanes: Vec<CaptureLaneV1>,
     pub segment_count: u64,
     pub input_finalized: bool,
     pub capture_duration_ms: Option<DurationMillis>,

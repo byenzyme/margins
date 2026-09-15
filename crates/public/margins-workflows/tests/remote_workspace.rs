@@ -1,5 +1,6 @@
 use margins_meeting_protocol::*;
 use margins_workflows::remote_workspace::*;
+use ropus::{Application, Bitrate, Channels, Encoder};
 use sha2::{Digest as _, Sha256};
 
 fn chunk(sequence: u64, byte: u8) -> ClientMessageV1 {
@@ -86,6 +87,255 @@ fn http_client_preserves_present_null_for_optional_route_results() {
 }
 
 #[test]
+fn paced_two_lane_delivery_batches_requests_without_serializing_the_producer() {
+    use std::io::{Read as _, Write as _};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+    use std::time::{Duration, Instant};
+
+    fn read_request(stream: &mut std::net::TcpStream) -> (String, String, Vec<u8>) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut bytes = Vec::new();
+        let header_end = loop {
+            let mut part = [0_u8; 8192];
+            let read = stream.read(&mut part).unwrap();
+            assert_ne!(read, 0, "HTTP request ended before its headers");
+            bytes.extend_from_slice(&part[..read]);
+            if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                break index + 4;
+            }
+        };
+        let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap_or_default();
+        while bytes.len() < header_end + content_length {
+            let mut part = [0_u8; 8192];
+            let read = stream.read(&mut part).unwrap();
+            assert_ne!(read, 0, "HTTP request ended before its body");
+            bytes.extend_from_slice(&part[..read]);
+        }
+        let request_line = headers.lines().next().unwrap().to_string();
+        (
+            request_line,
+            headers,
+            bytes[header_end..header_end + content_length].to_vec(),
+        )
+    }
+
+    fn respond(stream: &mut std::net::TcpStream, result: serde_json::Value) {
+        let body = serde_json::to_vec(&serde_json::json!({"ok":true,"result":result})).unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(&body).unwrap();
+    }
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let stopped = Arc::new(AtomicBool::new(false));
+    let server_stopped = stopped.clone();
+    let capability_requests = Arc::new(AtomicUsize::new(0));
+    let server_capabilities = capability_requests.clone();
+    let batch_requests = Arc::new(AtomicUsize::new(0));
+    let server_batches = batch_requests.clone();
+    let server = std::thread::spawn(move || {
+        while !server_stopped.load(Ordering::Acquire) {
+            let (mut stream, _) = match listener.accept() {
+                Ok(value) => value,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(2));
+                    continue;
+                }
+                Err(error) => panic!("paced HTTP fixture failed: {error}"),
+            };
+            let (line, headers, body) = read_request(&mut stream);
+            if line.starts_with("GET /v1/capabilities ") {
+                server_capabilities.fetch_add(1, Ordering::AcqRel);
+                respond(
+                    &mut stream,
+                    serde_json::to_value(WorkspaceCapabilitiesV1 {
+                        protocol_version: ProtocolVersionV1,
+                        instance_id: "instance-paced".into(),
+                        workspace_id: "workspace-a".into(),
+                        limits: WorkspaceLimitsV1 {
+                            max_chunk_bytes: 1_048_576,
+                            max_in_flight_chunks: 8,
+                            max_event_page: 256,
+                            max_import_bytes: 1_048_576,
+                            spool_reserve_bytes: 0,
+                        },
+                        capture_formats: Vec::new(),
+                        operations: Vec::new(),
+                        asr_available: false,
+                        recall_available: false,
+                    })
+                    .unwrap(),
+                );
+            } else if line.contains("/audio-chunks ") {
+                assert!(
+                    headers
+                        .to_ascii_lowercase()
+                        .contains("x-margins-instance-id: instance-paced"),
+                    "capture write omitted its instance fence"
+                );
+                server_batches.fetch_add(1, Ordering::AcqRel);
+                let batch = AudioChunkBatchV1::decode(&body, 8, 1_048_576).unwrap();
+                // Model the measured pre-Opus SSH boundary (~158.5 ms/request,
+                // 6.31 requests/s) rather than an unrealistically fast LAN.
+                std::thread::sleep(Duration::from_millis(160));
+                respond(
+                    &mut stream,
+                    serde_json::json!(
+                        batch
+                            .commands
+                            .iter()
+                            .map(|_| serde_json::json!({"messages":[],"idempotent_replay":false}))
+                            .collect::<Vec<_>>()
+                    ),
+                );
+            } else if line.contains("/commands ") {
+                respond(
+                    &mut stream,
+                    serde_json::json!({"messages":[],"idempotent_replay":false}),
+                );
+            } else {
+                panic!("unexpected paced fixture request: {line}");
+            }
+        }
+    });
+
+    let client = WorkspaceHttpClient::new(
+        url::Url::parse(&format!("http://{address}/")).unwrap(),
+        "scoped-token",
+        "workspace-a",
+        Some("instance-paced".into()),
+    )
+    .unwrap();
+    client.capabilities().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let spool = DurableTransferSpool::create(
+        temp.path(),
+        "paced-transfer",
+        "instance-paced",
+        &format!("http://{address}/"),
+        "workspace-a",
+        "session-paced",
+        "producer-secret",
+        0,
+    )
+    .unwrap();
+    let parent = spool.root().parent().unwrap().to_path_buf();
+    let uploader_done = Arc::new(AtomicBool::new(false));
+    let uploader_done_flag = uploader_done.clone();
+    let uploader_client = client.clone();
+    let uploader = std::thread::spawn(move || {
+        while !uploader_done_flag.load(Ordering::Acquire) {
+            let mut spool = DurableTransferSpool::open(&parent, "paced-transfer", 0).unwrap();
+            deliver_available(&mut spool, &uploader_client).unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+
+    let mut transfer = NativeRemoteTransfer::new(spool);
+    transfer.begin_segment("paced-segment".into(), 0).unwrap();
+    let capture_started = Instant::now();
+    let frame = vec![0_u8; OPUS_PACKET_FRAME_SAMPLES_V1 as usize * 2];
+    let mut max_pending_chunks = 0;
+    let mut max_pending_bytes = 0_u64;
+    let mut max_pending_age = Duration::ZERO;
+    for index in 0..100_u64 {
+        transfer
+            .append_s16le(NativeRemoteLane::Microphone, 16_000, &frame)
+            .unwrap();
+        transfer
+            .append_s16le(NativeRemoteLane::System, 16_000, &frame)
+            .unwrap();
+        let pending = transfer.spool().pending_chunks().unwrap();
+        max_pending_chunks = max_pending_chunks.max(pending.len());
+        max_pending_bytes =
+            max_pending_bytes.max(pending.iter().map(|chunk| chunk.size_bytes).sum::<u64>());
+        max_pending_age = max_pending_age.max(
+            pending
+                .iter()
+                .filter_map(|chunk| chunk.path.metadata().ok()?.modified().ok()?.elapsed().ok())
+                .max()
+                .unwrap_or_default(),
+        );
+        let deadline = capture_started + Duration::from_millis((index + 1) * 20);
+        if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+            std::thread::sleep(remaining);
+        }
+    }
+    let capture_elapsed = capture_started.elapsed();
+    let stop_started = Instant::now();
+    transfer.close_segment(SegmentCloseReasonV1::Stop).unwrap();
+    let pending_at_stop = transfer.spool().pending_chunks().unwrap().len();
+    uploader_done.store(true, Ordering::Release);
+    uploader.join().unwrap();
+    let mut spool = transfer.into_spool();
+    deliver_chunks(&mut spool, &client).unwrap();
+    let stop_drain = stop_started.elapsed();
+    let metrics = client.delivery_metrics();
+
+    eprintln!(
+        "paced_fixture capture_ms={} max_pending_chunks={} max_pending_bytes={} max_pending_age_ms={} pending_at_stop={} stop_drain_ms={} http_batches={} durable_commands={} encoded_bytes={} batch_body_bytes={} batch_request_ms={}",
+        capture_elapsed.as_millis(),
+        max_pending_chunks,
+        max_pending_bytes,
+        max_pending_age.as_millis(),
+        pending_at_stop,
+        stop_drain.as_millis(),
+        metrics.http_batch_requests,
+        metrics.durable_audio_commands,
+        metrics.encoded_payload_bytes,
+        metrics.batch_body_bytes,
+        metrics.batch_request_micros / 1_000,
+    );
+
+    stopped.store(true, Ordering::Release);
+    server.join().unwrap();
+    assert!(capture_elapsed >= Duration::from_millis(1_980));
+    assert!(capture_elapsed < Duration::from_millis(2_400));
+    assert!(pending_at_stop <= 12, "pending at stop: {pending_at_stop}");
+    assert!(
+        max_pending_chunks <= 16,
+        "max pending: {max_pending_chunks}"
+    );
+    assert!(max_pending_bytes < 20_000, "max bytes: {max_pending_bytes}");
+    assert!(max_pending_age < Duration::from_millis(800));
+    assert!(
+        stop_drain < Duration::from_millis(650),
+        "stop drain: {stop_drain:?}"
+    );
+    assert_eq!(capability_requests.load(Ordering::Acquire), 1);
+    assert_eq!(
+        batch_requests.load(Ordering::Acquire) as u64,
+        metrics.http_batch_requests
+    );
+    assert!(metrics.http_batch_requests <= 8, "metrics: {metrics:?}");
+    assert!(metrics.durable_audio_commands >= 40, "metrics: {metrics:?}");
+    assert_eq!(
+        metrics.durable_audio_commands,
+        metrics.durable_audio_receipts
+    );
+    assert!(metrics.batch_body_bytes > metrics.encoded_payload_bytes);
+}
+
+#[test]
 fn durable_spool_recovers_frames_and_retries_without_changing_identity() {
     let temp = tempfile::tempdir().unwrap();
     let spool = DurableTransferSpool::create(
@@ -100,9 +350,11 @@ fn durable_spool_recovers_frames_and_retries_without_changing_identity() {
     )
     .unwrap();
     assert_eq!(spool.producer_token().unwrap(), "producer-secret");
-    assert!(!std::fs::read_to_string(spool.root().join("manifest.json"))
-        .unwrap()
-        .contains("producer-secret"));
+    assert!(
+        !std::fs::read_to_string(spool.root().join("manifest.json"))
+            .unwrap()
+            .contains("producer-secret")
+    );
     let first = spool.append_chunk(&chunk(0, 0x11)).unwrap();
     let exact = spool.append_chunk(&chunk(0, 0x11)).unwrap();
     assert_eq!(first.path, exact.path);
@@ -288,9 +540,11 @@ fn reservation_intent_survives_lost_response_and_promotes_without_secret_leak() 
     )
     .unwrap();
     recovered[0].remove(temp.path()).unwrap();
-    assert!(pending_capture_reservations(temp.path())
-        .unwrap()
-        .is_empty());
+    assert!(
+        pending_capture_reservations(temp.path())
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         DurableTransferSpool::open(temp.path(), "transfer-a", 0)
             .unwrap()
@@ -400,7 +654,7 @@ fn concurrent_reservation_promotion_creates_once_and_capture_lease_fences_loser(
 }
 
 #[test]
-fn native_pcm_adapter_preserves_direct_16k_lane_samples_channels_and_duration() {
+fn native_opus_adapter_preserves_lane_identity_source_count_and_duration() {
     let temp = tempfile::tempdir().unwrap();
     let spool = DurableTransferSpool::create(
         temp.path(),
@@ -413,7 +667,7 @@ fn native_pcm_adapter_preserves_direct_16k_lane_samples_channels_and_duration() 
         0,
     )
     .unwrap();
-    let mut transfer = NativePcmTransfer::new(spool);
+    let mut transfer = NativeRemoteTransfer::new(spool);
     transfer
         .begin_segment("segment-native".into(), 250)
         .unwrap();
@@ -427,13 +681,13 @@ fn native_pcm_adapter_preserves_direct_16k_lane_samples_channels_and_duration() 
         .collect::<Vec<_>>();
     assert_eq!(
         transfer
-            .append_s16le(NativePcmLane::Microphone, 16_000, &mic)
+            .append_s16le(NativeRemoteLane::Microphone, 16_000, &mic)
             .unwrap(),
         3_200
     );
     assert_eq!(
         transfer
-            .append_s16le(NativePcmLane::System, 16_000, &system)
+            .append_s16le(NativeRemoteLane::System, 16_000, &system)
             .unwrap(),
         3_200
     );
@@ -443,10 +697,12 @@ fn native_pcm_adapter_preserves_direct_16k_lane_samples_channels_and_duration() 
     };
     assert_eq!(close.ended_at_ms.0, 450);
     assert_eq!(close.lane_boundaries.len(), 2);
-    assert!(close
-        .lane_boundaries
-        .iter()
-        .all(|boundary| boundary.next_sequence == 2));
+    assert!(
+        close
+            .lane_boundaries
+            .iter()
+            .all(|boundary| boundary.next_sequence == 2)
+    );
 
     let chunks = transfer.spool().pending_chunks().unwrap();
     assert_eq!(chunks.len(), 4);
@@ -456,16 +712,424 @@ fn native_pcm_adapter_preserves_direct_16k_lane_samples_channels_and_duration() 
             panic!("expected audio");
         };
         assert!(matches!(audio.starts_at_ms.0, 250 | 350));
-        assert_eq!(audio.duration_ms.0, 100);
-        assert_eq!(audio.payload.len(), 1_600 * 2);
         encoded
             .entry(audio.lane_id.0)
             .or_insert_with(Vec::new)
             .extend(audio.payload);
     }
-    assert_eq!(encoded["mic"], mic);
-    assert_eq!(encoded["system"], system);
+    assert_eq!(
+        remote_opus_packet_stream_for_asr(&encoded["mic"])
+            .unwrap()
+            .len(),
+        3_200
+    );
+    assert_eq!(
+        remote_opus_packet_stream_for_asr(&encoded["system"])
+            .unwrap()
+            .len(),
+        3_200
+    );
     assert_ne!(encoded["mic"], encoded["system"]);
+}
+
+#[test]
+fn native_opus_attach_uses_session_lane_identity_not_current_instance_preference() {
+    let command =
+        native_create_session_command("session-a", "native-format", Some("native".into()), "test");
+    let ClientMessageBodyV1::CreateSession(create) = command.body else {
+        panic!("expected create");
+    };
+    validate_native_opus_capture_lanes(&create.lanes).unwrap();
+
+    let mut legacy = create.lanes;
+    for lane in &mut legacy {
+        lane.format = AudioFormatV1 {
+            codec: AudioCodecV1::PcmS16Le,
+            container: AudioContainerV1::Raw,
+            sample_rate_hz: 48_000,
+            channel_count: 1,
+        };
+    }
+    let error = validate_native_opus_capture_lanes(&legacy)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("retry its existing transfer"), "{error}");
+}
+
+fn native_stream_for_frames(frames: usize) -> (Vec<u8>, CloseSegmentV1) {
+    let temp = tempfile::tempdir().unwrap();
+    let spool = DurableTransferSpool::create(
+        temp.path(),
+        "native-boundary",
+        "instance-a",
+        "https://margins.example.test/",
+        "workspace-a",
+        "session-a",
+        "producer-secret",
+        0,
+    )
+    .unwrap();
+    let mut transfer = NativeRemoteTransfer::new(spool);
+    transfer
+        .begin_segment("segment-boundary".into(), 700)
+        .unwrap();
+    let pcm = (0..frames)
+        .map(|index| ((index as i32 * 997 % 32_000) - 16_000) as i16)
+        .flat_map(i16::to_le_bytes)
+        .collect::<Vec<_>>();
+    transfer
+        .append_s16le(NativeRemoteLane::Microphone, 16_000, &pcm)
+        .unwrap();
+    let close = transfer.close_segment(SegmentCloseReasonV1::Stop).unwrap();
+    let ClientMessageBodyV1::CloseSegment(close) = close.body else {
+        panic!("expected close");
+    };
+    let mut chunks = transfer
+        .spool()
+        .pending_chunks()
+        .unwrap()
+        .into_iter()
+        .map(|chunk| match chunk.command.body {
+            ClientMessageBodyV1::AudioChunk(audio) => (audio.sequence, audio.payload),
+            _ => panic!("expected audio chunk"),
+        })
+        .collect::<Vec<_>>();
+    chunks.sort_by_key(|(sequence, _)| *sequence);
+    let stream = chunks
+        .into_iter()
+        .flat_map(|(_, payload)| payload)
+        .collect();
+    (stream, close)
+}
+
+#[test]
+fn native_opus_uses_real_16k_lookahead_and_handles_exact_durable_multiples_and_tail() {
+    let encoder = Encoder::builder(16_000, Channels::Mono, Application::Voip)
+        .bitrate(Bitrate::Bits(24_000))
+        .build()
+        .unwrap();
+    assert_eq!(
+        encoder.lookahead(),
+        104,
+        "ropus lookahead is in input-rate frames"
+    );
+
+    for frames in [1_280_usize, 2_560, 1_403, 1_600, 3_200, 1_723] {
+        let (stream, close) = native_stream_for_frames(frames);
+        let blocks = decode_opus_packet_blocks_v1(&stream).unwrap();
+        let summary = validate_opus_packet_stream_v1(&stream).unwrap();
+        assert_eq!(summary.pre_skip_48k, 312);
+        assert_eq!(summary.source_frame_count, frames as u64);
+        assert!(blocks.first().unwrap().stream_start);
+        assert!(blocks.last().unwrap().stream_end);
+        assert!(blocks.last().unwrap().source_frame_count > 0);
+        assert_eq!(
+            remote_opus_packet_stream_for_asr(&stream).unwrap().len(),
+            frames
+        );
+        assert_eq!(
+            close.ended_at_ms.0,
+            700 + (frames as u64 * 1_000).div_ceil(16_000)
+        );
+    }
+}
+
+#[test]
+fn native_opus_decoder_rejects_valid_non_twenty_millisecond_packets() {
+    let mut encoder = Encoder::builder(16_000, Channels::Mono, Application::Voip)
+        .bitrate(Bitrate::Bits(24_000))
+        .build()
+        .unwrap();
+    let mut packet = [0_u8; OPUS_PACKET_MAX_BYTES_V1];
+    let bytes = encoder.encode(&[0_i16; 160], &mut packet).unwrap();
+    let stream = OpusPacketBlockV1 {
+        stream_start: true,
+        stream_end: true,
+        pre_skip_48k: 312,
+        sample_rate_hz: 16_000,
+        source_start_frame: 0,
+        source_frame_count: 56,
+        frame_samples: OPUS_PACKET_FRAME_SAMPLES_V1,
+        packets: vec![packet[..bytes].to_vec()],
+    }
+    .encode()
+    .unwrap();
+    assert!(validate_opus_packet_stream_v1(&stream).is_ok());
+    let error = remote_opus_packet_stream_for_asr(&stream)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("expected 320 (20 ms)"), "{error}");
+}
+
+#[test]
+fn native_opus_silent_lane_preserves_source_timeline_without_dtx_elision() {
+    let frames = 32_000;
+    let (stream, close) = native_stream_for_frames(frames);
+    let decoded = remote_opus_packet_stream_for_asr(&stream).unwrap();
+    assert_eq!(decoded.len(), frames);
+    assert_eq!(close.ended_at_ms.0, 2_700);
+    let peak = decoded
+        .iter()
+        .map(|sample| sample.abs())
+        .fold(0.0_f32, f32::max);
+    // The deterministic input above is not silent; run a true silent lane too.
+    assert!(peak > 0.0);
+
+    let temp = tempfile::tempdir().unwrap();
+    let spool = DurableTransferSpool::create(
+        temp.path(),
+        "silent",
+        "instance-a",
+        "https://example.test",
+        "workspace-a",
+        "session-a",
+        "producer-secret",
+        0,
+    )
+    .unwrap();
+    let mut transfer = NativeRemoteTransfer::new(spool);
+    transfer.begin_segment("silent-segment".into(), 0).unwrap();
+    transfer
+        .append_s16le(NativeRemoteLane::System, 16_000, &vec![0; frames * 2])
+        .unwrap();
+    transfer.close_segment(SegmentCloseReasonV1::Stop).unwrap();
+    let mut chunks = transfer.spool().pending_chunks().unwrap();
+    chunks.sort_by_key(|chunk| match &chunk.command.body {
+        ClientMessageBodyV1::AudioChunk(audio) => audio.sequence,
+        _ => u64::MAX,
+    });
+    let encoded = chunks
+        .into_iter()
+        .flat_map(|chunk| match chunk.command.body {
+            ClientMessageBodyV1::AudioChunk(audio) => audio.payload,
+            _ => Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    let summary = validate_opus_packet_stream_v1(&encoded).unwrap();
+    assert_eq!(summary.source_frame_count, frames as u64);
+    assert!(summary.packet_count >= 101, "DTX must remain disabled");
+    let decoded = remote_opus_packet_stream_for_asr(&encoded).unwrap();
+    assert_eq!(decoded.len(), frames);
+    assert!(decoded.iter().all(|sample| sample.abs() <= 1.0 / 32_768.0));
+}
+
+#[test]
+fn native_opus_crash_recovery_closes_durable_prefix_and_next_segment_is_contiguous() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let spool = DurableTransferSpool::create(
+        root,
+        "crash",
+        "instance-a",
+        "https://example.test",
+        "workspace-a",
+        "session-a",
+        "producer-secret",
+        0,
+    )
+    .unwrap();
+    let mut transfer = NativeRemoteTransfer::new(spool);
+    transfer
+        .begin_segment("crashed-segment".into(), 5_000)
+        .unwrap();
+    transfer
+        .append_s16le(NativeRemoteLane::Microphone, 16_000, &vec![3; 3_200])
+        .unwrap();
+    // The 100 ms source checkpoint is already fsynced even though the first
+    // five-packet Opus block is still held for terminal-tail-safe framing.
+    assert!(transfer.spool().pending_chunks().unwrap().is_empty());
+    drop(transfer);
+
+    let spool = DurableTransferSpool::open(root, "crash", 0).unwrap();
+    let mut recovered = NativeRemoteTransfer::new(spool);
+    let close = recovered
+        .recover_interrupted_segment(SegmentCloseReasonV1::Error)
+        .unwrap()
+        .expect("100 ms checkpoint should be recoverable");
+    let ClientMessageBodyV1::CloseSegment(close) = close.body else {
+        panic!("expected recovery close");
+    };
+    assert_eq!(close.ended_at_ms.0, 5_100);
+    assert_eq!(recovered.last_closed_ended_at_ms(), Some(5_100));
+
+    recovered
+        .begin_segment("resumed-segment".into(), 5_100)
+        .unwrap();
+    recovered
+        .append_s16le(NativeRemoteLane::Microphone, 16_000, &vec![7; 640])
+        .unwrap();
+    recovered.close_segment(SegmentCloseReasonV1::Stop).unwrap();
+    assert_eq!(recovered.last_closed_ended_at_ms(), Some(5_120));
+    let final_command = recovered
+        .seal_session(5_120, SessionFinalizeReasonV1::Completed)
+        .unwrap();
+    let ClientMessageBodyV1::FinalizeSession(finalize) = final_command.body else {
+        panic!("expected finalize");
+    };
+    assert_eq!(finalize.ended_at_ms.0, 5_120);
+    assert_eq!(finalize.segment_closes.len(), 2);
+}
+
+#[test]
+fn native_opus_close_cleanup_crash_reuses_the_durable_two_lane_close() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let spool = DurableTransferSpool::create(
+        root,
+        "close-cleanup-crash",
+        "instance-a",
+        "https://example.test",
+        "workspace-a",
+        "session-a",
+        "producer-secret",
+        0,
+    )
+    .unwrap();
+    let mut transfer = NativeRemoteTransfer::new(spool);
+    transfer.begin_segment("segment-a".into(), 0).unwrap();
+    for lane in [NativeRemoteLane::Microphone, NativeRemoteLane::System] {
+        transfer
+            .append_s16le(lane, 16_000, &vec![3; 6_400])
+            .unwrap();
+    }
+    let transfer_path = root.join("close-cleanup-crash");
+    let open_path = transfer_path.join("open-native-segment.json");
+    let system_path = transfer_path.join("recovery/segment-a-system.s16le");
+    let system_durable_path = system_path.with_extension("durable");
+    let open = std::fs::read(&open_path).unwrap();
+    let system = std::fs::read(&system_path).unwrap();
+    let system_durable = std::fs::read(&system_durable_path).unwrap();
+    let close = transfer.close_segment(SegmentCloseReasonV1::Stop).unwrap();
+    let pending = transfer.spool().pending_chunks().unwrap();
+    let pending_before = pending.len();
+    assert!(pending_before > 0);
+    // Also preserve the legitimate ACK-fsynced/frame-not-yet-unlinked state.
+    let redundant = &pending[0];
+    let receipt = transfer_path
+        .join("acks")
+        .join(redundant.path.file_name().unwrap())
+        .with_extension("ack");
+    std::fs::write(receipt, redundant.payload_digest.as_bytes()).unwrap();
+    drop(transfer);
+
+    // Reconstruct the exact observable state after the microphone journal was
+    // removed but before the system journal/open marker cleanup committed.
+    std::fs::write(&system_path, system).unwrap();
+    std::fs::write(&system_durable_path, system_durable).unwrap();
+    std::fs::write(&open_path, open).unwrap();
+
+    let spool = DurableTransferSpool::open(root, "close-cleanup-crash", 0).unwrap();
+    let mut recovered = NativeRemoteTransfer::new(spool);
+    let replayed = recovered
+        .recover_interrupted_segment(SegmentCloseReasonV1::Error)
+        .unwrap()
+        .expect("the already-durable close must survive cleanup replay");
+    assert_eq!(replayed, close);
+    assert_eq!(
+        recovered.spool().pending_chunks().unwrap().len(),
+        pending_before
+    );
+    assert!(!open_path.exists());
+    assert!(!system_path.exists());
+    assert!(!system_durable_path.exists());
+}
+
+#[test]
+fn native_opus_pause_resume_final_duration_is_the_last_media_boundary() {
+    let temp = tempfile::tempdir().unwrap();
+    let spool = DurableTransferSpool::create(
+        temp.path(),
+        "pause-resume",
+        "instance-a",
+        "https://example.test",
+        "workspace-a",
+        "session-a",
+        "producer-secret",
+        0,
+    )
+    .unwrap();
+    let mut transfer = NativeRemoteTransfer::new(spool);
+    transfer.begin_segment("first".into(), 0).unwrap();
+    transfer
+        .append_s16le(NativeRemoteLane::Microphone, 16_000, &vec![0; 3_200])
+        .unwrap();
+    transfer.close_segment(SegmentCloseReasonV1::Pause).unwrap();
+    assert_eq!(transfer.last_closed_ended_at_ms(), Some(100));
+    transfer.begin_segment("second".into(), 375).unwrap();
+    transfer
+        .append_s16le(NativeRemoteLane::Microphone, 16_000, &vec![0; 6_400])
+        .unwrap();
+    transfer.close_segment(SegmentCloseReasonV1::Stop).unwrap();
+    let media_boundary = transfer.last_closed_ended_at_ms().unwrap();
+    assert_eq!(media_boundary, 575);
+
+    // A delayed uploader/memo path must not be sampled into the capture clock.
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    let final_command = transfer
+        .seal_session(media_boundary, SessionFinalizeReasonV1::Completed)
+        .unwrap();
+    let ClientMessageBodyV1::FinalizeSession(finalize) = final_command.body else {
+        panic!("expected finalize");
+    };
+    assert_eq!(finalize.ended_at_ms.0, 575);
+    assert_eq!(finalize.segment_closes.len(), 2);
+}
+
+#[test]
+fn native_opus_sub_checkpoint_crash_is_bounded_and_low_space_fails_truthfully() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let spool = DurableTransferSpool::create(
+        root,
+        "short-crash",
+        "instance-a",
+        "https://example.test",
+        "workspace-a",
+        "session-a",
+        "producer-secret",
+        0,
+    )
+    .unwrap();
+    let mut transfer = NativeRemoteTransfer::new(spool);
+    transfer.begin_segment("short-segment".into(), 0).unwrap();
+    transfer
+        .append_s16le(NativeRemoteLane::Microphone, 16_000, &vec![1; 2_528])
+        .unwrap();
+    assert!(transfer.spool().pending_chunks().unwrap().is_empty());
+    drop(transfer);
+    let spool = DurableTransferSpool::open(root, "short-crash", 0).unwrap();
+    let mut recovered = NativeRemoteTransfer::new(spool);
+    assert!(
+        recovered
+            .recover_interrupted_segment(SegmentCloseReasonV1::Error)
+            .unwrap()
+            .is_none()
+    );
+    assert!(recovered.spool().pending_chunks().unwrap().is_empty());
+    recovered
+        .seal_session(0, SessionFinalizeReasonV1::Error)
+        .unwrap();
+
+    let full = tempfile::tempdir().unwrap();
+    let spool = DurableTransferSpool::create(
+        full.path(),
+        "full",
+        "instance-a",
+        "https://example.test",
+        "workspace-a",
+        "session-a",
+        "producer-secret",
+        u64::MAX,
+    )
+    .unwrap();
+    let mut transfer = NativeRemoteTransfer::new(spool);
+    transfer.begin_segment("full-segment".into(), 0).unwrap();
+    let error = transfer
+        .append_s16le(NativeRemoteLane::Microphone, 16_000, &vec![0; 3_200])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("disk reserve"), "{error}");
+    assert!(transfer.spool().pending_chunks().unwrap().is_empty());
 }
 
 fn capture_resampled(rate: u32, samples: &[f32], partitions: &[usize]) -> Vec<u8> {
@@ -481,7 +1145,7 @@ fn capture_resampled(rate: u32, samples: &[f32], partitions: &[usize]) -> Vec<u8
         0,
     )
     .unwrap();
-    let mut transfer = NativePcmTransfer::new(spool);
+    let mut transfer = NativeRemoteTransfer::new(spool);
     transfer
         .begin_segment("segment-resample".into(), 0)
         .unwrap();
@@ -489,13 +1153,13 @@ fn capture_resampled(rate: u32, samples: &[f32], partitions: &[usize]) -> Vec<u8
     for &length in partitions {
         let end = (offset + length).min(samples.len());
         transfer
-            .append_f32(NativePcmLane::Microphone, rate, &samples[offset..end])
+            .append_f32(NativeRemoteLane::Microphone, rate, &samples[offset..end])
             .unwrap();
         offset = end;
     }
     if offset < samples.len() {
         transfer
-            .append_f32(NativePcmLane::Microphone, rate, &samples[offset..])
+            .append_f32(NativeRemoteLane::Microphone, rate, &samples[offset..])
             .unwrap();
     }
     transfer.close_segment(SegmentCloseReasonV1::Stop).unwrap();
@@ -510,7 +1174,15 @@ fn capture_resampled(rate: u32, samples: &[f32], partitions: &[usize]) -> Vec<u8
         })
         .collect::<Vec<_>>();
     chunks.sort_by_key(|(sequence, _)| *sequence);
-    chunks.into_iter().flat_map(|(_, bytes)| bytes).collect()
+    let encoded = chunks
+        .into_iter()
+        .flat_map(|(_, bytes)| bytes)
+        .collect::<Vec<_>>();
+    remote_opus_packet_stream_for_asr(&encoded)
+        .unwrap()
+        .into_iter()
+        .flat_map(|sample| ((sample * 32_768.0).round() as i16).to_le_bytes())
+        .collect()
 }
 
 #[test]
@@ -565,14 +1237,16 @@ fn native_resampler_rejects_alias_energy_and_rate_changes() {
         0,
     )
     .unwrap();
-    let mut transfer = NativePcmTransfer::new(spool);
+    let mut transfer = NativeRemoteTransfer::new(spool);
     transfer.begin_segment("segment-rate".into(), 0).unwrap();
     transfer
-        .append_f32(NativePcmLane::Microphone, 48_000, &[0.0; 64])
+        .append_f32(NativeRemoteLane::Microphone, 48_000, &[0.0; 64])
         .unwrap();
-    assert!(transfer
-        .append_f32(NativePcmLane::Microphone, 44_100, &[0.0; 64])
-        .is_err());
+    assert!(
+        transfer
+            .append_f32(NativeRemoteLane::Microphone, 44_100, &[0.0; 64])
+            .is_err()
+    );
 }
 
 #[test]

@@ -9,11 +9,11 @@ use anyhow::{bail, Context, Result};
 use fs4::fs_std::FileExt;
 use margins_core::SessionRepository;
 use margins_meeting_protocol::{
-    ArtifactId, AudioCodecV1, AudioContainerV1, AudioFormatV1, BeginCaptureGenerationV1,
-    ClientMessageBodyV1, ClientMessageV1, DurationMillis, InstanceId, ProtocolVersionV1,
-    SequenceRangeV1, ServerMessageBodyV1, SessionId, WorkspaceArtifactV1, WorkspaceAttachV1,
-    WorkspaceCapabilitiesV1, WorkspaceId, WorkspaceLimitsV1, WorkspaceMemoLineV1,
-    WorkspaceMemoReplaceV1, WorkspaceMemoUpdateV1, WorkspaceMemoV1,
+    decode_opus_packet_blocks_v1, ArtifactId, AudioCodecV1, AudioContainerV1, AudioFormatV1,
+    BeginCaptureGenerationV1, ClientMessageBodyV1, ClientMessageV1, DurationMillis, InstanceId,
+    ProtocolVersionV1, SequenceRangeV1, ServerMessageBodyV1, SessionId, WorkspaceArtifactV1,
+    WorkspaceAttachV1, WorkspaceCapabilitiesV1, WorkspaceId, WorkspaceLimitsV1,
+    WorkspaceMemoLineV1, WorkspaceMemoReplaceV1, WorkspaceMemoUpdateV1, WorkspaceMemoV1,
     WorkspaceNoteAssociationUpdateV1, WorkspaceNoteAssociationV1, WorkspaceProcessingJobV1,
     WorkspaceRenameV1, WorkspaceSessionPageV1, WorkspaceSessionSummaryV1, WorkspaceSummaryV1,
     WorkspaceTranscriptV1,
@@ -337,6 +337,10 @@ impl WorkspaceService {
         &self.workspace.config.id
     }
 
+    pub fn instance_id(&self) -> &str {
+        self.instance_id.as_ref()
+    }
+
     pub fn capture_root(&self) -> &Path {
         &self.capture_root
     }
@@ -363,9 +367,9 @@ impl WorkspaceService {
                 spool_reserve_bytes: DEFAULT_SPOOL_RESERVE_BYTES,
             },
             capture_formats: vec![AudioFormatV1 {
-                codec: AudioCodecV1::PcmS16Le,
-                container: AudioContainerV1::Raw,
-                sample_rate_hz: crate::remote_workspace::NATIVE_PCM_RATE_HZ,
+                codec: AudioCodecV1::Opus,
+                container: AudioContainerV1::PacketStream,
+                sample_rate_hz: crate::remote_workspace::NATIVE_REMOTE_RATE_HZ,
                 channel_count: 1,
             }],
             operations: principal
@@ -420,13 +424,17 @@ impl WorkspaceService {
         if let ClientMessageBodyV1::CreateSession(create) = &command.body {
             for lane in &create.lanes {
                 let format = &lane.format;
-                if format.codec != AudioCodecV1::PcmS16Le
-                    || format.container != AudioContainerV1::Raw
-                    || format.channel_count != 1
-                    || !matches!(format.sample_rate_hz, 16_000 | 48_000)
-                {
+                let opus = format.codec == AudioCodecV1::Opus
+                    && format.container == AudioContainerV1::PacketStream
+                    && format.channel_count == 1
+                    && format.sample_rate_hz == 16_000;
+                let recoverable_pcm = format.codec == AudioCodecV1::PcmS16Le
+                    && format.container == AudioContainerV1::Raw
+                    && format.channel_count == 1
+                    && matches!(format.sample_rate_hz, 16_000 | 48_000);
+                if !opus && !recoverable_pcm {
                     bail!(
-                        "unsupported capture format for lane {}; use mono raw PCM s16le at 16 kHz (48 kHz is accepted only for durable legacy recovery)",
+                        "unsupported capture format for lane {}; use mono Margins Opus packet stream at 16 kHz (raw PCM s16le at 16/48 kHz is accepted only for durable recovery)",
                         lane.lane_id.as_ref()
                     );
                 }
@@ -519,11 +527,7 @@ impl WorkspaceService {
             &principal.id,
             producer_token,
         )?;
-        if let ClientMessageBodyV1::AudioChunk(chunk) = &command.body {
-            if chunk.payload.len() as u64 > DEFAULT_MAX_CHUNK_BYTES {
-                bail!("audio chunk exceeds advertised maximum");
-            }
-        }
+        self.validate_capture_command(&command)?;
         let finalized = matches!(command.body, ClientMessageBodyV1::FinalizeSession(_));
         let session_id = command.session_id.clone();
         let response = self
@@ -547,6 +551,105 @@ impl WorkspaceService {
                 .release_producer(session_id.as_ref(), &principal.id, producer_token)?;
         }
         Ok(response)
+    }
+
+    pub fn execute_audio_batch(
+        &self,
+        principal: &ServicePrincipal,
+        producer_token: &str,
+        session_id: &SessionId,
+        commands: Vec<ClientMessageV1>,
+    ) -> Result<Vec<RuntimeResponseV1>> {
+        principal.require(self.workspace_id(), OP_CAPTURE_WRITE)?;
+        if commands.is_empty() || commands.len() > DEFAULT_MAX_IN_FLIGHT_CHUNKS as usize {
+            bail!("audio chunk batch exceeds the advertised command bound");
+        }
+        self.authority
+            .authorize_producer(session_id.as_ref(), &principal.id, producer_token)?;
+        for command in &commands {
+            if command.session_id != *session_id
+                || !matches!(command.body, ClientMessageBodyV1::AudioChunk(_))
+            {
+                bail!("audio chunk batch crosses its session or operation boundary");
+            }
+            self.validate_capture_command(command)?;
+        }
+        commands
+            .into_iter()
+            .map(|command| self.execute_capture(principal, producer_token, command))
+            .collect()
+    }
+
+    fn validate_capture_command(&self, command: &ClientMessageV1) -> Result<()> {
+        if let ClientMessageBodyV1::AudioChunk(chunk) = &command.body {
+            if chunk.payload.len() as u64 > DEFAULT_MAX_CHUNK_BYTES {
+                bail!("audio chunk exceeds advertised maximum");
+            }
+            let format = self.capture_lane_format(&command.session_id, chunk.lane_id.as_ref())?;
+            match (format.codec, format.container, format.channel_count) {
+                (AudioCodecV1::PcmS16Le, AudioContainerV1::Raw, 1) => {
+                    if chunk.payload.len() % 2 != 0 {
+                        bail!("mono s16 PCM audio chunk has a partial sample");
+                    }
+                    let frames = chunk.payload.len() as u64 / 2;
+                    let expected_duration = frames
+                        .saturating_mul(1_000)
+                        .div_ceil(u64::from(format.sample_rate_hz));
+                    if frames == 0 || chunk.duration_ms.0 != expected_duration {
+                        bail!("mono s16 PCM audio chunk duration does not match its frames");
+                    }
+                }
+                (AudioCodecV1::Opus, AudioContainerV1::PacketStream, 1) => {
+                    let blocks =
+                        decode_opus_packet_blocks_v1(&chunk.payload).map_err(anyhow::Error::msg)?;
+                    if blocks.len() != 1 {
+                        bail!("each durable native Opus command must contain exactly one block");
+                    }
+                    let block = &blocks[0];
+                    let expected_start = chunk
+                        .sequence
+                        .checked_mul(crate::remote_workspace::NATIVE_OPUS_DURABLE_FRAMES as u64)
+                        .context("native Opus source start overflowed")?;
+                    if block.source_start_frame != expected_start {
+                        bail!("native Opus block source start does not match its sequence");
+                    }
+                    if chunk.sequence == 0 {
+                        if !block.stream_start || block.pre_skip_48k == 0 {
+                            bail!("native Opus sequence zero is missing START/pre-skip");
+                        }
+                    } else if block.stream_start || block.pre_skip_48k != 0 {
+                        bail!("native Opus continuation repeats START/pre-skip");
+                    }
+                    if !block.stream_end
+                        && u64::from(block.source_frame_count)
+                            != block.packets.len() as u64 * u64::from(block.frame_samples)
+                    {
+                        bail!(
+                            "non-terminal native Opus block does not fully represent its packets"
+                        );
+                    }
+                    let frame_end = block
+                        .source_start_frame
+                        .checked_add(u64::from(block.source_frame_count))
+                        .context("native Opus source end overflowed")?;
+                    let expected_duration = frame_end
+                        .saturating_mul(1_000)
+                        .div_ceil(u64::from(format.sample_rate_hz))
+                        .saturating_sub(
+                            block
+                                .source_start_frame
+                                .saturating_mul(1_000)
+                                .div_ceil(u64::from(format.sample_rate_hz)),
+                        )
+                        .max(1);
+                    if chunk.duration_ms.0 != expected_duration {
+                        bail!("native Opus audio chunk duration does not match its source frames");
+                    }
+                }
+                _ => bail!("audio chunk uses an unsupported declared lane format"),
+            }
+        }
+        Ok(())
     }
 
     pub fn current(&self, principal: &ServicePrincipal) -> Result<Option<SessionId>> {
@@ -616,10 +719,15 @@ impl WorkspaceService {
         let finalized_input = runtime.as_ref().and_then(|value| value.finalized_input());
         let capture_duration_ms = finalized_input.map(|(_, ended)| DurationMillis(ended.0));
         let capture_finalize_message_id = finalized_input.map(|(message, _)| message.clone());
+        let capture_lanes = runtime
+            .as_ref()
+            .map(|session| session.create().lanes.clone())
+            .unwrap_or_default();
         Ok(WorkspaceSessionSummaryV1 {
             session_id: SessionId(session_id.to_string()),
             title: meta.title,
             started_at: session.start_time,
+            capture_lanes,
             segment_count: session.segment_count.max(0) as u64,
             input_finalized,
             capture_duration_ms,

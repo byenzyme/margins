@@ -6,27 +6,28 @@ use crate::ctx::Ctx;
 use crate::server::events::WsSink;
 use anyhow::Context as _;
 use axum::{
+    Json, Router,
     body::Bytes,
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         DefaultBodyLimit, Multipart, Path, Query, Request, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post, put},
-    Json, Router,
 };
 use margins_meeting_protocol::{
-    AudioChunkV1, ClientMessageBodyV1, ClientMessageV1, ContentDigestV1, DigestAlgorithmV1,
-    DurationMillis, MessageId, ProtocolVersionV1, SessionId, SessionMillis, UnixMillis,
-    WorkspaceAttachV1, WorkspaceErrorV1, WorkspaceMemoReplaceV1, WorkspaceMemoUpdateV1,
-    WorkspaceNoteAssociationUpdateV1, WorkspaceRenameV1, WorkspaceResponseV1,
+    AUDIO_CHUNK_BATCH_CONTENT_TYPE_V1, AudioChunkBatchV1, AudioChunkV1, ClientMessageBodyV1,
+    ClientMessageV1, ContentDigestV1, DigestAlgorithmV1, DurationMillis, MessageId,
+    ProtocolVersionV1, SessionId, SessionMillis, UnixMillis, WorkspaceAttachV1, WorkspaceErrorV1,
+    WorkspaceMemoReplaceV1, WorkspaceMemoUpdateV1, WorkspaceNoteAssociationUpdateV1,
+    WorkspaceRenameV1, WorkspaceResponseV1,
 };
 use margins_workflows::workspace_service::{
-    ScopedCredentialStore, ServicePrincipal, WorkspaceService, OP_CAPTURE_WRITE, OP_MEMO_WRITE,
-    OP_SESSION_CREATE, OP_SESSION_READ,
+    OP_CAPTURE_WRITE, OP_MEMO_WRITE, OP_SESSION_CREATE, OP_SESSION_READ, ScopedCredentialStore,
+    ServicePrincipal, WorkspaceService,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -91,6 +92,15 @@ pub fn build_router(state: ServerState) -> Router {
         .route(
             "/v1/workspaces/:workspace/sessions/:session/segments/:segment/lanes/:lane/chunks/:sequence",
             put(workspace_audio_chunk),
+        )
+        .route(
+            "/v1/workspaces/:workspace/sessions/:session/audio-chunks",
+            post(workspace_audio_chunks).layer(DefaultBodyLimit::max(
+                ((margins_workflows::workspace_service::DEFAULT_MAX_CHUNK_BYTES + 64 * 1024)
+                    * u64::from(
+                        margins_workflows::workspace_service::DEFAULT_MAX_IN_FLIGHT_CHUNKS,
+                    )) as usize,
+            )),
         )
         .route(
             "/v1/workspaces/:workspace/sessions/:session/events",
@@ -236,6 +246,30 @@ fn workspace_auth_operation(
             )
         })?;
     Ok(principal)
+}
+
+fn workspace_instance_fence(state: &ServerState, headers: &HeaderMap) -> Result<(), Response> {
+    let Some(instance_id) = headers
+        .get("X-Margins-Instance-Id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+    else {
+        return Err(workspace_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "instance_id_required",
+            false,
+            "Missing Workspace instance identity",
+        ));
+    };
+    if instance_id != state.workspace_service.instance_id() {
+        return Err(workspace_error(
+            StatusCode::CONFLICT,
+            "instance_changed",
+            false,
+            "Workspace service instance identity changed",
+        ));
+    }
+    Ok(())
 }
 
 fn workspace_ok<T: serde::Serialize>(value: T) -> Response {
@@ -401,6 +435,9 @@ async fn workspace_create_session(
         Ok(value) => value,
         Err(response) => return response,
     };
+    if let Err(response) = workspace_instance_fence(&state, &headers) {
+        return response;
+    }
     state
         .workspace_service
         .reserve_session(&principal, command)
@@ -418,6 +455,9 @@ async fn workspace_session_command(
         Ok(value) => value,
         Err(response) => return response,
     };
+    if let Err(response) = workspace_instance_fence(&state, &headers) {
+        return response;
+    }
     if command.session_id.as_ref() != session {
         return workspace_error(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -469,6 +509,9 @@ async fn workspace_attach_session(
         Ok(value) => value,
         Err(response) => return response,
     };
+    if let Err(response) = workspace_instance_fence(&state, &headers) {
+        return response;
+    }
     state
         .workspace_service
         .attach_session(&principal, &SessionId(session), &request)
@@ -509,6 +552,9 @@ async fn workspace_audio_chunk(
         Ok(value) => value,
         Err(response) => return response,
     };
+    if let Err(response) = workspace_instance_fence(&state, &headers) {
+        return response;
+    }
     if body.len() as u64 > margins_workflows::workspace_service::DEFAULT_MAX_CHUNK_BYTES {
         return workspace_error(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -590,6 +636,66 @@ async fn workspace_audio_chunk(
     state
         .workspace_service
         .execute_capture(&principal, token, command)
+        .map(workspace_ok)
+        .unwrap_or_else(service_error)
+}
+
+async fn workspace_audio_chunks(
+    State(state): State<ServerState>,
+    Path((workspace, session)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let principal = match workspace_auth(&state, &headers, Some(&workspace)) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(response) = workspace_instance_fence(&state, &headers) {
+        return response;
+    }
+    let Some(token) = headers
+        .get("X-Margins-Producer-Token")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+    else {
+        return workspace_error(
+            StatusCode::UNAUTHORIZED,
+            "producer_token_required",
+            false,
+            "Missing producer token",
+        );
+    };
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim);
+    if content_type != Some(AUDIO_CHUNK_BATCH_CONTENT_TYPE_V1) {
+        return workspace_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_media_type",
+            false,
+            "Audio batch content type is unsupported",
+        );
+    }
+    let batch = match AudioChunkBatchV1::decode(
+        &body,
+        margins_workflows::workspace_service::DEFAULT_MAX_IN_FLIGHT_CHUNKS as usize,
+        margins_workflows::workspace_service::DEFAULT_MAX_CHUNK_BYTES,
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            return workspace_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_audio_batch",
+                false,
+                error,
+            );
+        }
+    };
+    state
+        .workspace_service
+        .execute_audio_batch(&principal, token, &SessionId(session), batch.commands)
         .map(workspace_ok)
         .unwrap_or_else(service_error)
 }
@@ -714,6 +820,9 @@ async fn workspace_replace_memo(
         Ok(value) => value,
         Err(response) => return response,
     };
+    if let Err(response) = workspace_instance_fence(&state, &headers) {
+        return response;
+    }
     state
         .workspace_service
         .replace_memo(&principal, &SessionId(session), &request)
@@ -865,7 +974,7 @@ async fn workspace_multipart_import(
                             "too_large",
                             false,
                             "Import exceeds the advertised maximum",
-                        )
+                        );
                     }
                     Err(error) => return service_error(error.into()),
                 }
@@ -1424,6 +1533,168 @@ async fn handle_ws(mut socket: WebSocket, sink: Arc<WsSink>) {
                     _ => {}
                 }
             }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "parakeet-asr"))]
+mod remote_finalize_authority_tests {
+    use super::*;
+    use axum::http::{HeaderValue, header::AUTHORIZATION};
+    use margins_meeting_protocol::{
+        ClientMessageBodyV1, SegmentCloseReasonV1, SessionFinalizeReasonV1,
+    };
+    use margins_workflows::{
+        remote_workspace::{
+            DurableTransferSpool, NativeRemoteLane, NativeRemoteTransfer,
+            native_create_session_command,
+        },
+        workspace::ensure_service_workspace,
+        workspace_service::{OP_CAPTURE_WRITE, OP_SESSION_CREATE},
+    };
+
+    #[tokio::test]
+    async fn capture_only_http_finalize_schedules_with_internal_service_principal() {
+        let temp = tempfile::tempdir().unwrap();
+        let notes = temp.path().join("notes");
+        let captures = temp.path().join("captures");
+        std::fs::create_dir_all(&notes).unwrap();
+        let workspace = ensure_service_workspace(
+            &temp.path().join("home"),
+            "http-authority",
+            Some("HTTP authority"),
+            &notes,
+            &captures,
+        )
+        .unwrap();
+        let service = Arc::new(
+            WorkspaceService::open_with_capabilities(
+                "http-authority-instance",
+                workspace,
+                true,
+                false,
+            )
+            .unwrap(),
+        );
+        let capture = ServicePrincipal::scoped(
+            "capture-only",
+            ["http-authority".to_string()],
+            [OP_SESSION_CREATE.to_string(), OP_CAPTURE_WRITE.to_string()],
+        );
+        let internal = ServicePrincipal::full("service-internal", "http-authority");
+        let session = SessionId("http-capture-finalize".into());
+        let reservation = service
+            .reserve_session(
+                &capture,
+                native_create_session_command(
+                    session.as_ref(),
+                    "http-capture-finalize",
+                    None,
+                    "test",
+                ),
+            )
+            .unwrap();
+        let spool = DurableTransferSpool::create(
+            &temp.path().join("spool"),
+            "http-capture-finalize",
+            "http-authority-instance",
+            "https://fixture.invalid",
+            "http-authority",
+            session.as_ref(),
+            &reservation.producer_token,
+            0,
+        )
+        .unwrap();
+        let mut transfer = NativeRemoteTransfer::new(spool);
+        transfer.begin_segment("segment".into(), 0).unwrap();
+        for lane in [NativeRemoteLane::Microphone, NativeRemoteLane::System] {
+            transfer
+                .append_s16le(lane, 16_000, &vec![0; 3_200])
+                .unwrap();
+        }
+        let close = transfer.close_segment(SegmentCloseReasonV1::Stop).unwrap();
+        let ended_at_ms = match &close.body {
+            ClientMessageBodyV1::CloseSegment(close) => close.ended_at_ms.0,
+            _ => unreachable!(),
+        };
+        let finalize = transfer
+            .seal_session(ended_at_ms, SessionFinalizeReasonV1::Completed)
+            .unwrap();
+        for chunk in transfer.spool().pending_chunks().unwrap() {
+            service
+                .execute_capture(&capture, &reservation.producer_token, chunk.command)
+                .unwrap();
+        }
+        service
+            .execute_capture(&capture, &reservation.producer_token, close)
+            .unwrap();
+
+        let credentials =
+            ScopedCredentialStore::open(temp.path().join("credentials.json")).unwrap();
+        credentials
+            .register(
+                "capture-only",
+                "capture-token",
+                vec!["http-authority".to_string()],
+                vec![OP_CAPTURE_WRITE.to_string()],
+                None,
+            )
+            .unwrap();
+        let sink = Arc::new(WsSink::new(8));
+        let ctx = crate::ctx::Ctx {
+            state: crate::build_app_state(
+                temp.path().join("work"),
+                crate::settings::Settings::default(),
+            ),
+            sink: sink.clone(),
+        };
+        let state = ServerState {
+            ctx: Arc::new(CtxState(ctx)),
+            sink,
+            token: "unused-admin-token".to_string(),
+            workspace_service: service.clone(),
+            credential_store: credentials,
+            service_principal: internal.clone(),
+            remote_asr_jobs: super::super::remote_asr::RemoteAsrJobs::default(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer capture-token"),
+        );
+        headers.insert(
+            "X-Margins-Producer-Token",
+            HeaderValue::from_str(&reservation.producer_token).unwrap(),
+        );
+        headers.insert(
+            "X-Margins-Instance-Id",
+            HeaderValue::from_static("http-authority-instance"),
+        );
+        assert!(service.latest_job(&capture, &session).is_err());
+        let response = workspace_session_command(
+            State(state),
+            Path(("http-authority".to_string(), session.as_ref().to_string())),
+            headers,
+            Json(finalize),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let job = service.latest_job(&internal, &session).unwrap().unwrap();
+            if job.status != "queued" {
+                assert!(matches!(
+                    job.status.as_str(),
+                    "running" | "complete" | "failed"
+                ));
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "internal scheduler never claimed the durable job"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
 }

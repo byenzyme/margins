@@ -203,12 +203,7 @@ pub fn run(
     let connection = RemoteConnection::connect(remote, workspace, token.as_deref())
         .map_err(CliError::from_anyhow)?;
     let value = match command {
-        Command::Capabilities => serde_json::to_value(
-            connection
-                .client
-                .capabilities()
-                .map_err(CliError::from_anyhow)?,
-        ),
+        Command::Capabilities => serde_json::to_value(&connection.capabilities),
         Command::Ls | Command::Recent { all: false } => serde_json::to_value(
             connection
                 .client

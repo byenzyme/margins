@@ -20,6 +20,7 @@ dirs = "6"
 fs4 = { version = "0.13", features = ["sync"] }
 globset = "0.4"
 keyring = { version = "3.6.2", default-features = false, features = ["apple-native", "linux-native-sync-persistent", "crypto-rust", "vendored"] }
+libc = "0.2"
 margins-core = { version = "0.1.0", path = "../margins-core" }
 margins-media = { version = "0.1.0", path = "../margins-media" }
 margins-meeting-protocol = { version = "0.1.0", path = "../margins-meeting-protocol" }
@@ -29,6 +30,7 @@ oauth2 = { version = "5", default-features = false, features = ["reqwest-blockin
 rand = "0.8"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+ropus = "0.12"
 rubato = { version = "0.16.2", default-features = false }
 rusqlite = { package = "libsql-rusqlite", version = "=0.9.30" }
 serde = { version = "1", features = ["derive"] }

@@ -5,8 +5,8 @@ use margins_core::{
     NewSegment, SampleFormat, SegmentId as CoreSegmentId, UnixMillis as CoreUnixMillis,
 };
 use margins_meeting_protocol::{
-    AudioChunkV1, AudioCodecV1, AudioContainerV1, AudioFormatV1, LaneId, MessageId,
-    SequenceRangeV1, ServerMessageBodyV1, ServerMessageV1, SessionId,
+    validate_opus_packet_stream_v1, AudioChunkV1, AudioCodecV1, AudioContainerV1, AudioFormatV1,
+    LaneId, MessageId, SequenceRangeV1, ServerMessageBodyV1, ServerMessageV1, SessionId,
 };
 use margins_meeting_runtime::{
     MeetingRuntimeStorage, SessionDeltaV1, StorageCommit, StoredCommandReceiptV1, StoredSessionV1,
@@ -252,6 +252,9 @@ impl SqliteMeetingRuntimeStorage {
         std::fs::create_dir_all(&artifacts)?;
         let mut lanes = Vec::new();
         for boundary in &finalized.lane_boundaries {
+            if boundary.next_sequence == 0 {
+                continue;
+            }
             let mut bytes = Vec::new();
             for sequence in 0..boundary.next_sequence {
                 let payload = if delta.audio_chunk.as_ref().is_some_and(|chunk| {
@@ -277,11 +280,32 @@ impl SqliteMeetingRuntimeStorage {
                 };
                 bytes.extend_from_slice(&payload);
             }
+            let format = declared_lanes
+                .iter()
+                .find(|lane| lane.lane_id == boundary.lane_id)
+                .context("finalized lane was not declared by the session")?
+                .format
+                .clone();
+            let (extension, artifact_suffix, frame_count) = match (format.codec, format.container) {
+                (AudioCodecV1::PcmS16Le, AudioContainerV1::Raw) => {
+                    if bytes.len() % 2 != 0 {
+                        anyhow::bail!("finalized PCM lane has a partial s16 sample");
+                    }
+                    ("pcm", "pcm", bytes.len() as u64 / 2)
+                }
+                (AudioCodecV1::Opus, AudioContainerV1::PacketStream) => {
+                    let summary =
+                        validate_opus_packet_stream_v1(&bytes).map_err(anyhow::Error::msg)?;
+                    ("mopus", "opus", summary.source_frame_count)
+                }
+                _ => anyhow::bail!("finalized remote audio uses an unsupported durable format"),
+            };
             let file_name = format!(
-                "{}_{}_{}.pcm",
+                "{}_{}_{}.{}",
                 safe_file_component(session_id.as_ref()),
                 safe_file_component(finalized.segment_id.as_ref()),
-                safe_file_component(boundary.lane_id.as_ref())
+                safe_file_component(boundary.lane_id.as_ref()),
+                extension,
             );
             let path = artifacts.join(&file_name);
             atomic_replace(&path, &bytes)?;
@@ -289,13 +313,13 @@ impl SqliteMeetingRuntimeStorage {
                 boundary.lane_id.clone(),
                 format!(".margins/artifacts/{}/{file_name}", session_id.as_ref()),
                 bytes.len() as u64,
-                declared_lanes
-                    .iter()
-                    .find(|lane| lane.lane_id == boundary.lane_id)
-                    .context("finalized lane was not declared by the session")?
-                    .format
-                    .clone(),
+                frame_count,
+                artifact_suffix.to_string(),
+                format,
             ));
+        }
+        if lanes.is_empty() {
+            return Ok(None);
         }
         Ok(Some(FinalizedProjection {
             segment_id: finalized.segment_id.as_ref().to_string(),
@@ -308,7 +332,7 @@ impl SqliteMeetingRuntimeStorage {
 struct FinalizedProjection {
     segment_id: String,
     duration_secs: f64,
-    lanes: Vec<(LaneId, String, u64, AudioFormatV1)>,
+    lanes: Vec<(LaneId, String, u64, u64, String, AudioFormatV1)>,
 }
 
 impl MeetingRuntimeStorage for SqliteMeetingRuntimeStorage {
@@ -556,9 +580,9 @@ impl MeetingRuntimeStorage for SqliteMeetingRuntimeStorage {
                     segment_id: CoreSegmentId::from(projection.segment_id.clone()),
                     lane,
                     uri: representative.1.clone(),
-                    format: core_audio_format(&representative.3)?,
+                    format: core_audio_format(&representative.5)?,
                     duration_ms: CoreDurationMillis(duration_ms),
-                    frame_count: representative.2 / 2,
+                    frame_count: representative.3,
                     byte_length: Some(representative.2),
                 },
                 dropped_live_frames: 0,
@@ -569,8 +593,12 @@ impl MeetingRuntimeStorage for SqliteMeetingRuntimeStorage {
                 "INSERT OR IGNORE INTO session_segment_contracts (session_name, segment_index, segment_id, contract_json) VALUES (?1, ?2, ?3, ?4)",
                 params![session_id.as_ref(), ordinal, projection.segment_id, serde_json::to_string(&contract)?],
             )?;
-            for (lane, path, _, _) in projection.lanes {
-                let kind = format!("audio_{}_pcm", safe_file_component(lane.as_ref()));
+            for (lane, path, _, _, artifact_suffix, _) in projection.lanes {
+                let kind = format!(
+                    "audio_{}_{}",
+                    safe_file_component(lane.as_ref()),
+                    artifact_suffix
+                );
                 tx.execute(
                     "INSERT INTO session_artifacts (session_name, kind, ordinal, path, retention_class, created_at, expires_at) VALUES (?1, ?2, ?3, ?4, 'durable', ?5, NULL) ON CONFLICT(session_name, kind, ordinal) DO UPDATE SET path = excluded.path, retention_class = excluded.retention_class",
                     params![session_id.as_ref(), kind, ordinal, path, chrono::Utc::now().to_rfc3339()],
@@ -583,7 +611,12 @@ impl MeetingRuntimeStorage for SqliteMeetingRuntimeStorage {
 }
 
 fn core_audio_format(format: &AudioFormatV1) -> Result<AudioFormat> {
-    if format.codec != AudioCodecV1::PcmS16Le || format.container != AudioContainerV1::Raw {
+    let supported = matches!(
+        (format.codec, format.container),
+        (AudioCodecV1::PcmS16Le, AudioContainerV1::Raw)
+            | (AudioCodecV1::Opus, AudioContainerV1::PacketStream)
+    );
+    if !supported {
         anyhow::bail!("finalized remote audio uses an unsupported durable format");
     }
     if format.channel_count != 1 || format.sample_rate_hz == 0 {
