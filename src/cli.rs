@@ -1706,9 +1706,8 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
     if !memo_path.exists() && meta.vault_note_path.is_none() {
         std::fs::write(&memo_path, "")?;
     }
-    let parsed = crate::parser::parse_markdown(
+    let parsed = margins_core::TimedMemoDocument::parse_markdown(
         &std::fs::read_to_string(&memo_path).context("failed to read memo")?,
-        &started_at,
     );
     let ordinal = margins_store::legacy::next_segment_index(&margins_dir, &name)?;
     let audio_path = margins_dir.join(format!("{name}_seg{ordinal}.wav"));
@@ -1742,7 +1741,7 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
     )?;
     std::fs::write(margins_dir.join("current"), format!("{name}\n"))?;
     let mic_name = crate::recorder::default_input_device_name().unwrap_or_else(|| "Unknown".into());
-    let mut app = crate::app::App::from_parsed(
+    let mut app = crate::app::App::from_memo(
         parsed,
         memo_path.to_string_lossy().into_owned(),
         started_at,

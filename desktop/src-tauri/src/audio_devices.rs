@@ -1,10 +1,10 @@
-#[cfg(feature = "tauri-app")]
+#[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
 use margins::recorder;
 use serde::Serialize;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::process::Command;
 use std::sync::Arc;
-#[cfg(feature = "tauri-app")]
+#[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
 use std::time::Duration;
 
 #[derive(Serialize)]
@@ -27,7 +27,7 @@ pub(crate) struct SystemAudioTestResult {
 }
 
 pub(crate) fn verify_microphone_authorization() -> Result<(), String> {
-    #[cfg(feature = "tauri-app")]
+    #[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
     match recorder::microphone_authorization().map_err(|error| error.to_string())? {
         recorder::MicrophoneAuthorization::Denied => {
             return Err("Microphone access is denied. Allow Margins in System Settings > Privacy & Security > Microphone, then try again.".to_string());
@@ -57,12 +57,12 @@ pub(crate) fn test_audio_input(
     registry: Arc<crate::device_registry::DeviceRegistry>,
     device_uid: Option<String>,
 ) -> Result<AudioTestResult, String> {
-    #[cfg(not(feature = "tauri-app"))]
+    #[cfg(not(any(feature = "tauri-app", feature = "live-runtime")))]
     {
         let _ = (registry, device_uid);
         return Err("microphone capture is not available in headless server mode".to_string());
     }
-    #[cfg(feature = "tauri-app")]
+    #[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
     {
         verify_microphone_authorization()?;
         let selection =

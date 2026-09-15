@@ -3282,6 +3282,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "margins-live-runtime"
+version = "0.1.0"
+dependencies = [
+ "margins-meeting-protocol",
+]
+
+[[package]]
 name = "margins-media"
 version = "0.1.0"
 dependencies = [

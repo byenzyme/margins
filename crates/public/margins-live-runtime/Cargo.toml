@@ -1,0 +1,13 @@
+[package]
+name = "margins-live-runtime"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Small control seam for a locally running Margins meeting"
+repository = "https://github.com/byenzyme/margins"
+readme = "README.md"
+keywords = ["meeting", "recording", "runtime", "transcription"]
+categories = ["api-bindings"]
+
+[dependencies]
+margins-meeting-protocol = { version = "0.1.0", path = "../margins-meeting-protocol" }

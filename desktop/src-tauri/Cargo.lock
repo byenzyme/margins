@@ -5312,6 +5312,8 @@ dependencies = [
  "libc",
  "libsql-rusqlite",
  "margins",
+ "margins-live-runtime",
+ "margins-meeting-protocol",
  "margins-workflows",
  "matroska-demuxer",
  "notify",
@@ -5344,6 +5346,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "margins-live-runtime"
+version = "0.1.0"
+dependencies = [
+ "margins-meeting-protocol",
+]
+
+[[package]]
 name = "margins-media"
 version = "0.1.0"
 dependencies = [
@@ -5362,6 +5371,15 @@ dependencies = [
  "serde",
  "serde_json",
  "symphonia",
+]
+
+[[package]]
+name = "margins-meeting-protocol"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

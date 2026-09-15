@@ -2644,47 +2644,7 @@ pub(crate) fn idle_recording_status() -> RecordingStatus {
 }
 
 pub(crate) fn export_memo(lines: &[MemoLine]) -> String {
-    let mut out = String::new();
-    for line in lines {
-        if line.text.trim().is_empty() {
-            continue;
-        }
-        if let Some(ordinal) = line.block_ordinal {
-            // Block line (clock-stopped): use [block N] prefix instead of a timestamp.
-            out.push_str(&format!("[block {}] {}\n", ordinal, line.text));
-            continue;
-        }
-        let created = format_elapsed(line.created_secs);
-        let grounding = if line.audio_pending_at_mark {
-            " (audio not live yet)"
-        } else {
-            ""
-        };
-        if let Some(edited) = line.edited_secs {
-            out.push_str(&format!(
-                "[{} ~{}]{} {}\n",
-                created,
-                format_elapsed(edited),
-                grounding,
-                line.text
-            ));
-        } else {
-            out.push_str(&format!("[{}]{} {}\n", created, grounding, line.text));
-        }
-    }
-    out
-}
-
-fn format_elapsed(secs: f64) -> String {
-    let total = secs as i64;
-    let h = total / 3600;
-    let m = (total % 3600) / 60;
-    let s = total % 60;
-    if h > 0 {
-        format!("{:02}:{:02}:{:02}", h, m, s)
-    } else {
-        format!("{:02}:{:02}", m, s)
-    }
+    margins::core::TimedMemoDocument::from_committed(lines.to_vec()).export_markdown()
 }
 
 #[cfg(test)]

@@ -973,6 +973,72 @@ pub fn sync_web_recording_memo(
         })
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebNotepadSnapshot {
+    pub text: String,
+    pub revision: String,
+}
+
+fn web_notepad_snapshot(lines: &[MemoLine]) -> WebNotepadSnapshot {
+    let document = margins::core::TimedMemoDocument::from_committed(lines.to_vec());
+    WebNotepadSnapshot {
+        text: document.plain_text(),
+        revision: document.revision(),
+    }
+}
+
+pub fn get_web_recording_notepad(
+    state: &Arc<AppState>,
+    recording_id: &str,
+    owner_id: &str,
+) -> Result<WebNotepadSnapshot, String> {
+    let active = state.web_sessions.lock().unwrap();
+    let ws = active
+        .get(recording_id)
+        .ok_or_else(|| format!("No active web recording for ID '{recording_id}'"))?;
+    ensure_owner(ws, owner_id)?;
+    Ok(web_notepad_snapshot(&ws.memo_lines))
+}
+
+/// Reconcile the whole hosted notepad through the same timestamp-preserving
+/// model used by the TUI and local live bridge.
+pub fn update_web_recording_notepad(
+    state: &Arc<AppState>,
+    recording_id: &str,
+    owner_id: &str,
+    expected_revision: &str,
+    text: &str,
+) -> Result<WebNotepadSnapshot, String> {
+    let update = |ws: &mut WebRecordingState| {
+        ensure_owner(ws, owner_id)?;
+        let current = web_notepad_snapshot(&ws.memo_lines);
+        if current.revision != expected_revision {
+            return Err(
+                "The notepad changed somewhere else. Review the latest text and try again."
+                    .to_string(),
+            );
+        }
+        let elapsed = ws.started_at.elapsed().unwrap_or_default().as_secs_f64();
+        let moment = if ws.paused {
+            margins::core::MemoMoment::paused(elapsed, 1)
+        } else {
+            margins::core::MemoMoment::recording(elapsed)
+        };
+        let lines = margins::core::TimedMemoDocument::from_committed(ws.memo_lines.clone())
+            .reconcile_plain_text(text, moment)
+            .into_lines();
+        crate::persist_live_memo(&ws.work_dir, &ws.session_name, &lines)?;
+        ws.memo_lines = lines;
+        Ok(web_notepad_snapshot(&ws.memo_lines))
+    };
+    let mut active = state.web_sessions.lock().unwrap();
+    active
+        .get_mut(recording_id)
+        .ok_or_else(|| format!("No active web recording for ID '{recording_id}'"))
+        .and_then(update)
+}
+
 pub fn active_web_recording_status(
     state: &Arc<AppState>,
 ) -> Option<crate::recording::RecordingStatus> {
@@ -2368,6 +2434,52 @@ mod tests {
             .is_empty());
 
         discard_web_recording(&state, "memo-owned", "memo-owner").unwrap();
+        let _ = std::fs::remove_dir_all(&work_dir);
+    }
+
+    #[test]
+    fn whole_notepad_updates_reuse_the_shared_timed_memo_model() {
+        let work_dir = make_test_dir("whole-notepad");
+        let state = make_state(work_dir.clone());
+        let original = MemoLine {
+            text: "Keep this anchor".to_string(),
+            created_secs: 3.0,
+            edited_secs: None,
+            draft_started_secs: None,
+            audio_pending_at_mark: false,
+            block_ordinal: None,
+        };
+        insert_test_recording(
+            &state,
+            &work_dir,
+            "notepad-owned",
+            "notepad-owner",
+            vec![original.clone()],
+        );
+        let before = get_web_recording_notepad(&state, "notepad-owned", "notepad-owner").unwrap();
+        let after = update_web_recording_notepad(
+            &state,
+            "notepad-owned",
+            "notepad-owner",
+            &before.revision,
+            "Keep this anchor\nA new thought",
+        )
+        .unwrap();
+        assert_eq!(after.text, "Keep this anchor\nA new thought");
+        let active = state.web_sessions.lock().unwrap();
+        assert_eq!(active["notepad-owned"].memo_lines[0], original);
+        assert!(active["notepad-owned"].memo_lines[1].created_secs >= 0.0);
+        drop(active);
+        assert!(update_web_recording_notepad(
+            &state,
+            "notepad-owned",
+            "notepad-owner",
+            &before.revision,
+            "stale",
+        )
+        .unwrap_err()
+        .contains("changed somewhere else"));
+        discard_web_recording(&state, "notepad-owned", "notepad-owner").unwrap();
         let _ = std::fs::remove_dir_all(&work_dir);
     }
 

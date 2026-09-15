@@ -203,7 +203,7 @@ pub(crate) fn settings_path() -> PathBuf {
         .join("settings.json")
 }
 
-fn app_data_dir() -> PathBuf {
+pub(crate) fn app_data_dir() -> PathBuf {
     dirs::data_dir()
         .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("."))

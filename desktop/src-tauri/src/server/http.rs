@@ -117,6 +117,8 @@ fn hosted_capture_command(command: &str) -> bool {
             | "heartbeat_web_recording"
             | "claim_web_recording_recovery"
             | "hydrate_web_recording_memo"
+            | "update_web_recording_notepad"
+            | "get_web_recording_notepad"
             | "request_backchannel_for_memo"
             | "steer_backchannel_for_memo"
     )

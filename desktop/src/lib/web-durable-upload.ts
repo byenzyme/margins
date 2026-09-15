@@ -2,6 +2,7 @@ export interface WebDurableUploadOptions {
   maxQueuedChunks?: number;
   uploadTimeoutMs?: number;
   closeDeadlineMs?: number;
+  initialSequence?: number;
 }
 
 export type DurableChunkUpload = (chunk: Blob, sequence: number, signal: AbortSignal) => Promise<void>;
@@ -58,7 +59,7 @@ export class WebDurableUploadQueue {
   private worker: Promise<void> | null = null;
   private active: AbortController | null = null;
   private accepting = true;
-  private nextSequence = 0;
+  private nextSequence: number;
 
   constructor(
     upload: DurableChunkUpload,
@@ -70,6 +71,7 @@ export class WebDurableUploadQueue {
     this.maxQueuedChunks = Math.max(1, options.maxQueuedChunks ?? 8);
     this.uploadTimeoutMs = Math.max(1, options.uploadTimeoutMs ?? 10_000);
     this.closeDeadlineMs = Math.max(1, options.closeDeadlineMs ?? 12_000);
+    this.nextSequence = Math.max(0, Math.trunc(options.initialSequence ?? 0));
   }
 
   get pendingCount(): number {

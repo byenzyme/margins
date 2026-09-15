@@ -32,6 +32,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
 
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
       - name: Assert native runner architecture
         run: test "$(uname -m)" = "${{ matrix.host_arch }}"
 
@@ -45,6 +51,32 @@ jobs:
           --no-default-features --features "${{ matrix.features }}"
           --target "${{ matrix.target }}"
 
+      - name: Build the windowless meeting runtime
+        if: runner.os == 'macOS'
+        run: >-
+          cargo build --release --locked
+          --manifest-path desktop/src-tauri/Cargo.toml
+          --target-dir target
+          --no-default-features --features live-runtime
+          --bin margins-live
+          --target "${{ matrix.target }}"
+
+      - name: Build project recording service web assets
+        run: npm ci --prefix desktop && npm run --prefix desktop build
+
+      - name: Compile the project recording service
+        run: >-
+          cargo build --release --locked
+          --manifest-path desktop/src-tauri/Cargo.toml
+          --target-dir target
+          --no-default-features --features server
+          --bin margins-server
+          --target "${{ matrix.target }}"
+
+      - name: Verify the meeting runtime permission metadata
+        if: runner.os == 'macOS'
+        run: scripts/verify-margins-live-macos.sh "target/${{ matrix.target }}/release/margins-live"
+
       - name: Package and smoke the exact archive binary
         env:
           TARGET: ${{ matrix.target }}
@@ -54,7 +86,11 @@ jobs:
           ARCHIVE="margins-${VERSION}-${TARGET}.tar.gz"
           mkdir packaged-cli
           install -m 0755 "target/${TARGET}/release/margins-private" packaged-cli/margins
-          tar -czf "$ARCHIVE" -C packaged-cli margins
+          install -m 0755 "target/${TARGET}/release/margins-server" packaged-cli/margins-server
+          if [[ "$TARGET" == "aarch64-apple-darwin" ]]; then
+            install -m 0755 "target/${TARGET}/release/margins-live" packaged-cli/margins-live
+          fi
+          tar -czf "$ARCHIVE" -C packaged-cli .
           if command -v shasum >/dev/null; then
             shasum -a 256 "$ARCHIVE" > "${ARCHIVE}.sha256"
           else
@@ -63,6 +99,11 @@ jobs:
           mkdir packaged-smoke
           tar -xzf "$ARCHIVE" -C packaged-smoke
           scripts/smoke-official-cli.sh packaged-smoke/margins
+          if [[ "$TARGET" == "aarch64-apple-darwin" ]]; then
+            scripts/verify-margins-live-macos.sh packaged-smoke/margins-live
+            packaged-smoke/margins-live capabilities \
+              | grep -Fq '"protocol_version":1'
+          fi
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

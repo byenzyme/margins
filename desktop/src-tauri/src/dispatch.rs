@@ -203,6 +203,15 @@ struct SyncMemoArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct UpdateWebRecordingNotepadArgs {
+    recording_id: String,
+    owner_id: String,
+    expected_revision: String,
+    text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CheckpointMemoLineArgs {
     lines: Vec<crate::MemoLine>,
     #[serde(alias = "committed_index")]
@@ -633,7 +642,11 @@ pub(crate) async fn dispatch(ctx: &Ctx, command: &str, args: Value) -> Result<Va
                     }
                 }
                 crate::validate_session_name(&a.name)?;
-                let work_dir = crate::work_dir_for_project_id(&ctx.state, a.project_id.as_deref());
+                // Hosted capture is already scoped by this margins-server
+                // process. Its AppState root is authoritative; machine-global
+                // desktop project preferences must never redirect browser
+                // audio into a different vault.
+                let work_dir = ctx.state.work_dir.lock().unwrap().clone();
                 let margins_dir = work_dir.join(".margins");
                 std::fs::create_dir_all(&margins_dir).map_err(|e| e.to_string())?;
                 let name = crate::unique_session_name(&work_dir, &margins_dir, &a.name);
@@ -872,6 +885,32 @@ pub(crate) async fn dispatch(ctx: &Ctx, command: &str, args: Value) -> Result<Va
                     .as_deref()
                     .ok_or("hydrate_web_recording_memo requires recordingId")?,
                 a.owner_id.as_deref(),
+            )?)
+        }
+        "update_web_recording_notepad" => {
+            if !ctx.sink.is_web() {
+                return Err("update_web_recording_notepad is only available in hosted mode".into());
+            }
+            let a = de!(UpdateWebRecordingNotepadArgs);
+            ok!(web_session::update_web_recording_notepad(
+                &ctx.state,
+                &a.recording_id,
+                &a.owner_id,
+                &a.expected_revision,
+                &a.text,
+            )?)
+        }
+        "get_web_recording_notepad" => {
+            if !ctx.sink.is_web() {
+                return Err("get_web_recording_notepad is only available in hosted mode".into());
+            }
+            let a = de!(SessionRecordingArgs);
+            ok!(web_session::get_web_recording_notepad(
+                &ctx.state,
+                a.recording_id
+                    .as_deref()
+                    .ok_or("get_web_recording_notepad requires recordingId")?,
+                a.owner_id.as_deref().unwrap_or_default(),
             )?)
         }
         "request_backchannel_for_memo" => {

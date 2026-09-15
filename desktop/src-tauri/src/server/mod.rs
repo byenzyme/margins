@@ -22,6 +22,7 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 ///   - `MARGINS_HOST`     — listen address (default: 127.0.0.1)
 ///   - `MARGINS_DATA_DIR` — data / token directory (default: ~/.margins-app)
 ///   - `MARGINS_PROFILE`  — settings profile (default: "default")
+///   - `MARGINS_WORK_DIR` — explicit project root for the hosted capture store
 ///
 /// Blocks until the server exits.
 pub fn run() -> anyhow::Result<()> {
@@ -81,8 +82,18 @@ async fn run_async() -> anyhow::Result<()> {
     .map_err(anyhow::Error::msg)?;
 
     // --- Load settings (same logic as desktop lib.rs startup) ---
-    let settings = crate::settings::load_settings();
-    let work_dir = crate::settings::default_work_dir();
+    let explicit_work_dir = std::env::var("MARGINS_WORK_DIR").ok().map(PathBuf::from);
+    let work_dir = explicit_work_dir
+        .clone()
+        .unwrap_or_else(crate::settings::default_work_dir);
+    let mut settings = crate::settings::load_settings();
+    if explicit_work_dir.is_some() {
+        // A project-scoped server must not let the user's desktop vault
+        // preference redirect capture away from the project selected by its
+        // launcher. This override is process-local and is never persisted.
+        settings.vault_path = Some(work_dir.to_string_lossy().into_owned());
+        settings.active_project_id = None;
+    }
     std::fs::create_dir_all(&work_dir)?;
 
     // --- Build shared app state ---

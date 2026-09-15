@@ -1,9 +1,37 @@
 fn main() {
+    embed_live_runtime_info_plist();
+
     #[cfg(feature = "tauri-app")]
     {
         ensure_sidecar("margins-cli", "scripts/build-margins-sidecar.sh");
         tauri_build::build()
     }
+}
+
+/// A command-line executable has no app bundle from which macOS can read its
+/// privacy purpose strings. Put the live runtime's plist in the Mach-O itself
+/// so microphone and system-audio permission prompts work when bb launches the
+/// standalone binary.
+fn embed_live_runtime_info_plist() {
+    println!("cargo:rerun-if-changed=MarginsLive-Info.plist");
+
+    let targets_macos = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos");
+    let builds_live_runtime = std::env::var_os("CARGO_FEATURE_LIVE_RUNTIME").is_some();
+    if !targets_macos || !builds_live_runtime {
+        return;
+    }
+
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");
+    let plist = std::path::Path::new(&manifest_dir).join("MarginsLive-Info.plist");
+    assert!(
+        plist.is_file(),
+        "margins-live information property list is missing: {}",
+        plist.display()
+    );
+    println!(
+        "cargo:rustc-link-arg-bin=margins-live=-Wl,-sectcreate,__TEXT,__info_plist,{}",
+        plist.display()
+    );
 }
 
 /// tauri.conf.json declares externalBin sidecars, so the target-triple-suffixed

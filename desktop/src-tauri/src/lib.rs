@@ -13,6 +13,7 @@ mod audio_devices;
 mod backchannel_ai;
 mod calendar;
 pub mod ctx;
+mod desktop_live;
 mod device_registry;
 mod dispatch;
 mod editor;
@@ -336,20 +337,7 @@ impl Drop for DistillCancelGuard {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-struct MemoLine {
-    text: String,
-    created_secs: f64,
-    edited_secs: Option<f64>,
-    #[serde(default)]
-    draft_started_secs: Option<f64>,
-    #[serde(default)]
-    audio_pending_at_mark: bool,
-    /// null = timed (clock was running); 0 = prep block; N = pause block after segment N.
-    /// When non-null, created_secs is NOT a timeline mark.
-    #[serde(default)]
-    block_ordinal: Option<u32>,
-}
+type MemoLine = margins::core::TimedMemoLine;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct BackchannelSuggestionEvent {
@@ -2167,7 +2155,7 @@ fn provision_recall(vault: &Path) -> Result<margins::recall::SearchHandle, Strin
         .map_err(|e| format!("recall provisioning failed: {e:#}"))
 }
 
-#[cfg(feature = "recall")]
+#[cfg(any(feature = "recall", feature = "live-runtime", feature = "server"))]
 fn resolve_recall_workspace(
     path: &Path,
 ) -> Result<margins_workflows::workspace::ResolvedWorkspace, String> {
@@ -3912,10 +3900,7 @@ async fn start_recording(
 
 #[cfg(feature = "tauri-app")]
 #[tauri::command]
-fn cancel_recording_startup(
-    app: AppHandle,
-    state: tauri::State<'_, Arc<AppState>>,
-) -> bool {
+fn cancel_recording_startup(app: AppHandle, state: tauri::State<'_, Arc<AppState>>) -> bool {
     let result = cancel_recording_startup_impl(&state);
     aux_windows::reconcile_from_state(&app, &state);
     result
@@ -4085,30 +4070,13 @@ fn append_active_pad_line(
     text: String,
 ) -> Result<(), String> {
     validate_session_name(&session_name)?;
-    let text = text.trim().to_string();
-    if text.is_empty() {
-        return Err("A Pad mark cannot be empty.".to_string());
-    }
-
-    let mut guard = state.recording.lock().unwrap();
-    let recording = guard.as_mut().ok_or("There is no active capture.")?;
-    ensure_memo_session(&session_name, &recording.session_name)?;
-    let status = recording_status_from_state(recording);
-    let block_ordinal = recording
-        .paused
-        .then(|| recording.segment_index.saturating_add(1) as u32);
-    let mut lines = recording.memo_lines.clone();
-    lines.push(MemoLine {
-        text,
-        created_secs: status.elapsed_secs,
-        edited_secs: None,
-        draft_started_secs: None,
-        audio_pending_at_mark: false,
-        block_ordinal,
-    });
-    persist_live_memo(&recording.work_dir, &recording.session_name, &lines)?;
-    recording.memo_lines = lines;
-    Ok(())
+    desktop_live::append_active_memo_text(&state, &session_name, text).map_err(|error| {
+        if error == "Memo text cannot be empty." {
+            "A Pad mark cannot be empty.".to_string()
+        } else {
+            error
+        }
+    })
 }
 
 #[cfg(feature = "tauri-app")]
@@ -4751,7 +4719,7 @@ async fn run_backchannel_steer_request(
     }
 }
 
-fn persist_live_memo(
+pub(crate) fn persist_live_memo(
     work_dir: &std::path::Path,
     session_name: &str,
     lines: &[MemoLine],
@@ -12548,6 +12516,11 @@ pub fn run() {
         )
         .setup(move |app| {
             apply_macos_window_material(app);
+            if let Some(state) = app.try_state::<Arc<AppState>>() {
+                if let Err(error) = desktop_live::start_loopback_api(Arc::clone(&*state)) {
+                    eprintln!("margins: could not start local companion service: {error}");
+                }
+            }
             let toggle = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyN);
             if let Err(e) = app.global_shortcut().register(toggle) {
                 eprintln!("margins: could not register global shortcut CmdShiftN (another app may have claimed it): {e}");
@@ -12799,8 +12772,65 @@ pub fn run() {
             open_note_target_in_obsidian,
             get_capabilities,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running margins desktop");
+        .build(tauri::generate_context!())
+        .expect("error while building margins desktop")
+        .run(|_, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                desktop_live::shutdown_loopback_api();
+            }
+        });
+}
+
+/// Run the native recorder as a small local service with no application
+/// window. Local integrations discover it through the same private V1 file as
+/// the desktop compatibility adapter.
+#[cfg(feature = "live-runtime")]
+pub fn run_live_runtime() -> anyhow::Result<()> {
+    configure_pi_agent_dir();
+    let settings = load_settings();
+    let fallback_work_dir = default_work_dir();
+    let work_dir = settings_work_dir(&settings, &fallback_work_dir);
+    let state = build_app_state(work_dir, settings.clone());
+
+    let registry = Arc::clone(&state.device_registry);
+    std::thread::Builder::new()
+        .name("margins-device-watcher".to_string())
+        .spawn(move || device_registry::run_device_watcher(registry, |_| {}))?;
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async move {
+            desktop_live::start_cli_loopback_api(Arc::clone(&state)).map_err(anyhow::Error::msg)?;
+            live_backchannel::prewarm_live_models(settings);
+            eprintln!("margins-live: ready");
+
+            wait_for_live_runtime_shutdown().await?;
+            if state.recording.lock().unwrap().is_some() {
+                let ctx = ctx::Ctx::no_emit(Arc::clone(&state));
+                if let Err(error) = stop_recording_impl(&ctx).await {
+                    eprintln!("margins-live: could not finish the active meeting: {error}");
+                }
+            }
+            desktop_live::shutdown_loopback_api();
+            Ok(())
+        })
+}
+
+#[cfg(all(feature = "live-runtime", unix))]
+async fn wait_for_live_runtime_shutdown() -> anyhow::Result<()> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result?,
+        _ = terminate.recv() => {},
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "live-runtime", not(unix)))]
+async fn wait_for_live_runtime_shutdown() -> anyhow::Result<()> {
+    tokio::signal::ctrl_c().await?;
+    Ok(())
 }
 
 #[cfg(all(feature = "tauri-app", target_os = "macos"))]

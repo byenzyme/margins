@@ -28,6 +28,7 @@ recall-local-model = ["recall", "margins/recall-local-model"]
 tauri-app = [
   "dep:tauri",
   "dep:tauri-build",
+  "dep:axum",
   "dep:tauri-plugin-shell",
   "dep:tauri-plugin-dialog",
   "dep:tauri-plugin-fs",
@@ -47,6 +48,9 @@ parakeet-asr-dynamic = ["parakeet-asr", "margins/parakeet-asr-dynamic"]
 # Normal hosted browser composition: HTTP server, in-process recall, and live
 # Parakeet loaded from an explicitly provisioned ONNX Runtime + model bundle.
 hosted-web = ["server", "recall", "parakeet-asr-dynamic"]
+# Headless native meeting runtime used by local integrations such as bb. It
+# keeps the recorder and local API alive without starting a desktop window.
+live-runtime = ["dep:axum", "dep:cpal", "margins/audio-capture", "coreml-asr"]
 rust-diarization = ["margins/polyvoice-diarization", "dep:polyvoice"]
 rust-diarization-coreml = ["rust-diarization", "margins/polyvoice-coreml", "polyvoice/coreml"]
 devtools = ["tauri-app", "tauri/devtools"]
@@ -57,11 +61,18 @@ name = "margins-server"
 path = "src/server_main.rs"
 required-features = ["server"]
 
+[[bin]]
+name = "margins-live"
+path = "src/live_runtime_main.rs"
+required-features = ["live-runtime"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [], optional = true }
 
 [dependencies]
 margins = { path = "../..", default-features = false }
+margins-live-runtime = { path = "../../crates/public/margins-live-runtime" }
+margins-meeting-protocol = { path = "../../crates/public/margins-meeting-protocol" }
 margins-workflows = { path = "../../crates/public/margins-workflows" }
 polyvoice = { version = "0.6.7", optional = true, features = ["onnx", "download"] }
 tauri = { version = "2", features = ["macos-private-api"], optional = true }

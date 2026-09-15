@@ -1,0 +1,88 @@
+{
+  "discovery": {
+    "protocol_version": 1,
+    "runtime": "margins_cli",
+    "profile": "default",
+    "pid": 42,
+    "base_url": "http://127.0.0.1:49152",
+    "token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "permissions": {
+      "loopback_only": true,
+      "private_file": true
+    },
+    "endpoints": {
+      "snapshot": "/v1/live/snapshot",
+      "start": "/v1/live/start",
+      "pause": "/v1/live/pause",
+      "resume": "/v1/live/resume",
+      "stop": "/v1/live/stop",
+      "update_notepad": "/v1/live/notepad"
+    },
+    "generated_at_unix_ms": 1800000000000
+  },
+  "recording_snapshot": {
+    "protocol_version": 1,
+    "server_unix_ms": 1800000000100,
+    "session": {
+      "session_id": "customer-call",
+      "status": "recording",
+      "elapsed_ms": 12345,
+      "generation": 2
+    },
+    "health": {
+      "capture_phase": "recording",
+      "tap_status": "ok",
+      "system_audio_expected": true,
+      "system_audio_observed": true,
+      "transcript_freshness": {
+        "decoded_until_ms": 11000,
+        "committed_until_ms": 10000,
+        "updated_at_unix_ms": 1800000000000,
+        "age_ms": 100
+      }
+    },
+    "rolling_transcript": [
+      {
+        "at_ms": 10000,
+        "text": "[00:10] user: hello"
+      }
+    ],
+    "memo_lines": [
+      {
+        "index": 0,
+        "at_ms": 12345,
+        "text": "Follow up"
+      }
+    ],
+    "notepad_revision": "v1-abc"
+  },
+  "idle_snapshot": {
+    "protocol_version": 1,
+    "server_unix_ms": 1800000000100,
+    "session": null,
+    "health": {
+      "capture_phase": "idle",
+      "tap_status": "not_expected",
+      "system_audio_expected": false,
+      "system_audio_observed": false
+    },
+    "notepad_revision": "v1-empty"
+  },
+  "start_request": {
+    "operation_id": "op_start_1",
+    "name": "Customer call",
+    "project_id": "project-1"
+  },
+  "session_request": {
+    "operation_id": "pause-1",
+    "session_id": "customer-call",
+    "expected_generation": 2
+  },
+  "notepad_request": {
+    "operation_id": "notepad-1",
+    "session_id": "customer-call",
+    "expected_generation": 2,
+    "expected_notepad_revision": "v1-abc",
+    "text": "Follow up\nSend details"
+  }
+}
