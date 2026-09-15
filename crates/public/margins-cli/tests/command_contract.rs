@@ -9,7 +9,7 @@ use margins_core::{
     CaptureLaneSnapshot, CaptureLaneState, CaptureObserver, CaptureProvider, CaptureRequest,
     CaptureSnapshot, CaptureState, PermissionState, TranscriptError,
 };
-use margins_store::legacy;
+use margins_store::canonical;
 use margins_workflows::project::{ProjectSource, ResolvedProject};
 use margins_workflows::workspace::{self, GmailCollectionSelector, WorkspaceBinding};
 use std::io::{Read, Write as IoWrite};
@@ -2505,17 +2505,17 @@ fn seed_inspectable_session(vault: &Path, meeting_id: &str, marker: &str) {
         format!("# {marker}"),
     )
     .unwrap();
-    legacy::create_session(
+    canonical::create_session(
         &margins_dir,
         meeting_id,
         &Local::now(),
         &format!(".margins/{meeting_id}.md"),
     )
     .unwrap();
-    legacy::upsert_session_artifact(
+    canonical::upsert_session_artifact(
         &margins_dir,
         meeting_id,
-        legacy::SESSION_ARTIFACT_KIND_TRANSCRIPT,
+        canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT,
         0,
         &format!(".margins/{meeting_id}_aligned.md"),
         "durable",
@@ -2528,14 +2528,14 @@ fn seed_checkpoint_session(vault: &Path, meeting_id: &str, terminal: bool, decod
     let margins_dir = vault.join(".margins");
     std::fs::create_dir_all(&margins_dir).unwrap();
     std::fs::write(margins_dir.join(format!("{meeting_id}.md")), "[00:01] memo").unwrap();
-    legacy::create_session(
+    canonical::create_session(
         &margins_dir,
         meeting_id,
         &Local::now(),
         &format!(".margins/{meeting_id}.md"),
     )
     .unwrap();
-    legacy::add_segment(
+    canonical::add_segment(
         &margins_dir,
         meeting_id,
         0,
@@ -2994,6 +2994,80 @@ fn unavailable_capture_is_stable_and_precedes_all_mutation() {
     }
 }
 
+#[test]
+fn explicit_workspace_new_uses_declared_capture_store_from_unrelated_cwd() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let margins_home = temp.path().join("state");
+    let notes = temp.path().join("notes");
+    let unrelated = temp.path().join("unrelated");
+    let legacy_project = temp.path().join("legacy-project");
+    std::fs::create_dir_all(&notes).unwrap();
+    std::fs::create_dir_all(&unrelated).unwrap();
+    std::fs::create_dir_all(&legacy_project).unwrap();
+    let old_margins_home = std::env::var_os("MARGINS_HOME");
+    std::env::set_var("MARGINS_HOME", &margins_home);
+    workspace::create_workspace(&margins_home, "practice", None, &notes).unwrap();
+    let mut services = services(&legacy_project);
+    services.capture = Arc::new(FakeCapture);
+
+    let (result, _stdout, stderr) = invoke(
+        &services,
+        &unrelated,
+        &[
+            "margins",
+            "--workspace",
+            "practice",
+            "new",
+            "--title",
+            "Remote parity",
+        ],
+    );
+    restore_env("MARGINS_HOME", old_margins_home.as_ref());
+
+    assert!(result.is_ok(), "{stderr}");
+    let canonical = margins_home.join("workspaces/practice/captures/.margins");
+    assert!(canonical.join("2026-08-10-12-00-00.md").is_file());
+    assert!(canonical.join("sessions.sqlite").is_file());
+    assert!(!unrelated.join(".margins").exists());
+    assert!(!legacy_project.join(".margins").exists());
+    assert!(!notes.join(".margins").exists());
+}
+
+#[test]
+fn explicit_workspace_rejects_project_before_capture_side_effects() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let margins_home = temp.path().join("state");
+    let notes = temp.path().join("notes");
+    std::fs::create_dir_all(&notes).unwrap();
+    let old_margins_home = std::env::var_os("MARGINS_HOME");
+    std::env::set_var("MARGINS_HOME", &margins_home);
+    workspace::create_workspace(&margins_home, "practice", None, &notes).unwrap();
+    let mut services = services(temp.path());
+    services.capture = Arc::new(FakeCapture);
+
+    let (result, _stdout, stderr) = invoke(
+        &services,
+        temp.path(),
+        &[
+            "margins",
+            "--workspace",
+            "practice",
+            "--project",
+            "test",
+            "new",
+        ],
+    );
+    restore_env("MARGINS_HOME", old_margins_home.as_ref());
+
+    assert_eq!(result.unwrap_err().code(), "invalid_arguments");
+    assert!(stderr.contains("cannot be combined"));
+    assert!(!margins_home
+        .join("workspaces/practice/captures/.margins")
+        .exists());
+}
+
 #[derive(Default)]
 struct FakeCapture;
 
@@ -3180,7 +3254,7 @@ fn injected_capture_keeps_one_stable_id_across_attaches() {
     let current = std::fs::read_to_string(margins_dir.join("current")).unwrap();
     let id = current.trim();
     assert_eq!(id, "2026-08-10-12-00-00");
-    let meta = legacy::get_session_meta(&margins_dir, id).unwrap();
+    let meta = canonical::get_session_meta(&margins_dir, id).unwrap();
     assert_eq!(meta.title.as_deref(), Some("Stable"));
     assert_eq!(
         meta.segments
@@ -3189,7 +3263,7 @@ fn injected_capture_keeps_one_stable_id_across_attaches() {
             .collect::<Vec<_>>(),
         vec![0, 1, 2]
     );
-    assert_eq!(legacy::list_sessions(&margins_dir).unwrap().len(), 1);
+    assert_eq!(canonical::list_sessions(&margins_dir).unwrap().len(), 1);
 }
 
 #[test]
@@ -3283,8 +3357,8 @@ fn unavailable_process_backends_do_not_replace_existing_outputs() {
     let margins_dir = project.join(".margins");
     std::fs::create_dir_all(&margins_dir).unwrap();
     let started = Local.with_ymd_and_hms(2026, 8, 10, 10, 0, 0).unwrap();
-    legacy::create_session(&margins_dir, "meeting", &started, ".margins/meeting.md").unwrap();
-    legacy::add_segment(
+    canonical::create_session(&margins_dir, "meeting", &started, ".margins/meeting.md").unwrap();
+    canonical::add_segment(
         &margins_dir,
         "meeting",
         0,
@@ -3320,8 +3394,8 @@ fn xml_and_json_presenters_escape_user_controlled_values() {
     let services = services(temp.path());
     let margins_dir = temp.path().join(".margins");
     let started = Local.with_ymd_and_hms(2026, 8, 10, 10, 0, 0).unwrap();
-    legacy::create_session(&margins_dir, "meeting", &started, ".margins/meeting.md").unwrap();
-    legacy::set_title(
+    canonical::create_session(&margins_dir, "meeting", &started, ".margins/meeting.md").unwrap();
+    canonical::set_title(
         &margins_dir,
         "meeting",
         Some("A <title> & \"quote\"".into()),
@@ -3360,14 +3434,14 @@ fn align_only_does_not_consult_unavailable_asr() {
     let margins_dir = temp.path().join(".margins");
     let memo = temp.path().join("memo.md");
     std::fs::write(&memo, "[00:01] checkpoint").unwrap();
-    legacy::create_session(
+    canonical::create_session(
         &margins_dir,
         "meeting",
         &Local::now(),
         &memo.to_string_lossy(),
     )
     .unwrap();
-    legacy::add_segment(
+    canonical::add_segment(
         &margins_dir,
         "meeting",
         0,
@@ -3399,14 +3473,14 @@ fn archive_commands_route_new_aligned_output_to_visible_default_folder() {
     let memo = margins_dir.join("meeting.md");
     std::fs::create_dir_all(&margins_dir).unwrap();
     std::fs::write(&memo, "[00:01] checkpoint").unwrap();
-    legacy::create_session(
+    canonical::create_session(
         &margins_dir,
         "meeting",
         &Local::now(),
         ".margins/meeting.md",
     )
     .unwrap();
-    legacy::add_segment(
+    canonical::add_segment(
         &margins_dir,
         "meeting",
         0,
@@ -3436,7 +3510,7 @@ fn archive_commands_route_new_aligned_output_to_visible_default_folder() {
     assert!(temp.path().join("_margins/meeting_aligned.md").is_file());
     assert!(!margins_dir.join("meeting_aligned.md").exists());
     assert_eq!(
-        legacy::list_session_artifacts(&margins_dir, "meeting").unwrap()[0].path,
+        canonical::list_session_artifacts(&margins_dir, "meeting").unwrap()[0].path,
         "_margins/meeting_aligned.md"
     );
 
@@ -3467,17 +3541,17 @@ fn session_catalog_and_artifact_commands_emit_vault_anchored_paths() {
         r#"{"terminal":true,"transcripts":[{"words":[{"channel":0,"start_ms":500,"end_ms":900,"text":" hello"}]}]}"#,
     )
     .unwrap();
-    legacy::create_session(
+    canonical::create_session(
         &margins_dir,
         "meeting",
         &Local::now(),
         ".margins/meeting.md",
     )
     .unwrap();
-    legacy::upsert_session_artifact(
+    canonical::upsert_session_artifact(
         &margins_dir,
         "meeting",
-        legacy::SESSION_ARTIFACT_KIND_TRANSCRIPT,
+        canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT,
         0,
         ".margins/meeting_seg0.live-transcript.json",
         "durable",
@@ -3537,7 +3611,7 @@ fn bare_margins_creates_without_a_current_session_then_resumes_it() {
     let margins_dir = temp.path().join(".margins");
     let current = std::fs::read_to_string(margins_dir.join("current")).unwrap();
     let id = current.trim();
-    let first_meta = legacy::get_session_meta(&margins_dir, id).unwrap();
+    let first_meta = canonical::get_session_meta(&margins_dir, id).unwrap();
     assert_eq!(first_meta.segments.len(), 1);
 
     let (second, _, second_stderr) = invoke(&services, temp.path(), &["margins"]);
@@ -3545,7 +3619,7 @@ fn bare_margins_creates_without_a_current_session_then_resumes_it() {
 
     let second_current = std::fs::read_to_string(margins_dir.join("current")).unwrap();
     assert_eq!(second_current.trim(), id);
-    let resumed_meta = legacy::get_session_meta(&margins_dir, id).unwrap();
+    let resumed_meta = canonical::get_session_meta(&margins_dir, id).unwrap();
     assert_eq!(
         resumed_meta
             .segments
@@ -3554,7 +3628,7 @@ fn bare_margins_creates_without_a_current_session_then_resumes_it() {
             .collect::<Vec<_>>(),
         vec![0, 1]
     );
-    assert_eq!(legacy::list_sessions(&margins_dir).unwrap().len(), 1);
+    assert_eq!(canonical::list_sessions(&margins_dir).unwrap().len(), 1);
 }
 
 #[test]

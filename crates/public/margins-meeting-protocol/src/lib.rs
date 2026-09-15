@@ -28,6 +28,9 @@ pub const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
 
 /// V1 path prefix for the desktop live loopback API.
 pub const DESKTOP_LIVE_API_PREFIX_V1: &str = "/v1/live";
+/// Versioned Workspace authority routes. This surface is deliberately
+/// separate from desktop SPA dispatch and generic invoke commands.
+pub const WORKSPACE_API_PREFIX_V1: &str = "/v1";
 
 /// A local, message-level V1 validation failure.
 ///
@@ -147,6 +150,10 @@ string_id!(/// Stable ID for a generated memo.
     MemoId);
 string_id!(/// Stable ID for a generated artifact.
     ArtifactId);
+string_id!(/// Stable identity returned by one Margins authority.
+    InstanceId);
+string_id!(/// Stable Workspace identity resolved by the authority.
+    WorkspaceId);
 
 string_id!(/// Stable idempotency key for one live API write.
     LiveOperationId);
@@ -1116,6 +1123,122 @@ impl CaptureProvenanceHopV1 {
         }
         Ok(())
     }
+}
+
+/// Negotiated limits for the Workspace authority API. Values are advertised
+/// so clients can bound queues and reject unsupported capture before devices
+/// start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceLimitsV1 {
+    pub max_chunk_bytes: u64,
+    pub max_in_flight_chunks: u32,
+    pub max_event_page: u32,
+    pub max_import_bytes: u64,
+    pub spool_reserve_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCapabilitiesV1 {
+    pub protocol_version: ProtocolVersionV1,
+    pub instance_id: InstanceId,
+    pub workspace_id: WorkspaceId,
+    pub limits: WorkspaceLimitsV1,
+    pub capture_formats: Vec<AudioFormatV1>,
+    pub operations: Vec<String>,
+    pub asr_available: bool,
+    pub recall_available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSummaryV1 {
+    pub instance_id: InstanceId,
+    pub workspace_id: WorkspaceId,
+    pub display_name: String,
+    pub source_ids: Vec<String>,
+    pub source_freshness: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSessionSummaryV1 {
+    pub session_id: SessionId,
+    pub title: Option<String>,
+    pub started_at: String,
+    pub segment_count: u64,
+    pub input_finalized: bool,
+    pub processing_state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSessionPageV1 {
+    pub sessions: Vec<WorkspaceSessionSummaryV1>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceTranscriptV1 {
+    pub session_id: SessionId,
+    pub body: String,
+    pub view: String,
+    pub decoded_until_ms: u64,
+    pub committed_until_ms: u64,
+    pub updated_at_unix_ms: u64,
+    pub live: bool,
+    pub terminal: bool,
+    pub source_artifact: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceArtifactV1 {
+    pub artifact_id: ArtifactId,
+    pub session_id: SessionId,
+    pub kind: String,
+    pub ordinal: i64,
+    pub size_bytes: Option<u64>,
+    pub retention_class: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceMemoV1 {
+    pub session_id: SessionId,
+    pub revision: String,
+    pub lines: Vec<WorkspaceMemoLineV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceMemoLineV1 {
+    pub text: String,
+    pub created_secs: f64,
+    pub edited_secs: Option<f64>,
+    pub draft_started_secs: Option<f64>,
+    pub audio_pending_at_mark: bool,
+    pub block_ordinal: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceMemoUpdateV1 {
+    pub request_id: String,
+    pub expected_revision: String,
+    pub observed_at_ms: SessionMillis,
+    pub paused: bool,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceErrorV1 {
+    pub code: String,
+    pub retryable: bool,
+    pub request_id: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceResponseV1<T> {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<T>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<WorkspaceErrorV1>,
 }
 
 /// Appends relay lineage without rewriting an idempotent original command.

@@ -4,24 +4,14 @@ import { mkdir, readFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import type { HostCaptureSnapshot, HostError, HostResult, ProjectTarget } from "./contracts.js";
-import { CAPTURE_PROTOCOL_VERSION } from "./contracts.js";
 import { createRuntimeManager } from "./runtime-manager.js";
 
 interface ServerHandle {
   baseUrl: string;
   token: string;
+  workspaceId: string;
   child: ChildProcess;
 }
-
-interface RecordingStatus {
-  is_recording: boolean;
-  paused: boolean;
-  web_recording_id?: string | null;
-  elapsed_secs: number;
-  capture_phase?: string;
-}
-
-interface WebNotepadSnapshot { text: string; revision: string }
 
 function hostError(code: string, message: string, retryable = true): HostError {
   return { code, message, retryable };
@@ -91,6 +81,10 @@ export class ProjectServerManager {
         MARGINS_PORT: String(port),
         MARGINS_DATA_DIR: instanceDir,
         MARGINS_WORK_DIR: target.projectRoot,
+        MARGINS_HOME: join(instanceDir, "margins-home"),
+        MARGINS_INSTANCE_ID: `bb-host-${target.hostId}`,
+        MARGINS_WORKSPACE: `bb-${key}`,
+        MARGINS_SERVICE_PROVISION: "1",
       },
       stdio: "ignore",
     });
@@ -100,7 +94,7 @@ export class ProjectServerManager {
       throw error;
     });
     child.once("exit", () => this.handles.delete(key));
-    return { baseUrl, token, child };
+    return { baseUrl, token, workspaceId: `bb-${key}`, child };
   }
 
   async dispose() {
@@ -114,16 +108,15 @@ export class ProjectServerManager {
 export class ProjectMarginsTransport {
   constructor(private readonly manager = new ProjectServerManager()) {}
 
-  private async invoke<T>(handle: ServerHandle, command: string, body: object, signal?: AbortSignal): Promise<T> {
-    const response = await fetch(`${handle.baseUrl}/api/invoke/${command}`, {
-      method: "POST",
+  private async request<T>(handle: ServerHandle, path: string, method: "GET" | "POST" | "PUT", body?: object, signal?: AbortSignal): Promise<T> {
+    const response = await fetch(`${handle.baseUrl}/v1/workspaces/${handle.workspaceId}/${path}`, {
+      method,
       signal,
       headers: {
         authorization: `Bearer ${handle.token}`,
         "content-type": "application/json",
-        "x-margins-capture-protocol": String(CAPTURE_PROTOCOL_VERSION),
       },
-      body: JSON.stringify(body),
+      body: body === undefined ? undefined : JSON.stringify(body),
     });
     if (!response.ok) throw new Error(`Margins could not save on the project machine (${response.status})`);
     const value = await response.json() as { ok: boolean; result?: T; error?: string };
@@ -132,15 +125,7 @@ export class ProjectMarginsTransport {
   }
 
   private async snapshot(handle: ServerHandle, recordingId: string, ownerId: string, signal?: AbortSignal): Promise<HostCaptureSnapshot> {
-    const [status, notepad] = await Promise.all([
-      this.invoke<RecordingStatus>(handle, "get_web_recording_status", { recordingId, ownerId }, signal),
-      this.invoke<WebNotepadSnapshot>(handle, "get_web_recording_notepad", { recordingId, ownerId }, signal),
-    ]);
-    return {
-      recordingId,
-      status: status.capture_phase === "finalizing" ? "saving" : status.paused ? "paused" : "recording",
-      notepad,
-    };
+    return this.request<HostCaptureSnapshot>(handle, `browser/sessions/${recordingId}/snapshot?ownerId=${encodeURIComponent(ownerId)}`, "GET", undefined, signal);
   }
 
   private async withHandle(target: ProjectTarget, dataDir: string, action: (handle: ServerHandle) => Promise<HostCaptureSnapshot | null>): Promise<HostResult> {
@@ -153,8 +138,7 @@ export class ProjectMarginsTransport {
 
   start(target: ProjectTarget, dataDir: string, ownerId: string, name: string) {
     return this.withHandle(target, dataDir, async (handle) => {
-      const started = await this.invoke<{ recordingId: string }>(handle, "start_recording", { name, ownerId });
-      return this.snapshot(handle, started.recordingId, ownerId);
+      return this.request<HostCaptureSnapshot>(handle, "browser/sessions", "POST", { name, ownerId });
     });
   }
 
@@ -164,37 +148,33 @@ export class ProjectMarginsTransport {
 
   mutate(target: ProjectTarget, dataDir: string, recordingId: string, ownerId: string, command: "heartbeat_web_recording" | "pause_recording" | "resume_recording") {
     return this.withHandle(target, dataDir, async (handle) => {
-      await this.invoke(handle, command, { recordingId, ownerId });
-      return this.snapshot(handle, recordingId, ownerId);
+      const action = command === "heartbeat_web_recording" ? "heartbeat" : command === "pause_recording" ? "pause" : "resume";
+      return this.request<HostCaptureSnapshot>(handle, `browser/sessions/${recordingId}/${action}`, "POST", { ownerId });
     });
   }
 
   stop(target: ProjectTarget, dataDir: string, recordingId: string, ownerId: string) {
     return this.withHandle(target, dataDir, async (handle) => {
-      await this.invoke(handle, "stop_recording", { recordingId, ownerId });
+      await this.request(handle, `browser/sessions/${recordingId}/stop`, "POST", { ownerId });
       return null;
     });
   }
 
   updateNotepad(target: ProjectTarget, dataDir: string, recordingId: string, ownerId: string, expectedRevision: string, text: string) {
     return this.withHandle(target, dataDir, async (handle) => {
-      await this.invoke(handle, "update_web_recording_notepad", { recordingId, ownerId, expectedRevision, text });
-      return this.snapshot(handle, recordingId, ownerId);
+      return this.request<HostCaptureSnapshot>(handle, `browser/sessions/${recordingId}/notepad`, "PUT", { ownerId, expectedRevision, text });
     });
   }
 
   async upload(target: ProjectTarget, dataDir: string, recordingId: string, ownerId: string, sequence: number, bytesBase64: string) {
     try {
       const handle = await this.manager.ensure(target, dataDir);
-      const response = await fetch(`${handle.baseUrl}/api/audio/chunk`, {
-        method: "POST",
+      const response = await fetch(`${handle.baseUrl}/v1/workspaces/${handle.workspaceId}/browser/sessions/${recordingId}/chunks/${sequence}`, {
+        method: "PUT",
         headers: {
           authorization: `Bearer ${handle.token}`,
           "content-type": "application/octet-stream",
-          "x-margins-capture-protocol": String(CAPTURE_PROTOCOL_VERSION),
-          "x-margins-recording-id": recordingId,
           "x-margins-capture-owner": ownerId,
-          "x-margins-chunk-sequence": String(sequence),
         },
         body: Buffer.from(bytesBase64, "base64"),
       });

@@ -246,6 +246,14 @@ where
             return error.exit_code();
         }
     };
+    let remote_selected = !parsed.local
+        && (parsed.remote.is_some()
+            || std::env::var("MARGINS_REMOTE")
+                .ok()
+                .is_some_and(|value| !value.trim().is_empty()));
+    if remote_selected {
+        return margins_cli::main_entry(args);
+    }
 
     // Intercept Setup before the interactive dispatch.
     if let Some(Command::Setup {
@@ -595,15 +603,33 @@ where
 
     let services = margins_cli::standalone_services();
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let project = match services
-        .projects
-        .resolve_vault(project_selector.as_deref(), &cwd)
-    {
-        Ok(project) => project,
-        Err(error) => return report_error(&error.to_string()),
+    let env_workspace = std::env::var("MARGINS_WORKSPACE")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let selected_workspace = workspace_selector.as_deref().or(env_workspace.as_deref());
+    if selected_workspace.is_some() && project_selector.is_some() {
+        return report_error("`--project` cannot be combined with an explicit Workspace selection");
+    }
+    let capture_root = if selected_workspace.is_some() {
+        let workspace = match resolve_workspace(selected_workspace) {
+            Ok(workspace) => workspace,
+            Err(error) => return report_error(&error.to_string()),
+        };
+        match workspace.capture_store_dir() {
+            Ok(path) => path,
+            Err(error) => return report_error(&error.to_string()),
+        }
+    } else {
+        match services
+            .projects
+            .resolve_vault(project_selector.as_deref(), &cwd)
+        {
+            Ok(project) => project.work_dir,
+            Err(error) => return report_error(&error.to_string()),
+        }
     };
     let create = if create_if_missing {
-        let margins_dir = project.work_dir.join(".margins");
+        let margins_dir = capture_root.join(".margins");
         let current = match services.sessions.current(&margins_dir) {
             Ok(current) => current,
             Err(error) => return report_error(&error.to_string()),
@@ -620,9 +646,9 @@ where
         create
     };
     let result = if create {
-        interactive.create(&project.work_dir, title)
+        interactive.create(&capture_root, title)
     } else {
-        interactive.attach(&project.work_dir, selected)
+        interactive.attach(&capture_root, selected)
     };
     match result {
         Ok(()) => 0,
@@ -1629,16 +1655,16 @@ fn create_native_session(work_dir: &Path, title: Option<&str>) -> Result<()> {
     margins_workflows::project::register_vault_silently(work_dir);
     std::fs::write(&memo_path, "")
         .with_context(|| format!("failed to initialize memo {}", memo_path.display()))?;
-    margins_store::legacy::create_session(
+    margins_store::canonical::create_session(
         &margins_dir,
         &name,
         &started_at,
         &relative_artifact(&memo_path, work_dir),
     )?;
     if let Some(title) = title {
-        margins_store::legacy::set_title(&margins_dir, &name, Some(title.to_string()))?;
+        margins_store::canonical::set_title(&margins_dir, &name, Some(title.to_string()))?;
     }
-    margins_store::legacy::add_segment(
+    margins_store::canonical::add_segment(
         &margins_dir,
         &name,
         0,
@@ -1697,11 +1723,11 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
             .trim()
             .to_string(),
     };
-    if name.is_empty() || !margins_store::legacy::session_exists(&margins_dir, &name)? {
+    if name.is_empty() || !margins_store::canonical::session_exists(&margins_dir, &name)? {
         bail!("Session '{name}' not found. Run `margins ls` to choose one.");
     }
-    let meta = margins_store::legacy::get_session_meta(&margins_dir, &name)?;
-    let started_at = margins_store::legacy::get_session_start_time(&margins_dir, &name)?;
+    let meta = margins_store::canonical::get_session_meta(&margins_dir, &name)?;
+    let started_at = margins_store::canonical::get_session_start_time(&margins_dir, &name)?;
     let memo_path = resolve_artifact(work_dir, &meta.notes_path);
     if !memo_path.exists() && meta.vault_note_path.is_none() {
         std::fs::write(&memo_path, "")?;
@@ -1709,7 +1735,7 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
     let parsed = margins_core::TimedMemoDocument::parse_markdown(
         &std::fs::read_to_string(&memo_path).context("failed to read memo")?,
     );
-    let ordinal = margins_store::legacy::next_segment_index(&margins_dir, &name)?;
+    let ordinal = margins_store::canonical::next_segment_index(&margins_dir, &name)?;
     let audio_path = margins_dir.join(format!("{name}_seg{ordinal}.wav"));
     let offset_ms = (Local::now() - started_at).num_milliseconds().max(0);
     let live_artifact_ordinal = ordinal;
@@ -1731,7 +1757,7 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
         None,
         initial_live_sink,
     )?;
-    margins_store::legacy::add_segment(
+    margins_store::canonical::add_segment(
         &margins_dir,
         &name,
         ordinal,
@@ -1853,7 +1879,7 @@ fn run_segment(
         stop.store(true, Ordering::SeqCst);
         let duration = recorder.stop_and_write(&audio_path.to_string_lossy())?;
 
-        margins_store::legacy::update_segment_duration(
+        margins_store::canonical::update_segment_duration(
             margins_dir,
             session_name,
             ordinal,
@@ -1863,7 +1889,7 @@ fn run_segment(
             .strip_prefix(work_dir)
             .unwrap_or(&audio_path)
             .to_string_lossy();
-        margins_store::legacy::upsert_session_artifact(
+        margins_store::canonical::upsert_session_artifact(
             margins_dir,
             session_name,
             "audio",
@@ -1895,10 +1921,10 @@ fn run_segment(
                 let (device_name, device) = devices.swap_remove(index);
                 app.current_mic_name = device_name;
                 selected_device = Some(device);
-                ordinal = margins_store::legacy::next_segment_index(margins_dir, session_name)?;
+                ordinal = margins_store::canonical::next_segment_index(margins_dir, session_name)?;
                 audio_path = margins_dir.join(format!("{session_name}_seg{ordinal}.wav"));
                 let new_offset_ms = (Local::now() - started_at).num_milliseconds().max(0);
-                margins_store::legacy::add_segment(
+                margins_store::canonical::add_segment(
                     margins_dir,
                     session_name,
                     ordinal,
@@ -1942,7 +1968,7 @@ fn run_segment(
                 finalizer.complete()?
             };
             if completed {
-                margins_store::legacy::upsert_session_artifact(
+                margins_store::canonical::upsert_session_artifact(
                     margins_dir,
                     session_name,
                     "transcript",
@@ -2950,13 +2976,13 @@ mod tests {
             std::fs::write(&memo, "test memo")?;
             std::fs::write(&audio, b"test wav fixture")?;
             std::fs::write(&checkpoint, br#"{"terminal":false,"transcripts":[]}"#)?;
-            margins_store::legacy::create_session(
+            margins_store::canonical::create_session(
                 &margins_dir,
                 name,
                 &chrono::Local::now(),
                 &format!(".margins/{name}.md"),
             )?;
-            margins_store::legacy::add_segment(
+            margins_store::canonical::add_segment(
                 &margins_dir,
                 name,
                 0,
@@ -3002,7 +3028,7 @@ mod tests {
             margins_dir.join("capture-root-regression.md"),
             margins_dir.join("capture-root-regression_seg0.wav"),
             margins_dir.join("capture-root-regression_seg0.live-transcript.json"),
-            margins_store::legacy::database_path(&margins_dir),
+            margins_store::canonical::database_path(&margins_dir),
         ] {
             assert_eq!(
                 path.is_file(),
@@ -3660,6 +3686,44 @@ mod tests {
     }
 
     #[test]
+    fn production_new_with_workspace_ignores_cwd_and_legacy_project() {
+        let _guard = PROCESS_ENV_LOCK.lock().unwrap();
+        let _settings = ScopedTestSettings::new();
+        let temp = tempfile::tempdir().unwrap();
+        let margins_home = temp.path().join("state");
+        let notes = temp.path().join("notes");
+        let unrelated = temp.path().join("unrelated");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::create_dir_all(&unrelated).unwrap();
+        let _restore = EnvRestore::capture(&["MARGINS_HOME", "MARGINS_WORKSPACE"]);
+        std::env::set_var("MARGINS_HOME", &margins_home);
+        std::env::remove_var("MARGINS_WORKSPACE");
+        margins_workflows::workspace::create_workspace(
+            &margins_home,
+            "practice",
+            None,
+            &notes,
+        )
+        .unwrap();
+        let old_cwd = std::env::current_dir().unwrap();
+
+        std::env::set_current_dir(&unrelated).unwrap();
+        let code = main_entry_with(
+            ["margins", "--workspace", "practice", "new"],
+            &ArtifactWritingInteractive,
+        );
+        std::env::set_current_dir(&old_cwd).unwrap();
+
+        assert_eq!(code, 0);
+        assert_capture_artifacts(
+            &margins_home.join("workspaces/practice/captures"),
+            true,
+        );
+        assert_capture_artifacts(&unrelated, false);
+        assert_capture_artifacts(&notes, false);
+    }
+
+    #[test]
     fn production_new_allows_launcher_temp_only_when_explicitly_selected() {
         let _guard = PROCESS_ENV_LOCK.lock().unwrap();
         let _settings = ScopedTestSettings::new();
@@ -3710,7 +3774,7 @@ mod tests {
 
             let margins_dir = temp.path().join(".margins");
             std::fs::create_dir_all(&margins_dir).unwrap();
-            margins_store::legacy::create_session(
+            margins_store::canonical::create_session(
                 &margins_dir,
                 "current-session",
                 &chrono::Local::now(),

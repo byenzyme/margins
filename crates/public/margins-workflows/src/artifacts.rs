@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local};
-use margins_store::legacy::{self, SessionArtifact};
+use margins_store::canonical::{self, SessionArtifact};
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
@@ -224,7 +224,7 @@ pub fn list_artifacts(
     margins_dir: &Path,
     session_name: &str,
 ) -> Result<Vec<ArtifactView>> {
-    Ok(legacy::list_session_artifacts(margins_dir, session_name)?
+    Ok(canonical::list_session_artifacts(margins_dir, session_name)?
         .into_iter()
         .map(|artifact| {
             let disk_path = artifact_registry_disk_path(work_dir, margins_dir, &artifact.path);
@@ -248,7 +248,7 @@ pub fn prune_expired_artifacts(
     before: DateTime<Local>,
 ) -> Result<ArtifactPruneReport> {
     let mut report = ArtifactPruneReport::default();
-    for artifact in legacy::list_expired_session_artifacts(margins_dir, before)? {
+    for artifact in canonical::list_expired_session_artifacts(margins_dir, before)? {
         let Some(path) = confined_session_artifact_registry_disk_path(
             margins_dir,
             &artifact.session_name,
@@ -261,7 +261,7 @@ pub fn prune_expired_artifacts(
         // the registry row so the next prune can retry.
         let deleted = delete_path_if_present(&path)?;
         prune_empty_artifact_dirs(margins_dir, path.parent());
-        let rows = legacy::delete_session_artifact_registry_row(
+        let rows = canonical::delete_session_artifact_registry_row(
             margins_dir,
             &artifact.session_name,
             &artifact.kind,

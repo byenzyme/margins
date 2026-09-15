@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::note_artifacts::read_note_frontmatter;
-use margins_store::legacy as session;
+use margins_store::canonical as session;
 
 /// `(year, month, day, hour, minute, second)` — the second-precision key shared
 /// between a session's `start_time` and a note filename's leading timestamp.

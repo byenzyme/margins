@@ -102,7 +102,7 @@ pi = { package = "pi_agent_rust", git = "https://github.com/byenzyme/pi_agent_ru
 rusqlite = { package = "libsql-rusqlite", version = "=0.9.30" }
 tauri-plugin-updater = { version = "2", optional = true }
 notify = { version = "6", default-features = false, features = ["macos_fsevent"] }
-axum = { version = "0.7", features = ["ws"], optional = true }
+axum = { version = "0.7", features = ["ws", "multipart"], optional = true }
 tower-http = { version = "0.5", features = ["fs", "cors"], optional = true }
 rust-embed = { version = "8", optional = true }
 

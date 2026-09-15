@@ -665,6 +665,40 @@ impl ResolvedWorkspace {
         self.state_dir.join("captures")
     }
 
+    /// Resolve the one declared writable capture destination for this
+    /// Workspace. Capture routing is declaration-owned: callers must not fall
+    /// back to their cwd or silently choose between multiple stores.
+    pub fn capture_store_dir(&self) -> Result<PathBuf> {
+        let mut captures = self.config.bindings.iter().filter_map(|(name, binding)| {
+            match binding {
+                WorkspaceBinding::Captures { path } => Some((name.as_str(), path)),
+                _ => None,
+            }
+        });
+        let Some((name, path)) = captures.next() else {
+            bail!(
+                "workspace '{}' has no declared captures source",
+                self.config.id
+            );
+        };
+        if let Some((other, _)) = captures.next() {
+            bail!(
+                "workspace '{}' has multiple writable capture destinations ('{}' and '{}'); remove one before recording",
+                self.config.id,
+                name,
+                other
+            );
+        }
+        if !path.is_absolute() {
+            bail!(
+                "workspace '{}' capture destination is not absolute: {}",
+                self.config.id,
+                path.display()
+            );
+        }
+        Ok(path.clone())
+    }
+
     /// Machine-level Google transport state for one declared account.
     pub fn google_dir(&self, account: &str) -> Result<PathBuf> {
         let margins_home = self
@@ -779,6 +813,77 @@ pub fn create_workspace(
             path: state_dir.join("captures"),
         },
     );
+    let config = WorkspaceConfig {
+        id: id.to_string(),
+        name: name.map(str::to_string),
+        policy: WorkspacePolicy::default(),
+        retention: RetentionPolicy::default(),
+        bindings,
+    };
+    write_config(&state_dir.join(WORKSPACE_CONFIG), &config)?;
+    resolve_at(margins_home, id)
+}
+
+/// Provision an explicitly routed service Workspace without inferring either
+/// its notes home or capture authority from the server process cwd.
+///
+/// Reopening is data preserving: an existing declaration is accepted only
+/// when both paths still match. The caller must use the reviewed plan/apply
+/// workflow to change either binding.
+pub fn ensure_service_workspace(
+    margins_home: &Path,
+    id: &str,
+    name: Option<&str>,
+    home_notes: &Path,
+    capture_store: &Path,
+) -> Result<ResolvedWorkspace> {
+    validate_id(id)?;
+    let home_notes = home_notes
+        .canonicalize()
+        .with_context(|| format!("notes folder does not exist: {}", home_notes.display()))?;
+    let capture_store = if capture_store.exists() {
+        capture_store.canonicalize().with_context(|| {
+            format!("capture store does not exist: {}", capture_store.display())
+        })?
+    } else {
+        if !capture_store.is_absolute() {
+            bail!("capture store must be absolute: {}", capture_store.display());
+        }
+        std::fs::create_dir_all(capture_store)?;
+        capture_store.canonicalize()?
+    };
+    if let Ok(existing) = resolve_at(margins_home, id) {
+        let declared_capture = existing.capture_store_dir()?;
+        if existing.home_dir != home_notes || declared_capture != capture_store {
+            bail!(
+                "workspace '{id}' is already mapped to different paths; use workspace plan/apply to change it"
+            );
+        }
+        return Ok(existing);
+    }
+    let state_dir = workspace_state_dir(margins_home, id)?;
+    if state_dir.exists() {
+        bail!(
+            "workspace '{id}' has incomplete state at {}; inspect it before retrying",
+            state_dir.display()
+        );
+    }
+    std::fs::create_dir_all(&state_dir)?;
+    let bindings = BTreeMap::from([
+        (
+            "home".to_string(),
+            WorkspaceBinding::NativeMarkdown {
+                path: home_notes.clone(),
+                role: SourceRole::Home,
+            },
+        ),
+        (
+            "captures".to_string(),
+            WorkspaceBinding::Captures {
+                path: capture_store,
+            },
+        ),
+    ]);
     let config = WorkspaceConfig {
         id: id.to_string(),
         name: name.map(str::to_string),
@@ -2433,6 +2538,11 @@ account = "owner@example.com"
         )
         .unwrap();
 
+        let error = workspace.capture_store_dir().unwrap_err().to_string();
+        assert!(error.contains("multiple writable capture destinations"));
+        assert!(error.contains("captures"));
+        assert!(error.contains("sessions"));
+
         assert_eq!(
             remove_source(&mut workspace, "sessions").unwrap(),
             WorkspaceBinding::Captures { path: sessions }
@@ -2444,6 +2554,20 @@ account = "owner@example.com"
                 WorkspaceBinding::Captures { path } if path == &workspace.captures_dir()
             )
         }));
+    }
+
+    #[test]
+    fn declared_capture_store_is_stable_across_client_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let margins_home = temp.path().join("state");
+        let notes = temp.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        let workspace = create_workspace(&margins_home, "practice", None, &notes).unwrap();
+
+        assert_eq!(
+            workspace.capture_store_dir().unwrap(),
+            margins_home.join("workspaces/practice/captures")
+        );
     }
 
     #[test]

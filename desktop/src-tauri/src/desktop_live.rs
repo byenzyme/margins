@@ -1,19 +1,18 @@
 use crate::{recording, transcript_store, AppState, MemoLine};
 use margins::core::{MemoMoment, TimedMemoDocument, TimedMemoLine};
+use margins_meeting_protocol::{
+    DurationMillis, LiveErrorCodeV1, LiveErrorV1, LiveHealthV1, LiveMemoLineV1,
+    LiveMutationResponseV1, LiveOperationId, LiveSessionStatusV1, LiveSessionV1, LiveSnapshotV1,
+    LiveTranscriptFreshnessV1, LiveTranscriptLineV1, ProtocolVersionV1, SessionId, SessionMillis,
+    UnixMillis,
+};
+#[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
+use margins_meeting_protocol::{
+    LiveDiscoveryV1, LiveEndpointsV1, LivePermissionsV1, LiveRuntimeV1, LiveSessionRequestV1,
+    LiveStartRequestV1, LiveUpdateNotepadRequestV1, DESKTOP_LIVE_API_PREFIX_V1,
+};
 #[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
 use margins_meeting_runtime::{LiveRuntime, LiveRuntimeCommandV1, LiveRuntimeFuture};
-#[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
-use margins_meeting_protocol::{
-    LiveDiscoveryV1, LiveEndpointsV1, LivePermissionsV1, LiveRuntimeV1,
-    LiveSessionRequestV1, LiveStartRequestV1, LiveUpdateNotepadRequestV1,
-    DESKTOP_LIVE_API_PREFIX_V1,
-};
-use margins_meeting_protocol::{
-    LiveErrorCodeV1, LiveErrorV1, LiveHealthV1, LiveMemoLineV1,
-    LiveMutationResponseV1, LiveSessionV1, LiveSnapshotV1,
-    LiveTranscriptFreshnessV1, LiveTranscriptLineV1, DurationMillis, LiveOperationId,
-    LiveSessionStatusV1, ProtocolVersionV1, SessionId, SessionMillis, UnixMillis,
-};
 #[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
 use serde::Serialize;
 use std::{
@@ -128,10 +127,7 @@ impl NativeLiveRuntime {
 
 #[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
 impl LiveRuntime for NativeLiveRuntime {
-    fn snapshot(
-        &self,
-        session_id: Option<&str>,
-    ) -> Result<LiveSnapshotV1, LiveErrorV1> {
+    fn snapshot(&self, session_id: Option<&str>) -> Result<LiveSnapshotV1, LiveErrorV1> {
         snapshot_for_state(&self.app_state, session_id)
     }
 
@@ -193,6 +189,7 @@ impl LiveRuntime for NativeLiveRuntime {
                 LiveRuntimeCommandV1::UpdateNotepad(request) => {
                     update_notepad_text(
                         &app_state,
+                        request.operation_id.as_ref(),
                         request.session_id.as_ref(),
                         request.expected_generation,
                         &request.expected_notepad_revision,
@@ -351,9 +348,9 @@ fn error_response(error: LiveErrorV1) -> axum::response::Response {
         LiveErrorCodeV1::SessionMismatch
         | LiveErrorCodeV1::GenerationMismatch
         | LiveErrorCodeV1::NotepadChanged => axum::http::StatusCode::CONFLICT,
-        LiveErrorCodeV1::AlreadyRecording
-        | LiveErrorCodeV1::Busy
-        | LiveErrorCodeV1::NotReady => axum::http::StatusCode::CONFLICT,
+        LiveErrorCodeV1::AlreadyRecording | LiveErrorCodeV1::Busy | LiveErrorCodeV1::NotReady => {
+            axum::http::StatusCode::CONFLICT
+        }
         LiveErrorCodeV1::Internal => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
     };
     (status, axum::Json(error)).into_response()
@@ -575,6 +572,10 @@ fn snapshot_for_state(
     }
 
     let margins_dir = work_dir.join(".margins");
+    let memo_lines = margins::session::SqliteWorkspaceAuthorityStorage::open(&margins_dir)
+        .and_then(|authority| authority.memo(&session_name))
+        .map(|memo| memo.lines)
+        .unwrap_or(memo_lines);
     let live_context = live_client.and_then(|client| client.request_context(elapsed_ms).ok());
     let (transcript, freshness) = if let Some(context) = live_context {
         (
@@ -726,21 +727,48 @@ fn append_memo_text(
     }
     let elapsed_secs = recording::recording_status_from_state(rec).elapsed_secs;
     let line = memo_line(text, elapsed_secs, rec.paused, rec.segment_index);
-    let mut lines = rec.memo_lines.clone();
-    lines.push(line);
-    crate::persist_live_memo(&rec.work_dir, &rec.session_name, &lines).map_err(|error| {
-        live_error(
-            LiveErrorCodeV1::Internal,
-            format!("Could not save memo: {error}"),
-            true,
+    let authority =
+        margins::session::SqliteWorkspaceAuthorityStorage::open(rec.work_dir.join(".margins"))
+            .map_err(|error| live_error(LiveErrorCodeV1::Internal, error.to_string(), true))?;
+    let current = authority
+        .memo(&rec.session_name)
+        .map_err(|error| live_error(LiveErrorCodeV1::Internal, error.to_string(), true))?;
+    let mut document = TimedMemoDocument::from_committed(current.lines);
+    let mut text = document.plain_text();
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    text.push_str(&line.text);
+    let request_id = format!(
+        "native-append-{}-{}",
+        current.revision,
+        elapsed_secs.to_bits()
+    );
+    let saved = authority
+        .update_memo(
+            &rec.session_name,
+            "native-desktop",
+            &request_id,
+            &current.revision,
+            (elapsed_secs * 1000.0).max(0.0) as u64,
+            rec.paused,
+            &text,
         )
-    })?;
-    rec.memo_lines = lines;
+        .map_err(|error| {
+            live_error(
+                LiveErrorCodeV1::Internal,
+                format!("Could not save memo: {error}"),
+                true,
+            )
+        })?;
+    document = TimedMemoDocument::from_committed(saved.lines);
+    rec.memo_lines = document.into_lines();
     Ok(())
 }
 
 fn update_notepad_text(
     state: &Arc<AppState>,
+    operation_id: &str,
     session_id: &str,
     expected_generation: Option<u64>,
     expected_notepad_revision: &str,
@@ -788,7 +816,13 @@ fn update_notepad_text(
             true,
         ));
     }
-    if expected_notepad_revision != notepad_revision(&rec.memo_lines) {
+    let authority =
+        margins::session::SqliteWorkspaceAuthorityStorage::open(rec.work_dir.join(".margins"))
+            .map_err(|error| live_error(LiveErrorCodeV1::Internal, error.to_string(), true))?;
+    let current = authority
+        .memo(&rec.session_name)
+        .map_err(|error| live_error(LiveErrorCodeV1::Internal, error.to_string(), true))?;
+    if expected_notepad_revision != current.revision {
         return Err(live_error(
             LiveErrorCodeV1::NotepadChanged,
             "The notepad changed somewhere else. Review the latest text and try again.",
@@ -797,18 +831,24 @@ fn update_notepad_text(
     }
 
     let elapsed_secs = recording::recording_status_from_state(rec).elapsed_secs;
-    let moment = memo_moment(elapsed_secs, rec.paused, rec.segment_index);
-    let lines = TimedMemoDocument::from_committed(rec.memo_lines.clone())
-        .reconcile_plain_text(&text, moment)
-        .into_lines();
-    crate::persist_live_memo(&rec.work_dir, &rec.session_name, &lines).map_err(|error| {
-        live_error(
-            LiveErrorCodeV1::Internal,
-            format!("Could not save notepad: {error}"),
-            true,
+    let saved = authority
+        .update_memo(
+            &rec.session_name,
+            "native-desktop",
+            operation_id,
+            &current.revision,
+            (elapsed_secs * 1000.0).max(0.0) as u64,
+            rec.paused,
+            &text,
         )
-    })?;
-    rec.memo_lines = lines;
+        .map_err(|error| {
+            live_error(
+                LiveErrorCodeV1::Internal,
+                format!("Could not save notepad: {error}"),
+                true,
+            )
+        })?;
+    rec.memo_lines = saved.lines;
     Ok(())
 }
 
@@ -928,18 +968,12 @@ fn classify_runtime_error(error: String) -> LiveErrorV1 {
     };
     let retryable = matches!(
         code,
-        LiveErrorCodeV1::Busy
-            | LiveErrorCodeV1::NoActiveSession
-            | LiveErrorCodeV1::Internal
+        LiveErrorCodeV1::Busy | LiveErrorCodeV1::NoActiveSession | LiveErrorCodeV1::Internal
     );
     live_error(code, error, retryable)
 }
 
-fn live_error(
-    code: LiveErrorCodeV1,
-    message: impl ToString,
-    retryable: bool,
-) -> LiveErrorV1 {
+fn live_error(code: LiveErrorCodeV1, message: impl ToString, retryable: bool) -> LiveErrorV1 {
     LiveErrorV1::new(code, message.to_string(), retryable)
 }
 
@@ -949,11 +983,7 @@ fn discovery_path() -> PathBuf {
 }
 
 #[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
-fn discovery_document(
-    base_url: &str,
-    token: &str,
-    runtime: LiveRuntimeV1,
-) -> LiveDiscoveryV1 {
+fn discovery_document(base_url: &str, token: &str, runtime: LiveRuntimeV1) -> LiveDiscoveryV1 {
     LiveDiscoveryV1 {
         protocol_version: ProtocolVersionV1,
         runtime,

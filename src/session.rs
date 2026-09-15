@@ -1,3 +1,4 @@
-//! Transitional compatibility facade for the extracted public store crate.
+//! Canonical production session persistence surface.
 
-pub use margins_store::legacy::*;
+pub use margins_store::canonical::*;
+pub use margins_store::SqliteWorkspaceAuthorityStorage;

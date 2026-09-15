@@ -212,9 +212,9 @@ pub fn workspace_status_recall(
     let database = recall_engine::db::Database::open_existing_compatible(&index_path)
         .with_context(|| format!("opening recall status index {}", index_path.display()))?;
     Ok(margins_workflows::local_recall::LocalRecallStatus {
-        schema_version: "margins.indexed-recall.v1",
+        schema_version: "margins.indexed-recall.v1".to_string(),
         available: true,
-        mode: "indexed",
+        mode: "indexed".to_string(),
         documents: database.get_document_count()? as usize,
     })
 }

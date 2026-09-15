@@ -381,7 +381,7 @@ impl<E: fmt::Display> fmt::Display for RuntimeError<E> {
 impl<E: Error + 'static> Error for RuntimeError<E> {}
 
 /// Output for one accepted command.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeResponseV1 {
     /// Original envelopes to deliver. Exact command retries return the same
     /// envelopes with the same message IDs, sequences, and timestamps.
@@ -429,6 +429,14 @@ impl StoredSessionV1 {
 
     pub fn discontinuities(&self) -> impl Iterator<Item = &CaptureDiscontinuityV1> {
         self.discontinuities.values()
+    }
+
+    pub fn input_finalized(&self) -> bool {
+        self.finalize.as_ref().is_some_and(|record| record.finalized)
+    }
+
+    pub fn next_event_sequence(&self) -> u64 {
+        self.next_event_sequence
     }
 }
 

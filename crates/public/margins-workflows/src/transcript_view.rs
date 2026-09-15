@@ -2,7 +2,7 @@
 
 use crate::artifacts::{artifact_registry_disk_path, confined_session_artifact_access_disk_path};
 use anyhow::{bail, Context, Result};
-use margins_store::legacy;
+use margins_store::canonical;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -54,10 +54,10 @@ pub fn preferred_transcript_path(margins_dir: &Path, name: &str) -> Option<PathB
     if artifact.exists() {
         return Some(artifact);
     }
-    if let Some(path) = legacy::list_session_artifacts(margins_dir, name)
+    if let Some(path) = canonical::list_session_artifacts(margins_dir, name)
         .unwrap_or_default()
         .into_iter()
-        .filter(|artifact| artifact.kind == legacy::SESSION_ARTIFACT_KIND_TRANSCRIPT)
+        .filter(|artifact| artifact.kind == canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT)
         .find_map(|artifact| {
             confined_session_artifact_access_disk_path(margins_dir, name, &artifact.path)
         })
@@ -80,7 +80,7 @@ pub fn resolve_session_name(margins_dir: &Path, requested: &str) -> Result<Strin
     if requested != "latest" {
         return Ok(requested.to_string());
     }
-    if let Some(name) = legacy::list_sessions(margins_dir)?
+    if let Some(name) = canonical::list_sessions(margins_dir)?
         .first()
         .map(|s| s.name.clone())
     {
@@ -98,7 +98,7 @@ pub fn load_transcript_view(
     requested: &str,
 ) -> Result<TranscriptView> {
     let name = resolve_session_name(margins_dir, requested)?;
-    let meta = legacy::get_session_meta(margins_dir, &name).ok();
+    let meta = canonical::get_session_meta(margins_dir, &name).ok();
     let (source, view) =
         if let Some(source) = read_freshest_live_transcript(work_dir, margins_dir, &name)? {
             (source, "full")
@@ -168,7 +168,7 @@ fn read_terminal_checkpoint_body(
     work_dir: &Path,
     margins_dir: &Path,
     name: &str,
-    meta: Option<&legacy::SessionMeta>,
+    meta: Option<&canonical::SessionMeta>,
 ) -> Result<Option<TranscriptSource>> {
     let checkpoint = meta
         .and_then(|meta| {
@@ -185,10 +185,10 @@ fn read_terminal_checkpoint_body(
                 .map(|(_, path)| path)
         })
         .or_else(|| {
-            legacy::list_session_artifacts(margins_dir, name)
+            canonical::list_session_artifacts(margins_dir, name)
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|artifact| artifact.kind == legacy::SESSION_ARTIFACT_KIND_TRANSCRIPT)
+                .filter(|artifact| artifact.kind == canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT)
                 .filter(|artifact| artifact.path.ends_with(".live-transcript.json"))
                 .find_map(|artifact| {
                     confined_session_artifact_access_disk_path(margins_dir, name, &artifact.path)
@@ -224,7 +224,7 @@ fn read_terminal_checkpoint_body(
     let Some(meta) = meta else {
         return Ok(None);
     };
-    let started_at = legacy::get_session_start_time(margins_dir, name)?;
+    let started_at = canonical::get_session_start_time(margins_dir, name)?;
     let memo_path = artifact_registry_disk_path(work_dir, margins_dir, &meta.notes_path);
     let memo = std::fs::read_to_string(memo_path).unwrap_or_default();
     let body = crate::alignment::render_aligned_markdown(name, &started_at, &memo, &entries);
@@ -243,10 +243,10 @@ pub fn read_registered_or_fallback(
     margins_dir: &Path,
     name: &str,
 ) -> Result<(PathBuf, String)> {
-    let registered = legacy::list_session_artifacts(margins_dir, name)
+    let registered = canonical::list_session_artifacts(margins_dir, name)
         .unwrap_or_default()
         .into_iter()
-        .filter(|artifact| artifact.kind == legacy::SESSION_ARTIFACT_KIND_TRANSCRIPT)
+        .filter(|artifact| artifact.kind == canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT)
         .filter(|artifact| !artifact.path.ends_with(".live-transcript.json"))
         .filter_map(|artifact| {
             confined_session_artifact_access_disk_path(margins_dir, name, &artifact.path)
@@ -480,7 +480,7 @@ fn read_live_transcript_body(
 }
 
 fn read_live_memo(work_dir: &Path, dir: &Path, name: &str) -> String {
-    legacy::get_session_meta(dir, name)
+    canonical::get_session_meta(dir, name)
         .ok()
         .and_then(|meta| {
             let path = PathBuf::from(meta.notes_path);
@@ -603,7 +603,7 @@ fn format_elapsed(ms: u64) -> String {
     }
 }
 
-pub fn speaker_alias_from_meta(meta: Option<&legacy::SessionMeta>) -> Option<String> {
+pub fn speaker_alias_from_meta(meta: Option<&canonical::SessionMeta>) -> Option<String> {
     let people = &meta?.people;
     (people.len() == 1)
         .then(|| people[0].trim().to_string())
@@ -628,17 +628,17 @@ pub fn saved_note_path_for_session(dir: &Path, id: &str) -> Option<String> {
             .filter(|p| !p.trim().is_empty() && Path::new(p).is_file())
             .map(str::to_string)
     };
-    if let Ok(meta) = legacy::get_session_meta(dir, id) {
+    if let Ok(meta) = canonical::get_session_meta(dir, id) {
         if let Some(path) = available(meta.vault_note_path.as_deref()) {
             return Some(path);
         }
     }
-    if let Ok(Some(path)) = legacy::vault_note_path_by_id(dir, id) {
+    if let Ok(Some(path)) = canonical::vault_note_path_by_id(dir, id) {
         if let Some(path) = available(Some(&path)) {
             return Some(path);
         }
     }
-    legacy::list_vault_notes(dir)
+    canonical::list_vault_notes(dir)
         .ok()?
         .into_iter()
         .find(|note| note.source_session_name.as_deref() == Some(id))
@@ -699,7 +699,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let work_dir = temp.path();
         let margins_dir = work_dir.join(".margins");
-        legacy::create_session(&margins_dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
+        canonical::create_session(&margins_dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
         std::fs::write(margins_dir.join("meet.md"), "[00:02] memo").unwrap();
         std::fs::write(
             margins_dir.join("meet_live_transcript_segments.jsonl"),
@@ -731,7 +731,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let work_dir = temp.path();
         let margins_dir = work_dir.join(".margins");
-        legacy::create_session(&margins_dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
+        canonical::create_session(&margins_dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
         std::fs::write(margins_dir.join("meet.md"), "[00:02] memo").unwrap();
         std::fs::write(margins_dir.join("current"), "meet\n").unwrap();
         std::fs::write(
@@ -758,7 +758,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let work_dir = temp.path();
         let margins_dir = work_dir.join(".margins");
-        legacy::create_session(&margins_dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
+        canonical::create_session(&margins_dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
         std::fs::write(margins_dir.join("meet.md"), "[00:02] memo").unwrap();
         std::fs::write(margins_dir.join("current"), "meet\n").unwrap();
         std::fs::write(
@@ -794,13 +794,13 @@ mod tests {
         let work_dir = temp.path();
         let margins_dir = work_dir.join(".margins");
         let secret = work_dir.join("secret.md");
-        legacy::create_session(&margins_dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
+        canonical::create_session(&margins_dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
         std::fs::write(&secret, "secret outside root").unwrap();
         std::fs::write(margins_dir.join("meet_aligned.md"), "safe fallback").unwrap();
-        legacy::upsert_session_artifact(
+        canonical::upsert_session_artifact(
             &margins_dir,
             "meet",
-            legacy::SESSION_ARTIFACT_KIND_TRANSCRIPT,
+            canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT,
             0,
             &secret.to_string_lossy(),
             "durable",

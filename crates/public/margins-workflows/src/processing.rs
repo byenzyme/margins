@@ -10,7 +10,7 @@ use margins_media::audio::{
     AudioBuffer,
 };
 use margins_media::transcript::{transcript_json, TranscriptWordEntry};
-use margins_store::legacy::{self, SESSION_ARTIFACT_KIND_TRANSCRIPT};
+use margins_store::canonical::{self, SESSION_ARTIFACT_KIND_TRANSCRIPT};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap};
 use std::io::Write;
@@ -69,7 +69,7 @@ pub fn process_session(
 ) -> Result<ProcessResult> {
     validate_speaker_request(request.speakers, diarization)?;
     validate_session_name(request.session_name)?;
-    let meta = legacy::get_session_meta(request.margins_dir, request.session_name)?;
+    let meta = canonical::get_session_meta(request.margins_dir, request.session_name)?;
     if meta.segments.is_empty() {
         bail!("Session '{}' has no audio segments.", request.session_name);
     }
@@ -131,7 +131,7 @@ pub fn process_session(
     std::fs::create_dir_all(aligned_path.parent().expect("aligned path has parent"))?;
     replace_file_atomically(&aligned_path, aligned.as_bytes())?;
     let local_registry_path = format!(".margins/{}_aligned.md", request.session_name);
-    legacy::upsert_session_artifact(
+    canonical::upsert_session_artifact(
         request.margins_dir,
         request.session_name,
         SESSION_ARTIFACT_KIND_TRANSCRIPT,
@@ -203,8 +203,8 @@ pub fn transcribe_audio(
     let mono = downmix_to_mono(&source)?;
     let mono = resample_mono_linear(&mono, source.sample_rate, 16_000);
     let duration = write_interleaved_wav(&audio_dest, &mono, 16_000, 1)?;
-    legacy::create_session(request.margins_dir, &name, &request.started_at, &memo_rel)?;
-    legacy::add_segment(request.margins_dir, &name, 0, &audio_rel, 0, Some(duration))?;
+    canonical::create_session(request.margins_dir, &name, &request.started_at, &memo_rel)?;
+    canonical::add_segment(request.margins_dir, &name, 0, &audio_rel, 0, Some(duration))?;
     if let Some(path) = request.memo_path {
         std::fs::copy(path, &memo_dest).with_context(|| {
             format!(
@@ -238,7 +238,7 @@ pub fn transcribe_audio(
         ),
     )?;
     let local_registry_path = format!(".margins/artifacts/{name}/transcript.md");
-    legacy::upsert_session_artifact(
+    canonical::upsert_session_artifact(
         request.margins_dir,
         &name,
         SESSION_ARTIFACT_KIND_TRANSCRIPT,
@@ -426,7 +426,7 @@ fn unique_session_name(dir: &Path, base: &str) -> Result<String> {
         } else {
             format!("{base}-{ordinal}")
         };
-        if !legacy::session_exists(dir, &candidate)?
+        if !canonical::session_exists(dir, &candidate)?
             && !dir.join(format!("{candidate}.md")).exists()
             && !transcript_artifact_path(dir, &candidate).exists()
         {

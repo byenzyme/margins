@@ -1,6 +1,12 @@
+use crate::{canonical, sqlite::init_repository_schema};
 use anyhow::{Context, Result};
+use margins_core::{
+    ArtifactDescriptor, ArtifactId, AudioFormat, AudioLane, DurationMillis as CoreDurationMillis,
+    NewSegment, SampleFormat, SegmentId as CoreSegmentId, UnixMillis as CoreUnixMillis,
+};
 use margins_meeting_protocol::{
-    AudioChunkV1, LaneId, MessageId, SequenceRangeV1, ServerMessageV1, SessionId,
+    AudioChunkV1, LaneId, MessageId, SequenceRangeV1, ServerMessageBodyV1, ServerMessageV1,
+    SessionId,
 };
 use margins_meeting_runtime::{
     MeetingRuntimeStorage, SessionDeltaV1, StorageCommit, StoredCommandReceiptV1, StoredSessionV1,
@@ -50,7 +56,7 @@ impl SqliteMeetingRuntimeStorage {
         &self.directory
     }
     pub fn database_path(&self) -> PathBuf {
-        self.directory.join("meeting-runtime.sqlite")
+        canonical::database_path(&self.directory)
     }
     fn blob_dir(&self) -> PathBuf {
         self.directory.join("meeting-blobs")
@@ -60,7 +66,8 @@ impl SqliteMeetingRuntimeStorage {
     /// metadata/receipt commit. Used by crash-boundary contract tests.
     #[doc(hidden)]
     pub fn fail_before_metadata_commit_once(&self) {
-        self.fail_before_metadata_commit.store(true, Ordering::Release);
+        self.fail_before_metadata_commit
+            .store(true, Ordering::Release);
     }
 
     /// Storage-level counters used by scaling and operational diagnostics.
@@ -108,16 +115,17 @@ impl SqliteMeetingRuntimeStorage {
 
     fn connection(&self) -> Result<Connection> {
         std::fs::create_dir_all(&self.directory)?;
-        let connection = Connection::open(self.database_path())?;
+        let connection = canonical::open_db(&self.directory)?;
         connection.busy_timeout(Duration::from_secs(5))?;
-        connection.pragma_update(None, "foreign_keys", "ON")?;
+        init_repository_schema(&connection)?;
         connection.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS meeting_sessions (
                 session_id TEXT PRIMARY KEY NOT NULL,
                 create_key TEXT UNIQUE NOT NULL,
                 revision INTEGER NOT NULL,
-                state_json TEXT NOT NULL
+                state_json TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(name) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS meeting_receipts (
                 session_id TEXT NOT NULL,
@@ -143,6 +151,14 @@ impl SqliteMeetingRuntimeStorage {
                 metadata_json TEXT NOT NULL,
                 blob_path TEXT NOT NULL,
                 PRIMARY KEY (session_id, segment_id, lane_id, sequence),
+                FOREIGN KEY (session_id) REFERENCES meeting_sessions(session_id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS meeting_segment_projection (
+                session_id TEXT NOT NULL,
+                segment_id TEXT NOT NULL,
+                canonical_ordinal INTEGER NOT NULL,
+                PRIMARY KEY (session_id, segment_id),
+                UNIQUE (session_id, canonical_ordinal),
                 FOREIGN KEY (session_id) REFERENCES meeting_sessions(session_id) ON DELETE CASCADE
             );
             "#,
@@ -219,6 +235,73 @@ impl SqliteMeetingRuntimeStorage {
         }
         Ok(())
     }
+
+    fn assemble_finalized_segment(
+        &self,
+        delta: &SessionDeltaV1,
+    ) -> Result<Option<FinalizedProjection>> {
+        let Some(finalized) = delta.events.iter().find_map(|event| match &event.body {
+            ServerMessageBodyV1::SegmentFinalized(value) => Some(value),
+            _ => None,
+        }) else {
+            return Ok(None);
+        };
+        let session_id = delta.session.session_id();
+        let artifacts = self.directory.join("artifacts").join(session_id.as_ref());
+        std::fs::create_dir_all(&artifacts)?;
+        let mut lanes = Vec::new();
+        for boundary in &finalized.lane_boundaries {
+            let mut bytes = Vec::new();
+            for sequence in 0..boundary.next_sequence {
+                let payload = if delta.audio_chunk.as_ref().is_some_and(|chunk| {
+                    chunk.segment_id == finalized.segment_id
+                        && chunk.lane_id == boundary.lane_id
+                        && chunk.sequence == sequence
+                }) {
+                    delta.audio_chunk.as_ref().unwrap().payload.clone()
+                } else {
+                    self.load_audio_chunk(
+                        session_id,
+                        finalized.segment_id.as_ref(),
+                        &boundary.lane_id,
+                        sequence,
+                    )?
+                    .with_context(|| {
+                        format!(
+                            "finalized lane {} is missing sequence {sequence}",
+                            boundary.lane_id.as_ref()
+                        )
+                    })?
+                    .payload
+                };
+                bytes.extend_from_slice(&payload);
+            }
+            let file_name = format!(
+                "{}_{}_{}.pcm",
+                safe_file_component(session_id.as_ref()),
+                safe_file_component(finalized.segment_id.as_ref()),
+                safe_file_component(boundary.lane_id.as_ref())
+            );
+            let path = artifacts.join(&file_name);
+            atomic_replace(&path, &bytes)?;
+            lanes.push((
+                boundary.lane_id.clone(),
+                format!(".margins/artifacts/{}/{file_name}", session_id.as_ref()),
+                bytes.len() as u64,
+            ));
+        }
+        Ok(Some(FinalizedProjection {
+            segment_id: finalized.segment_id.as_ref().to_string(),
+            duration_secs: finalized.duration_ms.0 as f64 / 1000.0,
+            lanes,
+        }))
+    }
+}
+
+struct FinalizedProjection {
+    segment_id: String,
+    duration_secs: f64,
+    lanes: Vec<(LaneId, String, u64)>,
 }
 
 impl MeetingRuntimeStorage for SqliteMeetingRuntimeStorage {
@@ -324,6 +407,31 @@ impl MeetingRuntimeStorage for SqliteMeetingRuntimeStorage {
         let mut connection = self.connection()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let session_id = delta.session.session_id();
+        let create = delta.session.create();
+        let started_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+            i64::try_from(create.started_at_unix_ms.0)
+                .context("session start time exceeds SQLite range")?,
+        )
+        .context("session start time is invalid")?
+        .to_rfc3339();
+        let created_at = chrono::Utc::now().to_rfc3339();
+        let note_path = format!(".margins/{}.md", session_id.as_ref());
+        let canonical_created = tx.execute(
+            "INSERT OR IGNORE INTO sessions (name, start_time, notes_path, created_at, title) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![session_id.as_ref(), started_at, note_path, created_at, create.title],
+        )?;
+        if canonical_created == 0 {
+            let existing_create_key: Option<String> = tx
+                .query_row(
+                    "SELECT create_key FROM meeting_sessions WHERE session_id = ?1",
+                    params![session_id.as_ref()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if existing_create_key.as_deref() != Some(create.idempotency_key.as_str()) {
+                return Ok(StorageCommit::Conflict);
+            }
+        }
         let changed = tx.execute(
             "INSERT OR IGNORE INTO meeting_sessions (session_id, create_key, revision, state_json) VALUES (?1, ?2, ?3, ?4)",
             params![session_id.as_ref(), delta.session.create().idempotency_key, delta.session.revision() as i64, serde_json::to_string(&delta.session)?],
@@ -344,9 +452,14 @@ impl MeetingRuntimeStorage for SqliteMeetingRuntimeStorage {
             .as_ref()
             .map(|chunk| self.stage_chunk(&session_id, chunk))
             .transpose()?;
-        if staged.is_some() && self.fail_before_metadata_commit.swap(false, Ordering::AcqRel) {
+        if staged.is_some()
+            && self
+                .fail_before_metadata_commit
+                .swap(false, Ordering::AcqRel)
+        {
             anyhow::bail!("injected failure before meeting metadata commit");
         }
+        let projection = self.assemble_finalized_segment(&delta)?;
         let mut connection = self.connection()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let revision: Option<i64> = tx
@@ -374,7 +487,147 @@ impl MeetingRuntimeStorage for SqliteMeetingRuntimeStorage {
         if changed != 1 {
             return Ok(StorageCommit::Conflict);
         }
+        if let Some(projection) = projection {
+            let existing: Option<i64> = tx
+                .query_row(
+                    "SELECT canonical_ordinal FROM meeting_segment_projection WHERE session_id = ?1 AND segment_id = ?2",
+                    params![session_id.as_ref(), projection.segment_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let ordinal = if let Some(value) = existing {
+                value
+            } else {
+                let next: i64 = tx.query_row(
+                    "SELECT COALESCE(MAX(segment_index) + 1, 0) FROM session_segments WHERE session_name = ?1",
+                    params![session_id.as_ref()],
+                    |row| row.get(0),
+                )?;
+                tx.execute(
+                    "INSERT INTO meeting_segment_projection (session_id, segment_id, canonical_ordinal) VALUES (?1, ?2, ?3)",
+                    params![session_id.as_ref(), projection.segment_id, next],
+                )?;
+                next
+            };
+            let offset_ms: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(offset_ms + CAST(ROUND(COALESCE(duration_secs, 0) * 1000.0) AS INTEGER)), 0) FROM session_segments WHERE session_name = ?1",
+                params![session_id.as_ref()],
+                |row| row.get(0),
+            )?;
+            let representative = projection
+                .lanes
+                .first()
+                .context("finalized segment has no lanes")?;
+            let started_at_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+            let started_at =
+                chrono::DateTime::<chrono::Utc>::from_timestamp_millis(started_at_ms as i64)
+                    .context("segment timestamp is outside the supported range")?
+                    .to_rfc3339();
+            tx.execute(
+                "INSERT OR IGNORE INTO session_segments (session_name, segment_index, wav_path, offset_ms, duration_secs, started_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![session_id.as_ref(), ordinal, representative.1, offset_ms, projection.duration_secs, started_at],
+            )?;
+            let duration_ms = (projection.duration_secs * 1000.0).round().max(0.0) as u64;
+            let lane = match representative.0.as_ref() {
+                "mic" | "microphone" => Some(AudioLane::Microphone),
+                "system" => Some(AudioLane::System),
+                _ => None,
+            };
+            let contract = NewSegment {
+                id: CoreSegmentId::from(projection.segment_id.clone()),
+                ordinal: ordinal.max(0) as u64,
+                start_offset_ms: offset_ms.max(0) as u64,
+                duration_ms: CoreDurationMillis(duration_ms),
+                started_at_ms: CoreUnixMillis(started_at_ms),
+                audio: ArtifactDescriptor {
+                    id: ArtifactId::from(format!(
+                        "{}:{}:{}",
+                        session_id.as_ref(),
+                        projection.segment_id,
+                        representative.0.as_ref()
+                    )),
+                    segment_id: CoreSegmentId::from(projection.segment_id.clone()),
+                    lane,
+                    uri: representative.1.clone(),
+                    format: AudioFormat {
+                        sample_rate_hz: 48_000,
+                        channel_count: 1,
+                        sample_format: SampleFormat::Signed16,
+                    },
+                    duration_ms: CoreDurationMillis(duration_ms),
+                    frame_count: representative.2 / 2,
+                    byte_length: Some(representative.2),
+                },
+                dropped_live_frames: 0,
+                dropped_durable_frames: 0,
+                timeline_reusable: true,
+            };
+            tx.execute(
+                "INSERT OR IGNORE INTO session_segment_contracts (session_name, segment_index, segment_id, contract_json) VALUES (?1, ?2, ?3, ?4)",
+                params![session_id.as_ref(), ordinal, projection.segment_id, serde_json::to_string(&contract)?],
+            )?;
+            for (lane, path, _) in projection.lanes {
+                let kind = format!("audio_{}_pcm", safe_file_component(lane.as_ref()));
+                tx.execute(
+                    "INSERT INTO session_artifacts (session_name, kind, ordinal, path, retention_class, created_at, expires_at) VALUES (?1, ?2, ?3, ?4, 'durable', ?5, NULL) ON CONFLICT(session_name, kind, ordinal) DO UPDATE SET path = excluded.path, retention_class = excluded.retention_class",
+                    params![session_id.as_ref(), kind, ordinal, path, chrono::Utc::now().to_rfc3339()],
+                )?;
+            }
+        }
         tx.commit()?;
         Ok(StorageCommit::Committed)
     }
+}
+
+fn safe_file_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .take(100)
+        .collect()
+}
+
+fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<()> {
+    if path.exists() {
+        if std::fs::read(path)? == bytes {
+            return Ok(());
+        }
+        anyhow::bail!("finalized lane projection conflicts with existing bytes");
+    }
+    let parent = path.parent().context("projection path has no parent")?;
+    let temporary = parent.join(format!(
+        ".{}.{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("audio"),
+        std::process::id(),
+        TEMPORARY_BLOB_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    match std::fs::hard_link(&temporary, path) {
+        Ok(()) => std::fs::remove_file(&temporary)?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::remove_file(&temporary)?;
+            if std::fs::read(path)? != bytes {
+                anyhow::bail!("finalized lane projection conflicts with existing bytes");
+            }
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error.into());
+        }
+    }
+    File::open(parent)?.sync_all()?;
+    Ok(())
 }

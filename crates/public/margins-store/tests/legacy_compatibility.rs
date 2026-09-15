@@ -1,5 +1,5 @@
 use chrono::{Local, TimeZone};
-use margins_store::{legacy, SqliteSessionRepository};
+use margins_store::{canonical, SqliteSessionRepository};
 use rusqlite::Connection;
 use std::path::Path;
 use tempfile::tempdir;
@@ -39,13 +39,13 @@ fn opening_a_populated_legacy_database_is_additive_and_idempotent() {
     let temporary = tempdir().unwrap();
     let margins_dir = temporary.path().join(".margins");
     let start = Local.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap();
-    legacy::create_session(&margins_dir, "kept", &start, "kept.md").unwrap();
-    legacy::add_segment(&margins_dir, "kept", 0, "kept.wav", 17, Some(2.25)).unwrap();
-    legacy::set_title(&margins_dir, "kept", Some("Exact title".to_string())).unwrap();
+    canonical::create_session(&margins_dir, "kept", &start, "kept.md").unwrap();
+    canonical::add_segment(&margins_dir, "kept", 0, "kept.wav", 17, Some(2.25)).unwrap();
+    canonical::set_title(&margins_dir, "kept", Some("Exact title".to_string())).unwrap();
     let job =
-        legacy::begin_processing_job(&margins_dir, "kept", "note:kept", "distill_note", "input-1")
+        canonical::begin_processing_job(&margins_dir, "kept", "note:kept", "distill_note", "input-1")
             .unwrap();
-    legacy::update_processing_job(
+    canonical::update_processing_job(
         &margins_dir,
         &job.job_id,
         job.attempt,
@@ -56,10 +56,10 @@ fn opening_a_populated_legacy_database_is_additive_and_idempotent() {
         Some("distill"),
     )
     .unwrap();
-    legacy::set_session_grounding(
+    canonical::set_session_grounding(
         &margins_dir,
         "kept",
-        &[legacy::SessionGrounding {
+        &[canonical::SessionGrounding {
             memo_ids: vec!["m-1".to_string()],
             note_quote: "quoted fact".to_string(),
             section_id: Some("decision".to_string()),
@@ -67,7 +67,7 @@ fn opening_a_populated_legacy_database_is_additive_and_idempotent() {
         }],
     )
     .unwrap();
-    legacy::upsert_session_artifact(
+    canonical::upsert_session_artifact(
         &margins_dir,
         "kept",
         "transcript",
@@ -78,12 +78,12 @@ fn opening_a_populated_legacy_database_is_additive_and_idempotent() {
     )
     .unwrap();
 
-    let before = legacy::get_session_meta(&margins_dir, "kept").unwrap();
+    let before = canonical::get_session_meta(&margins_dir, "kept").unwrap();
     SqliteSessionRepository::open(&margins_dir).unwrap();
-    let first = logical_snapshot(&legacy::database_path(&margins_dir));
+    let first = logical_snapshot(&canonical::database_path(&margins_dir));
     SqliteSessionRepository::open(&margins_dir).unwrap();
-    let second = logical_snapshot(&legacy::database_path(&margins_dir));
-    let after = legacy::get_session_meta(&margins_dir, "kept").unwrap();
+    let second = logical_snapshot(&canonical::database_path(&margins_dir));
+    let after = canonical::get_session_meta(&margins_dir, "kept").unwrap();
 
     assert_eq!(first, second, "second open must not change schema or rows");
     assert_eq!(before.name, after.name);
@@ -96,11 +96,11 @@ fn opening_a_populated_legacy_database_is_additive_and_idempotent() {
     assert_eq!(before.segments.len(), after.segments.len());
     assert_eq!(before.segments[0].offset_ms, after.segments[0].offset_ms);
     assert_eq!(
-        legacy::get_session_grounding(&margins_dir, "kept").unwrap()[0].note_quote,
+        canonical::get_session_grounding(&margins_dir, "kept").unwrap()[0].note_quote,
         "quoted fact"
     );
     assert_eq!(
-        legacy::list_session_artifacts(&margins_dir, "kept").unwrap()[0].path,
+        canonical::list_session_artifacts(&margins_dir, "kept").unwrap()[0].path,
         "transcript.md"
     );
 }
@@ -114,13 +114,13 @@ fn legacy_json_import_is_one_shot_and_preserves_invalid_input() {
     let invalid = margins_dir.join("invalid.meta.json");
     std::fs::write(
         &valid,
-        r#"{"name":"legacy-id","start_time":"2026-01-01T00:00:00Z","notes_path":"legacy.md","created_at":"2026-01-01T00:00:00Z","title":"Legacy","segments":[{"segment_index":0,"wav_path":"legacy.wav","offset_ms":42,"duration_secs":1.25,"started_at":"2026-01-01T00:00:00Z"}],"people":["Ada"],"calendar_event":null,"vault_note_path":"/vault/Legacy.md","note_error":"retry","processing_state":"failed","failed_stage":"distill"}"#,
+        r#"{"name":"canonical-id","start_time":"2026-01-01T00:00:00Z","notes_path":"canonical.md","created_at":"2026-01-01T00:00:00Z","title":"Legacy","segments":[{"segment_index":0,"wav_path":"canonical.wav","offset_ms":42,"duration_secs":1.25,"started_at":"2026-01-01T00:00:00Z"}],"people":["Ada"],"calendar_event":null,"vault_note_path":"/vault/Legacy.md","note_error":"retry","processing_state":"failed","failed_stage":"distill"}"#,
     )
     .unwrap();
     std::fs::write(&invalid, "{ definitely not json").unwrap();
 
-    let imported = legacy::get_session_meta(&margins_dir, "legacy-id").unwrap();
-    assert_eq!(imported.name, "legacy-id");
+    let imported = canonical::get_session_meta(&margins_dir, "canonical-id").unwrap();
+    assert_eq!(imported.name, "canonical-id");
     assert_eq!(imported.segments[0].offset_ms, 42);
     assert_eq!(imported.people, vec!["Ada"]);
     assert_eq!(imported.note_error.as_deref(), Some("retry"));
@@ -129,12 +129,12 @@ fn legacy_json_import_is_one_shot_and_preserves_invalid_input() {
     assert!(invalid.exists());
 
     SqliteSessionRepository::open(&margins_dir).unwrap();
-    let snapshot = logical_snapshot(&legacy::database_path(&margins_dir));
-    let reopened = legacy::get_session_meta(&margins_dir, "legacy-id").unwrap();
+    let snapshot = logical_snapshot(&canonical::database_path(&margins_dir));
+    let reopened = canonical::get_session_meta(&margins_dir, "canonical-id").unwrap();
     assert_eq!(reopened.start_time, imported.start_time);
     assert_eq!(
         snapshot,
-        logical_snapshot(&legacy::database_path(&margins_dir))
+        logical_snapshot(&canonical::database_path(&margins_dir))
     );
     assert!(invalid.exists());
 }
@@ -142,7 +142,7 @@ fn legacy_json_import_is_one_shot_and_preserves_invalid_input() {
 #[test]
 fn copied_pre_extraction_database_migrates_without_losing_failure_or_note_data() {
     let temporary = tempdir().unwrap();
-    let source = temporary.path().join("legacy-source.sqlite");
+    let source = temporary.path().join("canonical-source.sqlite");
     let margins_dir = temporary.path().join("copied");
     std::fs::create_dir_all(&margins_dir).unwrap();
     {
@@ -188,17 +188,17 @@ fn copied_pre_extraction_database_migrates_without_losing_failure_or_note_data()
             )
             .unwrap();
     }
-    std::fs::copy(&source, legacy::database_path(&margins_dir)).unwrap();
+    std::fs::copy(&source, canonical::database_path(&margins_dir)).unwrap();
 
     SqliteSessionRepository::open(&margins_dir).unwrap();
-    let meta = legacy::get_session_meta(&margins_dir, "copied").unwrap();
+    let meta = canonical::get_session_meta(&margins_dir, "copied").unwrap();
     assert_eq!(meta.note_error.as_deref(), Some("preserve me"));
     assert_eq!(meta.processing_state.as_deref(), Some("failed"));
     assert_eq!(meta.failed_stage.as_deref(), Some("distill"));
     assert_eq!(meta.vault_note_path.as_deref(), Some("/vault/Copied.md"));
     assert_eq!(meta.segments.len(), 1);
 
-    let connection = Connection::open(legacy::database_path(&margins_dir)).unwrap();
+    let connection = Connection::open(canonical::database_path(&margins_dir)).unwrap();
     let revision: i64 = connection
         .query_row(
             "SELECT revision FROM session_repository_state WHERE session_name = 'copied'",

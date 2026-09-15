@@ -13,6 +13,10 @@ mod windows_atomic_replace;
 use crate::ctx::Ctx;
 use anyhow::Context;
 use http::{build_router, CtxState, ServerState};
+use margins_workflows::{
+    workspace,
+    workspace_service::{ScopedCredentialStore, ServicePrincipal, WorkspaceService},
+};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 /// Entry point for the headless server.  Called from `server_main.rs`.
@@ -60,6 +64,11 @@ async fn run_async() -> anyhow::Result<()> {
         .unwrap_or(8787);
 
     let host = std::env::var("MARGINS_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    if !matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1") {
+        anyhow::bail!(
+            "margins-server only binds loopback; publish it through an explicitly configured trusted HTTPS proxy"
+        );
+    }
 
     let data_dir: PathBuf = std::env::var("MARGINS_DATA_DIR")
         .map(PathBuf::from)
@@ -96,6 +105,32 @@ async fn run_async() -> anyhow::Result<()> {
     }
     std::fs::create_dir_all(&work_dir)?;
 
+    // Resolve the hosted store from an explicit Workspace mapping. The BB
+    // launcher supplies a stable id; standalone servers must select one with
+    // MARGINS_WORKSPACE. No service route infers authority from process cwd.
+    let margins_home = std::env::var("MARGINS_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| data_dir.join("margins-home"));
+    let workspace_id = std::env::var("MARGINS_WORKSPACE")
+        .context("MARGINS_WORKSPACE is required for margins-server")?;
+    let workspace = if std::env::var_os("MARGINS_SERVICE_PROVISION").is_some() {
+        workspace::ensure_service_workspace(
+            &margins_home,
+            &workspace_id,
+            Some(&workspace_id),
+            &work_dir,
+            &work_dir,
+        )?
+    } else {
+        workspace::resolve_workspace(&margins_home, Some(&workspace_id), &work_dir)?
+    };
+    let workspace_service = Arc::new(WorkspaceService::open_with_capabilities(
+        std::env::var("MARGINS_INSTANCE_ID").unwrap_or_else(|_| "local".to_string()),
+        workspace,
+        cfg!(feature = "parakeet-asr"),
+        cfg!(feature = "recall"),
+    )?);
+
     // --- Build shared app state ---
     let app_state = crate::build_app_state(work_dir, settings);
     *app_state
@@ -115,12 +150,23 @@ async fn run_async() -> anyhow::Result<()> {
 
     // --- Auth token ---
     let token = auth::load_or_create_token(&data_dir)?;
+    let credential_store = ScopedCredentialStore::open(data_dir.join("credentials.json"))?;
+    let administrator = ServicePrincipal::full("server-admin", workspace_service.workspace_id());
+    credential_store.register(
+        &administrator.id,
+        &token,
+        administrator.workspace_ids.iter().cloned().collect(),
+        administrator.operations.iter().cloned().collect(),
+        None,
+    )?;
 
     // --- Build router ---
     let server_state = ServerState {
         ctx: Arc::new(CtxState(ctx)),
         sink: ws_sink,
         token: token.clone(),
+        workspace_service: workspace_service.clone(),
+        credential_store,
     };
     let app = build_router(server_state);
 
@@ -130,11 +176,30 @@ async fn run_async() -> anyhow::Result<()> {
         .expect("invalid MARGINS_HOST/MARGINS_PORT");
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let bound_port = listener.local_addr()?.port();
+    let service_state = margins_workflows::remote_workspace::ServiceStateV1 {
+        schema: "margins.service-state.v1".to_string(),
+        protocol_version: 1,
+        instance_id: std::env::var("MARGINS_INSTANCE_ID").unwrap_or_else(|_| "local".to_string()),
+        workspace_ids: vec![workspace_service.workspace_id().to_string()],
+        loopback_port: bound_port,
+    };
+    let state_path = data_dir.join("service.json");
+    let state_temp_path = data_dir.join(format!(".service.{}.tmp", std::process::id()));
+    let mut state_file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&state_temp_path)?;
+    use std::io::Write as _;
+    state_file.write_all(&serde_json::to_vec_pretty(&service_state)?)?;
+    state_file.sync_all()?;
+    drop(state_file);
+    std::fs::rename(&state_temp_path, &state_path)?;
+    std::fs::File::open(&data_dir)?.sync_all()?;
 
     eprintln!(
-        "[margins-server] listening on http://{}  (token: {}...)",
-        addr,
-        &token[..8]
+        "[margins-server] listening on http://{}",
+        listener.local_addr()?
     );
     eprintln!(
         "[margins-server] full token at: {}",

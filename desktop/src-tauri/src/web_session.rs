@@ -11,6 +11,7 @@ use crate::{settings::Settings, AppState, MemoLine};
 use margins::session;
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Write as _};
@@ -25,6 +26,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 pub const WEB_OWNER_LEASE_TIMEOUT_MS: u64 = 75_000;
 pub const WEB_TRANSPORT_OWNER_EVIDENCE_MS: u64 = 10_000;
 pub const HOSTED_CAPTURE_PROTOCOL_VERSION: u8 = 2;
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
 
 // ---------------------------------------------------------------------------
 // State struct
@@ -1000,7 +1005,13 @@ pub fn get_web_recording_notepad(
         .get(recording_id)
         .ok_or_else(|| format!("No active web recording for ID '{recording_id}'"))?;
     ensure_owner(ws, owner_id)?;
-    Ok(web_notepad_snapshot(&ws.memo_lines))
+    let authority =
+        margins::session::SqliteWorkspaceAuthorityStorage::open(ws.work_dir.join(".margins"))
+            .map_err(|error| error.to_string())?;
+    let memo = authority
+        .memo(&ws.session_name)
+        .map_err(|error| error.to_string())?;
+    Ok(web_notepad_snapshot(&memo.lines))
 }
 
 /// Reconcile the whole hosted notepad through the same timestamp-preserving
@@ -1014,7 +1025,13 @@ pub fn update_web_recording_notepad(
 ) -> Result<WebNotepadSnapshot, String> {
     let update = |ws: &mut WebRecordingState| {
         ensure_owner(ws, owner_id)?;
-        let current = web_notepad_snapshot(&ws.memo_lines);
+        let authority =
+            margins::session::SqliteWorkspaceAuthorityStorage::open(ws.work_dir.join(".margins"))
+                .map_err(|error| error.to_string())?;
+        let current_memo = authority
+            .memo(&ws.session_name)
+            .map_err(|error| error.to_string())?;
+        let current = web_notepad_snapshot(&current_memo.lines);
         if current.revision != expected_revision {
             return Err(
                 "The notepad changed somewhere else. Review the latest text and try again."
@@ -1022,16 +1039,23 @@ pub fn update_web_recording_notepad(
             );
         }
         let elapsed = ws.started_at.elapsed().unwrap_or_default().as_secs_f64();
-        let moment = if ws.paused {
-            margins::core::MemoMoment::paused(elapsed, 1)
-        } else {
-            margins::core::MemoMoment::recording(elapsed)
-        };
-        let lines = margins::core::TimedMemoDocument::from_committed(ws.memo_lines.clone())
-            .reconcile_plain_text(text, moment)
-            .into_lines();
-        crate::persist_live_memo(&ws.work_dir, &ws.session_name, &lines)?;
-        ws.memo_lines = lines;
+        let observed_at_ms = (elapsed * 1000.0).round().max(0.0) as u64;
+        let request_id = format!(
+            "web-{}",
+            sha256_hex(format!("{}\0{}\0{text}", ws.owner_id, expected_revision).as_bytes())
+        );
+        let receipt = authority
+            .update_memo(
+                &ws.session_name,
+                &ws.owner_id,
+                &request_id,
+                expected_revision,
+                observed_at_ms,
+                ws.paused,
+                text,
+            )
+            .map_err(|error| error.to_string())?;
+        ws.memo_lines = receipt.lines;
         Ok(web_notepad_snapshot(&ws.memo_lines))
     };
     let mut active = state.web_sessions.lock().unwrap();
@@ -2762,6 +2786,103 @@ mod tests {
         drop(sessions);
 
         discard_web_recording(&state, &first.recording_id, "owner-first").unwrap();
+        let _ = std::fs::remove_dir_all(&work_dir);
+    }
+
+    #[test]
+    fn hosted_writer_and_workspace_service_share_session_title_artifact_and_memo_facts() {
+        let work_dir = make_test_dir("workspace-authority-parity");
+        let state = make_state(work_dir.clone());
+        let workspace_home = work_dir.join("workspace-state");
+        let workspace = margins_workflows::workspace::ensure_service_workspace(
+            &workspace_home,
+            "hosted",
+            None,
+            &work_dir,
+            &work_dir,
+        )
+        .unwrap();
+        let service =
+            margins_workflows::workspace_service::WorkspaceService::open("test-host", workspace)
+                .unwrap();
+        let principal =
+            margins_workflows::workspace_service::ServicePrincipal::full("browser-test", "hosted");
+        let started = start_web_recording(
+            &state,
+            work_dir.clone(),
+            "browser-session".to_string(),
+            "browser-owner".to_string(),
+        )
+        .unwrap();
+
+        let page = service.sessions(&principal, None, 10).unwrap();
+        assert_eq!(page.sessions.len(), 1);
+        assert_eq!(page.sessions[0].session_id.as_ref(), "browser-session");
+        margins::session::set_title(
+            &work_dir.join(".margins"),
+            "browser-session",
+            Some("Canonical title".to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            service.sessions(&principal, None, 10).unwrap().sessions[0]
+                .title
+                .as_deref(),
+            Some("Canonical title")
+        );
+        let artifact_dir = work_dir.join(".margins/artifacts/browser-session");
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        std::fs::write(artifact_dir.join("proof.bin"), b"proof").unwrap();
+        margins::session::upsert_session_artifact(
+            &work_dir.join(".margins"),
+            "browser-session",
+            "proof",
+            0,
+            ".margins/artifacts/browser-session/proof.bin",
+            "durable",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            service.artifacts(&principal, "browser-session").unwrap()[0].size_bytes,
+            Some(5)
+        );
+
+        let first =
+            get_web_recording_notepad(&state, &started.recording_id, "browser-owner").unwrap();
+        update_web_recording_notepad(
+            &state,
+            &started.recording_id,
+            "browser-owner",
+            &first.revision,
+            "Browser note",
+        )
+        .unwrap();
+        let shared = service
+            .memo(
+                &principal,
+                &margins_meeting_protocol::SessionId("browser-session".to_string()),
+            )
+            .unwrap();
+        assert_eq!(shared.lines[0].text, "Browser note");
+        service
+            .update_memo(
+                &principal,
+                &margins_meeting_protocol::SessionId("browser-session".to_string()),
+                &margins_meeting_protocol::WorkspaceMemoUpdateV1 {
+                    request_id: "service-edit".to_string(),
+                    expected_revision: shared.revision,
+                    observed_at_ms: margins_meeting_protocol::SessionMillis(2_000),
+                    paused: false,
+                    text: "Browser note\nService note".to_string(),
+                },
+            )
+            .unwrap();
+        let reflected =
+            get_web_recording_notepad(&state, &started.recording_id, "browser-owner").unwrap();
+        assert_eq!(reflected.text, "Browser note\nService note");
+
+        discard_web_recording(&state, &started.recording_id, "browser-owner").unwrap();
         let _ = std::fs::remove_dir_all(&work_dir);
     }
 

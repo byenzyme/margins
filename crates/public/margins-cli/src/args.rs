@@ -8,12 +8,28 @@ use std::path::PathBuf;
     about = "Record meetings and work with their notes and transcripts"
 )]
 pub struct Args {
+    /// Select an opt-in remote Margins instance (ssh://alias or https://host)
+    #[arg(long, global = true, conflicts_with = "local")]
+    pub remote: Option<String>,
+    /// Force the direct local adapter even when MARGINS_REMOTE is set
+    #[arg(long, global = true, conflicts_with = "remote")]
+    pub local: bool,
     #[command(subcommand)]
     pub command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Inspect and recover opt-in remote capture transfers
+    Transfers {
+        #[command(subcommand)]
+        command: TransfersCommand,
+    },
+    /// Administer or discover the local Workspace service
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
     /// Define and inspect the memory boundary for one practice
     Workspace {
         #[command(subcommand)]
@@ -170,6 +186,39 @@ pub enum Command {
     Capabilities,
     /// Establish or refresh a Margins vault in this folder
     Init,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TransfersCommand {
+    /// List locally recoverable remote transfers
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Retry delivery of one recoverable transfer
+    Retry { transfer_id: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ServiceCommand {
+    /// Print SSH-safe discovery metadata and a short-lived scoped credential
+    Discover {
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Issue a revocable upload-only credential for a Shortcut installation
+    PairShortcut {
+        #[arg(long)]
+        principal: String,
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Revoke all credentials for a principal
+    Revoke {
+        principal: String,
+        #[arg(long, required = true)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

@@ -26,6 +26,7 @@ anyhow = "1"
 argon2 = "0.5"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
 chacha20poly1305 = "0.10"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"

@@ -9,6 +9,7 @@ pub mod integrations;
 pub mod process;
 pub mod projects;
 pub mod recall;
+pub mod remote;
 pub mod retention;
 pub mod sessions;
 pub mod transcript;

@@ -1,12 +1,12 @@
 use chrono::Local;
-use margins_store::legacy;
+use margins_store::canonical;
 use tempfile::tempdir;
 
 fn store() -> (tempfile::TempDir, std::path::PathBuf) {
     let temporary = tempdir().unwrap();
     let margins = temporary.path().join(".margins");
-    legacy::create_session(&margins, "session", &Local::now(), "session.md").unwrap();
-    legacy::add_segment(
+    canonical::create_session(&margins, "session", &Local::now(), "session.md").unwrap();
+    canonical::add_segment(
         &margins,
         "session",
         0,
@@ -21,7 +21,7 @@ fn store() -> (tempfile::TempDir, std::path::PathBuf) {
 #[test]
 fn note_association_is_revisioned_source_relative_and_has_no_job_side_effects() {
     let (_temporary, margins) = store();
-    let failed = legacy::begin_processing_job(
+    let failed = canonical::begin_processing_job(
         &margins,
         "session",
         "note:session",
@@ -29,7 +29,7 @@ fn note_association_is_revisioned_source_relative_and_has_no_job_side_effects() 
         "input-1",
     )
     .unwrap();
-    legacy::update_processing_job(
+    canonical::update_processing_job(
         &margins,
         &failed.job_id,
         failed.attempt,
@@ -41,7 +41,7 @@ fn note_association_is_revisioned_source_relative_and_has_no_job_side_effects() 
     )
     .unwrap();
 
-    let linked = legacy::link_note(
+    let linked = canonical::link_note(
         &margins,
         "session",
         "workspace",
@@ -51,20 +51,20 @@ fn note_association_is_revisioned_source_relative_and_has_no_job_side_effects() 
     )
     .unwrap();
     assert_eq!(linked.revision, 1);
-    let job = legacy::get_processing_job(&margins, "note:session")
+    let job = canonical::get_processing_job(&margins, "note:session")
         .unwrap()
         .unwrap();
     assert_eq!(job.status, "failed");
     assert_eq!(job.failure.as_deref(), Some("model unavailable"));
     assert_eq!(
-        legacy::get_session_meta(&margins, "session")
+        canonical::get_session_meta(&margins, "session")
             .unwrap()
             .segments
             .len(),
         1
     );
 
-    let replay = legacy::link_note(
+    let replay = canonical::link_note(
         &margins,
         "session",
         "workspace",
@@ -74,7 +74,7 @@ fn note_association_is_revisioned_source_relative_and_has_no_job_side_effects() 
     )
     .unwrap();
     assert_eq!(replay.revision, 1, "exact retry is idempotent");
-    assert!(legacy::link_note(
+    assert!(canonical::link_note(
         &margins,
         "session",
         "workspace",
@@ -85,13 +85,13 @@ fn note_association_is_revisioned_source_relative_and_has_no_job_side_effects() 
     .unwrap_err()
     .to_string()
     .contains("revision conflict"));
-    assert!(legacy::link_note(&margins, "session", "workspace", "../escape.md", None, 1,).is_err());
+    assert!(canonical::link_note(&margins, "session", "workspace", "../escape.md", None, 1,).is_err());
 }
 
 #[test]
 fn cancelled_or_superseded_job_attempt_rejects_late_success_after_reopen() {
     let (_temporary, margins) = store();
-    let first = legacy::begin_processing_job(
+    let first = canonical::begin_processing_job(
         &margins,
         "session",
         "note:session",
@@ -99,8 +99,8 @@ fn cancelled_or_superseded_job_attempt_rejects_late_success_after_reopen() {
         "input-1",
     )
     .unwrap();
-    legacy::cancel_processing_job(&margins, &first.job_id, first.attempt).unwrap();
-    assert!(legacy::update_processing_job(
+    canonical::cancel_processing_job(&margins, &first.job_id, first.attempt).unwrap();
+    assert!(canonical::update_processing_job(
         &margins,
         &first.job_id,
         first.attempt,
@@ -114,7 +114,7 @@ fn cancelled_or_superseded_job_attempt_rejects_late_success_after_reopen() {
     .to_string()
     .contains("late processing result"));
 
-    let second = legacy::begin_processing_job(
+    let second = canonical::begin_processing_job(
         &margins,
         "session",
         "note:session",
@@ -123,7 +123,7 @@ fn cancelled_or_superseded_job_attempt_rejects_late_success_after_reopen() {
     )
     .unwrap();
     assert_eq!(second.attempt, first.attempt + 1);
-    assert!(legacy::update_processing_job(
+    assert!(canonical::update_processing_job(
         &margins,
         &first.job_id,
         first.attempt,
@@ -136,13 +136,13 @@ fn cancelled_or_superseded_job_attempt_rejects_late_success_after_reopen() {
     .unwrap_err()
     .to_string()
     .contains("superseded"));
-    let reopened = legacy::get_processing_job(&margins, "note:session")
+    let reopened = canonical::get_processing_job(&margins, "note:session")
         .unwrap()
         .unwrap();
     assert_eq!(reopened.attempt, second.attempt);
     assert_eq!(reopened.status, "queued");
 
-    let third = legacy::begin_processing_job(
+    let third = canonical::begin_processing_job(
         &margins,
         "session",
         "note:session",
@@ -152,7 +152,7 @@ fn cancelled_or_superseded_job_attempt_rejects_late_success_after_reopen() {
     .unwrap();
     assert_eq!(third.attempt, second.attempt + 1);
     assert_eq!(third.input_revision, "input-2");
-    assert!(legacy::update_processing_job(
+    assert!(canonical::update_processing_job(
         &margins,
         &second.job_id,
         second.attempt,
@@ -173,7 +173,7 @@ fn link_unlink_never_remove_audio_or_complete_processing() {
     let audio = temporary.path().join("recordings/session.wav");
     std::fs::create_dir_all(audio.parent().unwrap()).unwrap();
     std::fs::write(&audio, b"durable audio").unwrap();
-    let job = legacy::begin_processing_job(
+    let job = canonical::begin_processing_job(
         &margins,
         "session",
         "note:session",
@@ -181,7 +181,7 @@ fn link_unlink_never_remove_audio_or_complete_processing() {
         "input-1",
     )
     .unwrap();
-    let linked = legacy::link_note(
+    let linked = canonical::link_note(
         &margins,
         "session",
         "workspace",
@@ -190,10 +190,10 @@ fn link_unlink_never_remove_audio_or_complete_processing() {
         0,
     )
     .unwrap();
-    legacy::unlink_note(&margins, "session", linked.revision).unwrap();
+    canonical::unlink_note(&margins, "session", linked.revision).unwrap();
     assert!(audio.exists());
     assert_eq!(
-        legacy::get_processing_job(&margins, &job.job_id)
+        canonical::get_processing_job(&margins, &job.job_id)
             .unwrap()
             .unwrap()
             .status,
@@ -204,7 +204,7 @@ fn link_unlink_never_remove_audio_or_complete_processing() {
 #[test]
 fn note_publication_and_exact_job_completion_are_atomic_and_retryable() {
     let (_temporary, margins) = store();
-    let job = legacy::begin_processing_job(
+    let job = canonical::begin_processing_job(
         &margins,
         "session",
         "note:session",
@@ -212,7 +212,7 @@ fn note_publication_and_exact_job_completion_are_atomic_and_retryable() {
         "input-1",
     )
     .unwrap();
-    let linked = legacy::complete_processing_job_with_note(
+    let linked = canonical::complete_processing_job_with_note(
         &margins,
         &job.job_id,
         job.attempt,
@@ -224,14 +224,14 @@ fn note_publication_and_exact_job_completion_are_atomic_and_retryable() {
     .unwrap();
     assert_eq!(linked.revision, 1);
     assert_eq!(
-        legacy::get_processing_job(&margins, &job.job_id)
+        canonical::get_processing_job(&margins, &job.job_id)
             .unwrap()
             .unwrap()
             .status,
         "complete"
     );
 
-    let retry = legacy::complete_processing_job_with_note(
+    let retry = canonical::complete_processing_job_with_note(
         &margins,
         &job.job_id,
         job.attempt,
@@ -247,7 +247,7 @@ fn note_publication_and_exact_job_completion_are_atomic_and_retryable() {
 #[test]
 fn cancelled_job_cannot_publish_a_late_note_association() {
     let (_temporary, margins) = store();
-    let job = legacy::begin_processing_job(
+    let job = canonical::begin_processing_job(
         &margins,
         "session",
         "note:session",
@@ -255,8 +255,8 @@ fn cancelled_job_cannot_publish_a_late_note_association() {
         "input-1",
     )
     .unwrap();
-    legacy::cancel_processing_job(&margins, &job.job_id, job.attempt).unwrap();
-    assert!(legacy::complete_processing_job_with_note(
+    canonical::cancel_processing_job(&margins, &job.job_id, job.attempt).unwrap();
+    assert!(canonical::complete_processing_job_with_note(
         &margins,
         &job.job_id,
         job.attempt,
@@ -268,7 +268,7 @@ fn cancelled_job_cannot_publish_a_late_note_association() {
     .unwrap_err()
     .to_string()
     .contains("late processing result"));
-    assert!(legacy::get_note_association(&margins, "session")
+    assert!(canonical::get_note_association(&margins, "session")
         .unwrap()
         .is_none());
 }

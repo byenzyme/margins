@@ -16,6 +16,8 @@ pub mod publish;
 pub mod session_index;
 pub mod transcript_view;
 pub mod workspace;
+pub mod workspace_service;
+pub mod remote_workspace;
 
 pub mod resources {
     pub const MARGINS_AGENT_INSTRUCTIONS: &str = include_str!("../resources/agents/margins.md");

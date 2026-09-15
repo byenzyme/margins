@@ -3,7 +3,7 @@ use margins_cli::services::{CliServices, ProjectService};
 use margins_core::{
     AsrBackend, AsrRequest, AsrResult, TranscriptError, TranscriptErrorCode, TranscriptWord,
 };
-use margins_store::legacy;
+use margins_store::canonical;
 use margins_workflows::project::{ProjectSource, ResolvedProject};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -92,7 +92,7 @@ impl AsrBackend for FixtureAsr {
 
 fn seed_multipart_project(root: &std::path::Path) {
     let margins_dir = root.join(".margins");
-    legacy::create_session(&margins_dir, "multi", &Local::now(), ".margins/multi.md").unwrap();
+    canonical::create_session(&margins_dir, "multi", &Local::now(), ".margins/multi.md").unwrap();
     std::fs::write(
         margins_dir.join("multi.md"),
         "[00:30] opening question\n[02:00] decision checkpoint\n[04:00] owners confirmed\n",
@@ -108,7 +108,7 @@ fn seed_multipart_project(root: &std::path::Path) {
             1,
         )
         .unwrap();
-        legacy::add_segment(
+        canonical::add_segment(
             &margins_dir,
             "multi",
             ordinal,
@@ -118,7 +118,7 @@ fn seed_multipart_project(root: &std::path::Path) {
         )
         .unwrap();
     }
-    legacy::create_session(
+    canonical::create_session(
         &margins_dir,
         "neighbor",
         &Local::now(),
@@ -272,11 +272,11 @@ fn realistic_multipart_processing_is_exact_once_offset_once_and_session_confined
         std::fs::read(margins_dir.join("multi_transcript.json")).unwrap(),
         transcript_before_align
     );
-    let artifacts = legacy::list_session_artifacts(&margins_dir, "multi").unwrap();
+    let artifacts = canonical::list_session_artifacts(&margins_dir, "multi").unwrap();
     assert_eq!(artifacts.len(), 1);
     assert_eq!(artifacts[0].session_name, "multi");
     assert_eq!(artifacts[0].path, ".margins/multi_aligned.md");
-    assert!(legacy::list_session_artifacts(&margins_dir, "neighbor")
+    assert!(canonical::list_session_artifacts(&margins_dir, "neighbor")
         .unwrap()
         .is_empty());
     assert!(!std::fs::read_dir(&margins_dir).unwrap().any(|entry| entry
@@ -297,17 +297,17 @@ fn multipart_failures_preserve_existing_outputs_and_artifacts() {
     let aligned = margins_dir.join("multi_aligned.md");
     std::fs::write(&transcript, "old-transcript").unwrap();
     std::fs::write(&aligned, "old-aligned").unwrap();
-    legacy::upsert_session_artifact(
+    canonical::upsert_session_artifact(
         &margins_dir,
         "multi",
-        legacy::SESSION_ARTIFACT_KIND_TRANSCRIPT,
+        canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT,
         0,
         ".margins/multi_aligned.md",
         "durable",
         None,
     )
     .unwrap();
-    let artifact_before = legacy::list_session_artifacts(&margins_dir, "multi").unwrap();
+    let artifact_before = canonical::list_session_artifacts(&margins_dir, "multi").unwrap();
     let assert_unchanged = || {
         assert_eq!(
             std::fs::read_to_string(&transcript).unwrap(),
@@ -315,7 +315,7 @@ fn multipart_failures_preserve_existing_outputs_and_artifacts() {
         );
         assert_eq!(std::fs::read_to_string(&aligned).unwrap(), "old-aligned");
         assert_eq!(
-            legacy::list_session_artifacts(&margins_dir, "multi").unwrap(),
+            canonical::list_session_artifacts(&margins_dir, "multi").unwrap(),
             artifact_before
         );
     };

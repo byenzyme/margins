@@ -2,7 +2,8 @@
 //!
 //! The crate has two deliberately separate layers:
 //!
-//! - [`legacy`] preserves the original path-based SQLite API and on-disk schema.
+//! - [`canonical`] owns the original on-disk schema and all production session
+//!   mutations while data is converted additively.
 //! - [`SqliteSessionRepository`] implements the richer `margins-core` port using
 //!   additive sidecar tables for revision and lossless segment metadata.
 //!
@@ -11,10 +12,15 @@
 #![forbid(unsafe_code)]
 
 pub mod index;
-pub mod legacy;
+#[path = "legacy.rs"]
+pub mod canonical;
+mod authority;
 mod meeting_runtime;
 mod sqlite;
 
 pub use index::{list_session_index, SessionIndexEntry, SessionIndexQuery};
+pub use authority::{
+    AuthorityMemoReceipt, ImportReceipt, SqliteWorkspaceAuthorityStorage,
+};
 pub use meeting_runtime::{MeetingRuntimeStorageStats, SqliteMeetingRuntimeStorage};
 pub use sqlite::SqliteSessionRepository;

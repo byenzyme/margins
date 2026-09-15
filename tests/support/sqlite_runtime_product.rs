@@ -1,5 +1,5 @@
 use chrono::Local;
-use margins_store::legacy;
+use margins_store::canonical;
 use std::path::Path;
 
 #[path = "fixture_generator.rs"]
@@ -7,14 +7,14 @@ mod fixture_generator;
 
 pub fn exercise_store(root: &Path, session_name: &str) {
     let margins_dir = root.join("margins-store");
-    legacy::create_session(&margins_dir, session_name, &Local::now(), "session-note.md").unwrap();
-    legacy::add_segment(&margins_dir, session_name, 0, "segment.wav", 0, Some(1.25)).unwrap();
+    canonical::create_session(&margins_dir, session_name, &Local::now(), "session-note.md").unwrap();
+    canonical::add_segment(&margins_dir, session_name, 0, "segment.wav", 0, Some(1.25)).unwrap();
 
-    let stored = legacy::get_session_meta(&margins_dir, session_name).unwrap();
+    let stored = canonical::get_session_meta(&margins_dir, session_name).unwrap();
     assert_eq!(stored.name, session_name);
     assert_eq!(stored.segments.len(), 1);
     assert_eq!(stored.segments[0].wav_path, "segment.wav");
-    let listed = legacy::list_sessions(&margins_dir).unwrap();
+    let listed = canonical::list_sessions(&margins_dir).unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].name, session_name);
     assert_eq!(listed[0].segment_count, 1);
