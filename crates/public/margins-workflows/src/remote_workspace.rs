@@ -503,9 +503,10 @@ impl WorkspaceHttpClient {
                 .context("server error omitted its envelope")?;
             bail!("{}: {}", error.code, error.message);
         }
-        envelope
-            .result
-            .context("successful response omitted its result")
+        match envelope.result {
+            EnvelopeResult::Present(result) => Ok(result),
+            EnvelopeResult::Missing => bail!("successful response omitted its result"),
+        }
     }
 }
 
@@ -657,10 +658,31 @@ fn producer_token_reference() -> String {
 }
 
 #[derive(Deserialize)]
+#[serde(bound(deserialize = "T: Deserialize<'de>"))]
 struct ClientEnvelope<T> {
     ok: bool,
-    result: Option<T>,
+    #[serde(default)]
+    result: EnvelopeResult<T>,
     error: Option<margins_meeting_protocol::WorkspaceErrorV1>,
+}
+
+enum EnvelopeResult<T> {
+    Missing,
+    Present(T),
+}
+
+impl<T> Default for EnvelopeResult<T> {
+    fn default() -> Self {
+        Self::Missing
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for EnvelopeResult<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        T::deserialize(deserializer).map(Self::Present)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

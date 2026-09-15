@@ -45,6 +45,47 @@ fn transport_selection_rejects_unsafe_or_plain_remote_targets() {
 }
 
 #[test]
+fn http_client_preserves_present_null_for_optional_route_results() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        use std::io::{Read as _, Write as _};
+        for expected_path in [
+            "/v1/workspaces/workspace-a/sessions/session-a/note-association",
+            "/v1/workspaces/workspace-a/sessions/session-a/jobs/latest",
+        ] {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let read = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(
+                request.starts_with(&format!("GET {expected_path} HTTP/1.1")),
+                "unexpected request: {request}"
+            );
+            let body = br#"{"ok":true,"result":null}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+        }
+    });
+    let client = WorkspaceHttpClient::new(
+        url::Url::parse(&format!("http://{address}/")).unwrap(),
+        "scoped-token",
+        "workspace-a",
+        None,
+    )
+    .unwrap();
+
+    assert!(client.note_association("session-a").unwrap().is_none());
+    assert!(client.latest_job("session-a").unwrap().is_none());
+    server.join().unwrap();
+}
+
+#[test]
 fn durable_spool_recovers_frames_and_retries_without_changing_identity() {
     let temp = tempfile::tempdir().unwrap();
     let spool = DurableTransferSpool::create(

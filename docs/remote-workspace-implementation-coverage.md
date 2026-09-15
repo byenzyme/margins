@@ -209,9 +209,11 @@ delivery and remains capability-truthful.
   provisioning, SSH/HTTPS, backup/recovery, capability semantics, and revocation.
   [Shortcut instructions](../integrations/shortcuts/README.md) contain no credential.
 
-Actual iPhone background behavior, app switch/lock, cellular retry, Mac permissions,
-native system audio, installed application, signing/package, published installation,
-and provisioned remote-host behavior were not run and remain release gates.
+Actual iPhone background behavior, app switch/lock, cellular retry, native Mac
+microphone/system capture, installed application, signing/package, and published
+installation were not run and remain release gates. An isolated server on an
+existing authorized Tailnet host was exercised without replacing a production
+service.
 
 ## Verification evidence
 
@@ -355,6 +357,40 @@ features as present. Its assertions now follow the actual `recall` and
 `recall-local-model` feature matrix, so the canonical native lane verifies capture
 without falsely requiring or advertising unrelated optional capabilities.
 
+The authorized Mac verifier built the exact committed `audio-capture` composition
+through the managed shared lane, confirmed its embedded full Git identity and
+`dirty=false`, and passed the canonical native composition test 1/1. Across the
+real `ssh://bs-server` discovery and Tailscale boundary, distinct two-second,
+48 kHz mono s16 fixtures arrived as 20 bounded chunks and 96,000 samples per lane.
+The canonical server artifacts matched the source bytes exactly (mic SHA-256
+`b9ea16f54ebde363da595804b0d486a5951826894f029cc87f36f5a5e36c2491`, system
+SHA-256 `fdb819f615731eb33c423ab0ada1467770c1b4ce7c96f3d3991c08de4c503428`),
+the timed memo remained readable, close preceded the single finalize at 2,000 ms,
+and successful completion removed the local producer credential.
+
+Composed recovery checks then covered four distinct boundaries. Restarting the
+client from a fully spooled transfer delivered the same 40 chunks and hashes. A
+proxy discarded one chunk response only after server commit; retry did not create
+a duplicate chunk. A separate disconnect occurred before the server saw chunk 0;
+the complete local spool remained recoverable. A final proxy discarded the finalize
+response after server commit; retry preserved exactly one finalize. Finally,
+`STOP_AFTER=memo` left 40 chunks, one close, a durable memo, and zero finalizes;
+after restarting only the scoped server against the same state, retry produced one
+finalize after close, 40 unique chunks, and 43 unique receipts without changing
+the artifacts. Three compile-free complete transfers took 14.20 s, 13.39 s, and
+13.09 s (median 13.39 s); these measure fresh SSH setup plus delivery of both
+two-second lanes and control receipts, not recorder callback or Stop latency.
+
+Actual SSH CLI readback found one additional client-contract defect: a successful
+`result: null` for absent processing job or note association was mistaken for a
+missing result field. The envelope now distinguishes a present JSON null from an
+omitted field. A real loopback HTTP regression covers both optional routes, and the
+full seven-test spool/transport suite passes with the shared decoder change.
+Native local and remote `new` reached the normal macOS permission boundary but the
+terminal host lacked Microphone permission; no lane opened. With no remotely
+controllable System Settings window, the verifier did not bypass/reset TCC, so real
+device Pause/Stop timing and native `attach` remain unclaimed.
+
 For backup/restore, the stopped isolated state tree was copied byte-for-byte,
 restored to its exact absolute Workspace paths, and restarted. The service returned
 the same finalized session, and the restored WAV SHA-256 matched
@@ -377,6 +413,8 @@ compile (service fixture 0.34 s; spool 0.01 s). The desktop parity test itself t
 separately above. BB increased from the prior 28-test baseline to 32/32 and the
 frontend production build passed. The browser counter measurements above are
 protocol/storage evidence, not native audio-fidelity or native latency evidence.
+The Mac SSH median is a complete fresh-tunnel transfer measurement; it must not be
+read as local-capture or instantaneous-control latency.
 
 Inferred, not measured on native hardware: the direct local path adds only canonical
 SQLite memo/session work already required for durability; it does not add network,
@@ -394,14 +432,17 @@ local capture.
 
 ## Remaining gates
 
-1. Run the exact committed private CLI on Mac for local and SSH remote `new`/`attach`,
-   pause/resume/Stop, capture-time network loss, memo, recovery, and measured latency.
+1. Grant the Mac terminal/BB host ordinary Microphone permission, then run the exact
+   committed private CLI for local and SSH remote `new`/`attach`, pause/resume/Stop,
+   and native readiness/device-release latency. Sample-exact SSH delivery, disconnect,
+   lost ACK, client/server restart, memo, and finalize recovery are complete.
 2. Run the complete BB full-host UI journey on an environment that can install/load
    this plugin, including remote remount, stale callbacks, conflicts, recovery,
    artifacts, jobs, and the now-wired agent handoff. Typed production host/client,
    remount, and exact-session contract tests are complete; the full BB host UI is not.
-3. Run real Mac microphone/system lanes and measure readiness/callback/Stop latency
-   (delegated to the authorized Mac verifier; no result claimed here yet).
+3. Run real Mac microphone/system lanes and measure readiness/callback/Stop latency;
+   the authorized verifier reached but could not clear the normal TCC gate without a
+   visible System Settings session.
 4. Run the real Shortcut share/retry/app-switch/lock/cellular matrix.
 5. Verify signed/published clean-client installation and supported OS service
    installation. Portable archive topology/checksum/extraction and stopped-state
