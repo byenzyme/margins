@@ -148,6 +148,18 @@ fn composed_service_is_the_same_canonical_store_across_retry_and_restart() {
     let service = WorkspaceService::open("host-a", workspace.clone()).unwrap();
     let owner = ServicePrincipal::full("client-a", "team");
     let other = ServicePrincipal::full("client-b", "team");
+    let capabilities = service.capabilities(&owner).unwrap();
+    assert_eq!(capabilities.capture_formats.len(), 1);
+    assert_eq!(capabilities.capture_formats[0].sample_rate_hz, 16_000);
+    let mut unsupported = create("unsupported-rate");
+    let ClientMessageBodyV1::CreateSession(unsupported_create) = &mut unsupported.body else {
+        unreachable!()
+    };
+    unsupported_create.lanes[0].format.sample_rate_hz = 32_000;
+    assert!(service.reserve_session(&owner, unsupported).is_err());
+
+    // This fixture deliberately uses the former 48 kHz wire declaration: a
+    // pending pre-cutover spool must replay with its recorded format intact.
     let reservation = service
         .reserve_session(&owner, create("capture-a"))
         .unwrap();
@@ -231,10 +243,11 @@ fn composed_service_is_the_same_canonical_store_across_retry_and_restart() {
     assert_eq!(page.sessions.len(), 1);
     assert_eq!(page.sessions[0].session_id.as_ref(), "capture-a");
     assert!(page.sessions[0].input_finalized);
-    assert!(restarted
+    let record = restarted
         .repository_record(&owner, &SessionId("capture-a".to_string()))
         .unwrap()
-        .is_some());
+        .unwrap();
+    assert_eq!(record.segments[0].audio.format.sample_rate_hz, 48_000);
     let artifacts =
         margins_store::canonical::list_session_artifacts(&captures.join(".margins"), "capture-a")
             .unwrap();
@@ -262,6 +275,77 @@ fn composed_service_is_the_same_canonical_store_across_retry_and_restart() {
     assert!(captures.join(".margins/sessions.sqlite").is_file());
     assert!(!captures.join(".margins/meeting-runtime.sqlite").exists());
     assert!(!temp.path().join("unrelated/.margins").exists());
+}
+
+#[test]
+fn finalized_asr_capable_service_durably_admits_one_revision_stable_job() {
+    let temp = tempfile::tempdir().unwrap();
+    let notes = temp.path().join("notes");
+    let captures = temp.path().join("captures");
+    std::fs::create_dir_all(&notes).unwrap();
+    let workspace = ensure_service_workspace(
+        &temp.path().join("state"),
+        "team",
+        Some("Team"),
+        &notes,
+        &captures,
+    )
+    .unwrap();
+    let service =
+        WorkspaceService::open_with_capabilities("host-a", workspace.clone(), true, false).unwrap();
+    let owner = ServicePrincipal::full("client-a", "team");
+    let reservation = service.reserve_session(&owner, create("asr-a")).unwrap();
+    for lane in ["mic", "system"] {
+        for sequence in 0..2 {
+            service
+                .execute_capture(
+                    &owner,
+                    &reservation.producer_token,
+                    chunk("asr-a", &format!("{lane}-{sequence}"), lane, sequence),
+                )
+                .unwrap();
+        }
+    }
+    service
+        .execute_capture(&owner, &reservation.producer_token, close("asr-a"))
+        .unwrap();
+    let finalize_command = finalize("asr-a");
+    service
+        .execute_capture(
+            &owner,
+            &reservation.producer_token,
+            finalize_command.clone(),
+        )
+        .unwrap();
+    let admitted = service
+        .latest_job(&owner, &SessionId("asr-a".into()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(admitted.job_id, "transcribe:asr-a");
+    assert_eq!(admitted.operation, "transcribe_session");
+    assert_eq!(admitted.status, "queued");
+    assert_eq!(admitted.attempt, 1);
+
+    // A lost finalize ACK replays the same receipt and must not manufacture a
+    // second processing attempt for an unchanged finalized input revision.
+    service
+        .execute_capture(&owner, &reservation.producer_token, finalize_command)
+        .unwrap();
+    assert_eq!(
+        service
+            .latest_job(&owner, &SessionId("asr-a".into()))
+            .unwrap()
+            .unwrap(),
+        admitted
+    );
+    drop(service);
+
+    let restarted =
+        WorkspaceService::open_with_capabilities("host-a", workspace, true, false).unwrap();
+    assert_eq!(
+        restarted.pending_transcription_jobs().unwrap(),
+        vec![admitted]
+    );
 }
 
 #[test]

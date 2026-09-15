@@ -5,8 +5,8 @@ use margins_core::{
     NewSegment, SampleFormat, SegmentId as CoreSegmentId, UnixMillis as CoreUnixMillis,
 };
 use margins_meeting_protocol::{
-    AudioChunkV1, LaneId, MessageId, SequenceRangeV1, ServerMessageBodyV1, ServerMessageV1,
-    SessionId,
+    AudioChunkV1, AudioCodecV1, AudioContainerV1, AudioFormatV1, LaneId, MessageId,
+    SequenceRangeV1, ServerMessageBodyV1, ServerMessageV1, SessionId,
 };
 use margins_meeting_runtime::{
     MeetingRuntimeStorage, SessionDeltaV1, StorageCommit, StoredCommandReceiptV1, StoredSessionV1,
@@ -247,6 +247,7 @@ impl SqliteMeetingRuntimeStorage {
             return Ok(None);
         };
         let session_id = delta.session.session_id();
+        let declared_lanes = &delta.session.create().lanes;
         let artifacts = self.directory.join("artifacts").join(session_id.as_ref());
         std::fs::create_dir_all(&artifacts)?;
         let mut lanes = Vec::new();
@@ -288,6 +289,12 @@ impl SqliteMeetingRuntimeStorage {
                 boundary.lane_id.clone(),
                 format!(".margins/artifacts/{}/{file_name}", session_id.as_ref()),
                 bytes.len() as u64,
+                declared_lanes
+                    .iter()
+                    .find(|lane| lane.lane_id == boundary.lane_id)
+                    .context("finalized lane was not declared by the session")?
+                    .format
+                    .clone(),
             ));
         }
         Ok(Some(FinalizedProjection {
@@ -301,7 +308,7 @@ impl SqliteMeetingRuntimeStorage {
 struct FinalizedProjection {
     segment_id: String,
     duration_secs: f64,
-    lanes: Vec<(LaneId, String, u64)>,
+    lanes: Vec<(LaneId, String, u64, AudioFormatV1)>,
 }
 
 impl MeetingRuntimeStorage for SqliteMeetingRuntimeStorage {
@@ -549,11 +556,7 @@ impl MeetingRuntimeStorage for SqliteMeetingRuntimeStorage {
                     segment_id: CoreSegmentId::from(projection.segment_id.clone()),
                     lane,
                     uri: representative.1.clone(),
-                    format: AudioFormat {
-                        sample_rate_hz: 48_000,
-                        channel_count: 1,
-                        sample_format: SampleFormat::Signed16,
-                    },
+                    format: core_audio_format(&representative.3)?,
                     duration_ms: CoreDurationMillis(duration_ms),
                     frame_count: representative.2 / 2,
                     byte_length: Some(representative.2),
@@ -566,7 +569,7 @@ impl MeetingRuntimeStorage for SqliteMeetingRuntimeStorage {
                 "INSERT OR IGNORE INTO session_segment_contracts (session_name, segment_index, segment_id, contract_json) VALUES (?1, ?2, ?3, ?4)",
                 params![session_id.as_ref(), ordinal, projection.segment_id, serde_json::to_string(&contract)?],
             )?;
-            for (lane, path, _) in projection.lanes {
+            for (lane, path, _, _) in projection.lanes {
                 let kind = format!("audio_{}_pcm", safe_file_component(lane.as_ref()));
                 tx.execute(
                     "INSERT INTO session_artifacts (session_name, kind, ordinal, path, retention_class, created_at, expires_at) VALUES (?1, ?2, ?3, ?4, 'durable', ?5, NULL) ON CONFLICT(session_name, kind, ordinal) DO UPDATE SET path = excluded.path, retention_class = excluded.retention_class",
@@ -577,6 +580,20 @@ impl MeetingRuntimeStorage for SqliteMeetingRuntimeStorage {
         tx.commit()?;
         Ok(StorageCommit::Committed)
     }
+}
+
+fn core_audio_format(format: &AudioFormatV1) -> Result<AudioFormat> {
+    if format.codec != AudioCodecV1::PcmS16Le || format.container != AudioContainerV1::Raw {
+        anyhow::bail!("finalized remote audio uses an unsupported durable format");
+    }
+    if format.channel_count != 1 || format.sample_rate_hz == 0 {
+        anyhow::bail!("finalized remote audio must be mono with a nonzero sample rate");
+    }
+    Ok(AudioFormat {
+        sample_rate_hz: format.sample_rate_hz,
+        channel_count: format.channel_count,
+        sample_format: SampleFormat::Signed16,
+    })
 }
 
 fn safe_file_component(value: &str) -> String {

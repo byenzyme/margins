@@ -257,7 +257,9 @@ fn reservation_intent_survives_lost_response_and_promotes_without_secret_leak() 
         remote_url: "https://margins.example.test".into(),
         workspace_id: "workspace-a".into(),
         session_id: "session-a".into(),
-        request: CaptureReservationRequestV1::Create { command: command.clone() },
+        request: CaptureReservationRequestV1::Create {
+            command: command.clone(),
+        },
     }
     .persist(temp.path())
     .unwrap();
@@ -267,7 +269,10 @@ fn reservation_intent_survives_lost_response_and_promotes_without_secret_leak() 
     drop(intent);
     let recovered = pending_capture_reservations(temp.path()).unwrap();
     assert_eq!(recovered.len(), 1);
-    assert_eq!(recovered[0].request, CaptureReservationRequestV1::Create { command });
+    assert_eq!(
+        recovered[0].request,
+        CaptureReservationRequestV1::Create { command }
+    );
     let json = std::fs::read_to_string(temp.path().join("reservations/transfer-a.json")).unwrap();
     assert!(!json.contains("producer-secret"));
 
@@ -283,7 +288,9 @@ fn reservation_intent_survives_lost_response_and_promotes_without_secret_leak() 
     )
     .unwrap();
     recovered[0].remove(temp.path()).unwrap();
-    assert!(pending_capture_reservations(temp.path()).unwrap().is_empty());
+    assert!(pending_capture_reservations(temp.path())
+        .unwrap()
+        .is_empty());
     assert_eq!(
         DurableTransferSpool::open(temp.path(), "transfer-a", 0)
             .unwrap()
@@ -296,8 +303,8 @@ fn reservation_intent_survives_lost_response_and_promotes_without_secret_leak() 
 #[test]
 fn concurrent_reservation_promotion_creates_once_and_capture_lease_fences_loser() {
     if let Ok(root) = std::env::var("MARGINS_TEST_CAPTURE_LEASE_ROOT") {
-        let spool = DurableTransferSpool::open(std::path::Path::new(&root), "promotion-race", 0)
-            .unwrap();
+        let spool =
+            DurableTransferSpool::open(std::path::Path::new(&root), "promotion-race", 0).unwrap();
         assert!(spool.acquire_capture_lease().is_err());
         return;
     }
@@ -393,7 +400,7 @@ fn concurrent_reservation_promotion_creates_once_and_capture_lease_fences_loser(
 }
 
 #[test]
-fn native_pcm_adapter_preserves_distinct_lane_samples_channels_and_duration() {
+fn native_pcm_adapter_preserves_direct_16k_lane_samples_channels_and_duration() {
     let temp = tempfile::tempdir().unwrap();
     let spool = DurableTransferSpool::create(
         temp.path(),
@@ -410,52 +417,162 @@ fn native_pcm_adapter_preserves_distinct_lane_samples_channels_and_duration() {
     transfer
         .begin_segment("segment-native".into(), 250)
         .unwrap();
-    let mic = (0..4_800)
+    let mic = (0..3_200)
         .map(|index| [i16::MIN, -23_456, -1, 0, 1, 12_345, i16::MAX][index % 7])
         .flat_map(i16::to_le_bytes)
         .collect::<Vec<_>>();
-    let system = (0..4_800)
+    let system = (0..3_200)
         .map(|index| [31_337_i16, 2, -17, -30_001][index % 4])
         .flat_map(i16::to_le_bytes)
         .collect::<Vec<_>>();
     assert_eq!(
         transfer
-            .append_s16le(NativePcmLane::Microphone, 48_000, &mic)
+            .append_s16le(NativePcmLane::Microphone, 16_000, &mic)
             .unwrap(),
-        4_800
+        3_200
     );
     assert_eq!(
         transfer
-            .append_s16le(NativePcmLane::System, 48_000, &system)
+            .append_s16le(NativePcmLane::System, 16_000, &system)
             .unwrap(),
-        4_800
+        3_200
     );
     let close = transfer.close_segment(SegmentCloseReasonV1::Stop).unwrap();
     let ClientMessageBodyV1::CloseSegment(close) = close.body else {
         panic!("expected close");
     };
-    assert_eq!(close.ended_at_ms.0, 350);
+    assert_eq!(close.ended_at_ms.0, 450);
     assert_eq!(close.lane_boundaries.len(), 2);
     assert!(close
         .lane_boundaries
         .iter()
-        .all(|boundary| boundary.next_sequence == 1));
+        .all(|boundary| boundary.next_sequence == 2));
 
     let chunks = transfer.spool().pending_chunks().unwrap();
-    assert_eq!(chunks.len(), 2);
+    assert_eq!(chunks.len(), 4);
     let mut encoded = std::collections::BTreeMap::new();
     for chunk in chunks {
         let ClientMessageBodyV1::AudioChunk(audio) = chunk.command.body else {
             panic!("expected audio");
         };
-        assert_eq!(audio.starts_at_ms.0, 250);
+        assert!(matches!(audio.starts_at_ms.0, 250 | 350));
         assert_eq!(audio.duration_ms.0, 100);
-        assert_eq!(audio.payload.len(), 4_800 * 2);
-        encoded.insert(audio.lane_id.0, audio.payload);
+        assert_eq!(audio.payload.len(), 1_600 * 2);
+        encoded
+            .entry(audio.lane_id.0)
+            .or_insert_with(Vec::new)
+            .extend(audio.payload);
     }
     assert_eq!(encoded["mic"], mic);
     assert_eq!(encoded["system"], system);
     assert_ne!(encoded["mic"], encoded["system"]);
+}
+
+fn capture_resampled(rate: u32, samples: &[f32], partitions: &[usize]) -> Vec<u8> {
+    let temp = tempfile::tempdir().unwrap();
+    let spool = DurableTransferSpool::create(
+        temp.path(),
+        "resample-transfer",
+        "instance-a",
+        "https://margins.example.test/",
+        "workspace-a",
+        "session-a",
+        "producer-secret",
+        0,
+    )
+    .unwrap();
+    let mut transfer = NativePcmTransfer::new(spool);
+    transfer
+        .begin_segment("segment-resample".into(), 0)
+        .unwrap();
+    let mut offset = 0;
+    for &length in partitions {
+        let end = (offset + length).min(samples.len());
+        transfer
+            .append_f32(NativePcmLane::Microphone, rate, &samples[offset..end])
+            .unwrap();
+        offset = end;
+    }
+    if offset < samples.len() {
+        transfer
+            .append_f32(NativePcmLane::Microphone, rate, &samples[offset..])
+            .unwrap();
+    }
+    transfer.close_segment(SegmentCloseReasonV1::Stop).unwrap();
+    let mut chunks = transfer
+        .spool()
+        .pending_chunks()
+        .unwrap()
+        .into_iter()
+        .map(|chunk| match chunk.command.body {
+            ClientMessageBodyV1::AudioChunk(audio) => (audio.sequence, audio.payload),
+            _ => panic!("expected audio chunk"),
+        })
+        .collect::<Vec<_>>();
+    chunks.sort_by_key(|(sequence, _)| *sequence);
+    chunks.into_iter().flat_map(|(_, bytes)| bytes).collect()
+}
+
+#[test]
+fn native_resampler_is_partition_invariant_and_drains_non_integer_tail() {
+    for rate in [44_100_u32, 48_000_u32] {
+        let samples = (0..rate as usize + 1)
+            .map(|index| {
+                (2.0 * std::f32::consts::PI * 437.0 * index as f32 / rate as f32).sin() * 0.5
+            })
+            .collect::<Vec<_>>();
+        let contiguous = capture_resampled(rate, &samples, &[]);
+        let partitioned = capture_resampled(rate, &samples, &[1, 17, 509, 2_048, 73, 8_191]);
+        assert_eq!(
+            partitioned, contiguous,
+            "partitioned {rate} Hz conversion changed bytes"
+        );
+        let expected_frames =
+            ((samples.len() as u128 * 16_000_u128).div_ceil(rate as u128)) as usize;
+        assert_eq!(contiguous.len(), expected_frames * 2);
+    }
+}
+
+#[test]
+fn native_resampler_rejects_alias_energy_and_rate_changes() {
+    let tone = |frequency: f32| {
+        (0..48_000)
+            .map(|index| {
+                (2.0 * std::f32::consts::PI * frequency * index as f32 / 48_000.0).sin() * 0.8
+            })
+            .collect::<Vec<_>>()
+    };
+    let rms = |bytes: &[u8]| {
+        let samples = bytes
+            .chunks_exact(2)
+            .map(|sample| i16::from_le_bytes([sample[0], sample[1]]) as f64 / 32_768.0)
+            .collect::<Vec<_>>();
+        (samples.iter().map(|sample| sample * sample).sum::<f64>() / samples.len() as f64).sqrt()
+    };
+    let passband = capture_resampled(48_000, &tone(1_000.0), &[]);
+    let aliased = capture_resampled(48_000, &tone(12_000.0), &[]);
+    assert!(rms(&aliased) < rms(&passband) * 0.05);
+
+    let temp = tempfile::tempdir().unwrap();
+    let spool = DurableTransferSpool::create(
+        temp.path(),
+        "rate-change",
+        "instance-a",
+        "https://example.test",
+        "workspace-a",
+        "session-a",
+        "producer-secret",
+        0,
+    )
+    .unwrap();
+    let mut transfer = NativePcmTransfer::new(spool);
+    transfer.begin_segment("segment-rate".into(), 0).unwrap();
+    transfer
+        .append_f32(NativePcmLane::Microphone, 48_000, &[0.0; 64])
+        .unwrap();
+    assert!(transfer
+        .append_f32(NativePcmLane::Microphone, 44_100, &[0.0; 64])
+        .is_err());
 }
 
 #[test]

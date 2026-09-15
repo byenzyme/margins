@@ -247,6 +247,7 @@ cargo build --no-default-features --features hosted-web --bin margins-server
 # runtime needs:
 #   ORT_DYLIB_PATH=/path/to/libonnxruntime.so.<ver>   (onnxruntime-linux-x64 release)
 #   MARGINS_PARAKEET_MODEL_DIR=/path/to/parakeet-tdt-0.6b-v2-int8
+#   MARGINS_PARAKEET_MODEL_KIND=tdt-v2
 ```
 
 The build above is intentionally headless: do not add `tauri-app`. For a fast
@@ -265,6 +266,35 @@ reuse the same read-only ONNX assets; they contain no user data. Hosted Linux
 builds never download the macOS-only FluidAudio CoreML bundle during model
 preparation. A cold host still needs the ONNX bundle provisioned once, but a
 fresh profile on a warm host should perform no model transfer.
+
+The interoperable speech-model contract for native Mac and hosted Linux is
+**Parakeet TDT 0.6b v2**. Packaging differs by platform: the default Mac CoreML
+bundle is about 464 MB and uses a 6-bit-palettized/mixed-precision encoder; the
+verified Linux ONNX int8 export is `smcleod/parakeet-tdt-0.6b-v2-int8` at pinned
+revision `d64884b484b919e9656d0b70cb95dfdc98852bef`. Its required files are
+`parakeet-tdt-0.6b-v2-encoder.int8.onnx` (652,282,300 bytes),
+`parakeet-tdt-0.6b-v2-decoder.int8.onnx` (8,998,557 bytes), and `vocab.txt`
+(9,384 bytes), about 631 MiB installed. The official ONNX Runtime 1.24.x Linux
+x64 archive is about 8 MB; it is not the source of the model-size difference.
+Do not silently substitute a v3 model directory while onboarding a machine that
+is expected to match the Mac v2 language/model contract.
+
+Native remote capture declares and durably uploads separate microphone and
+system mono/raw/s16 lanes at 16 kHz. The recorder may receive device-native
+44.1 or 48 kHz f32 callbacks, but its bounded spool worker performs one
+persistent anti-aliasing conversion per lane before disk/network delivery; the
+audio callback never resamples, hashes, writes, or waits on the network. Direct
+16 kHz s16 fixture input is byte-preserving. Older unacknowledged 48 kHz spools
+remain valid and are replayed with their declared format; the server converts
+those once at the ASR boundary without rewriting or deleting the source audio.
+
+For native remote sessions, a successful durable `FinalizeSession` admits a
+revision-stable `transcribe_session` job before releasing producer authority.
+The HTTP response does not wait for inference. A bounded server worker reads the
+canonical retained lane artifacts, writes/registers the transcript, and updates
+the durable job independently; queued/running work is discovered again after a
+server restart. Capability negotiation reports ASR only when both the configured
+model files and a loadable ONNX Runtime are present.
 
 ## FluidAudio model-cache contract
 

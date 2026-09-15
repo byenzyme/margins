@@ -11,9 +11,9 @@ use margins_core::SessionRepository;
 use margins_meeting_protocol::{
     ArtifactId, AudioCodecV1, AudioContainerV1, AudioFormatV1, BeginCaptureGenerationV1,
     ClientMessageBodyV1, ClientMessageV1, DurationMillis, InstanceId, ProtocolVersionV1,
-    SequenceRangeV1, ServerMessageBodyV1, SessionId, WorkspaceArtifactV1,
-    WorkspaceAttachV1, WorkspaceCapabilitiesV1, WorkspaceId, WorkspaceLimitsV1,
-    WorkspaceMemoLineV1, WorkspaceMemoReplaceV1, WorkspaceMemoUpdateV1, WorkspaceMemoV1,
+    SequenceRangeV1, ServerMessageBodyV1, SessionId, WorkspaceArtifactV1, WorkspaceAttachV1,
+    WorkspaceCapabilitiesV1, WorkspaceId, WorkspaceLimitsV1, WorkspaceMemoLineV1,
+    WorkspaceMemoReplaceV1, WorkspaceMemoUpdateV1, WorkspaceMemoV1,
     WorkspaceNoteAssociationUpdateV1, WorkspaceNoteAssociationV1, WorkspaceProcessingJobV1,
     WorkspaceRenameV1, WorkspaceSessionPageV1, WorkspaceSessionSummaryV1, WorkspaceSummaryV1,
     WorkspaceTranscriptV1,
@@ -345,6 +345,10 @@ impl WorkspaceService {
         &self.margins_dir
     }
 
+    pub fn asr_available(&self) -> bool {
+        self.asr_available
+    }
+
     pub fn capabilities(&self, principal: &ServicePrincipal) -> Result<WorkspaceCapabilitiesV1> {
         principal.require(self.workspace_id(), OP_WORKSPACE_READ)?;
         Ok(WorkspaceCapabilitiesV1 {
@@ -361,7 +365,7 @@ impl WorkspaceService {
             capture_formats: vec![AudioFormatV1 {
                 codec: AudioCodecV1::PcmS16Le,
                 container: AudioContainerV1::Raw,
-                sample_rate_hz: 48_000,
+                sample_rate_hz: crate::remote_workspace::NATIVE_PCM_RATE_HZ,
                 channel_count: 1,
             }],
             operations: principal
@@ -412,6 +416,21 @@ impl WorkspaceService {
         principal.require(self.workspace_id(), OP_SESSION_CREATE)?;
         if !matches!(command.body, ClientMessageBodyV1::CreateSession(_)) {
             bail!("session reservation requires create_session");
+        }
+        if let ClientMessageBodyV1::CreateSession(create) = &command.body {
+            for lane in &create.lanes {
+                let format = &lane.format;
+                if format.codec != AudioCodecV1::PcmS16Le
+                    || format.container != AudioContainerV1::Raw
+                    || format.channel_count != 1
+                    || !matches!(format.sample_rate_hz, 16_000 | 48_000)
+                {
+                    bail!(
+                        "unsupported capture format for lane {}; use mono raw PCM s16le at 16 kHz (48 kHz is accepted only for durable legacy recovery)",
+                        lane.lane_id.as_ref()
+                    );
+                }
+            }
         }
         let session_id = command.session_id.clone();
         let response = self
@@ -518,6 +537,12 @@ impl WorkspaceService {
                 .iter()
                 .any(|message| matches!(message.body, ServerMessageBodyV1::SessionFinalized(_)))
         {
+            if self.asr_available {
+                // Admission is durable and precedes producer release. A lost
+                // finalize response can therefore be retried without ever
+                // leaving finalized audio in an unobservable processing gap.
+                self.admit_transcription_job(&session_id)?;
+            }
             self.authority
                 .release_producer(session_id.as_ref(), &principal.id, producer_token)?;
         }
@@ -853,6 +878,86 @@ impl WorkspaceService {
         principal.require(self.workspace_id(), OP_JOB_READ)?;
         canonical::latest_processing_job(&self.margins_dir, session_id.as_ref())
             .map(|value| value.map(processing_job))
+    }
+
+    pub fn capture_lane_format(
+        &self,
+        session_id: &SessionId,
+        lane_id: &str,
+    ) -> Result<AudioFormatV1> {
+        let session = self
+            .runtime
+            .storage()
+            .load_session(session_id)?
+            .context("session has no capture authority state")?;
+        session
+            .create()
+            .lanes
+            .iter()
+            .find(|lane| lane.lane_id.as_ref() == lane_id)
+            .map(|lane| lane.format.clone())
+            .context("capture lane was not declared")
+    }
+
+    /// Idempotently admit the ASR-only job for the current finalized capture
+    /// revision. A completed job for the same revision is never reset.
+    pub fn admit_transcription_job(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<WorkspaceProcessingJobV1> {
+        if !self.asr_available {
+            bail!("ASR capability is unavailable on this instance");
+        }
+        let stored = self
+            .runtime
+            .storage()
+            .load_session(session_id)?
+            .context("session has no capture authority state")?;
+        if !stored.input_finalized() {
+            bail!("transcription can begin only after durable input finalization");
+        }
+        let job_id = format!("transcribe:{}", session_id.as_ref());
+        let input_revision = format!("meeting:{}", stored.revision());
+        if let Some(current) = canonical::get_processing_job(&self.margins_dir, &job_id)? {
+            if current.input_revision == input_revision && current.status == "complete" {
+                return Ok(processing_job(current));
+            }
+        }
+        canonical::begin_processing_job(
+            &self.margins_dir,
+            session_id.as_ref(),
+            &job_id,
+            "transcribe_session",
+            &input_revision,
+        )
+        .map(processing_job)
+    }
+
+    pub fn update_transcription_job(
+        &self,
+        job_id: &str,
+        attempt: u64,
+        status: &str,
+        progress: Option<f64>,
+        result_ref: Option<&str>,
+        failure: Option<&str>,
+    ) -> Result<WorkspaceProcessingJobV1> {
+        canonical::update_processing_job(
+            &self.margins_dir,
+            job_id,
+            attempt,
+            status,
+            progress,
+            result_ref,
+            failure,
+            failure.map(|_| "transcribe"),
+        )
+        .map(processing_job)
+    }
+
+    pub fn pending_transcription_jobs(&self) -> Result<Vec<WorkspaceProcessingJobV1>> {
+        canonical::pending_processing_jobs(&self.margins_dir, "transcribe_session")
+            .map(|jobs| jobs.into_iter().map(processing_job).collect())
     }
 
     pub fn import_finished_file(

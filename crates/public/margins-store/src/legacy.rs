@@ -1370,6 +1370,22 @@ pub fn latest_processing_job(dir: &Path, name: &str) -> Result<Option<Processing
     job_id.map_or(Ok(None), |job_id| load_processing_job(&conn, &job_id))
 }
 
+pub fn pending_processing_jobs(dir: &Path, operation: &str) -> Result<Vec<ProcessingJob>> {
+    let conn = open_db(dir)?;
+    let mut statement = conn.prepare(
+        "SELECT job_id FROM session_processing_jobs WHERE operation = ?1 AND status IN ('queued', 'running') ORDER BY updated_at, job_id",
+    )?;
+    let ids = statement
+        .query_map(params![operation], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    ids.into_iter()
+        .map(|job_id| {
+            load_processing_job(&conn, &job_id)?
+                .ok_or_else(|| anyhow::anyhow!("pending processing job disappeared"))
+        })
+        .collect()
+}
+
 pub fn update_processing_job(
     dir: &Path,
     job_id: &str,

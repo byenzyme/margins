@@ -9,11 +9,14 @@ use margins_meeting_protocol::{
     CaptureProvenanceHopV1, CaptureProvenanceV1, CaptureSourceKindV1, CaptureSourceV1,
     ClientMessageBodyV1, ClientMessageV1, CloseSegmentV1, ContentDigestV1, CreateSessionV1,
     DigestAlgorithmV1, DurationMillis, FinalizeSessionV1, LaneBoundaryV1, SegmentCloseReasonV1,
-    SegmentCloseReferenceV1, SessionFinalizeReasonV1, SessionId, SessionMillis,
-    WorkspaceAttachV1, WorkspaceMemoReplaceV1, WorkspaceMemoUpdateV1,
-    WorkspaceNoteAssociationUpdateV1, WorkspaceRenameV1,
+    SegmentCloseReferenceV1, SessionFinalizeReasonV1, SessionId, SessionMillis, WorkspaceAttachV1,
+    WorkspaceMemoReplaceV1, WorkspaceMemoUpdateV1, WorkspaceNoteAssociationUpdateV1,
+    WorkspaceRenameV1,
 };
 use rand::{distributions::Alphanumeric, Rng};
+use rubato::{
+    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -990,7 +993,10 @@ impl DurableTransferSpool {
             .context("cannot acknowledge a missing memo intent")?;
         let fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(request)?));
         with_transfer_lock(&self.root, || {
-            atomic_bytes(&self.root.join("control-acks/memo.ack"), fingerprint.as_bytes())
+            atomic_bytes(
+                &self.root.join("control-acks/memo.ack"),
+                fingerprint.as_bytes(),
+            )
         })
     }
 
@@ -1164,13 +1170,14 @@ pub fn pending_capture_reservations(
             continue;
         }
         let path = entry.path();
-        let bytes = with_reservation_lock(transfer_root, &id_from_reservation_path(&path)?, || {
-            match std::fs::read(&path) {
-                Ok(bytes) => Ok(Some(bytes)),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                Err(error) => Err(error.into()),
-            }
-        })?;
+        let bytes =
+            with_reservation_lock(transfer_root, &id_from_reservation_path(&path)?, || {
+                match std::fs::read(&path) {
+                    Ok(bytes) => Ok(Some(bytes)),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(error) => Err(error.into()),
+                }
+            })?;
         let Some(bytes) = bytes else { continue };
         let value: CaptureReservationIntentV1 = serde_json::from_slice(&bytes)?;
         validate_component(&value.transfer_id)?;
@@ -1195,7 +1202,9 @@ fn id_from_reservation_path(path: &Path) -> Result<String> {
 
 fn reservation_path(root: &Path, transfer_id: &str) -> Result<PathBuf> {
     validate_component(transfer_id)?;
-    Ok(root.join("reservations").join(format!("{transfer_id}.json")))
+    Ok(root
+        .join("reservations")
+        .join(format!("{transfer_id}.json")))
 }
 
 fn with_reservation_lock<T>(
@@ -1223,7 +1232,9 @@ pub fn promote_capture_reservation(
     obtain_producer_token: impl FnOnce() -> Result<String>,
 ) -> Result<DurableTransferSpool> {
     with_reservation_lock(transfer_root, &intent.transfer_id, || {
-        let manifest = transfer_root.join(&intent.transfer_id).join("manifest.json");
+        let manifest = transfer_root
+            .join(&intent.transfer_id)
+            .join("manifest.json");
         let spool = if manifest.is_file() {
             DurableTransferSpool::open(transfer_root, &intent.transfer_id, reserve_bytes)?
         } else {
@@ -1271,8 +1282,12 @@ impl DurableTransferSpool {
     }
 }
 
-pub const NATIVE_PCM_RATE_HZ: u32 = 48_000;
-pub const NATIVE_PCM_CHUNK_FRAMES: usize = 4_800;
+/// New native remote captures negotiate the same 16 kHz representation used by
+/// the local durable archive and the offline ASR backend. Existing spools keep
+/// their command-declared rate and are replayed without reinterpretation.
+pub const NATIVE_PCM_RATE_HZ: u32 = 16_000;
+pub const NATIVE_PCM_CHUNK_FRAMES: usize = 1_600;
+const NATIVE_RESAMPLE_INPUT_FRAMES: usize = 1_024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum NativePcmLane {
@@ -1346,18 +1361,206 @@ pub fn native_create_session_command(
     }
 }
 
-#[derive(Debug)]
 struct NativePcmSegment {
     id: String,
     starts_at_ms: u64,
-    lane_frames: BTreeMap<NativePcmLane, u64>,
-    lane_sequences: BTreeMap<NativePcmLane, u64>,
+    lanes: BTreeMap<NativePcmLane, NativePcmLaneStream>,
+}
+
+struct NativePcmLaneStream {
+    input_rate_hz: u32,
+    input_frames: u64,
+    emitted_frames: u64,
+    next_sequence: u64,
+    input_pending: Vec<f32>,
+    output_pending: Vec<f32>,
+    pcm_pending: Vec<u8>,
+    resampler: Option<SincFixedIn<f32>>,
+    delay_to_trim: usize,
+}
+
+impl NativePcmLaneStream {
+    fn new(input_rate_hz: u32) -> Result<Self> {
+        if input_rate_hz == 0 {
+            bail!("native input sample rate must be nonzero");
+        }
+        let (resampler, delay_to_trim) = if input_rate_hz == NATIVE_PCM_RATE_HZ {
+            (None, 0)
+        } else {
+            let parameters = SincInterpolationParameters {
+                sinc_len: 256,
+                f_cutoff: 0.95,
+                oversampling_factor: 128,
+                interpolation: SincInterpolationType::Cubic,
+                window: WindowFunction::BlackmanHarris2,
+            };
+            let resampler = SincFixedIn::<f32>::new(
+                f64::from(NATIVE_PCM_RATE_HZ) / f64::from(input_rate_hz),
+                1.0,
+                parameters,
+                NATIVE_RESAMPLE_INPUT_FRAMES,
+                1,
+            )
+            .context("failed to construct native anti-aliasing resampler")?;
+            let delay = resampler.output_delay();
+            (Some(resampler), delay)
+        };
+        Ok(Self {
+            input_rate_hz,
+            input_frames: 0,
+            emitted_frames: 0,
+            next_sequence: 0,
+            input_pending: Vec::with_capacity(NATIVE_RESAMPLE_INPUT_FRAMES * 2),
+            output_pending: Vec::new(),
+            pcm_pending: Vec::with_capacity(NATIVE_PCM_CHUNK_FRAMES * 4),
+            resampler,
+            delay_to_trim,
+        })
+    }
+
+    fn ensure_rate(&self, input_rate_hz: u32) -> Result<()> {
+        if self.input_rate_hz != input_rate_hz {
+            bail!(
+                "native lane sample rate changed within a segment ({} -> {})",
+                self.input_rate_hz,
+                input_rate_hz
+            );
+        }
+        Ok(())
+    }
+
+    fn append_f32(&mut self, samples: &[f32]) -> Result<usize> {
+        let before = self.available_pcm_frames();
+        self.input_frames = self.input_frames.saturating_add(samples.len() as u64);
+        if self.resampler.is_none() {
+            self.pcm_pending
+                .extend_from_slice(&encode_pcm_s16le(samples));
+            return Ok(self.available_pcm_frames().saturating_sub(before));
+        }
+        self.input_pending.extend_from_slice(samples);
+        while self.input_pending.len() >= NATIVE_RESAMPLE_INPUT_FRAMES {
+            let block = self
+                .input_pending
+                .drain(..NATIVE_RESAMPLE_INPUT_FRAMES)
+                .collect::<Vec<_>>();
+            self.process_resampler_block(Some(&block))?;
+        }
+        self.publish_resampled(false);
+        Ok(self.available_pcm_frames().saturating_sub(before))
+    }
+
+    fn append_s16le(&mut self, bytes: &[u8]) -> Result<usize> {
+        if bytes.len() % 2 != 0 {
+            bail!("s16 PCM fixture has a partial sample");
+        }
+        if self.input_rate_hz == NATIVE_PCM_RATE_HZ {
+            self.input_frames = self.input_frames.saturating_add((bytes.len() / 2) as u64);
+            self.pcm_pending.extend_from_slice(bytes);
+            return Ok(bytes.len() / 2);
+        }
+        let samples = bytes
+            .chunks_exact(2)
+            .map(|sample| i16::from_le_bytes([sample[0], sample[1]]) as f32 / 32_768.0)
+            .collect::<Vec<_>>();
+        self.append_f32(&samples)
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        if self.resampler.is_none() {
+            return Ok(());
+        }
+        if !self.input_pending.is_empty() {
+            let tail = std::mem::take(&mut self.input_pending);
+            self.process_resampler_block(Some(&tail))?;
+        }
+        let target = self.target_output_frames(true);
+        while self.emitted_frames
+            + self.available_pcm_frames() as u64
+            + (self.output_pending.len() as u64)
+            < target
+        {
+            self.process_resampler_block(None)?;
+        }
+        self.publish_resampled(true);
+        Ok(())
+    }
+
+    fn process_resampler_block(&mut self, input: Option<&[f32]>) -> Result<()> {
+        let resampler = self
+            .resampler
+            .as_mut()
+            .context("resampler block requested for a pass-through lane")?;
+        let output = if let Some(input) = input {
+            if input.len() == NATIVE_RESAMPLE_INPUT_FRAMES {
+                resampler.process(&[input], None)
+            } else {
+                resampler.process_partial(Some(&[input]), None)
+            }
+        } else {
+            resampler.process_partial::<&[f32]>(None, None)
+        }
+        .context("native anti-aliasing resampler failed")?;
+        let mut output = output.into_iter().next().unwrap_or_default();
+        let trim = self.delay_to_trim.min(output.len());
+        if trim > 0 {
+            output.drain(..trim);
+            self.delay_to_trim -= trim;
+        }
+        self.output_pending.extend(output);
+        Ok(())
+    }
+
+    fn publish_resampled(&mut self, finishing: bool) {
+        let target = self.target_output_frames(finishing);
+        let represented = self
+            .emitted_frames
+            .saturating_add(self.available_pcm_frames() as u64);
+        let allowed = target
+            .saturating_sub(represented)
+            .min(self.output_pending.len() as u64) as usize;
+        if allowed == 0 {
+            return;
+        }
+        let samples = self.output_pending.drain(..allowed).collect::<Vec<_>>();
+        self.pcm_pending
+            .extend_from_slice(&encode_pcm_s16le(&samples));
+    }
+
+    fn target_output_frames(&self, finishing: bool) -> u64 {
+        let numerator = u128::from(self.input_frames) * u128::from(NATIVE_PCM_RATE_HZ);
+        let denominator = u128::from(self.input_rate_hz);
+        if finishing {
+            numerator.div_ceil(denominator) as u64
+        } else {
+            (numerator / denominator) as u64
+        }
+    }
+
+    fn available_pcm_frames(&self) -> usize {
+        self.pcm_pending.len() / 2
+    }
+
+    fn take_pcm_chunks(&mut self, include_partial: bool) -> Vec<(u64, u64, Vec<u8>)> {
+        let mut chunks = Vec::new();
+        while self.pcm_pending.len() >= NATIVE_PCM_CHUNK_FRAMES * 2
+            || (include_partial && !self.pcm_pending.is_empty())
+        {
+            let byte_count = self.pcm_pending.len().min(NATIVE_PCM_CHUNK_FRAMES * 2);
+            let payload = self.pcm_pending.drain(..byte_count).collect::<Vec<_>>();
+            let frames = (payload.len() / 2) as u64;
+            let frame_start = self.emitted_frames;
+            let sequence = self.next_sequence;
+            self.emitted_frames = self.emitted_frames.saturating_add(frames);
+            self.next_sequence = self.next_sequence.saturating_add(1);
+            chunks.push((sequence, frame_start, payload));
+        }
+        chunks
+    }
 }
 
 /// Converts the recorder's bounded mono f32 lane feed into durable, bounded
 /// PCM commands. This is the only adapter added to native capture; the normal
 /// local recorder path does not construct it or hash/encode transport frames.
-#[derive(Debug)]
 pub struct NativePcmTransfer {
     spool: DurableTransferSpool,
     segment: Option<NativePcmSegment>,
@@ -1393,8 +1596,7 @@ impl NativePcmTransfer {
         self.segment = Some(NativePcmSegment {
             id: segment_id,
             starts_at_ms,
-            lane_frames: BTreeMap::new(),
-            lane_sequences: BTreeMap::new(),
+            lanes: BTreeMap::new(),
         });
         Ok(())
     }
@@ -1405,39 +1607,53 @@ impl NativePcmTransfer {
         input_rate_hz: u32,
         samples: &[f32],
     ) -> Result<usize> {
-        if input_rate_hz == 0 {
-            bail!("native input sample rate must be nonzero");
-        }
-        let output = resample_mono(samples, input_rate_hz, NATIVE_PCM_RATE_HZ);
-        let bytes = encode_pcm_s16le(&output);
-        self.append_pcm_s16le(lane, &bytes)
+        let written = {
+            let segment = self
+                .segment
+                .as_mut()
+                .context("native PCM arrived without an open segment")?;
+            if !segment.lanes.contains_key(&lane) {
+                segment
+                    .lanes
+                    .insert(lane, NativePcmLaneStream::new(input_rate_hz)?);
+            }
+            let stream = segment.lanes.get_mut(&lane).expect("lane was inserted");
+            stream.ensure_rate(input_rate_hz)?;
+            stream.append_f32(samples)?
+        };
+        self.flush_lane(lane, false)?;
+        Ok(written)
     }
 
-    fn append_pcm_s16le(&mut self, lane: NativePcmLane, bytes: &[u8]) -> Result<usize> {
-        if bytes.len() % 2 != 0 {
-            bail!("s16 PCM has a partial sample");
-        }
-        let segment = self
-            .segment
-            .as_mut()
-            .context("native PCM arrived without an open segment")?;
-        let mut written = 0usize;
-        for part in bytes.chunks(NATIVE_PCM_CHUNK_FRAMES * 2) {
-            let frame_count = part.len() / 2;
-            let frame_start = *segment.lane_frames.entry(lane).or_default();
-            let sequence = *segment.lane_sequences.entry(lane).or_default();
-            let payload = part.to_vec();
+    fn flush_lane(&mut self, lane: NativePcmLane, include_partial: bool) -> Result<()> {
+        let (segment_id, starts_at_ms, chunks) = {
+            let segment = self
+                .segment
+                .as_mut()
+                .context("native PCM arrived without an open segment")?;
+            let stream = segment
+                .lanes
+                .get_mut(&lane)
+                .context("native lane has no stream state")?;
+            (
+                segment.id.clone(),
+                segment.starts_at_ms,
+                stream.take_pcm_chunks(include_partial),
+            )
+        };
+        for (sequence, frame_start, payload) in chunks {
+            let frame_count = payload.len() / 2;
             let command = ClientMessageV1 {
                 protocol_version: Default::default(),
                 message_id: next_message_id("pcm").into(),
                 session_id: self.spool.manifest.session_id.clone().into(),
                 sent_at_unix_ms: margins_meeting_protocol::UnixMillis(unix_ms()),
                 body: ClientMessageBodyV1::AudioChunk(AudioChunkV1 {
-                    segment_id: segment.id.clone().into(),
+                    segment_id: segment_id.clone().into(),
                     lane_id: lane.id().into(),
                     sequence,
                     starts_at_ms: SessionMillis(
-                        segment.starts_at_ms
+                        starts_at_ms
                             + frame_start.saturating_mul(1_000) / u64::from(NATIVE_PCM_RATE_HZ),
                     ),
                     duration_ms: DurationMillis(
@@ -1451,13 +1667,8 @@ impl NativePcmTransfer {
                 }),
             };
             self.spool.append_chunk(&command)?;
-            segment
-                .lane_frames
-                .insert(lane, frame_start + frame_count as u64);
-            segment.lane_sequences.insert(lane, sequence + 1);
-            written += frame_count;
         }
-        Ok(written)
+        Ok(())
     }
 
     pub fn append_s16le(
@@ -1466,28 +1677,49 @@ impl NativePcmTransfer {
         input_rate_hz: u32,
         bytes: &[u8],
     ) -> Result<usize> {
-        if bytes.len() % 2 != 0 {
-            bail!("s16 PCM fixture has a partial sample");
-        }
-        if input_rate_hz == NATIVE_PCM_RATE_HZ {
-            // The native/test seam already has the negotiated representation;
-            // preserve every signed sample bit-for-bit.
-            return self.append_pcm_s16le(lane, bytes);
-        }
-        let samples = bytes
-            .chunks_exact(2)
-            .map(|sample| i16::from_le_bytes([sample[0], sample[1]]) as f32 / 32_768.0)
-            .collect::<Vec<_>>();
-        self.append_f32(lane, input_rate_hz, &samples)
+        let written = {
+            let segment = self
+                .segment
+                .as_mut()
+                .context("native PCM arrived without an open segment")?;
+            if !segment.lanes.contains_key(&lane) {
+                segment
+                    .lanes
+                    .insert(lane, NativePcmLaneStream::new(input_rate_hz)?);
+            }
+            let stream = segment.lanes.get_mut(&lane).expect("lane was inserted");
+            stream.ensure_rate(input_rate_hz)?;
+            stream.append_s16le(bytes)?
+        };
+        self.flush_lane(lane, false)?;
+        Ok(written)
     }
 
     pub fn close_segment(&mut self, reason: SegmentCloseReasonV1) -> Result<ClientMessageV1> {
-        let segment = self.segment.take().context("no native segment is open")?;
+        let lanes = self
+            .segment
+            .as_ref()
+            .context("no native segment is open")?
+            .lanes
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for lane in lanes {
+            self.segment
+                .as_mut()
+                .expect("checked above")
+                .lanes
+                .get_mut(&lane)
+                .expect("lane key came from map")
+                .finish()?;
+            self.flush_lane(lane, true)?;
+        }
+        let segment = self.segment.take().expect("checked above");
         let ended_at_ms = segment.starts_at_ms
             + segment
-                .lane_frames
+                .lanes
                 .values()
-                .copied()
+                .map(|lane| lane.emitted_frames)
                 .max()
                 .unwrap_or(0)
                 .saturating_mul(1_000)
@@ -1505,7 +1737,10 @@ impl NativePcmTransfer {
                     .into_iter()
                     .map(|lane| LaneBoundaryV1 {
                         lane_id: lane.id().into(),
-                        next_sequence: segment.lane_sequences.get(&lane).copied().unwrap_or(0),
+                        next_sequence: segment
+                            .lanes
+                            .get(&lane)
+                            .map_or(0, |lane| lane.next_sequence),
                     })
                     .collect(),
                 reason,
@@ -1569,21 +1804,39 @@ fn encode_pcm_s16le(samples: &[f32]) -> Vec<u8> {
         .collect()
 }
 
-fn resample_mono(samples: &[f32], input_rate: u32, output_rate: u32) -> Vec<f32> {
-    if samples.is_empty() || input_rate == output_rate {
-        return samples.to_vec();
+/// Decode a finalized mono/raw/s16 remote lane for the fixed 16 kHz ASR
+/// boundary. New transfers are a byte-preserving decode; legacy 48 kHz
+/// transfers use the same anti-aliasing converter as capture-time delivery.
+pub fn remote_pcm_s16le_for_asr(bytes: &[u8], sample_rate_hz: u32) -> Result<Vec<f32>> {
+    if bytes.len() % 2 != 0 {
+        bail!("remote PCM artifact has a partial s16 sample");
     }
-    let output_len =
-        ((samples.len() as u128 * u128::from(output_rate)) / u128::from(input_rate)) as usize;
-    (0..output_len)
-        .map(|index| {
-            let source = index as f64 * input_rate as f64 / output_rate as f64;
-            let left = source.floor() as usize;
-            let right = (left + 1).min(samples.len() - 1);
-            let fraction = (source - left as f64) as f32;
-            samples[left] + (samples[right] - samples[left]) * fraction
-        })
-        .collect()
+    if sample_rate_hz == 0 {
+        bail!("remote PCM artifact has a zero sample rate");
+    }
+    let samples = bytes
+        .chunks_exact(2)
+        .map(|sample| i16::from_le_bytes([sample[0], sample[1]]) as f32 / 32_768.0)
+        .collect::<Vec<_>>();
+    if sample_rate_hz == NATIVE_PCM_RATE_HZ {
+        return Ok(samples);
+    }
+    let mut stream = NativePcmLaneStream::new(sample_rate_hz)?;
+    stream.append_f32(&samples)?;
+    stream.finish()?;
+    let expected = stream.target_output_frames(true) as usize;
+    let output = stream
+        .pcm_pending
+        .chunks_exact(2)
+        .map(|sample| i16::from_le_bytes([sample[0], sample[1]]) as f32 / 32_768.0)
+        .collect::<Vec<_>>();
+    if output.len() != expected {
+        bail!(
+            "remote PCM resampler produced {} frames; expected {expected}",
+            output.len()
+        );
+    }
+    Ok(output)
 }
 
 fn next_message_id(prefix: &str) -> String {

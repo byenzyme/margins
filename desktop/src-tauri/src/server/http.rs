@@ -41,6 +41,9 @@ pub struct ServerState {
     pub token: String,
     pub workspace_service: Arc<WorkspaceService>,
     pub credential_store: ScopedCredentialStore,
+    pub service_principal: ServicePrincipal,
+    #[cfg(feature = "parakeet-asr")]
+    pub remote_asr_jobs: super::remote_asr::RemoteAsrJobs,
 }
 
 /// Wrapper so `Ctx` (which is not Clone) lives behind an Arc.
@@ -434,11 +437,26 @@ async fn workspace_session_command(
             "Missing producer token",
         );
     };
-    state
+    let finalized = matches!(&command.body, ClientMessageBodyV1::FinalizeSession(_));
+    let result = state
         .workspace_service
-        .execute_capture(&principal, token, command)
-        .map(workspace_ok)
-        .unwrap_or_else(service_error)
+        .execute_capture(&principal, token, command);
+    #[cfg(feature = "parakeet-asr")]
+    if finalized && result.is_ok() {
+        if let Ok(Some(job)) = state
+            .workspace_service
+            .latest_job(&state.service_principal, &SessionId(session))
+        {
+            state.remote_asr_jobs.schedule(
+                state.workspace_service.clone(),
+                state.service_principal.clone(),
+                job,
+            );
+        }
+    }
+    #[cfg(not(feature = "parakeet-asr"))]
+    let _ = finalized;
+    result.map(workspace_ok).unwrap_or_else(service_error)
 }
 
 async fn workspace_attach_session(

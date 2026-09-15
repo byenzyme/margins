@@ -37,8 +37,8 @@ fn create(session: &str) -> ClientMessageV1 {
                 source_ids: vec!["mic".into()],
                 label: None,
                 format: AudioFormatV1 {
-                    codec: AudioCodecV1::Opus,
-                    container: AudioContainerV1::Ogg,
+                    codec: AudioCodecV1::PcmS16Le,
+                    container: AudioContainerV1::Raw,
                     sample_rate_hz: 48_000,
                     channel_count: 1,
                 },
@@ -128,12 +128,21 @@ fn staged_blob_without_metadata_never_produces_a_false_ack_and_is_recoverable() 
     assert!(runtime.handle(command.clone()).is_err());
     let failed = storage.stats().unwrap();
     assert_eq!((failed.receipts, failed.chunks), (1, 0));
-    assert_eq!(failed.blob_bytes, 2048, "immutable staging may precede metadata");
+    assert_eq!(
+        failed.blob_bytes, 2048,
+        "immutable staging may precede metadata"
+    );
 
     let reopened = MeetingRuntime::new(SqliteMeetingRuntimeStorage::open(temp.path()).unwrap());
     let accepted = reopened.handle(command).unwrap();
     assert_eq!(ack_count(&accepted.messages), 1);
-    assert_eq!((reopened.storage().stats().unwrap().receipts, reopened.storage().stats().unwrap().chunks), (2, 1));
+    assert_eq!(
+        (
+            reopened.storage().stats().unwrap().receipts,
+            reopened.storage().stats().unwrap().chunks
+        ),
+        (2, 1)
+    );
 }
 
 #[test]

@@ -2,8 +2,10 @@
 //!
 //! Required environment: MARGINS_REMOTE, MARGINS_WORKSPACE,
 //! MARGINS_FIXTURE_MIC_S16LE, and
-//! MARGINS_FIXTURE_SYSTEM_S16LE. Inputs are mono 48 kHz signed little-endian
-//! PCM and remain subject to the production chunk/spool/service limits.
+//! MARGINS_FIXTURE_SYSTEM_S16LE. Inputs are mono 16 kHz signed little-endian
+//! PCM and remain subject to the production chunk/spool/service limits. The
+//! direct 16 kHz fixture seam is byte-preserving; recorder-native 44.1/48 kHz
+//! f32 input is resampled by the production spool worker before this boundary.
 //! MARGINS_REMOTE_TOKEN is required only for HTTPS/loopback. The optional
 //! MARGINS_FIXTURE_STOP_AFTER (`spool`, `chunks`, `close`, or `memo`) exposes
 //! durable barriers for restart/lost-response verification.
@@ -15,6 +17,7 @@ use margins_meeting_protocol::{
 use margins_workflows::remote_workspace::{
     deliver_chunks, deliver_closes, deliver_finalize, deliver_memo, native_create_session_command,
     transfer_root, DurableTransferSpool, NativePcmLane, NativePcmTransfer, RemoteConnection,
+    NATIVE_PCM_RATE_HZ,
 };
 
 fn main() -> Result<()> {
@@ -48,10 +51,14 @@ fn main() -> Result<()> {
     let initial_memo = connection.client.memo(&session_id)?;
     let mut transfer = NativePcmTransfer::new(spool);
     transfer.begin_segment("fixture-segment".into(), 0)?;
-    let mic_frames = transfer.append_s16le(NativePcmLane::Microphone, 48_000, &mic)?;
-    let system_frames = transfer.append_s16le(NativePcmLane::System, 48_000, &system)?;
-    transfer.close_segment(SegmentCloseReasonV1::Stop)?;
-    let ended_at_ms = mic_frames.max(system_frames) as u64 * 1_000 / 48_000;
+    let mic_frames = transfer.append_s16le(NativePcmLane::Microphone, NATIVE_PCM_RATE_HZ, &mic)?;
+    let system_frames =
+        transfer.append_s16le(NativePcmLane::System, NATIVE_PCM_RATE_HZ, &system)?;
+    let close = transfer.close_segment(SegmentCloseReasonV1::Stop)?;
+    let ended_at_ms = match &close.body {
+        margins_meeting_protocol::ClientMessageBodyV1::CloseSegment(close) => close.ended_at_ms.0,
+        _ => unreachable!("native close returned the wrong command"),
+    };
     transfer
         .spool_mut()
         .set_memo_intent(WorkspaceMemoReplaceV1 {

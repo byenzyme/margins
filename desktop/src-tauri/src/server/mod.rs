@@ -6,6 +6,8 @@ pub mod assets;
 pub mod auth;
 pub mod events;
 pub mod http;
+#[cfg(feature = "parakeet-asr")]
+pub mod remote_asr;
 
 #[cfg(windows)]
 mod windows_atomic_replace;
@@ -165,6 +167,9 @@ async fn run_async() -> anyhow::Result<()> {
         None,
     )?;
 
+    #[cfg(feature = "parakeet-asr")]
+    let remote_asr_jobs = remote_asr::RemoteAsrJobs::default();
+
     // --- Build router ---
     let server_state = ServerState {
         ctx: Arc::new(CtxState(ctx)),
@@ -172,7 +177,14 @@ async fn run_async() -> anyhow::Result<()> {
         token: token.clone(),
         workspace_service: workspace_service.clone(),
         credential_store,
+        service_principal: administrator.clone(),
+        #[cfg(feature = "parakeet-asr")]
+        remote_asr_jobs: remote_asr_jobs.clone(),
     };
+    #[cfg(feature = "parakeet-asr")]
+    for job in workspace_service.pending_transcription_jobs()? {
+        remote_asr_jobs.schedule(workspace_service.clone(), administrator.clone(), job);
+    }
     let app = build_router(server_state);
 
     // --- Bind and serve ---

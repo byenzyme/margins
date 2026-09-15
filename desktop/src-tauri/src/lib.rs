@@ -464,7 +464,10 @@ fn session_artifact_dir(margins_dir: &Path, session_name: &str) -> PathBuf {
     margins_dir.join("artifacts").join(session_name)
 }
 
-fn session_transcript_artifact_path(margins_dir: &Path, session_name: &str) -> PathBuf {
+pub(crate) fn session_transcript_artifact_path(
+    margins_dir: &Path,
+    session_name: &str,
+) -> PathBuf {
     session_artifact_dir(margins_dir, session_name).join("transcript.md")
 }
 
@@ -482,7 +485,7 @@ fn recording_combined_rel_path(session_name: &str) -> String {
     format!(".margins/recordings/{session_name}_combined.wav")
 }
 
-fn session_transcript_artifact_registry_path(session_name: &str) -> String {
+pub(crate) fn session_transcript_artifact_registry_path(session_name: &str) -> String {
     format!(".margins/artifacts/{session_name}/transcript.md")
 }
 
@@ -502,7 +505,10 @@ fn temporary_artifact_expires_at() -> String {
     (Local::now() + ChronoDuration::days(7)).to_rfc3339()
 }
 
-fn register_transcript_artifact(margins_dir: &Path, session_name: &str) -> Result<(), String> {
+pub(crate) fn register_transcript_artifact(
+    margins_dir: &Path,
+    session_name: &str,
+) -> Result<(), String> {
     session::upsert_session_artifact(
         margins_dir,
         session_name,
@@ -581,7 +587,10 @@ fn is_valid_session_transcript_checkpoint(content: &str, session_name: &str) -> 
 /// record. We therefore validate only genuineness: non-empty content whose
 /// `Session:` header names this session. This is the fix for the
 /// silent / memo-only / capture-without-model finish flow.
-fn is_valid_terminal_transcript_checkpoint(content: &str, session_name: &str) -> bool {
+pub(crate) fn is_valid_terminal_transcript_checkpoint(
+    content: &str,
+    session_name: &str,
+) -> bool {
     !content.trim().is_empty()
         && session_transcript_checkpoint_session_name(content) == Some(session_name)
 }
@@ -595,7 +604,7 @@ fn read_valid_session_transcript_checkpoint(
     is_valid_session_transcript_checkpoint(&content, session_name).then_some(content)
 }
 
-fn write_atomic_utf8(path: &Path, content: &str) -> Result<(), String> {
+pub(crate) fn write_atomic_utf8(path: &Path, content: &str) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("invalid path {}", path.display()))?;
@@ -613,8 +622,17 @@ fn write_atomic_utf8(path: &Path, content: &str) -> Result<(), String> {
         std::process::id(),
         Local::now().timestamp_nanos_opt().unwrap_or_default()
     ));
-    std::fs::write(&temp, content)
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temp)
+        .map_err(|e| format!("failed to create temporary artifact {}: {e}", temp.display()))?;
+    use std::io::Write as _;
+    file.write_all(content.as_bytes())
         .map_err(|e| format!("failed to write temporary artifact {}: {e}", temp.display()))?;
+    file.sync_all()
+        .map_err(|e| format!("failed to sync temporary artifact {}: {e}", temp.display()))?;
+    drop(file);
     std::fs::rename(&temp, path).map_err(|e| {
         let _ = std::fs::remove_file(&temp);
         format!(
@@ -622,7 +640,12 @@ fn write_atomic_utf8(path: &Path, content: &str) -> Result<(), String> {
             path.display(),
             temp.display()
         )
-    })
+    })?;
+    #[cfg(unix)]
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|e| format!("failed to sync artifact directory {}: {e}", parent.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -7024,7 +7047,7 @@ fn recording_transcript_label(channel: u32, channel_semantics: Option<&str>) -> 
 /// and/or the tail of the conversation), this artifact is produced from the
 /// offline transcription of the recorded WAV, so it carries both the local mic
 /// and the remote/system channel in full.
-fn render_aligned_markdown(
+pub(crate) fn render_aligned_markdown(
     session_name: &str,
     source_label: &str,
     memo: &str,

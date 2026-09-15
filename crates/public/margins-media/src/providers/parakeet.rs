@@ -11,8 +11,9 @@ pub enum AsrModelKind {
     /// NVIDIA Parakeet CTC. Best when punctuation is not required; word timing
     /// mode is the natural output.
     Ctc,
-    /// NVIDIA Parakeet TDT v3 ONNX. Keeps punctuation/capitalization and uses
-    /// the `vocab.txt` model asset directly, without a tokenizer/CLI process.
+    /// NVIDIA Parakeet TDT ONNX (compatible v2/v3 exports). Keeps
+    /// punctuation/capitalization and uses the `vocab.txt` model asset directly,
+    /// without a tokenizer/CLI process.
     Tdt,
 }
 
@@ -1122,6 +1123,41 @@ mod tests {
         let mono_16k = crate::audio::mono_16k_from_wav(&wav).unwrap();
         let mut asr = parakeet::ParakeetAsr::from_dir(&model_dir, AsrModelKind::Tdt).unwrap();
         let words = asr.transcribe_words(&mono_16k).unwrap();
+        assert!(
+            !words.is_empty(),
+            "Parakeet smoke produced no speech tokens"
+        );
+        if let Ok(expected) = std::env::var("MARGINS_PARAKEET_EXPECTED_PHRASES") {
+            let normalize = |value: &str| {
+                value
+                    .chars()
+                    .map(|character| {
+                        if character.is_alphanumeric() {
+                            character.to_ascii_lowercase()
+                        } else {
+                            ' '
+                        }
+                    })
+                    .collect::<String>()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            let rendered = normalize(
+                &words
+                    .iter()
+                    .map(|word| word.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+            for phrase in expected.split('|') {
+                let phrase = normalize(phrase);
+                assert!(
+                    rendered.contains(&phrase),
+                    "Parakeet smoke omitted expected phrase `{phrase}` from `{rendered}`"
+                );
+            }
+        }
         eprintln!(
             "Parakeet ONNX wav smoke: {} words: {:?}",
             words.len(),
