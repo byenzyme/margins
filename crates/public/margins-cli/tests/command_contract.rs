@@ -9,9 +9,11 @@ use margins_core::{
     CaptureLaneSnapshot, CaptureLaneState, CaptureObserver, CaptureProvider, CaptureRequest,
     CaptureSnapshot, CaptureState, PermissionState, TranscriptError,
 };
+use margins_meeting_protocol::{SessionId, SessionMillis, WorkspaceMemoUpdateV1};
 use margins_store::canonical;
 use margins_workflows::project::{ProjectSource, ResolvedProject};
 use margins_workflows::workspace::{self, GmailCollectionSelector, WorkspaceBinding};
+use margins_workflows::workspace_service::{ServicePrincipal, WorkspaceService};
 use std::io::{Read, Write as IoWrite};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -126,6 +128,30 @@ fn clap_help_preserves_the_prior_argument_contract() {
     let help = error.to_string();
     assert!(help.contains("Stable session id from `margins recent`, or `current`/`latest`"));
     assert!(help.contains("Rebuild alignment from the existing transcript without running ASR"));
+}
+
+#[test]
+fn unsupported_remote_command_fails_before_transport_or_local_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let services = services(temp.path());
+    let (result, stdout, stderr) = invoke(
+        &services,
+        temp.path(),
+        &[
+            "margins",
+            "--remote",
+            "http://127.0.0.1:9",
+            "--workspace",
+            "practice",
+            "rename",
+            "must-not-connect",
+        ],
+    );
+    let error = result.unwrap_err();
+    assert_eq!(error.code(), "remote_command_unsupported");
+    assert!(stdout.is_empty());
+    assert!(stderr.contains("not supported by the remote adapter"));
+    assert!(!temp.path().join(".margins").exists());
 }
 
 #[test]
@@ -2942,6 +2968,42 @@ fn workspace_transcribe_keeps_generated_artifacts_out_of_notes_sources() {
         &invocation,
         &["margins", "--workspace", "practice", "recent"],
     );
+    let resolved = workspace::resolve_workspace(&margins_home, Some("practice"), &invocation)
+        .unwrap();
+    let service = WorkspaceService::open("same-process-service", resolved).unwrap();
+    let principal = ServicePrincipal::full("service-reader", "practice");
+    let service_sessions = service.sessions(&principal, None, 10).unwrap();
+    assert_eq!(service_sessions.sessions[0].session_id.as_ref(), "public-input");
+    let service_artifacts = service
+        .artifacts(&principal, "public-input")
+        .unwrap();
+    assert!(service_artifacts
+        .iter()
+        .any(|artifact| artifact.kind == "transcript"));
+    let service_memo = service
+        .memo(&principal, &SessionId("public-input".into()))
+        .unwrap();
+    let service_edit = service
+        .update_memo(
+            &principal,
+            &SessionId("public-input".into()),
+            &WorkspaceMemoUpdateV1 {
+                request_id: "service-edit-after-cli-create".into(),
+                expected_revision: service_memo.revision,
+                observed_at_ms: SessionMillis(500),
+                paused: false,
+                text: "public memo\nservice-visible edit".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(service_edit.lines[1].text, "service-visible edit");
+    assert_eq!(
+        service
+            .memo(&principal, &SessionId("public-input".into()))
+            .unwrap()
+            .revision,
+        service_edit.revision
+    );
     restore_env("MARGINS_HOME", old_margins_home.as_ref());
 
     let capture_store = margins_home.join("workspaces/practice/captures/.margins");
@@ -2959,6 +3021,9 @@ fn workspace_transcribe_keeps_generated_artifacts_out_of_notes_sources() {
     assert!(artifacts_stdout.contains(capture_store.to_string_lossy().as_ref()));
     assert!(recent_result.is_ok(), "{recent_stderr}");
     assert!(recent_stdout.contains("id=\"public-input\""));
+    assert!(std::fs::read_to_string(capture_store.join("public-input.md"))
+        .unwrap()
+        .contains("service-visible edit"));
     assert!(capture_store.join("public-input.md").is_file());
     assert!(capture_store.join("public-input_transcript.json").is_file());
     assert!(!notes.join(".margins").exists());

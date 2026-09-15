@@ -185,6 +185,10 @@ impl WorkspaceHttpClient {
         self.get(&path)
     }
 
+    pub fn current(&self) -> Result<Option<margins_meeting_protocol::SessionId>> {
+        self.get(&format!("v1/workspaces/{}/current", self.workspace_id))
+    }
+
     pub fn transcript(
         &self,
         session: &str,
@@ -463,6 +467,8 @@ impl DurableTransferSpool {
         validate_component(transfer_id)?;
         let transfer_root = root.join(transfer_id);
         std::fs::create_dir_all(transfer_root.join("chunks"))?;
+        set_directory_owner_only(&transfer_root)?;
+        set_directory_owner_only(&transfer_root.join("chunks"))?;
         let manifest = TransferManifest {
             schema: "margins.remote-transfer.v1".into(),
             transfer_id: transfer_id.into(),
@@ -562,6 +568,7 @@ impl DurableTransferSpool {
         let name = chunk.path.file_name().context("chunk has no file name")?;
         let receipt = self.root.join("acks").join(name).with_extension("ack");
         std::fs::create_dir_all(receipt.parent().unwrap())?;
+        set_directory_owner_only(receipt.parent().unwrap())?;
         atomic_bytes(&receipt, chunk.payload_digest.as_bytes())?;
         match std::fs::remove_file(&chunk.path) {
             Ok(()) => {}
@@ -712,6 +719,15 @@ fn sync_dir(path: &Path) -> Result<()> {
 fn set_owner_only(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+fn set_directory_owner_only(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
     Ok(())
 }
 

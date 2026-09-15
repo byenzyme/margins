@@ -45,6 +45,7 @@ zeroize = { version = "1", features = ["derive"] }
 rusqlite = { package = "libsql-rusqlite", version = "=0.9.30" }
 
 [dev-dependencies]
+margins-meeting-protocol = { version = "0.1.0", path = "../margins-meeting-protocol" }
 tempfile = "3"
 
 [build-dependencies]

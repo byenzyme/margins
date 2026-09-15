@@ -4638,9 +4638,31 @@ pub(crate) fn persist_live_memo(
     session_name: &str,
     lines: &[MemoLine],
 ) -> Result<(), String> {
-    let memo_content = export_memo(lines);
-    let notes_path = session_memo_path(work_dir, session_name);
-    std::fs::write(&notes_path, &memo_content).map_err(|e| e.to_string())
+    let authority =
+        margins::session::SqliteWorkspaceAuthorityStorage::open(work_dir.join(".margins"))
+            .map_err(|error| error.to_string())?;
+    let current = authority
+        .memo(session_name)
+        .map_err(|error| error.to_string())?;
+    if current.lines == lines {
+        return Ok(());
+    }
+    let desired = margins::core::TimedMemoDocument::from_committed(lines.to_vec()).revision();
+    use sha2::{Digest as _, Sha256};
+    let request_id = format!(
+        "desktop-memo-{:x}",
+        Sha256::digest(format!("{}\0{desired}", current.revision).as_bytes())
+    );
+    authority
+        .replace_memo_lines(
+            session_name,
+            "desktop-local",
+            &request_id,
+            &current.revision,
+            lines,
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 fn ensure_memo_session(expected: &str, active: &str) -> Result<(), String> {
@@ -6857,13 +6879,9 @@ fn import_transcript_for_state(
     let memo_content = args
         .memo
         .unwrap_or_else(|| format!("# {title}\n\nImported transcript captured through Margins.\n"));
+    let imported_memo = margins::core::TimedMemoDocument::parse_markdown(&memo_content);
+    persist_live_memo(&work_dir, &name, imported_memo.lines())?;
     let memo_path = session_memo_path(&work_dir, &name);
-    if let Some(parent) = memo_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create memo directory {}: {e}", parent.display()))?;
-    }
-    std::fs::write(&memo_path, &memo_content)
-        .map_err(|e| format!("failed to write memo {}: {e}", memo_path.display()))?;
 
     session::add_segment(
         &margins_dir,
@@ -7606,8 +7624,8 @@ async fn import_audio_file(
             path,
             created.format("%Y-%m-%d %H:%M:%S")
         );
-        std::fs::write(session_memo_path(work_dir, name), &stub_memo)
-            .map_err(|e| format!("Failed to write stub memo: {e}"))?;
+        let imported_memo = margins::core::TimedMemoDocument::parse_markdown(&stub_memo);
+        persist_live_memo(work_dir, name, imported_memo.lines())?;
 
         let transcript = render_imported_transcript_markdown(name, path, &stub_memo, &timeline);
         let transcript_path = session_transcript_artifact_path(margins_dir, name);
@@ -10775,8 +10793,8 @@ pub(crate) async fn stop_recording_impl(ctx: &ctx::Ctx) -> Result<String, String
         let live_finalize_ms = live_started.elapsed().as_millis();
         let artifacts_started = Instant::now();
         let memo_content = export_memo(&rec.memo_lines);
+        persist_live_memo(&work_dir, &rec.session_name, &rec.memo_lines)?;
         let notes_path = session_memo_path(&work_dir, &rec.session_name);
-        std::fs::write(&notes_path, &memo_content).map_err(|e| e.to_string())?;
         if let Some(transcript) = qualified_live_transcript.as_deref() {
             if let Err(error) = write_qualified_live_transcript_artifact(
                 &margins_dir,

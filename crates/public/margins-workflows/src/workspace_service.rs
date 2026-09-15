@@ -169,12 +169,20 @@ impl ScopedCredentialStore {
         let expires_at_unix_ms = ttl.map(|ttl| unix_ms().saturating_add(ttl.as_millis() as u64));
         self.mutate(|file| {
             let token_hash = hash_secret(token);
-            if file
+            if let Some(record) = file
                 .records
                 .iter()
-                .any(|record| record.token_hash == token_hash)
+                .find(|record| record.token_hash == token_hash)
             {
-                return Ok(());
+                if !record.revoked
+                    && record.principal_id == principal_id
+                    && record.workspace_ids == workspace_ids
+                    && record.operations == operations
+                    && record.expires_at_unix_ms == expires_at_unix_ms
+                {
+                    return Ok(());
+                }
+                bail!("credential token is already registered with different scope");
             }
             file.records.push(CredentialRecord {
                 principal_id: principal_id.to_string(),
@@ -691,6 +699,34 @@ impl WorkspaceService {
             observed_hash,
             expected_revision,
         )
+    }
+
+    pub fn note_association(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+    ) -> Result<Option<canonical::NoteAssociation>> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        canonical::get_note_association(&self.margins_dir, session_id.as_ref())
+    }
+
+    pub fn unlink_note(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        principal.require(self.workspace_id(), OP_NOTE_ASSOCIATE)?;
+        canonical::unlink_note(&self.margins_dir, session_id.as_ref(), expected_revision)
+    }
+
+    pub fn latest_job(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+    ) -> Result<Option<canonical::ProcessingJob>> {
+        principal.require(self.workspace_id(), OP_JOB_READ)?;
+        canonical::latest_processing_job(&self.margins_dir, session_id.as_ref())
     }
 
     pub fn import_finished_file(

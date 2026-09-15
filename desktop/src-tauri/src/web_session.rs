@@ -1537,13 +1537,11 @@ where
             .map_err(|e| e.to_string())
     );
 
-    // Write memo file
+    // Commit the final memo through the same revisioned authority used while
+    // capture was live; it owns the Markdown projection.
     let memo_content = crate::recording::export_memo(&ws.memo_lines);
+    retain_on_error!(crate::persist_live_memo(work_dir, name, &ws.memo_lines));
     let notes_path = crate::session_memo_path(work_dir, name);
-    if let Some(parent) = notes_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    retain_on_error!(std::fs::write(&notes_path, &memo_content).map_err(|e| e.to_string()));
 
     if let Some(transcript) = qualified_live_transcript.as_deref() {
         let publication = crate::write_qualified_headless_live_transcript_artifact(
@@ -2061,7 +2059,17 @@ mod tests {
         owner_id: &str,
         memo_lines: Vec<MemoLine>,
     ) {
-        let recordings_dir = work_dir.join(".margins").join("recordings");
+        let margins_dir = work_dir.join(".margins");
+        std::fs::create_dir_all(&margins_dir).unwrap();
+        session::create_session(
+            &margins_dir,
+            session_name,
+            &chrono::Local::now(),
+            &format!(".margins/{session_name}.md"),
+        )
+        .unwrap();
+        crate::persist_live_memo(work_dir, session_name, &memo_lines).unwrap();
+        let recordings_dir = margins_dir.join("recordings");
         std::fs::create_dir_all(&recordings_dir).unwrap();
         let webm_path = recordings_dir.join(format!("{session_name}_upload.webm"));
         let file = File::create(&webm_path).unwrap();

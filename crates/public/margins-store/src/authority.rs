@@ -301,6 +301,97 @@ impl SqliteWorkspaceAuthorityStorage {
         Ok(receipt)
     }
 
+    /// Replace an already-timestamped memo through the same revisioned
+    /// authority used by plain-text remote edits. Desktop capture owns the
+    /// timestamps it supplies; SQLite owns CAS, retry receipts, and the
+    /// Markdown projection.
+    pub fn replace_memo_lines(
+        &self,
+        session_id: &str,
+        principal_id: &str,
+        request_id: &str,
+        expected_revision: &str,
+        lines: &[TimedMemoLine],
+    ) -> Result<AuthorityMemoReceipt> {
+        validate_request_id(request_id)?;
+        let document = TimedMemoDocument::from_committed(lines.to_vec());
+        let fingerprint =
+            digest(format!("{expected_revision}\0{}", serde_json::to_string(lines)?).as_bytes());
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let prior: Option<(String, String)> = tx
+            .query_row(
+                "SELECT fingerprint, response_json FROM workspace_memo_receipts WHERE session_id = ?1 AND principal_id = ?2 AND request_id = ?3",
+                params![session_id, principal_id, request_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((prior_fingerprint, response)) = prior {
+            if prior_fingerprint != fingerprint {
+                bail!("memo request id was reused with different content");
+            }
+            let mut receipt: AuthorityMemoReceiptWire = serde_json::from_str(&response)?;
+            receipt.replayed = true;
+            return Ok(receipt.into());
+        }
+        let current = self.memo_in_transaction(&tx, session_id)?;
+        if current.revision != expected_revision {
+            bail!(
+                "memo revision conflict: current revision is {}",
+                current.revision
+            );
+        }
+        let receipt = AuthorityMemoReceipt {
+            revision: document.revision(),
+            lines: lines.to_vec(),
+            replayed: false,
+        };
+        let response = serde_json::to_string(&AuthorityMemoReceiptWire::from(&receipt))?;
+        tx.execute(
+            "INSERT INTO workspace_memos (session_id, revision, document_json, updated_at_ms) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(session_id) DO UPDATE SET revision = excluded.revision, document_json = excluded.document_json, updated_at_ms = excluded.updated_at_ms",
+            params![session_id, receipt.revision, serde_json::to_string(lines)?, now_ms()],
+        )?;
+        tx.execute(
+            "INSERT INTO workspace_memo_receipts (session_id, principal_id, request_id, fingerprint, response_json) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![session_id, principal_id, request_id, fingerprint, response],
+        )?;
+        tx.commit()?;
+        atomic_write(
+            &self.directory.join(format!("{session_id}.md")),
+            document.export_markdown().as_bytes(),
+        )?;
+        Ok(receipt)
+    }
+
+    fn memo_in_transaction(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        session_id: &str,
+    ) -> Result<AuthorityMemoReceipt> {
+        let stored: Option<(String, String)> = tx
+            .query_row(
+                "SELECT revision, document_json FROM workspace_memos WHERE session_id = ?1",
+                params![session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((revision, json)) = stored {
+            return Ok(AuthorityMemoReceipt {
+                revision,
+                lines: serde_json::from_str(&json)?,
+                replayed: false,
+            });
+        }
+        let markdown = std::fs::read_to_string(self.directory.join(format!("{session_id}.md")))
+            .unwrap_or_default();
+        let document = TimedMemoDocument::parse_markdown(&markdown);
+        Ok(AuthorityMemoReceipt {
+            revision: document.revision(),
+            lines: document.into_lines(),
+            replayed: false,
+        })
+    }
+
     pub fn record_import(
         &self,
         upload_id: &str,

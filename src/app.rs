@@ -2,6 +2,7 @@ use chrono::{DateTime, Local};
 use margins_core::{MemoMoment, TimedMemoDocument};
 use ratatui::layout::Rect;
 use std::io;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8};
 use std::sync::Arc;
 
@@ -40,6 +41,7 @@ pub struct App {
     pub spk_frames: Arc<AtomicU64>,
     pub spk_rate: u32,
     pub live_transcription_status: Arc<AtomicU8>,
+    workspace_authority: Option<(PathBuf, String)>,
 }
 
 impl App {
@@ -65,6 +67,7 @@ impl App {
             spk_frames: Arc::new(AtomicU64::new(0)),
             spk_rate: 0,
             live_transcription_status: Arc::new(AtomicU8::new(LIVE_TRANSCRIPTION_OFF)),
+            workspace_authority: None,
         }
     }
 
@@ -102,7 +105,12 @@ impl App {
             spk_frames: Arc::new(AtomicU64::new(0)),
             spk_rate: 0,
             live_transcription_status: Arc::new(AtomicU8::new(LIVE_TRANSCRIPTION_OFF)),
+            workspace_authority: None,
         }
+    }
+
+    pub fn bind_workspace_authority(&mut self, margins_dir: PathBuf, session_id: String) {
+        self.workspace_authority = Some((margins_dir, session_id));
     }
 
     pub fn mark_edited(&mut self, line: usize) {
@@ -416,7 +424,30 @@ impl App {
     pub fn save(&mut self) -> io::Result<()> {
         self.commit_uncommitted_at(Local::now());
         let content = self.export();
-        std::fs::write(&self.output_path, &content)?;
+        if let Some((margins_dir, session_id)) = &self.workspace_authority {
+            let authority = margins_store::SqliteWorkspaceAuthorityStorage::open(margins_dir)
+                .map_err(io::Error::other)?;
+            let current = authority.memo(session_id).map_err(io::Error::other)?;
+            if current.lines != self.memo.lines() {
+                let desired = self.memo.revision();
+                let request_id = format!(
+                    "native-memo-{}-{}",
+                    current.revision.chars().take(32).collect::<String>(),
+                    desired.chars().take(32).collect::<String>()
+                );
+                authority
+                    .replace_memo_lines(
+                        session_id,
+                        "native-cli",
+                        &request_id,
+                        &current.revision,
+                        self.memo.lines(),
+                    )
+                    .map_err(io::Error::other)?;
+            }
+        } else {
+            std::fs::write(&self.output_path, &content)?;
+        }
         let count = content.lines().count();
         self.message = Some(format!("Saved {} lines to {}", count, self.output_path));
         Ok(())
@@ -499,5 +530,36 @@ mod tests {
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.contains("final memo"));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn bound_native_memo_save_uses_sqlite_authority_and_markdown_projection() {
+        let temp = tempfile::tempdir().unwrap();
+        let margins_dir = temp.path().join(".margins");
+        margins_store::canonical::create_session(
+            &margins_dir,
+            "native-session",
+            &Local::now(),
+            ".margins/native-session.md",
+        )
+        .unwrap();
+        let output = margins_dir.join("native-session.md");
+        let mut app = App::new(
+            output.to_string_lossy().into_owned(),
+            make_start(),
+            "mic".into(),
+        );
+        app.bind_workspace_authority(margins_dir.clone(), "native-session".into());
+        type_text(&mut app, "authoritative memo");
+        app.save().unwrap();
+
+        let authority =
+            margins_store::SqliteWorkspaceAuthorityStorage::open(&margins_dir).unwrap();
+        let memo = authority.memo("native-session").unwrap();
+        assert_eq!(memo.lines[0].text, "authoritative memo");
+        assert_eq!(
+            std::fs::read_to_string(output).unwrap(),
+            app.memo.export_markdown()
+        );
     }
 }

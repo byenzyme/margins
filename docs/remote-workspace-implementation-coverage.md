@@ -1,0 +1,295 @@
+# Remote Workspace implementation coverage
+
+Implementation base: `4228ef5396074413cf4349365a5529132b4b956d`
+Phase 1 checkpoint: `188d29b2c`
+
+This report separates implemented portable behavior from platform and deployment
+gates. “Supported” below means a production caller reaches the implementation;
+it does not mean a real Mac, phone, installed application, or remote host was
+tested.
+
+## Acceptance plan and outcome
+
+1. Map writers and cut over Workspace routing before adding transport.
+2. Put local/service queries, receipts, memo, associations, jobs, and imports on
+   the same canonical store.
+3. Add scoped negotiation plus SSH/HTTPS adapters.
+4. Add crash-recoverable client spooling and exact ACK/finalize behavior.
+5. Adapt BB and Shortcut ingress to typed operations.
+6. Run portable composed fixtures, real local HTTP/CLI processes, and record the
+   remaining platform gates without inferring them.
+
+Phases 0–1 have a portable production cutover and parity proof. Phase 2 is wired
+for the supported read/query/import commands. Phase 3 has the durable delivery
+substrate, but the native recorder-to-remote command journey remains an explicit
+implementation gate. Phase 4 has the typed BB capture adapter and its 28-test
+suite, but its complete same-host/remote browser journey requires a real browser
+host. Phase 5 has production multipart intake, receipts, pairing, and instructions;
+the real-phone gate is unverified. Phase 6 has source-build and operator
+documentation; installation, packaging, signing, and provisioned-host gates are
+unverified.
+
+## Phase 0 — writer and operation map
+
+### Persistence writers
+
+| Caller | Production mutation path after cutover | Durable owner |
+| --- | --- | --- |
+| Public local CLI | `SessionStore` → `margins_store::canonical` | selected Captures binding’s `.margins/sessions.sqlite` |
+| Native CLI and desktop recorder | direct device control remains local; session/segment/artifact calls use the same canonical module; TUI/native memo saves use `SqliteWorkspaceAuthorityStorage::replace_memo_lines` | same `sessions.sqlite`; no transport/spool on default local capture |
+| Native desktop live memo | `SqliteWorkspaceAuthorityStorage::update_memo` / `replace_memo_lines` | `workspace_memos` + receipt rows in the same `sessions.sqlite`, with authority-owned Markdown projection |
+| Hosted browser capture | existing bounded browser owner for device/WebM bytes; session/artifacts use canonical store and memo uses `SqliteWorkspaceAuthorityStorage` | same `sessions.sqlite` and confined artifact files |
+| Remote capture service | `WorkspaceService` → `MeetingRuntime<SqliteMeetingRuntimeStorage>` | runtime state, receipts, events, canonical session/segment/artifact projection in one `sessions.sqlite` transaction |
+| BB plugin | typed `/v1/.../browser/...` routes | hosted browser adapter above; no plugin call to generic `/api/invoke` or JSON audio route |
+| Shortcut | multipart import → `WorkspaceService::import_finished_file` | immutable staged original + principal-scoped receipt + canonical artifact row |
+
+The former public name `legacy` was removed; first-party code imports the selected
+schema owner as `canonical`. `meeting-runtime.sqlite` is no longer a production or
+test destination. At the implementation base it was instantiated only by tests,
+so no production user-store move was needed. Canonical `sessions.sqlite` is opened
+in place and extended transactionally. The operator guide explicitly refuses to
+silently consume or delete any standalone experimental runtime database.
+
+The superseded native/browser finalization writes that overwrote memo Markdown
+directly were removed. Initial, periodic, final, imported, and whole-notepad memo
+mutations now pass through the SQLite authority; Markdown remains a native readable
+projection, not a competing revision owner. Native `Pause`/`Stop` still invoke the recorder implementation because local device
+release must remain immediate and independent of memo, ASR, service, or network.
+That is a capture-control adapter, not a second metadata store. The Stop behavior
+from the first implementation remains: release synchronously, then bounded drain
+and finalization with truthful incomplete state on failure.
+
+### BB operation mapping
+
+| BB behavior | Typed operation / authority | Portable status |
+| --- | --- | --- |
+| Project start | stable `MARGINS_INSTANCE_ID`, `MARGINS_WORKSPACE`, `MARGINS_HOME`, explicit notes/Captures provisioning | implemented |
+| Capabilities | `GET /v1/capabilities` | implemented; ASR/recall are compile-truthful |
+| Start | `POST /v1/workspaces/{w}/browser/sessions` | implemented |
+| Browser audio | binary `PUT .../browser/sessions/{s}/chunks/{n}` | implemented; bounded browser owner retained |
+| Pause/resume/heartbeat/stop | typed browser routes | implemented; owner/generation fencing retained |
+| Notepad | typed `PUT .../notepad`, canonical timed memo revision | implemented |
+| Snapshot/remount | typed snapshot plus existing single browser owner/event fan-out | implemented in adapter; real remount journey unverified |
+| Transcript/artifacts | shared Workspace query routes | server implemented; plugin UI journey unverified |
+| Note association | typed session note-association GET/PUT/DELETE | server implemented; ordinary note bytes remain native filesystem data |
+| Processing outcome | typed latest-job query | server implemented; full plugin UI journey unverified |
+| Agent context | stable instance/Workspace/session values | server substrate implemented; plugin handoff journey unverified |
+| Cancel/discard/recover | browser owner’s truthful discard/finalize rules; remote transfer list/retry | substrate implemented; end-to-end plugin recovery unverified |
+
+The BB saved-flag schema and dismiss RPC remain removed. No lifecycle competitor was
+reintroduced.
+
+## Phase 1 — local parity and routing
+
+- Explicit local `--workspace` resolves its single absolute Captures binding for
+  public and native `new`/`attach`; it does not discover from cwd. A conflicting
+  `--project` is rejected before writes. No-selector local behavior is retained.
+- `margins-server` requires `MARGINS_WORKSPACE`; optional provisioning creates only
+  an exact explicit mapping and rejects later mismatch.
+- `WorkspaceService` is called directly in-process by local composition. Merely
+  using local Margins does not start a service, hash/encode chunks, create a transfer
+  spool, or allocate a remote worker.
+- Runtime session reservation and finalized PCM projection share the canonical
+  SQLite transaction with receipts/events/revision checks. Direct native/browser
+  completed segment durations and remote explicit finalization reduce to the same
+  `input_finalized` query fact. Finished-file imports reduce through the durable
+  `original_audio` artifact fact.
+- Native-live and browser whole-notepad mutations now read/update the same timed
+  memo document and durable request receipts as the service. Stale expected
+  revisions are rejected; delayed edits carry observed capture time and paused
+  state.
+- A real CLI fixture creates `public-input` from an unrelated cwd, then an
+  in-process production `WorkspaceService` reads that exact session and transcript
+  artifact, updates the same memo revision, and the authority-owned Markdown
+  projection contains the edit. The browser composed fixture independently creates
+  a hosted session and proves the service sees the exact title, artifact size, and
+  memo revision.
+- Note associations, processing jobs, and retention tables remain independent.
+  Association setters perform no note-file write, job completion, or audio deletion.
+  Completion does not delete audio; retention deletion remains preview/apply only.
+
+Composed counterevidence addressed: an early PCM fixture used two-byte payloads
+described as 100 ms. It was replaced with two distinct mono signed-16 48 kHz lanes,
+4,800 samples per 100 ms chunk. The final fixture reconstructs 9,600 samples per
+lane, asserts both chunk-boundary sample values, mono channel identity through lane
+artifacts, and exactly 200 ms duration after service restart.
+
+## Phase 2 — read-only remote access
+
+- Remote selection order supports explicit `--remote`/`--local`, then
+  `MARGINS_REMOTE`; remote use requires Workspace and rejects `--project` before
+  local work.
+- HTTPS and loopback-test clients negotiate protocol/instance/Workspace,
+  capabilities and limits on connect. Plain remote HTTP is rejected.
+- `ssh://` accepts an OpenSSH config alias only. Discovery uses a fixed command and
+  the tunnel uses fixed forward/keepalive arguments; URL usernames, paths, shell
+  commands, and arbitrary options are rejected.
+- Remote CLI production support is wired for capabilities, `current`, `ls`,
+  `recent` (including the single authorized Workspace interpretation of `--all`),
+  transcript, artifacts, recall, and finished-file import. Recall evidence exposes
+  Source identity and Source-relative paths, never a source-file proxy.
+- Unsupported commands return `remote_command_unsupported` before local mutation.
+  The adapter now rejects them before opening HTTPS/SSH or reading a local input.
+
+Not yet claimed supported: remote interactive `new`/`attach` native capture,
+rename, note handoff generation, and CLI note-association syntax. The service
+protocol primitives exist for reservation/capture/memo/association, but advertising
+those CLI journeys without composing the native device loop would be a placeholder.
+This is a remaining implementation gate, not a platform-verification claim.
+
+## Phase 3 — durable delivery
+
+- A transfer manifest pins remote URL, instance, Workspace, session, producer token,
+  and close/finalize intents. Owner-only directories/files contain the credential.
+  Retry re-negotiates and refuses to send if the live instance differs from the
+  preserved manifest.
+- Each self-describing frame is atomically published and fsynced before scheduling.
+  Payload digests and immutable command identity are checked. Conflicting bytes fail.
+- Disk reserve, advertised chunk and in-flight limits, producer ownership, and
+  immutable receipt replay are enforced. ACK evidence is fsynced before a frame is
+  unlinked. Restart scans complete remaining frames; exact retries keep identity.
+- Close is accepted only after contiguous lane boundaries; finalize follows close.
+  Producer release occurs only after successful finalization. Failed delivery keeps
+  bytes and identity for `transfers list/retry`.
+- Default local capture never constructs this spool.
+
+Portable tests cover restart before finalize, duplicate/lost-ACK replay, different
+bytes under the same identity, producer fencing, two lanes, out-of-order arrival,
+and service reopen. A real native recorder-to-remote delivery loop is still the CLI
+composition gate listed above.
+
+## Phases 4–6 — adapters and operations
+
+- BB launcher selects one stable instance/Workspace and uses typed control/binary
+  browser routes. Existing 28 plugin tests pass after the adapter change.
+- Scoped credential storage hashes tokens, uses an owner-only atomic file, checks
+  Workspace/operation/expiry, and supports revocation. Browser routes enforce their
+  specific operation scope. Shortcut credentials contain import/receipt only.
+- `POST /v1/workspaces/{w}/imports` accepts multipart metadata plus the original
+  file. Stable upload IDs return the original durable receipt for identical bytes
+  and conflict for changed bytes. The older id-addressed binary PUT is retained as
+  the resumable CLI transport, not a note/source proxy.
+- [Remote operations](remote-workspace-operations.md) documents explicit service
+  provisioning, SSH/HTTPS, backup/recovery, capability semantics, and revocation.
+  [Shortcut instructions](../integrations/shortcuts/README.md) contain no credential.
+
+Actual iPhone background behavior, app switch/lock, cellular retry, Mac permissions,
+native system audio, installed application, signing/package, published installation,
+and provisioned remote-host behavior were not run and remain release gates.
+
+## Verification evidence
+
+Available baseline before changes:
+
+- `scripts/cargo-lane disposable -- cargo test -p margins-store -p margins-workflows`
+  passed: store unit 13, application 5, index 3, compatibility 3, runtime SQLite 5,
+  public 2, repository 6; workflows unit 189 with 1 ignored; all integration suites.
+- Prior evidence from the companion coverage: desktop Rust 367 passed with 3
+  capability tests ignored; desktop frontend 155; BB 28.
+- Known portable root counterevidence remains
+  `integrations_recall_sqlite_source recall_unavailable_stale_materialization`
+  after 529 recall-engine tests; it reproduced alone on the base, with four sibling
+  failures from poisoned-lock fallout. The final broad lane re-evaluated it after
+  the Source-relative recall serialization change and reproduced the same first
+  failure and four poisoned-lock follow-ons.
+
+Implementation checks run from the canonical worktree/origin:
+
+```text
+scripts/cargo-lane disposable -- cargo test -p margins-workflows --test workspace_service --test remote_workspace
+  5 passed (3 service/auth + 2 transport/spool) after final auth test addition
+
+scripts/cargo-lane disposable -- cargo test -p margins-store -p margins-workflows
+  passed after cutover: store suites unchanged at 13/5/3/3/5/2/6;
+  workflows 190 passed, 1 ignored, plus every integration suite
+
+scripts/cargo-lane disposable -- cargo test -p margins-cli --test command_contract \
+  workspace_transcribe_keeps_generated_artifacts_out_of_notes_sources -- --exact
+  1 passed; real SQLite CLI-create/service-read/service-mutate parity
+
+scripts/cargo-lane disposable -- cargo test -p margins-cli --test command_contract \
+  unsupported_remote_command_fails_before_transport_or_local_mutation -- --exact
+  1 passed; 68 filtered
+
+scripts/cargo-lane disposable -- cargo test -p margins-desktop \
+  --manifest-path desktop/src-tauri/Cargo.toml --no-default-features --features server \
+  web_session::tests::hosted_writer_and_workspace_service_share_session_title_artifact_and_memo_facts \
+  -- --exact --test-threads=1
+  1 passed; 380 filtered; 95 s cold disposable compile, test 0.17 s
+
+scripts/cargo-lane shared -- cargo check -p margins-cli -p margins-workflows --tests
+  passed
+
+scripts/cargo-lane shared -- cargo check -p margins-desktop \
+  --manifest-path desktop/src-tauri/Cargo.toml --no-default-features --features server
+  passed
+
+scripts/cargo-lane disposable -- cargo test -p margins-desktop \
+  --manifest-path desktop/src-tauri/Cargo.toml --no-default-features --features recall \
+  -- --test-threads=1
+  368 passed, 3 ignored after the memo-authority cutover
+
+  Counterevidence from the first broad run: 367 passed, 1 failed, 3 ignored;
+  `whole_notepad_updates_reuse_the_shared_timed_memo_model` hit a foreign-key
+  failure because its old fixture bypassed canonical session creation. The fix
+  made the fixture production-shaped and removed the remaining direct final-memo
+  writers; the focused test and the complete 371-test lane then passed.
+
+scripts/cargo-lane disposable -- cargo test --workspace --no-default-features --features recall
+  529 recall-engine tests passed, then the known
+  integrations_recall_sqlite_source stale-materialization failure reproduced;
+  four sibling tests failed only after the shared test lock was poisoned
+
+cd integrations/bb-plugin-margins && npm ci && npm run typecheck && npm test
+  28 passed
+
+cd desktop && npm ci && npm run build
+  passed
+```
+
+A final rebuilt `margins-server` was started on a disposable loopback port with an
+explicit provisioned Workspace. Authenticated HTTP import and identical retry were
+then queried from both remote-mode and direct local `margins-private` processes;
+both returned session `http-cli-parity` from the same `sessions.sqlite`. Capabilities
+reported `instance=e2e-final`, `workspace=parity`, `asr=false`, `recall=false`.
+The remote artifact was `original_audio`; the second multipart upload returned the
+same receipt with `replayed=true`; service discovery succeeded without a Workspace
+flag because the instance serves exactly one Workspace. An upload-only credential
+received 403 for session listing, an invalid credential received 401, and the
+revoked credential received 401. Only `sessions.sqlite` existed; no experimental
+runtime database was created.
+
+## Robustness, latency, and burden
+
+Measured: the composed service/spool tests complete in well under one second after
+compile (service fixture 0.34 s; spool 0.01 s). The desktop parity test itself took
+0.17 s. Cold disposable compile time is not runtime latency and is reported
+separately above. BB stayed 28/28 and the frontend production build passed.
+
+Inferred, not measured on native hardware: the direct local path adds only canonical
+SQLite memo/session work already required for durability; it does not add network,
+wire encoding, duplicate audio, spool hashing, or remote threads. Therefore the
+design avoids an architectural local callback-pressure regression, but recorder
+readiness, callback pressure, native Stop latency, and warm CLI startup still need
+comparable Mac measurements. No native-performance claim is made from Linux builds.
+
+The principal implementation burden versus the old unit-only substrate is the
+production adapters, owner-scoped credentials, explicit Workspace mapping, immutable
+spool/receipt bookkeeping, and crash-boundary tests. Simplicity is recovered by one
+canonical database, one shared service, typed first-party routes, no source-file or
+note-publishing API, no background delivery daemon, and no remote work in default
+local capture.
+
+## Remaining gates
+
+1. Compose the private native terminal recorder with reservation/spool/upload so
+   remote `new`/`attach`, pause/resume/Stop, memo, and recovery form one user journey.
+2. Add remote rename/note-handoff CLI syntax and complete note-association/client
+   command coverage; run distillation pin-before-recall behavior.
+3. Run the complete BB same-host and remote real-browser journey, including remount,
+   stale callbacks, conflicts, recovery, artifacts, jobs, and agent handoff.
+4. Run real Mac microphone/system lanes and measure readiness/callback/Stop latency.
+5. Run the real Shortcut share/retry/app-switch/lock/cellular matrix.
+6. Verify service packaging, backup restore, published clean-client install, and a
+   provisioned host. No push, merge, deployment, credential change, or release was
+   performed here.

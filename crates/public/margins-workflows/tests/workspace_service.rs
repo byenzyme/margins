@@ -1,7 +1,9 @@
 use margins_meeting_protocol::*;
 use margins_workflows::{
     workspace::ensure_service_workspace,
-    workspace_service::{ServicePrincipal, WorkspaceService},
+    workspace_service::{
+        ScopedCredentialStore, ServicePrincipal, WorkspaceService, OP_IMPORT_WRITE, OP_SESSION_READ,
+    },
 };
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
@@ -320,4 +322,54 @@ fn memo_source_and_import_authorization_are_independent_and_retry_safe() {
         "phone-a"
     );
     assert!(captures.join(&receipt.stored_path).is_file());
+}
+
+#[test]
+fn scoped_credentials_are_owner_only_expiring_and_revocable() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("credentials.json");
+    let store = ScopedCredentialStore::open(&path).unwrap();
+    let token = store
+        .issue(
+            "shortcut-phone",
+            vec!["team".to_string()],
+            vec![OP_IMPORT_WRITE.to_string()],
+            None,
+        )
+        .unwrap();
+    let principal = store.authorize(&token, "team").unwrap();
+    principal.require("team", OP_IMPORT_WRITE).unwrap();
+    assert!(principal.require("team", OP_SESSION_READ).is_err());
+    assert!(store.authorize(&token, "another-workspace").is_err());
+    assert!(store
+        .register(
+            "scope-substitution",
+            &token,
+            vec!["another-workspace".to_string()],
+            vec![OP_SESSION_READ.to_string()],
+            None,
+        )
+        .is_err());
+    store.authorize(&token, "team").unwrap();
+    assert_eq!(store.revoke("shortcut-phone").unwrap(), 1);
+    assert!(store.authorize(&token, "team").is_err());
+
+    let expired = store
+        .issue(
+            "short-lived",
+            vec!["team".to_string()],
+            vec![OP_SESSION_READ.to_string()],
+            Some(std::time::Duration::ZERO),
+        )
+        .unwrap();
+    assert!(store.authorize(&expired, "team").is_err());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 }

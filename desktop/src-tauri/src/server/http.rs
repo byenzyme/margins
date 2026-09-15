@@ -67,6 +67,7 @@ pub fn build_router(state: ServerState) -> Router {
         .route("/v1/capabilities", get(workspace_capabilities))
         .route("/v1/workspaces/:workspace", get(workspace_summary))
         .route("/v1/workspaces/:workspace/recall", post(workspace_recall))
+        .route("/v1/workspaces/:workspace/current", get(workspace_current))
         .route(
             "/v1/workspaces/:workspace/sessions",
             get(workspace_sessions).post(workspace_create_session),
@@ -98,6 +99,16 @@ pub fn build_router(state: ServerState) -> Router {
         .route(
             "/v1/workspaces/:workspace/sessions/:session/memo",
             get(workspace_memo).put(workspace_update_memo),
+        )
+        .route(
+            "/v1/workspaces/:workspace/sessions/:session/note-association",
+            get(workspace_note_association)
+                .put(workspace_link_note)
+                .delete(workspace_unlink_note),
+        )
+        .route(
+            "/v1/workspaces/:workspace/sessions/:session/jobs/latest",
+            get(workspace_latest_job),
         )
         .route(
             "/v1/workspaces/:workspace/imports",
@@ -245,6 +256,7 @@ fn workspace_error(
 fn service_error(error: anyhow::Error) -> Response {
     let message = error.to_string();
     let (status, code) = if message.contains("revision conflict")
+        || message.contains("changed somewhere else")
         || message.contains("different content")
         || message.contains("already has")
     {
@@ -322,6 +334,22 @@ async fn workspace_recall(
     state
         .workspace_service
         .recall(&principal, &request.query, request.source.as_deref())
+        .map(workspace_ok)
+        .unwrap_or_else(service_error)
+}
+
+async fn workspace_current(
+    State(state): State<ServerState>,
+    Path(workspace): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match workspace_auth(&state, &headers, Some(&workspace)) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    state
+        .workspace_service
+        .current(&principal)
         .map(workspace_ok)
         .unwrap_or_else(service_error)
 }
@@ -607,6 +635,92 @@ async fn workspace_update_memo(
     state
         .workspace_service
         .update_memo(&principal, &SessionId(session), &request)
+        .map(workspace_ok)
+        .unwrap_or_else(service_error)
+}
+
+#[derive(serde::Deserialize)]
+struct NoteAssociationBody {
+    source_id: String,
+    relative_path: String,
+    observed_content_hash: Option<String>,
+    expected_revision: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct RevisionQuery {
+    expected_revision: u64,
+}
+
+async fn workspace_note_association(
+    State(state): State<ServerState>,
+    Path((workspace, session)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match workspace_auth(&state, &headers, Some(&workspace)) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    state
+        .workspace_service
+        .note_association(&principal, &SessionId(session))
+        .map(workspace_ok)
+        .unwrap_or_else(service_error)
+}
+
+async fn workspace_link_note(
+    State(state): State<ServerState>,
+    Path((workspace, session)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(request): Json<NoteAssociationBody>,
+) -> Response {
+    let principal = match workspace_auth(&state, &headers, Some(&workspace)) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    state
+        .workspace_service
+        .link_note(
+            &principal,
+            &SessionId(session),
+            &request.source_id,
+            &request.relative_path,
+            request.observed_content_hash.as_deref(),
+            request.expected_revision,
+        )
+        .map(workspace_ok)
+        .unwrap_or_else(service_error)
+}
+
+async fn workspace_unlink_note(
+    State(state): State<ServerState>,
+    Path((workspace, session)): Path<(String, String)>,
+    Query(request): Query<RevisionQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match workspace_auth(&state, &headers, Some(&workspace)) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    state
+        .workspace_service
+        .unlink_note(&principal, &SessionId(session), request.expected_revision)
+        .map(|()| workspace_ok(serde_json::json!({"unlinked": true})))
+        .unwrap_or_else(service_error)
+}
+
+async fn workspace_latest_job(
+    State(state): State<ServerState>,
+    Path((workspace, session)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match workspace_auth(&state, &headers, Some(&workspace)) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    state
+        .workspace_service
+        .latest_job(&principal, &SessionId(session))
         .map(workspace_ok)
         .unwrap_or_else(service_error)
 }

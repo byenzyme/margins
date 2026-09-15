@@ -1653,8 +1653,6 @@ fn create_native_session(work_dir: &Path, title: Option<&str>) -> Result<()> {
     std::fs::create_dir_all(&margins_dir).context("failed to create .margins directory")?;
     // Silent bookkeeping so desktop and `recent --all` can enumerate this folder.
     margins_workflows::project::register_vault_silently(work_dir);
-    std::fs::write(&memo_path, "")
-        .with_context(|| format!("failed to initialize memo {}", memo_path.display()))?;
     margins_store::canonical::create_session(
         &margins_dir,
         &name,
@@ -1680,6 +1678,7 @@ fn create_native_session(work_dir: &Path, title: Option<&str>) -> Result<()> {
         started_at,
         mic_name,
     );
+    app.bind_workspace_authority(margins_dir.clone(), name.clone());
     app.live_transcription_status = live_status;
 
     let action = run_segment(
@@ -1729,12 +1728,8 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
     let meta = margins_store::canonical::get_session_meta(&margins_dir, &name)?;
     let started_at = margins_store::canonical::get_session_start_time(&margins_dir, &name)?;
     let memo_path = resolve_artifact(work_dir, &meta.notes_path);
-    if !memo_path.exists() && meta.vault_note_path.is_none() {
-        std::fs::write(&memo_path, "")?;
-    }
-    let parsed = margins_core::TimedMemoDocument::parse_markdown(
-        &std::fs::read_to_string(&memo_path).context("failed to read memo")?,
-    );
+    let authority = margins_store::SqliteWorkspaceAuthorityStorage::open(&margins_dir)?;
+    let parsed = margins_core::TimedMemoDocument::from_committed(authority.memo(&name)?.lines);
     let ordinal = margins_store::canonical::next_segment_index(&margins_dir, &name)?;
     let audio_path = margins_dir.join(format!("{name}_seg{ordinal}.wav"));
     let offset_ms = (Local::now() - started_at).num_milliseconds().max(0);
@@ -1773,6 +1768,7 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
         started_at,
         mic_name,
     );
+    app.bind_workspace_authority(margins_dir.clone(), name.clone());
     app.live_transcription_status = live_status;
 
     let action = run_segment(
@@ -1941,7 +1937,8 @@ fn run_segment(
     let mut live_finalizer = live.map(|worker| worker.begin_finish(live_timeline_duration_ms));
 
     // Save memo regardless of transcription result.
-    let memo_result = std::fs::write(&app.output_path, app.export())
+    let memo_result = app
+        .save()
         .with_context(|| format!("could not save memo {}", &app.output_path));
     if let Err(error) = memo_result {
         if let Some(finalizer) = live_finalizer.take() {

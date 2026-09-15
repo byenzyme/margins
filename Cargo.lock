@@ -3261,6 +3261,7 @@ dependencies = [
  "libsql-rusqlite",
  "margins-core",
  "margins-media",
+ "margins-meeting-protocol",
  "margins-store",
  "margins-workflows",
  "rand 0.8.6",

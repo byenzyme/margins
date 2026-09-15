@@ -23,6 +23,7 @@ pub fn service(
     let selected = workspace_selector
         .map(str::to_string)
         .or_else(|| std::env::var("MARGINS_WORKSPACE").ok())
+        .or_else(|| (state.workspace_ids.len() == 1).then(|| state.workspace_ids[0].clone()))
         .ok_or_else(|| CliError::usage("service command requires --workspace <id>"))?;
     if !state.workspace_ids.iter().any(|value| value == &selected) {
         return Err(CliError::new(
@@ -88,6 +89,25 @@ pub fn run(
     command: Command,
     stdout: &mut dyn Write,
 ) -> Result<(), CliError> {
+    // Reject placeholder commands before opening a socket, starting SSH, or
+    // reading any local input. A command is supported remotely only when this
+    // adapter has a complete production implementation for it.
+    if !matches!(
+        &command,
+        Command::Capabilities
+            | Command::Current
+            | Command::Ls
+            | Command::Recent { .. }
+            | Command::Transcript { .. }
+            | Command::Artifacts { .. }
+            | Command::Recall { .. }
+            | Command::Transcribe { .. }
+    ) {
+        return Err(CliError::new(
+            "remote_command_unsupported",
+            format!("command {command:?} is not supported by the remote adapter"),
+        ));
+    }
     let token = std::env::var("MARGINS_REMOTE_TOKEN").ok();
     let connection = RemoteConnection::connect(remote, workspace, token.as_deref())
         .map_err(CliError::from_anyhow)?;
@@ -98,12 +118,15 @@ pub fn run(
                 .capabilities()
                 .map_err(CliError::from_anyhow)?,
         ),
-        Command::Ls | Command::Recent { all: false } => serde_json::to_value(
+        Command::Ls | Command::Recent { .. } => serde_json::to_value(
             connection
                 .client
                 .sessions(None, 100)
                 .map_err(CliError::from_anyhow)?,
         ),
+        Command::Current => {
+            serde_json::to_value(connection.client.current().map_err(CliError::from_anyhow)?)
+        }
         Command::Transcript { meeting_id, .. } => serde_json::to_value(
             connection
                 .client
@@ -146,12 +169,7 @@ pub fn run(
                     .map_err(CliError::from_anyhow)?,
             )
         }
-        unsupported => {
-            return Err(CliError::new(
-                "remote_command_unsupported",
-                format!("command {unsupported:?} is not supported by the remote adapter"),
-            ))
-        }
+        _ => unreachable!("remote command was checked before transport setup"),
     }
     .map_err(|error| CliError::from_anyhow(error.into()))?;
     writeln!(stdout, "{}", serde_json::to_string(&value).unwrap())
@@ -185,6 +203,16 @@ pub fn transfers(command: TransfersCommand, stdout: &mut dyn Write) -> Result<()
                 token.as_deref(),
             )
             .map_err(CliError::from_anyhow)?;
+            let capabilities = connection
+                .client
+                .capabilities()
+                .map_err(CliError::from_anyhow)?;
+            if capabilities.instance_id.as_ref() != manifest.instance_id {
+                return Err(CliError::new(
+                    "remote_instance_changed",
+                    "remote instance identity changed; preserved transfer was not sent",
+                ));
+            }
             for chunk in spool.pending_chunks().map_err(CliError::from_anyhow)? {
                 connection
                     .client
