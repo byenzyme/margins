@@ -38,8 +38,18 @@ Workspace config, Captures `.margins/sessions.sqlite`, `.margins/artifacts/`,
 `.margins/imports/`, `.margins/meeting-blobs/`, and any pending client transfer
 directories. A durable server receipt is not an independent backup.
 
-Client capture frames are fsynced before delivery and removed only after a durable
-ACK receipt is fsynced. Inspect and retry them with:
+New native remote captures resample each enabled mono lane to 16 kHz off the audio
+callback, encode 20 ms Opus frames at a 24 kbps target, and fsync immutable
+100 ms packet-stream commands before delivery. A separate 16 kHz PCM recovery
+journal is checkpointed at least every 100 ms while a segment is open so a client
+crash can reconstruct a decodable terminal stream; it is removed only after the
+compressed chunks and close intent are durable. Packet commands are aggregated
+into bounded HTTP batches independently of that persistence cadence.
+
+Client packet commands are removed only after the matching durable ACK receipt is
+fsynced. Existing unacknowledged 16 kHz and 48 kHz raw-PCM transfer directories
+remain readable and retryable without relabeling their format. Inspect and retry
+all formats with:
 
 ```sh
 margins transfers list --json
@@ -61,9 +71,12 @@ review before using that directory as a service Workspace.
 ## Capability and failure policy
 
 Clients negotiate protocol version, instance ID, Workspace ID, limits, capture
-formats, operations, ASR, and recall on every connection. A Linux receiver built
-without ASR or recall reports those capabilities as unavailable; saving original
-audio remains valid. Unknown commands fail before local filesystem changes.
+formats, operations, ASR, and recall once while establishing each connection. The
+uploader uses that cached contract and fences every capture mutation with the
+negotiated instance ID; it does not poll capabilities during capture. A Linux
+receiver built without ASR or recall reports those capabilities as unavailable;
+saving original audio remains valid. Unknown commands fail before local filesystem
+changes.
 
 Credentials are scoped to Workspace and operations. Shortcut credentials receive
 only import and receipt operations. Revoke by principal using `service revoke`.
