@@ -1137,8 +1137,15 @@ fn packaged_binary_reports_private_native_composition() {
     assert_eq!(contract["capture_available"], true);
     assert_eq!(contract["capture_provider"], "native-recorder");
     assert_eq!(contract["tui_available"], true);
-    assert_eq!(contract["recall"]["scan"], true);
-    assert_eq!(contract["recall"]["indexing"], true);
-    assert_eq!(contract["recall"]["lookup"], true);
-    assert_eq!(contract["recall"]["local_model"], true);
+    for capability in ["available", "scan", "indexing", "lookup"] {
+        assert_eq!(
+            contract["recall"][capability],
+            cfg!(feature = "recall"),
+            "recall.{capability} must match the compiled feature matrix"
+        );
+    }
+    assert_eq!(
+        contract["recall"]["local_model"],
+        cfg!(feature = "recall-local-model")
+    );
 }

@@ -349,6 +349,11 @@ when Git is available. On the shared target, an initial build embedded clean com
 `b7c7d08da0ed18cb007f9b06cc4877cb850e7df1` and rebuilding without cleaning caused
 Cargo to recompile `margins-cli` and embed that exact new commit at `09:13:12Z`.
 The prior Mac binary whose metadata still named `46c8f6d4e` is rejected as evidence.
+The first corrected-candidate Mac run also found that the documented
+`audio-capture`-only native composition test hard-coded all optional recall
+features as present. Its assertions now follow the actual `recall` and
+`recall-local-model` feature matrix, so the canonical native lane verifies capture
+without falsely requiring or advertising unrelated optional capabilities.
 
 For backup/restore, the stopped isolated state tree was copied byte-for-byte,
 restored to its exact absolute Workspace paths, and restarted. The service returned
