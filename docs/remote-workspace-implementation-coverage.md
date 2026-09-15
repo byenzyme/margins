@@ -328,6 +328,15 @@ that capabilities originally advertised ASR from the compile feature alone; the
 rebuilt endpoint now reports `asr_available=false` after checking both model assets
 and the dynamic runtime (`recall_available=true` for compiled local lookup).
 
+The production `remote_pcm_transport` example then sent distinct 437 Hz and 913 Hz
+two-second lanes through the real HTTP client, durable spool, loopback server, and
+canonical artifact projection. The receipt reported 96,000 frames per lane and
+2,000 ms. Both 192,000-byte server artifacts compared byte-for-byte equal to their
+input raw s16 files; mic SHA-256 was
+`97e50c76d56fe80e588d3eff764c4dffa6b0695dc7123f65ab12485c92e37fbf`
+and system SHA-256 was
+`c7963073a991ed19c81f06c4174c51062250f5c02a076793bba5c40a0637c1c9`.
+
 For backup/restore, the stopped isolated state tree was copied byte-for-byte,
 restored to its exact absolute Workspace paths, and restarted. The service returned
 the same finalized session, and the restored WAV SHA-256 matched
