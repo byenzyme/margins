@@ -622,6 +622,8 @@ pub fn handle_audio_chunk(
         .ok_or("Web recording file is already closed")?;
     file.write_all(bytes)
         .map_err(|e| format!("Failed to write audio chunk: {e}"))?;
+    file.sync_data()
+        .map_err(|e| format!("Failed to durably sync audio chunk: {e}"))?;
     ws.webm_receipts
         .insert(sequence, (bytes.len() as u64, fingerprint));
     ws.next_webm_sequence = ws.next_webm_sequence.saturating_add(1);
@@ -2008,9 +2010,9 @@ fn probe_wav_duration(wav: &std::path::Path) -> Result<f64, String> {
 mod tests {
     use super::*;
     use crate::{build_app_state, settings::load_settings};
-    use std::io::Read as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Barrier;
+    use std::sync::{mpsc, Barrier};
+    use std::time::Duration;
 
     fn make_test_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -2166,6 +2168,95 @@ mod tests {
 
         // Cleanup
         let _ = std::fs::remove_dir_all(&work_dir);
+    }
+
+    #[test]
+    fn stalled_asr_does_not_serialize_durable_audio_status_or_memo() {
+        let work_dir = make_test_dir("stalled-asr-isolation");
+        let state = make_state(work_dir.clone());
+        insert_test_recording(&state, &work_dir, "isolated", "owner", Vec::new());
+        hydrate_web_recording_memo(&state, "isolated", Some("owner")).unwrap();
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker = crate::web_live_asr::start_stalled_test_worker(
+            work_dir.join(".margins"),
+            "isolated".to_string(),
+            entered_tx,
+            release_rx,
+        )
+        .unwrap();
+        state
+            .web_sessions
+            .lock()
+            .unwrap()
+            .get_mut("isolated")
+            .unwrap()
+            .live_asr = Some(worker);
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let barrier = Arc::new(Barrier::new(4));
+        let (done_tx, done_rx) = mpsc::channel();
+        let audio_state = state.clone();
+        let audio_barrier = barrier.clone();
+        let audio_done = done_tx.clone();
+        let audio = std::thread::spawn(move || {
+            audio_barrier.wait();
+            let result = handle_audio_chunk(&audio_state, "isolated", "owner", 0, b"durable");
+            let _ = audio_done.send(("audio", result.is_ok()));
+        });
+        let status_state = state.clone();
+        let status_barrier = barrier.clone();
+        let status_done = done_tx.clone();
+        let status = std::thread::spawn(move || {
+            status_barrier.wait();
+            let result = active_web_recording_status(&status_state).is_some();
+            let _ = status_done.send(("status", result));
+        });
+        let memo_state = state.clone();
+        let memo_barrier = barrier.clone();
+        let memo = std::thread::spawn(move || {
+            memo_barrier.wait();
+            let result = sync_web_recording_memo(
+                &memo_state,
+                "isolated",
+                "owner",
+                vec![MemoLine {
+                    text: "memo while ASR is stalled".to_string(),
+                    created_secs: 1.0,
+                    edited_secs: None,
+                    draft_started_secs: None,
+                    audio_pending_at_mark: false,
+                    block_ordinal: None,
+                }],
+            );
+            let _ = done_tx.send(("memo", result.is_ok()));
+        });
+        barrier.wait();
+
+        let mut completed = std::collections::BTreeSet::new();
+        for _ in 0..3 {
+            let (name, ok) = done_rx.recv_timeout(Duration::from_secs(1)).expect(
+                "audio, status, and memo must complete before the stalled ASR loader is released",
+            );
+            assert!(ok, "{name} failed while ASR was stalled");
+            completed.insert(name);
+        }
+        assert_eq!(completed, ["audio", "memo", "status"].into_iter().collect());
+        release_tx.send(()).unwrap();
+        audio.join().unwrap();
+        status.join().unwrap();
+        memo.join().unwrap();
+        assert_eq!(
+            std::fs::read(
+                state.web_sessions.lock().unwrap()["isolated"]
+                    .webm_path
+                    .clone()
+            )
+            .unwrap(),
+            b"durable"
+        );
+        let _ = std::fs::remove_dir_all(work_dir);
     }
 
     #[test]
