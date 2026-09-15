@@ -1218,10 +1218,7 @@ async fn health_handler() -> Json<Value> {
     Json(json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
-        "capabilities": {
-            "recall": cfg!(feature = "recall"),
-            "parakeet_asr": cfg!(feature = "parakeet-asr"),
-        },
+        "workspace_protocol": 1,
     }))
 }
 

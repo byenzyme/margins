@@ -326,7 +326,9 @@ the capture-context artifact. With no model/runtime configured, processing faile
 truthfully while capture remained saved. Counterevidence found during this run was
 that capabilities originally advertised ASR from the compile feature alone; the
 rebuilt endpoint now reports `asr_available=false` after checking both model assets
-and the dynamic runtime (`recall_available=true` for compiled local lookup).
+and the dynamic runtime (`recall_available=true` for compiled local lookup). The
+unauthenticated `/health` response now reports only liveness, version, and protocol;
+it no longer presents compile features as supported runtime capabilities.
 
 The production `remote_pcm_transport` example then sent distinct 437 Hz and 913 Hz
 two-second lanes through the real HTTP client, durable spool, loopback server, and
