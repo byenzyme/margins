@@ -7,6 +7,10 @@
 /homebrew-aside/
 CLAUDE.md
 docs/
+!/docs/
+/docs/*
+!/docs/remote-workspace-implementation.md
+!/docs/capture-refactor-and-testing.md
 .enzyme/
 .enzyme-embeddings/
 node_modules/
