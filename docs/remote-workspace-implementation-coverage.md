@@ -3,6 +3,7 @@
 Implementation base: `4228ef5396074413cf4349365a5529132b4b956d`
 Phase 1 checkpoint: `188d29b2c`
 Native remote composition checkpoint: `46c8f6d4ed3185e6f32d9edee977f6b01212f539`
+16 kHz remote ASR candidate: `68e6a07741fc23172436d3901fc9ae296ed35611`
 
 This report separates implemented portable behavior from platform and deployment
 gates. “Supported” below means a production caller reaches the implementation;
@@ -28,8 +29,10 @@ Chromium/fake-device journey ran against separate Vite and production service
 processes; the complete BB full-host UI journey remains environment-gated. Phase 5
 has production multipart intake, receipts, pairing, and instructions;
 the real-phone gate is unverified. Phase 6 has source-build and operator
-packaging code plus operator documentation; native release archive, installation,
-signing, and provisioned-host gates are unverified.
+packaging code plus operator documentation. Native remote finalization now admits
+a durable, restart-recoverable ASR-only job and a bounded service worker publishes
+the transcript without delaying capture finalization. Native release archive,
+installation, signing, and provisioned-host gates are unverified.
 
 ## Phase 0 — writer and operation map
 
@@ -180,11 +183,17 @@ placeholder.
   constructs this spool.
 
 Portable tests cover restart before finalize, duplicate/lost-ACK replay, different
-bytes under the same identity, producer/generation fencing, two sample-exact 48 kHz
-mono s16 lanes, out-of-order arrival, normal attach after finalization, and service
-reopen. The deterministic transport example exposes durable stops after spool,
-chunk, close, or memo for cross-process fault injection. ASR is not part of capture
-delivery and remains capability-truthful.
+bytes under the same identity, producer/generation fencing, direct sample-exact
+16 kHz mono s16 lanes, preserved replay of former 48 kHz manifests, out-of-order
+arrival, normal attach after finalization, and service reopen. New device-native
+44.1/48 kHz f32 input passes a persistent per-lane, anti-aliasing resampler in the
+bounded spool worker; callback partitioning does not change bytes, tails use an
+exact ceiling frame count, and rate changes inside a segment are rejected. The
+audio callback remains free of resampling, disk, hashes, network, and ASR. The
+deterministic transport example exposes durable stops after spool, chunk, close,
+or memo for cross-process fault injection. ASR remains outside capture delivery:
+successful finalization admits the job durably before producer release, then
+returns without waiting for the bounded service worker.
 
 ## Phases 4–6 — adapters and operations
 
@@ -205,6 +214,20 @@ delivery and remains capability-truthful.
   and `margins-server` for each supported source-build target. The first-party
   headless launcher now provisions an explicit test Workspace, so the mandatory
   routing variable does not break development startup.
+- The Linux service uses the same logical Parakeet TDT 0.6b v2 model as the Mac
+  default, with platform-specific packaging. The verified pinned Linux export is
+  `smcleod/parakeet-tdt-0.6b-v2-int8` revision
+  `d64884b484b919e9656d0b70cb95dfdc98852bef`: 631 MiB of model assets (652,282,300
+  byte int8 encoder, 8,998,557 byte int8 decoder/joint, 9,384 byte vocabulary)
+  plus a 23 MiB extracted official ONNX Runtime 1.24.4. This is not the v3 model
+  and the runtime is not responsible for the model-size difference versus the
+  Mac's roughly 464 MB 6-bit-palettized/mixed-precision CoreML v2 bundle.
+- Remote PCM finalization now admits one stable `transcribe_session` attempt for
+  its exact meeting revision before producer release. A dedicated bounded worker
+  reads canonical audio artifacts, honors each lane's declared rate, retains the
+  originals, publishes/registers a transcript, and durably records complete or
+  failed state. Startup scans queued/running jobs. It never publishes note bytes or
+  converts a note association into job success.
 - [Remote operations](remote-workspace-operations.md) documents explicit service
   provisioning, SSH/HTTPS, backup/recovery, capability semantics, and revocation.
   [Shortcut instructions](../integrations/shortcuts/README.md) contain no credential.
@@ -295,6 +318,39 @@ scripts/cargo-lane shared -- cargo check -p margins-desktop \
   --features hosted-web --bin margins-server
   passed; capability probing validates configured assets and dynamic ONNX runtime
 
+scripts/cargo-lane disposable -- cargo test -p margins-workflows \
+  --test remote_workspace --test workspace_service -p margins-store \
+  --test meeting_runtime_sqlite --no-default-features
+  19 passed; direct16 exact lanes, 44.1/48 partition-invariant resampling,
+  anti-alias rejection, tail/frame timing, unsupported rate changes, legacy48
+  recovery labeling, ASR admission/replay/restart, spool races, and SQLite CAS
+
+scripts/cargo-lane disposable -- cargo check -p margins-workflows \
+  --example remote_pcm_transport --no-default-features
+  passed; the production verification entrypoint now consumes direct16 s16 fixtures
+
+ORT_DYLIB_PATH=/tmp/.../libonnxruntime.so.1.24.4 \
+MARGINS_PARAKEET_MODEL_DIR=/tmp/.../parakeet-tdt-0.6b-v2-int8 \
+MARGINS_PARAKEET_MODEL_KIND=tdt-v2 \
+MARGINS_PARAKEET_SMOKE_WAV=/tmp/.../spoken-fixture-16k-mono-s16.wav \
+MARGINS_PARAKEET_EXPECTED_PHRASES='margins verification|alpha lane 437|system lane 913|stop now' \
+scripts/cargo-lane disposable -- cargo test -p margins-media \
+  --no-default-features --features parakeet-onnx-dynamic \
+  smoke_transcribes_wav_with_parakeet_onnx -- --ignored --nocapture
+  1 passed; real pinned v2 model returned all expected words
+
+ORT_DYLIB_PATH=/tmp/.../libonnxruntime.so.1.24.4 \
+MARGINS_PARAKEET_MODEL_DIR=/tmp/.../parakeet-tdt-0.6b-v2-int8 \
+MARGINS_PARAKEET_MODEL_KIND=tdt-v2 \
+MARGINS_REMOTE_ASR_SPOKEN_PCM=/tmp/.../spoken-fixture-16k-mono-s16.pcm \
+MARGINS_REMOTE_ASR_SILENCE_PCM=/tmp/.../system-silence-16k-mono-s16.pcm \
+scripts/cargo-lane disposable -- cargo test -p margins-desktop \
+  --manifest-path desktop/src-tauri/Cargo.toml --no-default-features \
+  --features hosted-web finalized_remote_pcm_runs_durable_asr_job_and_retains_exact_audio \
+  -- --ignored --nocapture
+  1 passed in 7.24 s after compile; real finalize, durable job, v2 inference,
+  transcript registration, expected words, and exact retained mic bytes
+
 temporary ALSA pkg-config metadata + scripts/cargo-lane disposable -- cargo check \
   -p margins --no-default-features --features audio-capture --bin margins-private
   passed; Linux type/ownership evidence only, temporary metadata removed
@@ -340,6 +396,41 @@ input raw s16 files; mic SHA-256 was
 `97e50c76d56fe80e588d3eff764c4dffa6b0695dc7123f65ab12485c92e37fbf`
 and system SHA-256 was
 `c7963073a991ed19c81f06c4174c51062250f5c02a076793bba5c40a0637c1c9`.
+
+That 48 kHz run is retained as pre-conversion recovery evidence, not the new wire
+format. Candidate `68e6a07741fc23172436d3901fc9ae296ed35611` was built on the
+shared lane and started as an isolated service on loopback port 38871 with the
+pinned v2 model. The server SHA-256 was
+`38bf3ce7709ebd48c9dfd5211a560b0c4a8a2c0ac50b2b24c3d8258435e36fd3`;
+the exact discovery CLI was
+`d81331bb781bb36088f16eafd922dc37eb8db4cee8dc900eb548b78cd545e12a`.
+Authenticated capabilities reported `instance=candidate-68e6a077`,
+`workspace=mac-e2e`, `asr=true`, and exactly mono/raw/s16/16 kHz capture.
+
+A production HTTP client/spool/service run then sent the 6.12275-second spoken mic
+fixture and duration-aligned system silence. Each lane contained 97,964 frames and
+195,928 payload bytes; this is one third of 48 kHz s16 payload for the same frame
+timeline (request count/headers are separate overhead). Server artifacts remained
+byte-identical to the direct16 inputs: mic SHA-256
+`a88e718bd931fc87d6015e5b846082595e1bdb3c4f14ca3cc13ec9f94ec1dc68`,
+system SHA-256
+`bf78d8f24d4537b85911acdd2755fcffc48fb22b176289f86ba17cf0bf3fdc5b`.
+The canonical segment contract recorded 16,000 Hz, mono signed16, 97,964 frames,
+195,928 bytes, and 6,122 ms. Finalize returned while processing was independent;
+job `transcribe:<session>` attempt 1 reached complete, and CLI transcript/artifact
+queries returned one durable transcript containing “Margins Verification”, “Alpha
+Lane 437”, “System Lane 913”, and “Stop Now”, alongside both retained audio lanes.
+
+A second direct16 transfer stopped after its durable memo: 124 audio chunks, close,
+and memo were acknowledged while finalize and ASR had not started. After stopping
+only the scoped server and reopening the same binary/state, `transfers retry`
+finalized that identity; the job was first observable running and then complete,
+the same expected transcript appeared, chunk files were reclaimed only after
+durability, and both server audio hashes still matched. In a separate disposable
+Workspace, a durable attempt was staged as `running` before process start; startup
+rediscovered and completed attempt 1 and retained exactly one transcript artifact.
+This latter test directly exercises restart scanning, while the former exercises
+the real transfer/finalize ordering boundary.
 
 Mac candidate preparation found that Cargo could reuse the CLI build script's output
 after a linked-worktree branch switch, leaving a new executable labeled with an old
@@ -389,7 +480,59 @@ full seven-test spool/transport suite passes with the shared decoder change.
 Native local and remote `new` reached the normal macOS permission boundary but the
 terminal host lacked Microphone permission; no lane opened. With no remotely
 controllable System Settings window, the verifier did not bypass/reset TCC, so real
-device Pause/Stop timing and native `attach` remain unclaimed.
+device Pause/Stop timing and native `attach` remained unclaimed in that automated
+lane.
+
+After the user enabled permission and launched the normal private CLI from their
+own Terminal, the exact title
+`terminal-remote-native-68e6-20260915T172103Z` resolved to two server sessions,
+not one. The earlier incomplete attempt
+`remote-2026-09-15-10-22-29-a23bba2f` retained 140 acknowledged chunks / 448,000
+bytes (microphone 7.200 s, system 6.800 s) with its producer and identity still
+active; it has no close, finalize, canonical artifact, memo, or job. No cleanup was
+performed. The completed attempt
+`remote-2026-09-15-10-22-56-817dcd90` retained 75 chunks and 237,830 bytes per
+lane, both declared mono/raw/s16/16 kHz with a 7.432 s boundary. The microphone
+artifact SHA-256 is
+`5918a14f92d7f02fc38bc0ab7018cc9028eb6c16f61eb1bb15cbc932d6f24780`;
+the system artifact SHA-256 is
+`9c39f7a486ba0f59fa8b082621af3d26bdac3c938309d0957e11325e15e29c6e`.
+The verifier measured a non-silent microphone signal and equal-duration silent
+system lane, as expected because no system tone was played. Its memo is durable,
+the producer is released, and ASR attempt 1 completed with a nonempty 405-byte
+registered transcript (content was not reported in this audit).
+
+That user-operated run also supplied important Stop-latency counterevidence. The
+two 100 ms lanes generated about 20 requests/s, while the single sequential HTTP
+delivery loop landed 150 chunk requests over 23.756 s, about 6.31 requests/s and
+20 KiB/s of PCM payload across this SSH path. The close intent was created at
+17:23:05.069 UTC and the finalize intent at 17:23:10.601. Server file/row times
+showed the last microphone chunk at 17:23:15.281, the last system chunk at
+17:23:21.644, canonical artifacts by 17:23:22.427, memo by 17:23:22.538, and
+producer release/finalize commit by 17:23:22.686. The transcript appeared at
+17:23:25.379 and the job completed at 17:23:25.435. The scoped server does not log
+per-request arrival, so close/finalize arrival cannot be narrowed further than
+those durable bounds. Source inspection proves ASR is scheduled with bounded
+`try_send` after durable job admission and does not hold the finalize response;
+the observed wait is the chunk/control drain. The Mac-side recorder trace placed
+both native-device retirement plus durable recovery-WAV completion at
+17:23:05.042, 27 ms before close-intent creation. It then observed roughly 17 s
+of post-release drain before CLI exit. This establishes immediate local release
+for this Stop, but is one run rather than a readiness/callback latency distribution.
+
+The same trace found a separate duration-accounting defect in candidate `68e6`.
+The close correctly records the last audio boundary at 7,432 ms, corroborated by
+118,915 samples / 16,000 Hz = 7.4321875 s in each artifact. Native CLI
+finalization currently samples `capture_started.elapsed()` only after joining the
+uploader, so this run wrote 13,181 ms as the session-finalize boundary: 5,749 ms
+of post-release drain was incorrectly added to summary duration. Audio bytes,
+per-chunk timing, close boundaries, device release, and ASR input/output are not
+altered, but session metadata/UI duration is overstated and the error grows with a
+slower drain. This was diagnosed read-only and remains a production fix gate.
+The complete Mac-side verifier report is committed independently as
+`8018a9cc3a9d1ce044ff8ed3ba8a6d6da5b01d6a`. After inspection, the exact scoped
+server PID was stopped, loopback port 38871 was confirmed closed, and the isolated
+state/evidence tree was preserved.
 
 For backup/restore, the stopped isolated state tree was copied byte-for-byte,
 restored to its exact absolute Workspace paths, and restarted. The service returned
@@ -414,14 +557,29 @@ separately above. BB increased from the prior 28-test baseline to 32/32 and the
 frontend production build passed. The browser counter measurements above are
 protocol/storage evidence, not native audio-fidelity or native latency evidence.
 The Mac SSH median is a complete fresh-tunnel transfer measurement; it must not be
-read as local-capture or instantaneous-control latency.
+read as local-capture or instantaneous-control latency. The later user-operated
+native run measured a concrete throughput limit: 150 100-ms chunk requests took
+23.756 s to land while the capture timeline was only 7.432 s. This is a healthy
+durability result but negative Stop-latency evidence: reducing sample payload to
+16 kHz did not reduce the fixed per-request SSH/HTTP cost enough for two lanes at
+the current cadence. The real composed v2 ASR
+unit completed in 7.24 s for 6.12275 s of two-lane input after compilation; the
+standalone v2 model smoke spent 3.08 s in its test. Those are debug-build,
+same-host fixture measurements, not a production throughput benchmark. New direct16
+PCM uses 64,000 bytes per two-second mono lane instead of 192,000 at 48 kHz, and
+195,928 instead of about 587,784 bytes for the 6.12275-second fixture. This measured
+threefold payload reduction does not reduce fixed HTTP/SSH request overhead because
+the 100 ms chunk cadence is unchanged.
 
 Inferred, not measured on native hardware: the direct local path adds only canonical
 SQLite memo/session work already required for durability; it does not add network,
 wire encoding, duplicate audio, spool hashing, or remote threads. Therefore the
 design avoids an architectural local callback-pressure regression, but recorder
-readiness, callback pressure, native Stop latency, and warm CLI startup still need
-comparable Mac measurements. No native-performance claim is made from Linux builds.
+remote capture does add a persistent anti-aliasing resampler in the already-bounded
+spool worker. Its remote-only CPU cost is inferred; callback cost is not, because
+the work remains downstream of the bounded queue. Recorder readiness, callback
+pressure, native Stop latency, and warm CLI startup still need comparable Mac
+measurements. No native-performance claim is made from Linux builds.
 
 The principal implementation burden versus the old unit-only substrate is the
 production adapters, owner-scoped credentials, explicit Workspace mapping, immutable
@@ -432,17 +590,24 @@ local capture.
 
 ## Remaining gates
 
-1. Grant the Mac terminal/BB host ordinary Microphone permission, then run the exact
-   committed private CLI for local and SSH remote `new`/`attach`, pause/resume/Stop,
-   and native readiness/device-release latency. Sample-exact SSH delivery, disconnect,
-   lost ACK, client/server restart, memo, and finalize recovery are complete.
+1. The user-operated native SSH `new` path now has real two-lane server evidence,
+   but its sequential 100-ms request delivery fell behind capture and made Stop
+   wait for the durable backlog. Decide and implement a bounded batching or
+   multiplexing policy before treating remote Stop latency as acceptable; then
+   measure local release separately from drain. Also pin finalize duration to the
+   last closed audio boundary instead of post-uploader wall time; regression-test a
+   blocked drain and multi-segment pause/attach. Native `attach` and pause/resume
+   remain unverified. Sample-exact SSH delivery, disconnect, lost ACK, client/server
+   restart, memo, device retirement, and finalize recovery are complete.
 2. Run the complete BB full-host UI journey on an environment that can install/load
    this plugin, including remote remount, stale callbacks, conflicts, recovery,
    artifacts, jobs, and the now-wired agent handoff. Typed production host/client,
    remount, and exact-session contract tests are complete; the full BB host UI is not.
-3. Run real Mac microphone/system lanes and measure readiness/callback/Stop latency;
-   the authorized verifier reached but could not clear the normal TCC gate without a
-   visible System Settings session.
+3. Measure readiness, callback pressure, local Stop/device-release timing, and
+   system-lane source fidelity across representative Mac runs. One user-operated
+   remote Stop now has a device-retirement trace, and its deliberately quiet system
+   lane is duration-correct, but no system source was played and one trace is not a
+   performance distribution.
 4. Run the real Shortcut share/retry/app-switch/lock/cellular matrix.
 5. Verify signed/published clean-client installation and supported OS service
    installation. Portable archive topology/checksum/extraction and stopped-state

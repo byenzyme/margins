@@ -271,10 +271,11 @@ The interoperable speech-model contract for native Mac and hosted Linux is
 **Parakeet TDT 0.6b v2**. Packaging differs by platform: the default Mac CoreML
 bundle is about 464 MB and uses a 6-bit-palettized/mixed-precision encoder; the
 verified Linux ONNX int8 export is `smcleod/parakeet-tdt-0.6b-v2-int8` at pinned
-revision `d64884b484b919e9656d0b70cb95dfdc98852bef`. Its required files are
-`parakeet-tdt-0.6b-v2-encoder.int8.onnx` (652,282,300 bytes),
-`parakeet-tdt-0.6b-v2-decoder.int8.onnx` (8,998,557 bytes), and `vocab.txt`
-(9,384 bytes), about 631 MiB installed. The official ONNX Runtime 1.24.x Linux
+revision `d64884b484b919e9656d0b70cb95dfdc98852bef`. Its runtime-required files
+are `encoder-model.int8.onnx` (652,282,300 bytes),
+`decoder_joint-model.int8.onnx` (8,998,557 bytes), and `vocab.txt` (9,384
+bytes), about 631 MiB installed (the export also includes a 140,152-byte
+`nemo128.onnx` preprocessor). The official ONNX Runtime 1.24.x Linux
 x64 archive is about 8 MB; it is not the source of the model-size difference.
 Do not silently substitute a v3 model directory while onboarding a machine that
 is expected to match the Mac v2 language/model contract.
