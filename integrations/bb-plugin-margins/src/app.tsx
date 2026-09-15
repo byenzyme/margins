@@ -5,12 +5,6 @@ import type { marginsRpcContract } from "../server.js";
 import { browserCaptureOwner, detectClientCapabilities } from "./browser-capture.js";
 import type { PanelState } from "./contracts.js";
 
-// The content-script/app bundle outlives a panel mount. Keep an unsaved edit
-// here so collapsing the panel cannot replace it with an older server copy.
-// Successfully saved text is removed immediately; durable notes still live
-// only in the project's Margins store.
-const pendingNotepadDrafts = new Map<string, string>();
-
 function paramsTitle(params: JsonValue | null) {
   return params && typeof params === "object" && !Array.isArray(params) && typeof params.title === "string" ? params.title : undefined;
 }
@@ -25,40 +19,42 @@ function MarginsPanel({ threadId, params }: { threadId: string; params: JsonValu
   const rpc = useRpc<typeof marginsRpcContract>();
   const composer = useComposer();
   const client = detectClientCapabilities();
-  const [state, setState] = useState<PanelState | null>(null);
+  const [state, setState] = useState<PanelState | null>(() => browserCaptureOwner.panel(threadId));
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const desiredDraft = useRef("");
   const savedDraft = useRef("");
   const revision = useRef<string | null>(null);
+  const memoOperation = useRef<string | null>(null);
   const saveLoop = useRef<Promise<void> | null>(null);
 
   const accept = useCallback((next: PanelState) => {
     setState(next);
     if (next.notepad && desiredDraft.current === savedDraft.current) {
-      const pending = next.recordingId ? pendingNotepadDrafts.get(next.recordingId) : undefined;
+      const pending = next.recordingId ? browserCaptureOwner.draft(next.recordingId) : undefined;
       desiredDraft.current = pending ?? next.notepad.text;
       savedDraft.current = next.notepad.text;
       revision.current = next.notepad.revision;
       setDraft(desiredDraft.current);
-      if (pending === next.notepad.text && next.recordingId) pendingNotepadDrafts.delete(next.recordingId);
+      if (pending === next.notepad.text && next.recordingId) browserCaptureOwner.clearDraft(next.recordingId);
     }
-  }, []);
-  const refresh = useCallback(async () => accept(await rpc.call("getPanelState", { threadId, client })), [accept, client.clientId, client.platform, rpc, threadId]);
+    browserCaptureOwner.acceptPanel(threadId, next);
+  }, [threadId]);
+  const refresh = useCallback(async () => {
+    const next = await browserCaptureOwner.refresh(threadId, () => rpc.call("getPanelState", { threadId, client }));
+    if (browserCaptureOwner.panel(threadId) === next) accept(next);
+  }, [accept, client.clientId, client.platform, rpc, threadId]);
 
   useEffect(() => { void refresh().catch((error) => setMessage(String(error))); }, [refresh]);
   useRealtime("margins-recording", () => void refresh().catch(() => undefined));
   useEffect(() => {
-    const unsubscribe = browserCaptureOwner.subscribe(() => void refresh().catch(() => undefined));
+    const unsubscribe = browserCaptureOwner.subscribe(() => {
+      const owned = browserCaptureOwner.panel(threadId);
+      if (owned) setState(owned);
+    });
     return () => { unsubscribe(); };
   }, [refresh]);
-  useEffect(() => {
-    if (!state || !["getting_ready", "recording", "paused", "recovering", "saving"].includes(state.state)) return;
-    const timer = setInterval(() => void refresh().catch(() => undefined), 3_000);
-    return () => clearInterval(timer);
-  }, [refresh, state?.state]);
-
   const saveNotepad = useCallback(async () => {
     if (saveLoop.current) return saveLoop.current;
     const loop = (async () => {
@@ -67,10 +63,15 @@ function MarginsPanel({ threadId, params }: { threadId: string; params: JsonValu
         const expectedRevision = revision.current;
         const text = desiredDraft.current;
         if (!current?.recordingId || !expectedRevision) return;
-        const next = await rpc.call("updateNotepad", { threadId, client, recordingId: current.recordingId, expectedRevision, text });
+        memoOperation.current ??= crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const next = await rpc.call("updateNotepad", {
+          threadId, client, recordingId: current.recordingId,
+          operationId: memoOperation.current, expectedRevision, text,
+        });
         if (next.error) throw new Error(next.error.message);
+        memoOperation.current = null;
         savedDraft.current = text;
-        pendingNotepadDrafts.delete(current.recordingId);
+        browserCaptureOwner.clearDraft(current.recordingId);
         revision.current = next.notepad?.revision || expectedRevision;
         setState(next);
       }
@@ -81,14 +82,13 @@ function MarginsPanel({ threadId, params }: { threadId: string; params: JsonValu
 
   function edit(value: string) {
     setDraft(value); desiredDraft.current = value; setMessage(null);
-    if (state?.recordingId) pendingNotepadDrafts.set(state.recordingId, value);
+    if (state?.recordingId) browserCaptureOwner.retainDraft(state.recordingId, value);
     void saveNotepad().catch((error) => setMessage(error instanceof Error ? error.message : String(error)));
   }
 
-  async function action(name: string, run: () => Promise<PanelState | void>, flush = false) {
+  async function action(name: string, run: () => Promise<PanelState | void>) {
     setBusy(name); setMessage(null);
     try {
-      if (flush) await saveNotepad();
       const next = await run(); if (next) accept(next);
     } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
     finally { setBusy(null); }
@@ -99,12 +99,12 @@ function MarginsPanel({ threadId, params }: { threadId: string; params: JsonValu
     if (state.primaryAction === "start") {
       setState({ ...state, state: "getting_ready", title: "Getting recording ready", detail: "Waiting for microphone permission and this bb project." });
       await action("start", () => browserCaptureOwner.start(threadId, paramsTitle(params)));
-    } else if (state.primaryAction === "pause") await action("pause", () => browserCaptureOwner.pause(), true);
+    } else if (state.primaryAction === "pause") await action("pause", () => browserCaptureOwner.pause());
     else if (state.primaryAction === "resume") await action("resume", () => browserCaptureOwner.resume());
     else if (state.primaryAction === "retry") await action("retry", refresh);
   }
 
-  async function stop() { await action("stop", () => browserCaptureOwner.stop(), true); }
+  async function stop() { await action("stop", () => browserCaptureOwner.stop()); }
   function connectedNote() {
     const request = "Turn the Margins meeting I just recorded into a connected note.";
     composer.updateText((current) => current.trim() ? `${current.trimEnd()}\n\n${request}` : request);

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { ReachabilityDeadline, applyRecorderTransition, hostAcknowledgedCapture, releaseBrowserMedia } from "./browser-capture.js";
+import { BrowserCaptureOwner, ReachabilityDeadline, applyRecorderTransition, hostAcknowledgedCapture, releaseBrowserMedia, type BrowserCaptureDependencies } from "./browser-capture.js";
 import type { PanelState } from "./contracts.js";
 import { CAPTURE_DISCONNECT_GRACE_MS } from "./contracts.js";
 
@@ -31,7 +31,7 @@ describe("browser capture ownership", () => {
     expect(capture.paused).toBe(true);
   });
 
-  it("ends local capture at the disconnect deadline unless reachability returns", async () => {
+  it("uses the last acknowledgement as a continuing disconnect deadline", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_000);
     const expired = vi.fn();
@@ -40,11 +40,72 @@ describe("browser capture ownership", () => {
     await vi.advanceTimersByTimeAsync(CAPTURE_DISCONNECT_GRACE_MS - 1);
     expect(expired).not.toHaveBeenCalled();
     deadline.acknowledged();
-    await vi.advanceTimersByTimeAsync(CAPTURE_DISCONNECT_GRACE_MS + 1);
-    expect(expired).not.toHaveBeenCalled();
-    deadline.failed();
     await vi.advanceTimersByTimeAsync(CAPTURE_DISCONNECT_GRACE_MS);
     expect(expired).toHaveBeenCalledOnce();
+    vi.useRealTimers();
+  });
+
+  function controllerFixture(rpc: BrowserCaptureDependencies["rpc"]) {
+    sessionStorage.clear();
+    const stopTrack = vi.fn();
+    const recorder = {
+      ondataavailable: null,
+      onstop: null,
+      start: vi.fn(), pause: vi.fn(), resume: vi.fn(),
+      stop: vi.fn(),
+    } as unknown as MediaRecorder;
+    const stream = { getTracks: () => [{ stop: stopTrack }] } as unknown as MediaStream;
+    const owner = new BrowserCaptureOwner({
+      rpc,
+      acquireMicrophone: async () => stream,
+      createRecorder: () => recorder,
+      supportsMime: () => false,
+      heartbeatMs: 10,
+      disconnectGraceMs: 100,
+    });
+    owner.install({ pluginId: "margins" } as never);
+    return { owner, recorder, stopTrack };
+  }
+
+  it("pauses local production before a hung control request settles", async () => {
+    const rpc: BrowserCaptureDependencies["rpc"] = async (_plugin, method) => {
+      if (method === "beginBrowserCapture") return state({}) as never;
+      return new Promise(() => {});
+    };
+    const { owner, recorder } = controllerFixture(rpc);
+    await owner.start("thr-1");
+    void owner.pause();
+    expect(recorder.pause).toHaveBeenCalledOnce();
+  });
+
+  it("releases tracks immediately when Stop transport and recorder stop event both hang", async () => {
+    const rpc: BrowserCaptureDependencies["rpc"] = async (_plugin, method) => {
+      if (method === "beginBrowserCapture") return state({}) as never;
+      return new Promise(() => {});
+    };
+    const { owner, stopTrack } = controllerFixture(rpc);
+    await owner.start("thr-1");
+    void owner.stop();
+    expect(stopTrack).toHaveBeenCalledOnce();
+    expect(owner.active).toBe(false);
+  });
+
+  it("allows only one hung heartbeat and still expires the local producer", async () => {
+    vi.useFakeTimers();
+    let heartbeatCalls = 0;
+    const rpc: BrowserCaptureDependencies["rpc"] = async (_plugin, method) => {
+      if (method === "beginBrowserCapture") return state({}) as never;
+      if (method === "heartbeat") heartbeatCalls += 1;
+      return new Promise(() => {});
+    };
+    const { owner, stopTrack } = controllerFixture(rpc);
+    await owner.start("thr-1");
+    await vi.advanceTimersByTimeAsync(99);
+    expect(heartbeatCalls).toBe(1);
+    expect(stopTrack).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(stopTrack).toHaveBeenCalledOnce();
+    expect(owner.active).toBe(false);
     vi.useRealTimers();
   });
 

@@ -52,7 +52,7 @@ test("never-settling durable upload is aborted and cannot hang Finish", async ()
   let aborted = false;
   const queue = new WebDurableUploadQueue((_chunk, _sequence, signal) => new Promise<void>(() => {
     signal.addEventListener("abort", () => { aborted = true; }, { once: true });
-  }), error => failures.push(error.message), { uploadTimeoutMs: 10, closeDeadlineMs: 30 });
+  }), error => failures.push(error.message), { maxAttempts: 1, uploadTimeoutMs: 10, closeDeadlineMs: 30 });
 
   queue.enqueue(new Blob(["stuck"]));
   const started = Date.now();
@@ -74,7 +74,7 @@ test("fake server rejects a later upload while a timed-out earlier request is st
       await new Promise<void>(() => {});
     }
     server.accept(sequence, body);
-  }, error => failures.push(error.message), { uploadTimeoutMs: 5, closeDeadlineMs: 50 });
+  }, error => failures.push(error.message), { maxAttempts: 1, uploadTimeoutMs: 5, closeDeadlineMs: 50 });
   queue.enqueue(new Blob(["late-zero"]));
   queue.enqueue(new Blob(["one"]));
   await queue.close();
@@ -90,6 +90,20 @@ test("fake server accepts only an identical retry for an already durable sequenc
   server.accept(0, "chunk-zero");
   assert.throws(() => server.accept(0, "different"), /already committed with different content/);
   assert.throws(() => server.accept(2, "future"), /Out-of-order WebM chunk/);
+  assert.deepEqual(server.appended, [0]);
+});
+
+test("lost ACK retries the exact sequence and stores one durable chunk", async () => {
+  const server = new FakeSequencedWebmServer();
+  const attempts: number[] = [];
+  const queue = new WebDurableUploadQueue(async (chunk, sequence) => {
+    attempts.push(sequence);
+    server.accept(sequence, await chunk.text());
+    if (attempts.length === 1) throw new Error("ack lost after commit");
+  }, error => assert.fail(error.message), { maxAttempts: 2, uploadTimeoutMs: 100, closeDeadlineMs: 100 });
+  queue.enqueue(new Blob(["only-once"]));
+  await queue.close();
+  assert.deepEqual(attempts, [0, 0]);
   assert.deepEqual(server.appended, [0]);
 });
 

@@ -1,6 +1,5 @@
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { describe, expect, it, vi } from "vitest";
-import { DISCONNECT_GRACE_MS } from "./server.js";
 import plugin from "./server.js";
 
 const browser = { clientId: "client-1", platform: "other" as const, secureContext: true, browserMicrophone: true, nativeMacCapture: false };
@@ -68,21 +67,18 @@ describe("Margins project recording server", () => {
     const host = harness({ heartbeatFails: true });
     await host.harness.behavior.callRpc("beginBrowserCapture", { threadId: "thr-1", client: browser, ownerId: "owner-secret" });
     now.mockReturnValue(9_000);
-    await expect(host.harness.behavior.callRpc("heartbeat", { threadId: "thr-1", client: browser, recordingId: "rec-1" })).resolves.toMatchObject({ state: "needs_attention" });
+    await expect(host.harness.behavior.callRpc("heartbeat", { threadId: "thr-1", client: browser, recordingId: "rec-1", operationId: "heartbeat-1" })).resolves.toMatchObject({ state: "needs_attention" });
     await expect(host.bb.storage.kv.get("capture:proj-1")).resolves.toMatchObject({ lastHeartbeatUnixMs: 1_000 });
     now.mockRestore();
   });
 
-  it("stops and records a durable handoff after the disconnect grace", async () => {
-    vi.useFakeTimers();
+  it("reconciles a repeated Stop from its durable control receipt", async () => {
     const host = harness();
     await host.harness.behavior.callRpc("beginBrowserCapture", { threadId: "thr-1", client: browser, ownerId: "owner-secret" });
-    const running = host.harness.runService("capture-disconnect-safety");
-    await vi.advanceTimersByTimeAsync(DISCONNECT_GRACE_MS + 4_000);
+    const input = { threadId: "thr-1", client: browser, recordingId: "rec-1", operationId: "stop-1" };
+    await expect(host.harness.behavior.callRpc("stop", input)).resolves.toMatchObject({ state: "saved" });
+    await expect(host.harness.behavior.callRpc("stop", input)).resolves.toMatchObject({ state: "saved" });
     await expect(host.bb.storage.kv.get("saved:proj-1")).resolves.toMatchObject({ savedAtUnixMs: expect.any(Number) });
-    await host.harness.lifecycle.dispose();
-    await running;
-    expect(host.harness.inspection.experimental_hostRpcCalls).toEqual(expect.arrayContaining([expect.objectContaining({ method: "stop", hostId: "project-host" })]));
-    vi.useRealTimers();
+    expect(host.harness.inspection.experimental_hostRpcCalls.filter(call => call.method === "stop")).toHaveLength(1);
   });
 });

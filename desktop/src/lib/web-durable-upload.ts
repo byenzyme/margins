@@ -3,6 +3,7 @@ export interface WebDurableUploadOptions {
   uploadTimeoutMs?: number;
   closeDeadlineMs?: number;
   initialSequence?: number;
+  maxAttempts?: number;
 }
 
 export type DurableChunkUpload = (chunk: Blob, sequence: number, signal: AbortSignal) => Promise<void>;
@@ -56,6 +57,7 @@ export class WebDurableUploadQueue {
   private readonly maxQueuedChunks: number;
   private readonly uploadTimeoutMs: number;
   private readonly closeDeadlineMs: number;
+  private readonly maxAttempts: number;
   private worker: Promise<void> | null = null;
   private active: AbortController | null = null;
   private accepting = true;
@@ -71,11 +73,13 @@ export class WebDurableUploadQueue {
     this.maxQueuedChunks = Math.max(1, options.maxQueuedChunks ?? 8);
     this.uploadTimeoutMs = Math.max(1, options.uploadTimeoutMs ?? 10_000);
     this.closeDeadlineMs = Math.max(1, options.closeDeadlineMs ?? 12_000);
+    this.maxAttempts = Math.max(1, Math.trunc(options.maxAttempts ?? 3));
     this.nextSequence = Math.max(0, Math.trunc(options.initialSequence ?? 0));
   }
 
   get pendingCount(): number {
-    return this.queue.length + (this.active ? 1 : 0);
+    // The active item remains at queue[0] until its retry identity is settled.
+    return this.queue.length;
   }
 
   enqueue(chunk: Blob): void {
@@ -124,12 +128,19 @@ export class WebDurableUploadQueue {
 
   private async drain(): Promise<void> {
     while (this.queue.length > 0) {
-      const { chunk, sequence } = this.queue.shift()!;
-      try {
-        await this.uploadWithTimeout(chunk, sequence);
-      } catch (error) {
-        this.onFailure(asError(error));
+      const item = this.queue[0]!;
+      let lastError: Error | null = null;
+      for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
+        try {
+          await this.uploadWithTimeout(item.chunk, item.sequence);
+          lastError = null;
+          break;
+        } catch (error) {
+          lastError = asError(error);
+        }
       }
+      this.queue.shift();
+      if (lastError) this.onFailure(lastError);
     }
   }
 

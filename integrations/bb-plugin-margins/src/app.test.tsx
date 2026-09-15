@@ -83,4 +83,28 @@ describe("Margins recording panel", () => {
     expect((await within(reopened.container).findByRole("textbox", { name: "Meeting notepad" }) as HTMLTextAreaElement).value).toBe("Pricing\nKeep this locally");
     reopened.lifecycle.unmount();
   });
+
+  it("does not put Pause behind a stalled notepad save", async () => {
+    const pause = vi.spyOn(browserCaptureOwner, "pause").mockResolvedValue(panel({ state: "paused" }));
+    const slot = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-pause", params: null }, {
+      rpc: { getPanelState: () => panel({ recordingId: "rec-pause" }), updateNotepad: () => new Promise(() => {}) },
+    });
+    const screen = within(slot.container);
+    fireEvent.change(await screen.findByRole("textbox", { name: "Meeting notepad" }), { target: { value: "unsaved" } });
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    await waitFor(() => expect(pause).toHaveBeenCalledOnce());
+    slot.lifecycle.unmount();
+  });
+
+  it("does not put Stop behind a stalled notepad save", async () => {
+    const stop = vi.spyOn(browserCaptureOwner, "stop").mockResolvedValue(panel({ state: "saved" }));
+    const slot = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-stop", params: null }, {
+      rpc: { getPanelState: () => panel({ recordingId: "rec-stop" }), updateNotepad: () => new Promise(() => {}) },
+    });
+    const screen = within(slot.container);
+    fireEvent.change(await screen.findByRole("textbox", { name: "Meeting notepad" }), { target: { value: "unsaved" } });
+    fireEvent.click(screen.getByRole("button", { name: "Stop and save" }));
+    await waitFor(() => expect(stop).toHaveBeenCalledOnce());
+    slot.lifecycle.unmount();
+  });
 });

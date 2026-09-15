@@ -86,7 +86,10 @@ export const panelStateSchema = z.object({
 const threadClientInputSchema = z.object({
   threadId: z.string().min(1), client: clientCapabilitiesSchema,
 }).strict();
-const captureClientInputSchema = threadClientInputSchema.extend({ recordingId: z.string().min(1) }).strict();
+const captureClientInputSchema = threadClientInputSchema.extend({
+  recordingId: z.string().min(1),
+  operationId: z.string().min(1),
+}).strict();
 export const marginsRpcContract = defineRpcContract({
   getPanelState: { input: threadClientInputSchema, output: panelStateSchema },
   beginBrowserCapture: {
