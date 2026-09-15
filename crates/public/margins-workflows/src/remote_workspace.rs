@@ -2785,7 +2785,10 @@ fn deliver_chunks_unchecked(
     let producer_token = spool.producer_token()?;
     let chunks = spool.pending_chunks()?;
     let batch_limit = client.max_batch_commands.load(Ordering::Acquire).max(1) as usize;
-    const MAX_CAPTURE_BATCH_AGE: std::time::Duration = std::time::Duration::from_millis(320);
+    // Persistence remains at the 100 ms command boundary. Waiting up to 500 ms
+    // only aggregates already-durable commands and gives SSH enough fixed-cost
+    // amortization for two live lanes.
+    const MAX_CAPTURE_BATCH_AGE: std::time::Duration = std::time::Duration::from_millis(500);
     if !force_partial && chunks.len() < batch_limit {
         let old_enough = chunks.first().is_some_and(|chunk| {
             chunk

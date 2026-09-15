@@ -155,6 +155,10 @@ fn composed_service_is_the_same_canonical_store_across_retry_and_restart() {
     let capabilities = service.capabilities(&owner).unwrap();
     assert_eq!(capabilities.capture_formats.len(), 1);
     assert_eq!(capabilities.capture_formats[0].sample_rate_hz, 16_000);
+    assert_eq!(
+        capabilities.limits.max_in_flight_chunks,
+        margins_workflows::workspace_service::DEFAULT_MAX_IN_FLIGHT_CHUNKS
+    );
     let mut unsupported = create("unsupported-rate");
     let ClientMessageBodyV1::CreateSession(unsupported_create) = &mut unsupported.body else {
         unreachable!()
@@ -441,6 +445,67 @@ fn composed_service_validates_and_finalizes_native_opus_without_relabeling() {
         .sessions
         .remove(0);
     assert_eq!(summary.capture_duration_ms, Some(DurationMillis(200)));
+}
+
+#[test]
+fn service_accepts_the_advertised_sixteen_command_catch_up_batch() {
+    let temp = tempfile::tempdir().unwrap();
+    let notes = temp.path().join("notes");
+    let captures = temp.path().join("captures");
+    std::fs::create_dir_all(&notes).unwrap();
+    let workspace = ensure_service_workspace(
+        &temp.path().join("state"),
+        "team",
+        Some("Team"),
+        &notes,
+        &captures,
+    )
+    .unwrap();
+    let service = WorkspaceService::open("host-a", workspace).unwrap();
+    let owner = ServicePrincipal::full("client-a", "team");
+    let reservation = service
+        .reserve_session(&owner, create("catch-up-batch"))
+        .unwrap();
+    let commands = (0..16)
+        .map(|sequence| {
+            chunk(
+                "catch-up-batch",
+                &format!("mic-{sequence}"),
+                "mic",
+                sequence,
+            )
+        })
+        .collect::<Vec<_>>();
+    let responses = service
+        .execute_audio_batch(
+            &owner,
+            &reservation.producer_token,
+            &SessionId("catch-up-batch".into()),
+            commands,
+        )
+        .unwrap();
+    assert_eq!(responses.len(), 16);
+
+    let oversized = (0..17)
+        .map(|sequence| {
+            chunk(
+                "catch-up-batch",
+                &format!("system-{sequence}"),
+                "system",
+                sequence,
+            )
+        })
+        .collect();
+    assert!(service
+        .execute_audio_batch(
+            &owner,
+            &reservation.producer_token,
+            &SessionId("catch-up-batch".into()),
+            oversized,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("advertised command bound"));
 }
 
 #[test]

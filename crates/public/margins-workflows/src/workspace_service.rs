@@ -30,7 +30,9 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 pub const DEFAULT_MAX_CHUNK_BYTES: u64 = 1_048_576;
-pub const DEFAULT_MAX_IN_FLIGHT_CHUNKS: u32 = 8;
+// Sixteen 100 ms durable commands lets a two-lane sender catch up after one
+// slow SSH request without changing the local crash-loss or ACK boundary.
+pub const DEFAULT_MAX_IN_FLIGHT_CHUNKS: u32 = 16;
 pub const DEFAULT_MAX_EVENT_PAGE: u32 = 256;
 pub const DEFAULT_MAX_IMPORT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub const DEFAULT_SPOOL_RESERVE_BYTES: u64 = 512 * 1024 * 1024;

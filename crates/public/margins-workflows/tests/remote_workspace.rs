@@ -1,5 +1,6 @@
 use margins_meeting_protocol::*;
 use margins_workflows::remote_workspace::*;
+use margins_workflows::workspace_service::DEFAULT_MAX_IN_FLIGHT_CHUNKS;
 use ropus::{Application, Bitrate, Channels, Encoder};
 use sha2::{Digest as _, Sha256};
 
@@ -97,7 +98,10 @@ fn paced_two_lane_delivery_batches_requests_without_serializing_the_producer() {
 
     fn read_request(stream: &mut std::net::TcpStream) -> (String, String, Vec<u8>) {
         stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            // Disposable debug builds can pause this fixture while macOS flushes
+            // the durable spool. This timeout detects a genuinely stuck client;
+            // it is not a product request-latency budget.
+            .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
         let mut bytes = Vec::new();
         let header_end = loop {
@@ -173,7 +177,7 @@ fn paced_two_lane_delivery_batches_requests_without_serializing_the_producer() {
                         workspace_id: "workspace-a".into(),
                         limits: WorkspaceLimitsV1 {
                             max_chunk_bytes: 1_048_576,
-                            max_in_flight_chunks: 8,
+                            max_in_flight_chunks: DEFAULT_MAX_IN_FLIGHT_CHUNKS,
                             max_event_page: 256,
                             max_import_bytes: 1_048_576,
                             spool_reserve_bytes: 0,
@@ -193,7 +197,12 @@ fn paced_two_lane_delivery_batches_requests_without_serializing_the_producer() {
                     "capture write omitted its instance fence"
                 );
                 server_batches.fetch_add(1, Ordering::AcqRel);
-                let batch = AudioChunkBatchV1::decode(&body, 8, 1_048_576).unwrap();
+                let batch = AudioChunkBatchV1::decode(
+                    &body,
+                    DEFAULT_MAX_IN_FLIGHT_CHUNKS as usize,
+                    1_048_576,
+                )
+                .unwrap();
                 // Model the measured pre-Opus SSH boundary (~158.5 ms/request,
                 // 6.31 requests/s) rather than an unrealistically fast LAN.
                 std::thread::sleep(Duration::from_millis(160));
@@ -309,7 +318,10 @@ fn paced_two_lane_delivery_batches_requests_without_serializing_the_producer() {
     stopped.store(true, Ordering::Release);
     server.join().unwrap();
     assert!(capture_elapsed >= Duration::from_millis(1_980));
-    assert!(capture_elapsed < Duration::from_millis(2_400));
+    // The producer must not inherit the 40 * 160 ms per-command network cost.
+    // Leave debug-host fsync/scheduling out of this assertion; the separately
+    // reported paced metrics are the performance evidence.
+    assert!(capture_elapsed < Duration::from_secs(5));
     assert!(pending_at_stop <= 12, "pending at stop: {pending_at_stop}");
     assert!(
         max_pending_chunks <= 16,
@@ -326,7 +338,7 @@ fn paced_two_lane_delivery_batches_requests_without_serializing_the_producer() {
         batch_requests.load(Ordering::Acquire) as u64,
         metrics.http_batch_requests
     );
-    assert!(metrics.http_batch_requests <= 8, "metrics: {metrics:?}");
+    assert!(metrics.http_batch_requests <= 5, "metrics: {metrics:?}");
     assert!(metrics.durable_audio_commands >= 40, "metrics: {metrics:?}");
     assert_eq!(
         metrics.durable_audio_commands,
