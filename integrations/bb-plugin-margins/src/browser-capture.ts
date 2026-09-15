@@ -2,7 +2,7 @@ import type { PluginContentScriptContext } from "@get-bb/plugin-sdk/app";
 import { fetchJsonWithDeadline } from "../../../desktop/src/lib/bounded-fetch.js";
 import { WebDurableUploadQueue, bindDurableMediaRecorder, stopMediaRecorderWithDeadline } from "../../../desktop/src/lib/web-durable-upload.js";
 import { acquireWebMicrophone, selectWebRecorderMimeType, webMicrophoneSupported } from "../../../desktop/src/lib/web-microphone-permission.js";
-import { CAPTURE_DISCONNECT_GRACE_MS, type ClientCapabilities, type PanelState } from "./contracts.js";
+import { CAPTURE_DISCONNECT_GRACE_MS, type ClientCapabilities, type HostError, type PanelState } from "./contracts.js";
 
 const CLIENT_KEY = "margins.bb.client.v1";
 const CAPTURE_KEY = "margins.bb.capture.v1";
@@ -13,6 +13,7 @@ interface StoredCapture {
   nextSequence: number;
   paused: boolean;
   pendingControl?: { kind: "pause" | "resume" | "stop"; operationId: string };
+  stopDrainError?: HostError;
 }
 
 interface LocalCapture extends StoredCapture {
@@ -23,6 +24,7 @@ interface LocalCapture extends StoredCapture {
   reachability: ReachabilityDeadline;
   heartbeatInFlight: boolean;
   generation: number;
+  uploadErrors: Error[];
 }
 
 type Subscriber = () => void;
@@ -64,18 +66,39 @@ export class ReachabilityDeadline {
   }
 }
 
-export async function releaseBrowserMedia(input: {
+type BrowserMedia = {
   recorder: MediaRecorder;
   uploads: Pick<WebDurableUploadQueue, "close">;
   stream: Pick<MediaStream, "getTracks">;
-}) {
-  // Calling stop first gives MediaRecorder a chance to emit its final chunk.
-  // Tracks are released immediately; neither the stop event nor a failed upload
-  // is allowed to leave the browser microphone active.
-  const recorderStopped = stopMediaRecorderWithDeadline(input.recorder).catch(() => null);
+};
+
+/** Synchronously detach the local producer, returning only the bounded final
+ * recorder event. The caller can update UI before awaiting any transport. */
+export function releaseBrowserDevice(input: Pick<BrowserMedia, "recorder" | "stream">): Promise<Error | null> {
+  const recorderStopped = stopMediaRecorderWithDeadline(input.recorder).catch((cause) => (
+    cause instanceof Error ? cause : new Error(String(cause))
+  ));
   input.stream.getTracks().forEach((track) => track.stop());
-  await recorderStopped;
-  await input.uploads.close().catch(() => undefined);
+  return recorderStopped;
+}
+
+/** Drain final recorder data and queued uploads before authority finalization.
+ * Both waits are bounded by their respective transport primitives. */
+export async function drainBrowserMedia(
+  input: Pick<BrowserMedia, "uploads">,
+  recorderStopped: Promise<Error | null>,
+): Promise<{ errors: Error[] }> {
+  const errors: Error[] = [];
+  const recorderError = await recorderStopped;
+  if (recorderError) errors.push(recorderError);
+  await input.uploads.close().catch((cause) => {
+    errors.push(cause instanceof Error ? cause : new Error(String(cause)));
+  });
+  return { errors };
+}
+
+export function releaseBrowserMedia(input: BrowserMedia): Promise<{ errors: Error[] }> {
+  return drainBrowserMedia(input, releaseBrowserDevice(input));
 }
 
 export function hostAcknowledgedCapture(state: PanelState) {
@@ -101,7 +124,17 @@ function readStored(): StoredCapture | null {
 }
 function writeStored(value: StoredCapture | null) {
   try {
-    if (value) sessionStorage.setItem(CAPTURE_KEY, JSON.stringify(value));
+    if (value) {
+      const stored: StoredCapture = {
+        threadId: value.threadId,
+        recordingId: value.recordingId,
+        nextSequence: value.nextSequence,
+        paused: value.paused,
+        ...(value.pendingControl ? { pendingControl: value.pendingControl } : {}),
+        ...(value.stopDrainError ? { stopDrainError: value.stopDrainError } : {}),
+      };
+      sessionStorage.setItem(CAPTURE_KEY, JSON.stringify(stored));
+    }
     else sessionStorage.removeItem(CAPTURE_KEY);
   } catch { /* a locked-down browser can still record for the current page */ }
 }
@@ -192,6 +225,7 @@ export class BrowserCaptureOwner {
   private emit() { for (const fn of this.subscribers) fn(); }
   get active() { return this.capture !== null; }
   get recovering() { return this.heartbeatRecovering; }
+  get hasPendingStop() { return readStored()?.pendingControl?.kind === "stop"; }
   get recordingId() { return this.capture?.recordingId ?? readStored()?.recordingId ?? this.endedRecordingId; }
   panel(threadId: string) { return this.panels.get(threadId) ?? null; }
   acceptPanel(threadId: string, state: PanelState) {
@@ -226,6 +260,7 @@ export class BrowserCaptureOwner {
     if (!this.pluginId) throw new Error("Margins is still loading");
     const mime = selectWebRecorderMimeType(this.dependencies.supportsMime);
     const recorder = this.dependencies.createRecorder(stream, mime);
+    const uploadErrors: Error[] = [];
     const uploads = new WebDurableUploadQueue(async (chunk, sequence, signal) => {
       const bytes = new Uint8Array(await chunk.arrayBuffer());
       const value = await fetchJsonWithDeadline<{ ok: boolean; error?: string | { message?: string } }>(
@@ -239,9 +274,19 @@ export class BrowserCaptureOwner {
         },
       );
       if (!value.ok) throw new Error(typeof value.error === "string" ? value.error : value.error?.message || "Audio upload failed");
-      stored.nextSequence = sequence + 1;
-      writeStored(stored);
-    }, () => {
+      const nextSequence = sequence + 1;
+      stored.nextSequence = nextSequence;
+      const current = this.capture;
+      if (current?.recordingId === stored.recordingId) current.nextSequence = nextSequence;
+      // A final upload can settle after local Stop has persisted its operation
+      // identity. Advance only the sequence cursor; never replace that pending
+      // control or its incomplete-drain evidence with the pre-Stop object.
+      const persisted = readStored();
+      writeStored(persisted?.recordingId === stored.recordingId
+        ? { ...persisted, nextSequence }
+        : stored);
+    }, (error) => {
+      uploadErrors.push(error);
       this.emit();
       const current = this.capture;
       if (current?.recordingId === stored.recordingId) void this.stopAfterDisconnect(current);
@@ -276,7 +321,7 @@ export class BrowserCaptureOwner {
     }, this.dependencies.heartbeatMs);
     recorder.start(3_000);
     if (stored.paused) recorder.pause();
-    this.capture = { ...stored, stream, recorder, uploads, heartbeat, reachability, heartbeatInFlight: false, generation };
+    this.capture = { ...stored, stream, recorder, uploads, heartbeat, reachability, heartbeatInFlight: false, generation, uploadErrors };
     reachability.start();
     this.heartbeatRecovering = false;
     writeStored(stored);
@@ -288,11 +333,7 @@ export class BrowserCaptureOwner {
     this.recoveryStarted = true;
     try {
       if (stored.pendingControl?.kind === "stop" && this.pluginId) {
-        await this.dependencies.rpc<PanelState>(this.pluginId, "stop", {
-          threadId: stored.threadId, client: detectClientCapabilities(), recordingId: stored.recordingId,
-          operationId: stored.pendingControl.operationId,
-        });
-        writeStored(null);
+        await this.reconcileStop(stored);
       } else {
         await this.createLocal(stored, await this.dependencies.acquireMicrophone());
       }
@@ -380,18 +421,94 @@ export class BrowserCaptureOwner {
       : { kind: "stop" as const, operationId: id() };
     current.pendingControl = pendingControl;
     writeStored(current);
-    const release = releaseBrowserMedia(current);
-    const command = this.dependencies.rpc<PanelState>(this.pluginId, "stop", {
-      threadId: current.threadId, client: detectClientCapabilities(), recordingId: current.recordingId,
-      operationId: pendingControl.operationId,
-    });
+    this.showStopping(current);
+    const recorderStopped = releaseBrowserDevice(current);
     try {
-      const [, state] = await Promise.all([release, command]);
-      writeStored(null);
-      return state;
+      const drain = await drainBrowserMedia(current, recorderStopped);
+      const errors = [...current.uploadErrors, ...drain.errors];
+      if (errors.length > 0) {
+        current.stopDrainError = {
+          code: "browser_audio_drain_incomplete",
+          message: errors[0]!.message,
+          retryable: true,
+        };
+        writeStored(current);
+      }
+      // The host owns finalization, so it must not close chunk admission until
+      // the browser's bounded final-data drain has settled.
+      return await this.reconcileStop(current);
     } finally {
       this.emit();
     }
+  }
+
+  async retryPendingStop() {
+    const stored = readStored();
+    if (!stored || stored.pendingControl?.kind !== "stop") return;
+    return this.reconcileStop(stored);
+  }
+
+  private async reconcileStop(stored: StoredCapture): Promise<PanelState> {
+    if (!this.pluginId || stored.pendingControl?.kind !== "stop") throw new Error("No pending Stop to reconcile");
+    const state = await this.dependencies.rpc<PanelState>(this.pluginId, "stop", {
+      threadId: stored.threadId, client: detectClientCapabilities(), recordingId: stored.recordingId,
+      operationId: stored.pendingControl.operationId,
+    });
+    const latest = readStored();
+    const recovery = latest?.recordingId === stored.recordingId
+      && latest.pendingControl?.kind === "stop"
+      && latest.pendingControl.operationId === stored.pendingControl.operationId
+      ? {
+          ...stored,
+          nextSequence: Math.max(stored.nextSequence, latest.nextSequence),
+          stopDrainError: stored.stopDrainError ?? latest.stopDrainError,
+        }
+      : stored;
+    if (state.error === null && state.state === "saved" && !recovery.stopDrainError) {
+      this.endedRecordingId = recovery.recordingId;
+      writeStored(null);
+      this.acceptPanel(recovery.threadId, state);
+      return state;
+    }
+    const error = recovery.stopDrainError ?? state.error ?? {
+      code: "authority_stop_unconfirmed",
+      message: "Margins did not confirm that the recording finished. Try again with the retained Stop operation.",
+      retryable: true,
+    };
+    const incomplete: PanelState = {
+      ...state,
+      state: "needs_attention",
+      title: "Recording needs attention",
+      detail: error.message,
+      primaryAction: error.retryable ? "retry" : "none",
+      primaryLabel: error.retryable ? "Try again" : "Recording unavailable",
+      canStop: false,
+      canEditNotepad: false,
+      ownsRecording: true,
+      recordingId: recovery.recordingId,
+      error,
+    };
+    writeStored(recovery);
+    this.acceptPanel(recovery.threadId, incomplete);
+    return incomplete;
+  }
+
+  private showStopping(stored: StoredCapture) {
+    const prior = this.panels.get(stored.threadId);
+    if (!prior) { this.emit(); return; }
+    this.acceptPanel(stored.threadId, {
+      ...prior,
+      state: "saving",
+      title: "Saving",
+      detail: "Capture has stopped. Margins is finishing the audio already received by this bb project.",
+      primaryAction: "none",
+      primaryLabel: "Saving",
+      canStop: false,
+      canEditNotepad: false,
+      ownsRecording: true,
+      recordingId: stored.recordingId,
+      error: null,
+    });
   }
 
   private async stopAfterDisconnect(current: LocalCapture) {
@@ -402,11 +519,24 @@ export class BrowserCaptureOwner {
     this.endedRecordingId = current.recordingId;
     current.reachability.dispose();
     clearInterval(current.heartbeat);
-    writeStored(null);
+    current.pendingControl = current.pendingControl?.kind === "stop"
+      ? current.pendingControl
+      : { kind: "stop", operationId: id() };
+    writeStored(current);
     this.emit();
-    await releaseBrowserMedia(current);
-    // The project-side lease independently stops and saves the session. Do not
-    // turn an unreachable stop request into a second, unbounded retry loop here.
+    const drain = await drainBrowserMedia(current, releaseBrowserDevice(current));
+    const errors = [...current.uploadErrors, ...drain.errors];
+    if (errors.length > 0) {
+      current.stopDrainError = {
+        code: "browser_audio_drain_incomplete",
+        message: errors[0]!.message,
+        retryable: true,
+      };
+      writeStored(current);
+    }
+    // The default transport is bounded. A failed acknowledgement leaves the
+    // exact Stop identity in session storage for explicit reconciliation.
+    await this.reconcileStop(current).catch(() => this.emit());
   }
 
   private disconnect() {

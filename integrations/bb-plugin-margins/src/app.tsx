@@ -44,6 +44,7 @@ function MarginsPanel({ threadId, params }: { threadId: string; params: JsonValu
   const refresh = useCallback(async () => {
     const next = await browserCaptureOwner.refresh(threadId, () => rpc.call("getPanelState", { threadId, client }));
     if (browserCaptureOwner.panel(threadId) === next) accept(next);
+    return next;
   }, [accept, client.clientId, client.platform, rpc, threadId]);
 
   useEffect(() => { void refresh().catch((error) => setMessage(String(error))); }, [refresh]);
@@ -101,7 +102,9 @@ function MarginsPanel({ threadId, params }: { threadId: string; params: JsonValu
       await action("start", () => browserCaptureOwner.start(threadId, paramsTitle(params)));
     } else if (state.primaryAction === "pause") await action("pause", () => browserCaptureOwner.pause());
     else if (state.primaryAction === "resume") await action("resume", () => browserCaptureOwner.resume());
-    else if (state.primaryAction === "retry") await action("retry", refresh);
+    else if (state.primaryAction === "retry") await action("retry", () => (
+      browserCaptureOwner.hasPendingStop ? browserCaptureOwner.retryPendingStop() : refresh()
+    ));
   }
 
   async function stop() { await action("stop", () => browserCaptureOwner.stop()); }
@@ -144,7 +147,7 @@ function MarginsPanel({ threadId, params }: { threadId: string; params: JsonValu
     />}
     {state.state === "saved" && <div className="margins-saved-actions">
       <button className="margins-connected-note" onClick={connectedNote}>Make connected note</button>
-      <button className="margins-quiet" onClick={() => void action("dismiss", () => rpc.call("dismissSavedMeeting", { threadId, client }))}>Not now</button>
+      <button className="margins-quiet" onClick={() => void action("dismiss", refresh)}>Not now</button>
     </div>}
     {state.state === "needs_setup" && <p className="margins-seam">Recording with computer audio isn’t available in this browser yet.</p>}
   </section>;

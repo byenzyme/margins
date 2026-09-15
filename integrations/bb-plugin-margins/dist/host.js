@@ -32836,9 +32836,6 @@ var captureRecordSchema = external_exports2.object({
   ownerId: external_exports2.string().min(1),
   lastHeartbeatUnixMs: external_exports2.number().int().nonnegative()
 });
-var savedMeetingSchema = external_exports2.object({
-  savedAtUnixMs: external_exports2.number().int().nonnegative()
-});
 var panelStateSchema = external_exports2.object({
   schema: external_exports2.literal(PANEL_STATE_SCHEMA),
   state: recordingStateSchema,
@@ -32876,8 +32873,7 @@ var marginsRpcContract = defineRpcContract2({
   updateNotepad: {
     input: captureClientInputSchema.extend({ expectedRevision: external_exports2.string().min(1), text: external_exports2.string().max(1e5) }).strict(),
     output: panelStateSchema
-  },
-  dismissSavedMeeting: { input: threadClientInputSchema, output: panelStateSchema }
+  }
 });
 
 // src/project-server.ts

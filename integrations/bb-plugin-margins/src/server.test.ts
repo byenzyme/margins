@@ -78,7 +78,8 @@ describe("Margins project recording server", () => {
     const input = { threadId: "thr-1", client: browser, recordingId: "rec-1", operationId: "stop-1" };
     await expect(host.harness.behavior.callRpc("stop", input)).resolves.toMatchObject({ state: "saved" });
     await expect(host.harness.behavior.callRpc("stop", input)).resolves.toMatchObject({ state: "saved" });
-    await expect(host.bb.storage.kv.get("saved:proj-1")).resolves.toMatchObject({ savedAtUnixMs: expect.any(Number) });
+    await expect(host.bb.storage.kv.get("saved:proj-1")).resolves.toBeUndefined();
+    await expect(host.harness.behavior.callRpc("getPanelState", { threadId: "thr-1", client: browser })).resolves.toMatchObject({ state: "ready" });
     expect(host.harness.inspection.experimental_hostRpcCalls.filter(call => call.method === "stop")).toHaveLength(1);
   });
 });

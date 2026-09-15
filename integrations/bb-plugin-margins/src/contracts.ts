@@ -70,9 +70,6 @@ export const captureRecordSchema = z.object({
   recordingId: z.string().min(1), clientId: z.string().min(1), ownerId: z.string().min(1),
   lastHeartbeatUnixMs: z.number().int().nonnegative(),
 });
-export const savedMeetingSchema = z.object({
-  savedAtUnixMs: z.number().int().nonnegative(),
-});
 export const panelStateSchema = z.object({
   schema: z.literal(PANEL_STATE_SCHEMA), state: recordingStateSchema,
   title: z.string().min(1), detail: z.string().min(1),
@@ -104,7 +101,6 @@ export const marginsRpcContract = defineRpcContract({
     input: captureClientInputSchema.extend({ expectedRevision: z.string().min(1), text: z.string().max(100_000) }).strict(),
     output: panelStateSchema,
   },
-  dismissSavedMeeting: { input: threadClientInputSchema, output: panelStateSchema },
 });
 
 export type ClientCapabilities = z.infer<typeof clientCapabilitiesSchema>;
@@ -115,5 +111,4 @@ export type HostError = z.infer<typeof hostErrorSchema>;
 export type HostCaptureSnapshot = z.infer<typeof hostCaptureSnapshotSchema>;
 export type HostResult = z.infer<typeof hostResultSchema>;
 export type CaptureRecord = z.infer<typeof captureRecordSchema>;
-export type SavedMeeting = z.infer<typeof savedMeetingSchema>;
 export type PanelState = z.infer<typeof panelStateSchema>;

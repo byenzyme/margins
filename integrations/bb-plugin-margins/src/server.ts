@@ -7,7 +7,6 @@ import {
   hostSignals,
   marginsHostContract,
   marginsRpcContract,
-  savedMeetingSchema,
   CAPTURE_DISCONNECT_GRACE_MS,
   type CaptureRecord,
   type ClientCapabilities,
@@ -15,16 +14,13 @@ import {
   type HostResult,
   type PanelState,
   type ProjectTarget,
-  type SavedMeeting,
 } from "./contracts.js";
 
 const CAPTURE_PREFIX = "capture:";
-const SAVED_PREFIX = "saved:";
 const REALTIME_CHANNEL = "margins-recording";
 export const DISCONNECT_GRACE_MS = CAPTURE_DISCONNECT_GRACE_MS;
 
 function captureKey(projectId: string) { return `${CAPTURE_PREFIX}${projectId}`; }
-function savedKey(projectId: string) { return `${SAVED_PREFIX}${projectId}`; }
 function meetingName(value: string | null | undefined) {
   const slug = (value || "meeting").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 90);
   return slug || "meeting";
@@ -108,14 +104,6 @@ export default function marginsPlugin(bb: BbPluginApi) {
   }
   async function saveCapture(value: CaptureRecord) { await bb.storage.kv.set(captureKey(value.projectId), value); }
   async function clearCapture(projectId: string) { await bb.storage.kv.delete(captureKey(projectId)); }
-  async function readSaved(projectId: string): Promise<SavedMeeting | null> {
-    const parsed = savedMeetingSchema.safeParse(await bb.storage.kv.get(savedKey(projectId)));
-    return parsed.success ? parsed.data : null;
-  }
-  async function saveSaved(projectId: string) {
-    await bb.storage.kv.set(savedKey(projectId), { savedAtUnixMs: Date.now() } satisfies SavedMeeting);
-  }
-
   async function callHost(target: ProjectTarget, method: keyof typeof marginsHostContract, input: object): Promise<any> {
     try {
       return await host.call(method as never, input as never, { hostId: target.hostId });
@@ -162,8 +150,6 @@ export default function marginsPlugin(bb: BbPluginApi) {
       const state = result.snapshot.status === "paused" ? "paused" : result.snapshot.status === "saving" ? "saving" : "recording";
       return basePanel(target.projectId, state, client, { capture, notepad: result.snapshot.notepad });
     }
-    const saved = await readSaved(target.projectId);
-    if (saved) return basePanel(target.projectId, "saved", client);
     if (client.platform === "macos" && !client.nativeMacCapture) return basePanel(target.projectId, "needs_setup", client);
     if (!sourceFor(client)) return basePanel(target.projectId, "unavailable", client);
     return basePanel(target.projectId, "ready", client);
@@ -192,7 +178,9 @@ export default function marginsPlugin(bb: BbPluginApi) {
             error: { code: "operation_conflict", message: "This control operation id was already used for different content.", retryable: false },
           });
         }
-        return getPanelState(threadId, client);
+        return operation === "stop"
+          ? basePanel(target.projectId, "saved", client)
+          : getPanelState(threadId, client);
       }
     }
     const capture = await readCapture(target.projectId);
@@ -200,7 +188,6 @@ export default function marginsPlugin(bb: BbPluginApi) {
     const result = await callHost(target, operation, { target, recordingId, ownerId: capture.ownerId }) as HostResult;
     if (result.ok) {
       if (operation === "stop") {
-        await saveSaved(target.projectId);
         await clearCapture(target.projectId);
       } else {
         capture.lastHeartbeatUnixMs = operation === "heartbeat" ? Date.now() : capture.lastHeartbeatUnixMs;
@@ -212,6 +199,7 @@ export default function marginsPlugin(bb: BbPluginApi) {
     }
     bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: operation });
     if (!result.ok) return basePanel(target.projectId, "needs_attention", client, { capture, error: result.error });
+    if (operation === "stop") return basePanel(target.projectId, "saved", client);
     return getPanelState(threadId, client);
   }
 
@@ -224,7 +212,6 @@ export default function marginsPlugin(bb: BbPluginApi) {
         if (await readCapture(target.projectId)) return getPanelState(threadId, client);
         const result = await callHost(target, "startBrowserCapture", { target, ownerId, name: meetingName(title) }) as HostResult;
         if (!result.ok || !result.snapshot) return basePanel(target.projectId, "needs_attention", client, { error: result.ok ? null : result.error });
-        await bb.storage.kv.delete(savedKey(target.projectId));
         await saveCapture({
           projectId: target.projectId, hostId: target.hostId, projectRoot: target.projectRoot,
           recordingId: result.snapshot.recordingId,
@@ -244,11 +231,6 @@ export default function marginsPlugin(bb: BbPluginApi) {
       if (!capture || capture.recordingId !== recordingId || capture.clientId !== client.clientId) return getPanelState(threadId, client);
       const result = await callHost(target, "updateNotepad", { target, recordingId, ownerId: capture.ownerId, expectedRevision, text }) as HostResult;
       if (!result.ok) return basePanel(target.projectId, "needs_attention", client, { capture, error: result.error });
-      return getPanelState(threadId, client);
-    },
-    async dismissSavedMeeting({ threadId, client }) {
-      const target = await targetForThread(threadId);
-      await bb.storage.kv.delete(savedKey(target.projectId));
       return getPanelState(threadId, client);
     },
   });
