@@ -6,6 +6,7 @@ Native remote composition checkpoint: `46c8f6d4ed3185e6f32d9edee977f6b01212f539`
 16 kHz remote ASR candidate: `68e6a07741fc23172436d3901fc9ae296ed35611`
 Native Opus candidate: `9353e00fa83e9fae54f03d3fb70da5643ebbda3a`
 SSH catch-up checkpoint: `f3aff7f12078d7f3ca41e00245ad603057e982b1`
+Sustained-transport candidate: `49a6d9a225d65a1ad4188db63017157f49fd2821`
 
 This report separates implemented portable behavior from platform and deployment
 gates. “Supported” below means a production caller reaches the implementation;
@@ -356,6 +357,28 @@ scripts/cargo-lane disposable -- cargo test -p margins-desktop \
 temporary ALSA pkg-config metadata + scripts/cargo-lane disposable -- cargo check \
   -p margins --no-default-features --features audio-capture --bin margins-private
   passed; Linux type/ownership evidence only, temporary metadata removed
+
+scripts/cargo-lane shared -- cargo build -p margins-desktop \
+  --manifest-path desktop/src-tauri/Cargo.toml --no-default-features \
+  --features server,parakeet-asr-dynamic --bin margins-server
+scripts/cargo-lane shared -- cargo build -p margins --no-default-features \
+  --bin margins-private
+  exact clean candidate 49a6d9a225d65a1ad4188db63017157f49fd2821;
+  server SHA-256 0962624c328108c6819840253ffb4ca92ba6ecabae015d628fb295f8d08c0c4e;
+  portable discovery CLI SHA-256
+  533087dbd42a37661bebe8a8867d147e074879fcaf2989e76fdce89a937eb427
+
+ORT_DYLIB_PATH=/tmp/.../libonnxruntime.so.1.24.4 \
+MARGINS_PARAKEET_MODEL_DIR=/tmp/.../parakeet-tdt-0.6b-v2-int8 \
+MARGINS_PARAKEET_MODEL_KIND=tdt-v2 \
+MARGINS_OPUS_EVAL_FIXTURES=/tmp/margins-opus-eval-fixtures-thr_n2qdmhncai \
+MARGINS_OPUS_EVAL_RESULTS=/tmp/margins-opus-quality-matrix-49a6d9a225d6.json \
+scripts/cargo-lane disposable -- cargo test -p margins-desktop \
+  --manifest-path desktop/src-tauri/Cargo.toml --no-default-features \
+  --features server,parakeet-asr-dynamic \
+  server::remote_asr::tests::pinned_v2_opus_quality_matrix \
+  -- --exact --ignored --nocapture
+  1 passed; 28 sanitized PCM/16/24/32 rows, no fixture or transcript bodies committed
 ```
 
 A final rebuilt `margins-server` was started on a disposable loopback port with an
@@ -560,10 +583,10 @@ runs in the bounded capture worker, not the device callback; exact 16 kHz signed
 input bypasses float conversion. The local recorder/archive path is unchanged and
 does not construct the resampler, encoder, remote spool, or uploader.
 
-Each Opus packet represents exactly 320 decoded source samples (20 ms). Five packets
-form a normal immutable durable command. A terminal command keeps source-bearing
-audio with the encoder lookahead/tail so exact 100 ms multiples, partial final
-frames, pre-skip, and source trimming remain unambiguous. The real ropus encoder
+Each Opus packet represents exactly 320 decoded source samples (20 ms). Twenty-five
+packets form a normal 500 ms immutable network command. A terminal command keeps
+source-bearing audio with the encoder lookahead/tail so exact 500 ms multiples,
+partial final frames, pre-skip, and source trimming remain unambiguous. The real ropus encoder
 reports 104 lookahead samples at 16 kHz; framing converts that to 312 samples in the
 48 kHz Opus clock, while decode drops 104 samples and trims to the declared source
 count. The receiver rejects non-20-ms packets, packet-count/length bombs, truncation,
@@ -571,7 +594,7 @@ missing or repeated START/END, gaps, overlaps, source-count overflow, timing mis
 and malformed PCM before artifact projection or finalization. Retransmission hashes
 the exact encoded packet-stream bytes and does not advance decoder state.
 
-Persistence and network cadence are separate. While a segment is open, a temporary
+Crash persistence and network cadence are separate. While a segment is open, a temporary
 full 16 kHz PCM journal is disk-reserve-accounted and fsynced at intervals no greater
 than 100 ms, including when one public adapter call contains a much larger slice.
 That deliberate ~64 KB/s two-lane journal cost makes a process-loss prefix
@@ -584,25 +607,41 @@ the valid ACK-fsynced/frame-not-yet-unlinked state is accepted only when digests
 match. Low space stops the producer truthfully before breaching the configured
 reserve. Existing raw 16/48 kHz PCM spools remain retryable, but attaching a native
 Opus recorder to a PCM-declared session is rejected rather than mixing or relabeling
-formats.
+formats. An interrupted first-generation PacketStream spool whose open marker lacks
+the network aggregation field is recovered with its original five-packet command
+identity, so existing unacknowledged data is neither relabeled nor discarded.
 
 The active uploader opens the same locked spool on a separate thread. Candidate
-`9353e00fa` initially aggregated up to eight immutable commands or 320 ms of
-partial-batch age. The exact SSH run below showed that ceiling had essentially no
-catch-up headroom, so the service now advertises and accepts 16 commands while the
-client waits up to 500 ms for a partial batch. These are network aggregation bounds:
-the encoded journal and immutable command still become durable every 100 ms, and
-Stop still forces the final partial batch. Capability/limit/instance negotiation
-occurs once at connection readiness and is cached; the capture-time uploader does
-not poll it. Every mutation carries the negotiated instance fence. ACKs remain per
-durable command, so HTTP batch count is not confused with fsync/receipt cost. Stop
-first retires and writes the local recorder, closes/tail-encodes the media, and pins
-final duration to that last durable close boundary. Only then does it join the
-bounded uploader, persist memo/finalize intents, and drain receipts; delayed
-transport therefore affects drain time but not media duration.
+`9353e00fa` first used 100 ms network commands; even a 16-command catch-up batch had
+no sustained headroom across the measured tunnel. Candidate `ddeb6f2d7` then made
+that failure explicit: a 61.228-second run accumulated 195 commands / 38,059 bytes /
+17.428 seconds at high water and needed 16.243 seconds to drain after Stop. Its
+1,226 commands in 83 sequential requests consumed 62.861 seconds of request time.
+Normal append also performed a full pending-frame scan and a growing ACK-directory
+scan for every new command, making producer work quadratic; encode-plus-spool wall
+grew to 50.355 seconds and the paced producer fell 14.37 seconds behind its media
+deadlines. This negative run is retained as the reason for the final design, not
+treated as success.
 
-The focused portable suite after the crash-cleanup changes passed workflow library
-191/191 with one ignored, protocol 8/8, remote transport 18/18, and service 7/7:
+Candidate `49a6d9a225d65a1ad4188db63017157f49fd2821` fixes both limits. Recovery PCM and
+its length marker are still fsynced every 100 ms, but one immutable audio command now
+carries 500 ms, reducing healthy two-lane command ingress from 20/s to 4/s. The
+server continues to accept at most 16 commands per HTTP batch. A full-batch result
+causes a prompt catch-up iteration; partial and idle polling remain relaxed. Normal
+monotonic capture appends directly under its capture lease and never enumerates old
+frames or ACKs. Crash recovery performs one bounded directory pass, builds a
+sequence-indexed identity view, then validates re-encoded blocks with logarithmic
+lookups. ACKs remain per immutable 500 ms command, so HTTP batch count is not
+confused with receipt cost. Capability/limit/instance negotiation occurs once at
+connection readiness and is cached; the capture-time uploader does not poll it.
+Every mutation carries the negotiated instance fence. Stop first retires and writes
+the local recorder, closes/tail-encodes the media, and pins final duration to that
+last durable close boundary. Only then does it join the bounded uploader, persist
+memo/finalize intents, and drain receipts; delayed transport therefore affects drain
+time but not media duration.
+
+The exact `49a6d9a2` portable suite passed workflow library 192/192 with one
+ignored, protocol 8/8, remote transport 19/19, and service 7/7:
 
 ```sh
 scripts/cargo-lane disposable -- cargo test \
@@ -621,17 +660,18 @@ capture-only principal can finalize while only the service principal reads/sched
 the admitted processing job.
 
 A two-second delayed-HTTP paced fixture used 160 ms per batch while the producer
-continued independently at a monotonic 20 ms cadence. With the final 16-command /
-500-ms bounds it completed in four HTTP batches carrying 40 durable commands, 3,302
-encoded bytes, and 19,230 attempted full batch-body bytes. Maximum backlog was 15
-commands / 1,230 bytes / 759 ms; seven commands were pending at Stop and drained in
-204 ms. Aggregate request time was 653 ms. These are deterministic Linux debug
-fixture measurements, not SSH or native-device performance. A Mac disposable debug
-run exposed that the former 2.4-second capture-wall assertion and two-second fixture
-socket timeout were host-speed assumptions: it took 3.201 seconds and a subsequent
-run hit the socket timeout. The fixture now retains the network-independence and
-backlog assertions but gives debug fsync/scheduling up to five seconds and a stuck-I/O
-timeout of ten seconds; those relaxed harness bounds are not product latency claims.
+continued independently at a monotonic 20 ms source cadence. Under the final 500 ms
+network framing it carried exactly eight durable audio commands in three HTTP
+batches: 2,278 encoded bytes and 5,474 attempted full batch-body bytes. Capture wall
+was 2,000 ms; maximum observed backlog was four commands / 1,130 bytes / 979 ms;
+five commands were present immediately after terminal blocks were published and the
+final drain took 353 ms. Aggregate request time was 486 ms. The invariant is based
+on delivery making progress during a finite paced source and terminal commands being
+at most two beyond the in-loop high water; generous five-second capture and
+capture-relative age/drain ceilings are fixture liveness bounds, not product latency
+claims. Ownership/ordering are covered by deterministic barrier tests rather than
+host-speed thresholds. These are Linux debug fixture measurements, not SSH or
+native-device performance.
 
 A real local HTTP/SQLite/pinned-v2 run from exact clean candidate
 `9353e00fa83e9fae54f03d3fb70da5643ebbda3a` used equal 6.122-second microphone
@@ -680,6 +720,67 @@ ms without weakening the 100-ms recovery or receipt boundary. A matching Mac/SSH
 rerun is required to measure whether that supplies adequate sustained headroom; the
 change is not declared sufficient from the Linux fixture alone.
 
+The later `ddeb6f2d7` 61.2275-second Mac/SSH run disproved that sufficiency rather
+than merely missing a test threshold. It produced 1,226 unique 100 ms commands in 83
+HTTP batches, accumulated 195 commands / 38,059 bytes / 17.428 seconds, left 187
+commands pending at Stop, and drained for 16.243 seconds. Sequential request time was
+62.861 seconds. In addition to the command-rate deficit, per-append full directory
+scans made encode-plus-spool wall grow to 50.355 seconds and capture wall to 75.600
+seconds for 61.228 seconds of media. Duration remained correctly pinned, but this is
+explicit failure evidence for that candidate.
+
+Exact candidate `49a6d9a225d65a1ad4188db63017157f49fd2821` replaces those commands
+with 500 ms containers and removes historical scans from normal append. A real
+same-host paced client/service/SQLite/pinned-v2 run over the 6.12275-second fixture
+used 26 audio commands in seven HTTP batches. Capture wall was 6,123 ms; backlog
+peaked at six commands / 3,885 bytes / 681 ms; the same six commands were pending at
+Stop, the last input ACK followed 188 ms later, and complete drain took 361 ms.
+Canonical encoded audio was 21,846 bytes versus 32,625 attempted full batch-body
+bytes; aggregate request time was 851 ms. The server retained an 18,359-byte
+microphone artifact (SHA-256
+`15d2b5b3eeb586031905c5b756a76cd746642cebd647d44554b5158a40cbac45`), a
+3,487-byte silent-system artifact (SHA-256
+`864035e0df1b04d6d485c4e9808f5c1d84cbd29e61b0c111a664debbb3c4d019`),
+and a 622-byte transcript from completed pinned-v2 attempt 1. Its transcript body
+was not read in this audit.
+
+The candidate's real 61.2275-second Mac producer through `ssh://bs-server`
+completed with capture wall
+61.247 seconds and duration 61.228 seconds. It emitted 246 audio commands/receipts in
+64 HTTP batches; aggregate request time was 20.504 seconds. Backlog stayed at six
+commands / 5,321 bytes / 1.468 seconds; six commands / 4,221 bytes were pending at
+Stop, the last input ACK followed 602 ms later, and complete drain took 2.022 seconds.
+Canonical encoded audio was 218,065 bytes and attempted full batch bodies were
+320,522 bytes. Producer encode-plus-spool wall was 37.913 seconds and its isolated
+thread CPU metric was 22.549 seconds. Unlike the ddeb run, the paced producer did not
+fall behind its media deadline and backlog age remained bounded across the full
+minute.
+
+The server independently records 123 contiguous sequences per lane, 246 unique
+audio acknowledgements, one segment finalize, one session finalize, 249 unique
+meeting receipts/events, and a released producer. Both close and finalize are pinned
+to 61,228 ms. The microphone artifact is 183,508 bytes (SHA-256
+`805800e20a023b86a9aa5625e3604614392132f64cc49149b112a6b904ac6d0e`), the
+system artifact is 34,557 bytes (SHA-256
+`6e48a47483bcb427746a54064bea69956a41dd82e8bc44ed27db475fe5d1c00a`),
+and the 3,708-byte transcript was registered by pinned-v2 ASR attempt 1 with no
+failure. Transcript contents were not read for this audit.
+
+The independent Mac verifier also passed the exact native composition assertion,
+the complete 19-test remote transport suite, legacy-spool recovery, sustained SSH
+transport, and ASR checks against this immutable source. Its tracked report is
+commit `8c7a5cd962a02bf4b480d1a58d12977dd0a1d081` on the verifier-only branch
+`bb/mac-e2e-verify-opus-49a6d9a2`; it includes the ddeb failure, root cause, and
+matching 49a6 retest rather than replacing the counterevidence.
+The exact Mac audio-capture binary SHA-256 is
+`39693825adbf6c5042b9c90370addce1bf2be1df45dcb52af2859d77e48be8ae`;
+its release smoke embeds full commit `49a6d9a225d65a1ad4188db63017157f49fd2821`,
+`dirty=false`, native-recorder capture, and TUI support. The packaged composition
+test passed 1/1 and the complete remote suite passed 19/19. Its local delayed-HTTP
+pace measurement was 2,560 ms capture wall, four commands / 1,130 bytes / 735 ms at
+high water, four pending at Stop, 477 ms drain, and four batches for eight commands.
+The audio-only feature slice truthfully reports recall unavailable.
+
 A second exact SSH transfer stopped with the client still reporting
 `completed=false` and retaining its finalization intent. Before the scoped server
 restart, authority state had in fact committed that exact finalize while its client
@@ -704,11 +805,13 @@ to match or improve its per-case PCM WER and critical-token hits, remain within
 160 ms at first/last word boundaries, remain below 15% of PCM transport bytes, and
 emit zero words for silence at every format. Exact sanitized 28-row results and hash
 are preserved outside git for the immutable committed candidate. The owner-only JSON
-is `/tmp/margins-opus-quality-matrix-9353e00fa.json` (SHA-256
-`2d696ad15b3add16b502d89fe0b5cc9008fd466a47cdb1499c3c769bd4ef5a2f`); its
-owner-only test log SHA-256 is
-`bbef79c76fd103bfe736575260d57ef3c7040b5078d088a5d346194643e1fdd4`.
-Audio and transcript bodies are not retained in the report.
+is `/tmp/margins-opus-quality-matrix-49a6d9a225d6.json`, mode 0600, 10,354
+bytes, SHA-256
+`b90fcb5d19adec7c03f8454b1f4a431d70d2840e17ac37736a06d00209bc00f8`.
+It was rebuilt and rerun from exact clean commit `49a6d9a225d65a1ad4188db63017157f49fd2821`
+after the 500 ms grouping change; earlier grouping-specific artifact hashes are not
+reused as final evidence. Audio and transcript bodies are not retained in the
+report.
 
 At the selected 24 kbps/lane target, every speech case exactly matched its PCM
 baseline WER and critical-token count. The compact comparison below reports
@@ -718,13 +821,13 @@ the final column pure codec CPU because it includes fsync.
 
 | Case | PCM bytes / WER / critical / bounds / ASR ms | Opus 24 bytes / WER / critical / bounds / ASR ms / encode+spool us |
 | --- | --- | --- |
-| US names/numbers | 409924 / .53125 / 4/7 / 0-12720 / 879 | 42317 / .53125 / 4/7 / 0-12720 / 811 / 2813898 |
-| Quiet US | 409924 / .53125 / 4/7 / 80-12720 / 1002 | 38059 / .53125 / 4/7 / 80-12640 / 909 / 2903208 |
-| Noisy US | 409924 / .53125 / 4/7 / 80-12720 / 804 | 43562 / .53125 / 4/7 / 80-12720 / 829 / 2806322 |
-| Indian names/numbers | 302102 / .47826 / 0/5 / 0-9360 / 775 | 29994 / .47826 / 0/5 / 0-9360 / 691 / 2093710 |
-| British names/numbers | 322952 / .30435 / 3/6 / 0-10000 / 639 | 32807 / .30435 / 3/6 / 0-10000 / 634 / 2212488 |
-| Two-voice overlap | 180102 / .76923 / 1/6 / 0-5440 / 409 | 19323 / .76923 / 1/6 / 0-5440 / 378 / 1530090 |
-| System silence | 409924 / 0 / 0/0 / none / 871 | 10539 / 0 / 0/0 / none / 1050 / 2712831 |
+| US names/numbers | 409924 / .53125 / 4/7 / 0-12720 / 809 | 39021 / .53125 / 4/7 / 0-12720 / 759 / 3163565 |
+| Quiet US | 409924 / .53125 / 4/7 / 80-12720 / 756 | 34763 / .53125 / 4/7 / 80-12640 / 753 / 2122808 |
+| Noisy US | 409924 / .53125 / 4/7 / 80-12720 / 754 | 40266 / .53125 / 4/7 / 80-12720 / 759 / 2167170 |
+| Indian names/numbers | 302102 / .47826 / 0/5 / 0-9360 / 570 | 27562 / .47826 / 0/5 / 0-9360 / 558 / 1627818 |
+| British names/numbers | 322952 / .30435 / 3/6 / 0-10000 / 596 | 30247 / .30435 / 3/6 / 0-10000 / 595 / 1715470 |
+| Two-voice overlap | 180102 / .76923 / 1/6 / 0-5440 / 348 | 17883 / .76923 / 1/6 / 0-5440 / 347 / 947751 |
+| System silence | 409924 / 0 / 0/0 / none / 746 | 7243 / 0 / 0/0 / none / 757 / 1809290 |
 
 The full 28 rows retain all 16/24/32 kbps variants. Important counterevidence is
 not averaged away: pinned v2 already performs weakly on the Indian and overlap PCM
@@ -756,15 +859,17 @@ PCM uses 64,000 bytes per two-second mono lane instead of 192,000 at 48 kHz, and
 threefold payload reduction does not reduce fixed HTTP/SSH request overhead because
 the 100 ms chunk cadence is unchanged.
 
-The Opus diagnostic replaces the PCM hot-path comparison: the same two-lane
-6.122-second fixture used 24,982 unique encoded bytes instead of 391,856 PCM bytes
-(93.6% less audio payload), while 76,338 attempted full request-body bytes expose the
-still-material command metadata. It reduced HTTP batches from the 80 ms prototype's
-22 to 16 and Stop drain from 1,519 to 903 ms on the same local fixture. The quality
-matrix `encode_micros` field measures encoder plus durable-spool wall time, including
-fsync; it is not pure codec CPU. Only the paced harness's thread-clock measurement
-isolates producer-thread CPU. All are debug measurements and cannot substitute for
-the pending exact-candidate Mac/SSH run.
+The final same-host Opus composition used 21,846 unique encoded bytes instead of
+391,856 PCM bytes (94.4% less audio payload), while 32,625 attempted full request
+bodies expose the still-material command metadata. It needed seven HTTP batches and
+361 ms of final drain. The exact 61-second SSH run used 218,065 encoded bytes and
+320,522 full-body bytes; its six-command high water and 2.022-second Stop drain are
+the measured evidence that 500 ms commands have steady headroom on this path. This
+does not promise the same latency on every tunnel. The quality matrix
+`encode_micros` field measures encoder plus durable-spool wall time, including fsync;
+it is not pure codec CPU. Only the paced harness's thread-clock measurement isolates
+producer-thread CPU. All are debug measurements rather than release-performance
+claims.
 
 Inferred, not measured on native hardware: the direct local path adds only canonical
 SQLite memo/session work already required for durability; it does not add network,
@@ -785,15 +890,15 @@ local capture.
 
 ## Remaining gates
 
-1. Opus packet transport, binary command batching, the actual-media duration fix,
-   and portable paced/recovery regressions are implemented. The first exact Opus
-   Mac/SSH run and restart replay passed, but exposed insufficient command-rate
-   headroom at the original eight-command bound. Repeat the paced run with matching
-   post-`f3aff7f1` client/server binaries and measure whether the 16-command/500-ms
-   tuning reaches a bounded-age steady state. Also run native `attach` and
-   pause/resume with delayed delivery to corroborate the portable duration tests.
-   The older PCM SSH runs remain recovery/baseline evidence, not evidence for the
-   new lossy format.
+1. Opus packet transport, 500 ms network framing with independent 100 ms crash
+   checkpoints, binary command batching, the actual-media duration fix, portable
+   paced/recovery regressions, exact pinned-v2 quality matrix, and a 61-second
+   matching Mac/SSH sustained run are complete. The earlier 100 ms-command SSH runs
+   remain counterevidence and recovery baselines, not evidence for the final framing.
+   A real device-driven native `attach` plus pause/resume under delayed delivery is
+   still needed to corroborate the portable duration/continuity tests; automation
+   could not obtain the app-server process's macOS microphone permission even though
+   the user's own Terminal run proved native capture works.
 2. Run the complete BB full-host UI journey on an environment that can install/load
    this plugin, including remote remount, stale callbacks, conflicts, recovery,
    artifacts, jobs, and the now-wired agent handoff. Typed production host/client,
