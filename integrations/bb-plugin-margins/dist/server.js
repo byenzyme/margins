@@ -18984,7 +18984,10 @@ var threadClientInputSchema = external_exports.object({
   threadId: external_exports.string().min(1),
   client: clientCapabilitiesSchema
 }).strict();
-var captureClientInputSchema = threadClientInputSchema.extend({ recordingId: external_exports.string().min(1) }).strict();
+var captureClientInputSchema = threadClientInputSchema.extend({
+  recordingId: external_exports.string().min(1),
+  operationId: external_exports.string().min(1)
+}).strict();
 var marginsRpcContract = defineRpcContract({
   getPanelState: { input: threadClientInputSchema, output: panelStateSchema },
   beginBrowserCapture: {
@@ -19200,8 +19203,21 @@ function marginsPlugin(bb) {
       if (startLocks.get(projectId) === queued) startLocks.delete(projectId);
     }
   }
-  async function operate(threadId, client, recordingId, operation) {
+  async function operate(threadId, client, recordingId, operationId, operation) {
     const target = await targetForThread(threadId);
+    const receiptKey = `control-receipt:${target.projectId}:${operationId}`;
+    if (operation !== "heartbeat") {
+      const prior = await bb.storage.kv.get(receiptKey);
+      if (prior) {
+        if (prior.recordingId !== recordingId || prior.operation !== operation || prior.clientId !== client.clientId) {
+          return basePanel(target.projectId, "needs_attention", client, {
+            capture: null,
+            error: { code: "operation_conflict", message: "This control operation id was already used for different content.", retryable: false }
+          });
+        }
+        return getPanelState(threadId, client);
+      }
+    }
     const capture = await readCapture(target.projectId);
     if (!capture || capture.recordingId !== recordingId || capture.clientId !== client.clientId) return getPanelState(threadId, client);
     const result = await callHost(target, operation, { target, recordingId, ownerId: capture.ownerId });
@@ -19212,6 +19228,9 @@ function marginsPlugin(bb) {
       } else {
         capture.lastHeartbeatUnixMs = operation === "heartbeat" ? Date.now() : capture.lastHeartbeatUnixMs;
         await saveCapture(capture);
+      }
+      if (operation !== "heartbeat") {
+        await bb.storage.kv.set(receiptKey, { recordingId, operation, clientId: client.clientId });
       }
     }
     bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: operation });
@@ -19241,10 +19260,10 @@ function marginsPlugin(bb) {
         return getPanelState(threadId, client);
       });
     },
-    heartbeat: ({ threadId, client, recordingId }) => operate(threadId, client, recordingId, "heartbeat"),
-    pause: ({ threadId, client, recordingId }) => operate(threadId, client, recordingId, "pause"),
-    resume: ({ threadId, client, recordingId }) => operate(threadId, client, recordingId, "resume"),
-    stop: ({ threadId, client, recordingId }) => operate(threadId, client, recordingId, "stop"),
+    heartbeat: ({ threadId, client, recordingId, operationId }) => operate(threadId, client, recordingId, operationId, "heartbeat"),
+    pause: ({ threadId, client, recordingId, operationId }) => operate(threadId, client, recordingId, operationId, "pause"),
+    resume: ({ threadId, client, recordingId, operationId }) => operate(threadId, client, recordingId, operationId, "resume"),
+    stop: ({ threadId, client, recordingId, operationId }) => operate(threadId, client, recordingId, operationId, "stop"),
     async updateNotepad({ threadId, client, recordingId, expectedRevision, text }) {
       const target = await targetForThread(threadId);
       const capture = await readCapture(target.projectId);
@@ -19282,35 +19301,6 @@ function marginsPlugin(bb) {
       bytesBase64: parsed.data.bytesBase64
     });
     return context.json(result, result.ok ? 200 : 502);
-  });
-  bb.background.service("capture-disconnect-safety", {
-    async start(signal) {
-      while (!signal.aborted) {
-        for (const key of await bb.storage.kv.list(CAPTURE_PREFIX)) {
-          const parsed = captureRecordSchema.safeParse(await bb.storage.kv.get(key));
-          if (!parsed.success || Date.now() - parsed.data.lastHeartbeatUnixMs <= DISCONNECT_GRACE_MS) continue;
-          const capture = parsed.data;
-          await saveCapture(capture);
-          const target = { projectId: capture.projectId, hostId: capture.hostId, projectRoot: capture.projectRoot };
-          const result = await callHost(target, "stop", { target, recordingId: capture.recordingId, ownerId: capture.ownerId });
-          if (result.ok) {
-            await saveSaved(capture.projectId);
-            await clearCapture(capture.projectId);
-            bb.realtime.publish(REALTIME_CHANNEL, { projectId: capture.projectId, reason: "disconnect-saved" });
-          } else {
-            capture.lastHeartbeatUnixMs = Date.now();
-            await saveCapture(capture);
-          }
-        }
-        await new Promise((resolve) => {
-          const timer = setTimeout(resolve, 2e3);
-          signal.addEventListener("abort", () => {
-            clearTimeout(timer);
-            resolve();
-          }, { once: true });
-        });
-      }
-    }
   });
   bb.ui.registerMentionProvider({
     id: "margins",

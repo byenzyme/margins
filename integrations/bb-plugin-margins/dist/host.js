@@ -32859,7 +32859,10 @@ var threadClientInputSchema = external_exports2.object({
   threadId: external_exports2.string().min(1),
   client: clientCapabilitiesSchema
 }).strict();
-var captureClientInputSchema = threadClientInputSchema.extend({ recordingId: external_exports2.string().min(1) }).strict();
+var captureClientInputSchema = threadClientInputSchema.extend({
+  recordingId: external_exports2.string().min(1),
+  operationId: external_exports2.string().min(1)
+}).strict();
 var marginsRpcContract = defineRpcContract2({
   getPanelState: { input: threadClientInputSchema, output: panelStateSchema },
   beginBrowserCapture: {
