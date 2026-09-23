@@ -22,6 +22,14 @@ export function createMarginsHostEntry(transport: Transport) {
     contract: marginsHostContract,
     experimental_signals: hostSignals,
     handlers: {
+      sessionExists(input, context) {
+        retain(context);
+        return transport.sessionExists(input.target, context.experimental_paths.dataDir, input.recordingId);
+      },
+      captureAuthority(input, context) {
+        retain(context);
+        return transport.authority(input.target, context.experimental_paths.dataDir);
+      },
       async startBrowserCapture(input, context) {
         retain(context);
         const result = await transport.start(input.target, context.experimental_paths.dataDir, input.ownerId, input.name);

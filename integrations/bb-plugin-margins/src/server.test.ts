@@ -21,6 +21,8 @@ function harness(options: { heartbeatFails?: boolean } = {}) {
       }) as never },
     },
     experimental_callHostRpc: ({ method }) => {
+      if (method === "captureAuthority") return { ok: true, instanceId: "instance-1", workspaceId: "workspace-1" };
+      if (method === "sessionExists") return { ok: true, found: true };
       if (method === "stop") { stopped = true; return { ok: true, snapshot: null }; }
       if (method === "uploadChunk") return { ok: true };
       if (method === "connectedNoteContext") return { ok: true, context: {
@@ -36,10 +38,12 @@ function harness(options: { heartbeatFails?: boolean } = {}) {
 }
 
 describe("Margins project recording server", () => {
-  it("is honest about Mac setup and offers browser microphone recording elsewhere", async () => {
+  it("offers microphone-only recording on a Mac until native capture is available", async () => {
     const host = harness();
-    await expect(host.harness.behavior.callRpc("getPanelState", { threadId: "thr-1", client: mac })).resolves.toMatchObject({ state: "needs_setup", title: "Enable recording on this Mac", sourceLabel: null, primaryAction: "none" });
+    await expect(host.harness.behavior.callRpc("getPanelState", { threadId: "thr-1", client: mac })).resolves.toMatchObject({ state: "ready", sourceLabel: "Microphone only", primaryAction: "start" });
+    await expect(host.harness.behavior.callRpc("getPanelState", { threadId: "thr-1", client: { ...mac, browserMicrophone: false } })).resolves.toMatchObject({ state: "needs_setup", sourceLabel: null });
     await expect(host.harness.behavior.callRpc("getPanelState", { threadId: "thr-1", client: browser })).resolves.toMatchObject({ state: "ready", sourceLabel: "Microphone only", storageLabel: "Saved to this bb project" });
+    await expect(host.harness.behavior.callRpc("beginBrowserCapture", { threadId: "thr-1", client: mac, ownerId: "mac-owner" })).resolves.toMatchObject({ state: "recording", sourceLabel: "Microphone only" });
   });
 
   it("routes capture to the stable primary project folder and stores no note or audio bodies", async () => {
@@ -95,5 +99,15 @@ describe("Margins project recording server", () => {
     await expect(host.harness.behavior.callRpc("connectedNoteContext", { threadId: "thr-1", sessionId: "rec-1" })).resolves.toMatchObject({ ok: true, context: { sessionId: "rec-1" } });
     await expect(host.harness.behavior.callRpc("connectedNoteContext", { threadId: "thr-1", sessionId: "stale" })).resolves.toMatchObject({ ok: false, error: { code: "session_pin_stale" } });
     expect(host.harness.inspection.experimental_hostRpcCalls.filter(call => call.method === "connectedNoteContext")).toHaveLength(1);
+  });
+
+  it("pins a saved Mac session only in the project's verified destination", async () => {
+    const host = harness();
+    const wrong = { threadId: "thr-1", sessionId: "mac-session-1", instanceId: "other", workspaceId: "workspace-1" };
+    await expect(host.harness.behavior.callRpc("pinNativeSession", wrong)).resolves.toMatchObject({ ok: false, error: { code: "destination_changed" } });
+    expect(host.harness.inspection.experimental_hostRpcCalls.filter(call => call.method === "sessionExists")).toHaveLength(0);
+    await expect(host.harness.behavior.callRpc("pinNativeSession", { ...wrong, instanceId: "instance-1" })).resolves.toMatchObject({ ok: true });
+    await expect(host.bb.storage.kv.get("last-session:proj-1")).resolves.toBe("mac-session-1");
+    expect(host.harness.inspection.experimental_hostRpcCalls.filter(call => call.method === "sessionExists")).toHaveLength(1);
   });
 });

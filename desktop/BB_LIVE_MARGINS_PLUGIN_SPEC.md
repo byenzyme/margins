@@ -81,41 +81,21 @@ State claims are conservative:
 
 ## First use on a Mac
 
-Before ordinary recording, the panel shows **Enable recording on this Mac**.
-It explains that Margins can hear the person through the microphone and a
-conversation playing on this Mac, starts only after the person presses Start,
-and stops and saves if this bb window stays disconnected.
+The Mac PWA always offers browser **Microphone only** when its secure-context
+media API is available. For **Microphone + computer audio**, the person starts
+`margins native-bridge` on that same Mac with a fixed remote Linux Workspace
+and exact BB origin, then enters its one-time pairing code in the panel. The
+bridge listens only on loopback and accepts only that Origin and Host. The BB
+plugin compares the helper's instance and Workspace identity with the project
+recording destination before enabling native Start. No enrolled bb host or
+thread environment substitutes for the current Mac.
 
-The setup action is deterministic. The UI does not expose or ask the user to
-manage a native component. Readiness is granted only after the current bb
-window proves it can reach the Mac-local capture capability and the operating
-system has granted the required audio access.
-
-The current bb plugin SDK does not expose a browser-local native-service bridge
-or a stable identity for the physical device running the PWA. Therefore the
-plugin in this repository must not claim that Mac setup works merely because an
-enrolled Mac or the thread's environment host exists. Until bb provides that
-capability, the Mac state remains an honest setup-required/unavailable state.
-
-The required bb seam is intentionally narrow:
-
-```ts
-interface ClientAudioCapture {
-  probe(): Promise<{
-    platform: "macos";
-    ready: boolean;
-    sources: ["microphone", "system"];
-  }>;
-  enable(): Promise<void>;
-  start(input: { captureId: string }): Promise<ReadableStream<AudioFrame>>;
-  pause(): Promise<void>;
-  resume(): Promise<void>;
-  stop(): Promise<void>;
-}
-```
-
-It must be bound to the current PWA window/device, not resolved through a bb
-thread environment or chosen from enrolled hosts.
+The BB app overlay keeps native and browser capture controls reachable after
+the thread panel closes. Native capture uses the existing two-lane recorder and
+durable remote transfer spool. The helper reports separate microphone/system
+accepted and dropped samples, system frames, and silence so the UI can make a
+source claim grounded in actual capture. A Mac device pass is still required
+before shipping the native source as verified.
 
 ## Browser and mobile recording
 
@@ -223,9 +203,10 @@ machine as part of Start. The release contains the normal `margins` CLI and the
 project-side hosted capture service. Downloads are named, digest-verified, and
 never overwrite an unrelated command.
 
-This installation is implementation. UI stages say **Getting recording ready**
-and, when required, **Enable recording on this Mac**. They do not say install,
-helper, daemon, runtime, binary, signing, plist, TCC, token, or host worker.
+The Mac panel currently shows the explicit `native-bridge` command and pairing
+step. This is the available bridge while the BB SDK has no window-local native
+audio API. The project-side release still needs to publish both `margins` and
+`margins-server` for automatic installation on a fresh project machine.
 
 The already-built `margins-live` Mac executable and its permission metadata are
 retained as a possible implementation of the future client-local capture seam.

@@ -20,11 +20,26 @@ function panel(changes: Partial<PanelState> = {}): PanelState {
 afterEach(() => vi.restoreAllMocks());
 
 describe("Margins recording panel", () => {
-  it("registers a route-independent owner and only one compact thread panel", () => {
+  it("registers a route-independent owner, persistent status, and one compact thread panel", () => {
     expect(app.contentScripts).toHaveLength(1);
+    expect(app.appOverlays).toMatchObject([{ id: "recording-status" }]);
     expect(app.threadPanelActions).toMatchObject([{ id: "live", title: "Margins", layout: "flush" }]);
     expect(app.navPanels).toEqual([]);
     expect(app.messageActions).toEqual([]);
+  });
+
+  it("keeps Pause and Stop reachable after the recording panel unmounts", async () => {
+    vi.spyOn(browserCaptureOwner, "threadId", "get").mockReturnValue("thr-owner");
+    vi.spyOn(browserCaptureOwner, "active", "get").mockReturnValue(true);
+    vi.spyOn(browserCaptureOwner, "panel").mockReturnValue(panel());
+    const pause = vi.spyOn(browserCaptureOwner, "pause").mockResolvedValue(panel({ state: "paused", primaryAction: "resume" }));
+    const overlay = renderSlot(app.appOverlays[0]!, {}, { context: { threadId: "thr-other" } });
+    const screen = within(overlay.container);
+    fireEvent.click(screen.getByRole("button", { name: "Pause recording" }));
+    await waitFor(() => expect(pause).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: /Recording/ }));
+    expect(overlay.inspection.navigateCalls).toContainEqual({ method: "toThread", threadId: "thr-owner" });
+    overlay.lifecycle.unmount();
   });
 
   it("shows the truthful microphone source, project storage, and one editable notepad", async () => {

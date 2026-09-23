@@ -6,11 +6,14 @@ the project’s primary folder under its existing `.margins` store.
 
 ## What works in this version
 
-- Browser and mobile microphone recording, labelled **Microphone only**.
+- Browser, Mac PWA, and mobile microphone recording, labelled **Microphone only**.
+- Paired Mac-local `margins native-bridge` recording with separate microphone and
+  computer-audio lanes delivered to the configured Linux Margins Workspace.
 - One Start action: permission is requested before a project meeting exists.
 - Small pause/stop controls and one full, editable notepad.
 - Recording ownership survives panel close and thread navigation because a bb
-  content script, rather than the panel component, owns the browser stream.
+  content script owns the browser stream. An app overlay provides persistent
+  controls for browser and paired Mac recordings.
 - A 25-second reconnect grace. After it expires, the project machine stops and
   saves the audio it received.
 - Saved recordings are ordinary Margins sessions. The normal `margins` CLI
@@ -35,19 +38,35 @@ The service is launched with the bb project’s default source path as
 worktree or the recording device’s personal Margins store. For local development,
 `MARGINS_PROJECT_SERVER_PATH` may point at an already-built `margins-server`.
 
-## Honest current limits
+## Mac PWA recording
 
-The plugin's current bb SDK does not yet expose either:
+The Mac PWA can record its microphone directly. For microphone and computer
+audio, run an audio-capture-enabled Margins build **on the Mac running the browser**:
 
-1. a browser-window-local native audio capability, required to enable
-   microphone + computer audio on the Mac actually running the PWA; or
-2. an app-global, client-scoped status/control contribution, required to keep
-   recording controls visibly reachable while the side panel is closed.
+```sh
+margins native-bridge --remote ssh://<configured-Linux-alias> \
+  --workspace <Workspace-id> --origin https://<exact-bb-origin> --port 18765
+```
 
-The plugin therefore does not pretend a thread host is the current Mac. Browser
-microphone capture can continue with the panel closed. A newer experimental bb
-app-overlay surface may provide the persistent return path once the plugin moves
-to that SDK and its lifecycle has been verified.
+Enter the one-time code printed by the bridge in the Margins panel. The plugin
+compares the bridge's instance and Workspace identity with the BB project's
+recording service before enabling Start. Configure the project host and Mac
+bridge to use the same provisioned Linux service when using a separate authority:
+`MARGINS_BB_REMOTE_URL`, `MARGINS_BB_REMOTE_TOKEN`, and
+`MARGINS_BB_REMOTE_WORKSPACE` select it on the project host. The Mac bridge uses
+the normal `ssh://` alias or HTTPS credentials from `MARGINS_REMOTE_TOKEN`.
+The bridge only accepts requests from the exact BB origin on loopback and never
+lets browser requests change its remote destination. The token stays in the
+browser tab's session storage. Stopping retains the native transfer spool until
+the remote server acknowledges it.
+
+Mac native recording still requires a Mac build and physical device test; the
+Linux build and protocol tests cannot prove TCC, system audio, or browser
+private-network behavior. Native notepad editing is not exposed through this
+bridge yet. The plugin's release-pinned installation also requires a published
+release archive containing both `margins` and `margins-server`. The currently
+published CLI does not contain the new `native-bridge` command; use the built
+`margins-private` executable for development until a matching release ships.
 
 `@Margins` is also withheld until the project recording service exposes a
 bounded live-context read. The control snapshot deliberately carries no rolling

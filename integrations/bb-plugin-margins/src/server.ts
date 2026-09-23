@@ -81,7 +81,7 @@ function stateCopy(state: PanelState["state"], sourceLabel: string | null, error
 }
 
 function sourceFor(client: ClientCapabilities) {
-  if (client.platform === "macos") return client.nativeMacCapture ? "Microphone + computer audio" : null;
+  if (client.platform === "macos" && client.nativeMacCapture) return "Microphone + computer audio";
   return client.secureContext && client.browserMicrophone ? "Microphone only" : null;
 }
 
@@ -159,7 +159,7 @@ export default function marginsPlugin(bb: BbPluginApi) {
       const state = result.snapshot.status === "paused" ? "paused" : result.snapshot.status === "saving" ? "saving" : "recording";
       return basePanel(target.projectId, state, client, { capture, lastSessionId, notepad: result.snapshot.notepad });
     }
-    if (client.platform === "macos" && !client.nativeMacCapture) return basePanel(target.projectId, "needs_setup", client);
+    if (client.platform === "macos" && !sourceFor(client)) return basePanel(target.projectId, "needs_setup", client);
     if (!sourceFor(client)) return basePanel(target.projectId, "unavailable", client);
     return basePanel(target.projectId, "ready", client, { lastSessionId });
   }
@@ -218,10 +218,36 @@ export default function marginsPlugin(bb: BbPluginApi) {
   }
 
   bb.rpc.register(marginsRpcContract, {
+    async captureAuthority({ threadId }) {
+      try {
+        const target = await targetForThread(threadId);
+        return await callHost(target, "captureAuthority", { target });
+      } catch (cause) {
+        return { ok: false as const, error: { code: "project_folder_unavailable", message: cause instanceof Error ? cause.message : String(cause), retryable: false } };
+      }
+    },
+    async pinNativeSession({ threadId, sessionId, instanceId, workspaceId }) {
+      try {
+        const target = await targetForThread(threadId);
+        const authority = await callHost(target, "captureAuthority", { target });
+        if (!authority.ok) return authority;
+        if (authority.instanceId !== instanceId || authority.workspaceId !== workspaceId) {
+          return { ok: false as const, error: { code: "destination_changed", message: "The Mac recording belongs to a different Margins instance or Workspace.", retryable: false } };
+        }
+        const found = await callHost(target, "sessionExists", { target, recordingId: sessionId }) as { ok: true; found: boolean } | { ok: false; error: HostError };
+        if (!found.ok) return { ok: false as const, error: found.error };
+        if (!found.found) return { ok: false as const, error: { code: "native_session_not_found", message: "The saved Mac session is not visible in this BB project's Margins Workspace yet.", retryable: true } };
+        await bb.storage.kv.set(lastSessionKey(target.projectId), sessionId);
+        bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: "stop" });
+        return { ok: true as const };
+      } catch (cause) {
+        return { ok: false as const, error: { code: "native_session_unavailable", message: cause instanceof Error ? cause.message : String(cause), retryable: true } };
+      }
+    },
     getPanelState: ({ threadId, client }) => getPanelState(threadId, client),
     async beginBrowserCapture({ threadId, client, ownerId, title }) {
       const target = await targetForThread(threadId);
-      if (client.platform === "macos" || !client.secureContext || !client.browserMicrophone) return getPanelState(threadId, client);
+      if (client.nativeMacCapture || !client.secureContext || !client.browserMicrophone) return getPanelState(threadId, client);
       return locked(target.projectId, async () => {
         if (await readCapture(target.projectId)) return getPanelState(threadId, client);
         const result = await callHost(target, "startBrowserCapture", { target, ownerId, name: meetingName(title) }) as HostResult;

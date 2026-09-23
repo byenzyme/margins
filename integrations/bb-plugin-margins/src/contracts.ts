@@ -56,6 +56,20 @@ const ownedCaptureInputSchema = z.object({ target: projectTargetSchema }).extend
   recordingId: z.string().min(1), ownerId: z.string().min(1),
 }).strict();
 export const marginsHostContract = defineRpcContract({
+  sessionExists: {
+    input: z.object({ target: projectTargetSchema, recordingId: z.string().min(1) }).strict(),
+    output: z.discriminatedUnion("ok", [
+      z.object({ ok: z.literal(true), found: z.boolean() }).strict(),
+      z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
+    ]),
+  },
+  captureAuthority: {
+    input: z.object({ target: projectTargetSchema }).strict(),
+    output: z.discriminatedUnion("ok", [
+      z.object({ ok: z.literal(true), instanceId: z.string().min(1), workspaceId: z.string().min(1) }).strict(),
+      z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
+    ]),
+  },
   startBrowserCapture: {
     input: z.object({ target: projectTargetSchema, ownerId: z.string().min(1), name: z.string().min(1).max(160) }).strict(),
     output: hostResultSchema,
@@ -109,6 +123,20 @@ const captureClientInputSchema = threadClientInputSchema.extend({
   operationId: z.string().min(1),
 }).strict();
 export const marginsRpcContract = defineRpcContract({
+  captureAuthority: {
+    input: z.object({ threadId: z.string().min(1) }).strict(),
+    output: z.discriminatedUnion("ok", [
+      z.object({ ok: z.literal(true), instanceId: z.string().min(1), workspaceId: z.string().min(1) }).strict(),
+      z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
+    ]),
+  },
+  pinNativeSession: {
+    input: z.object({ threadId: z.string().min(1), sessionId: z.string().min(1), instanceId: z.string().min(1), workspaceId: z.string().min(1) }).strict(),
+    output: z.discriminatedUnion("ok", [
+      z.object({ ok: z.literal(true) }).strict(),
+      z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
+    ]),
+  },
   getPanelState: { input: threadClientInputSchema, output: panelStateSchema },
   beginBrowserCapture: {
     input: threadClientInputSchema.extend({ ownerId: z.string().min(1), title: z.string().trim().max(160).optional() }).strict(),

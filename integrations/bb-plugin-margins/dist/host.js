@@ -5,6 +5,12 @@ const require = __createRequire(import.meta.url);
 var __filename = __fileURLToPath(import.meta.url);
 var __dirname = __pathDirname(__filename);
 var __defProp = Object.defineProperty;
+var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require : typeof Proxy !== "undefined" ? new Proxy(x, {
+  get: (a, b) => (typeof require !== "undefined" ? require : a)[b]
+}) : x)(function(x) {
+  if (typeof require !== "undefined") return require.apply(this, arguments);
+  throw Error('Dynamic require of "' + x + '" is not supported');
+});
 var __export = (target, all) => {
   for (var name in all)
     __defProp(target, name, { get: all[name], enumerable: true });
@@ -12,11 +18,516 @@ var __export = (target, all) => {
 
 // node_modules/@get-bb/plugin-sdk/dist/host.js
 import path from "node:path";
+var __create = Object.create;
 var __defProp2 = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __require2 = /* @__PURE__ */ ((x) => typeof __require !== "undefined" ? __require : typeof Proxy !== "undefined" ? new Proxy(x, {
+  get: (a, b) => (typeof __require !== "undefined" ? __require : a)[b]
+}) : x)(function(x) {
+  if (typeof __require !== "undefined") return __require.apply(this, arguments);
+  throw Error('Dynamic require of "' + x + '" is not supported');
+});
+var __commonJS = (cb, mod) => function __require22() {
+  try {
+    return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
+  } catch (e) {
+    throw mod = 0, e;
+  }
+};
 var __export2 = (target, all) => {
   for (var name in all)
     __defProp2(target, name, { get: all[name], enumerable: true });
 };
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp2(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp2(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
+var require_windows = __commonJS({
+  "../../node_modules/.pnpm/isexe@2.0.0/node_modules/isexe/windows.js"(exports, module) {
+    module.exports = isexe;
+    isexe.sync = sync;
+    var fs2 = __require2("fs");
+    function checkPathExt(path2, options) {
+      var pathext = options.pathExt !== void 0 ? options.pathExt : process.env.PATHEXT;
+      if (!pathext) {
+        return true;
+      }
+      pathext = pathext.split(";");
+      if (pathext.indexOf("") !== -1) {
+        return true;
+      }
+      for (var i = 0; i < pathext.length; i++) {
+        var p = pathext[i].toLowerCase();
+        if (p && path2.substr(-p.length).toLowerCase() === p) {
+          return true;
+        }
+      }
+      return false;
+    }
+    function checkStat(stat, path2, options) {
+      if (!stat.isSymbolicLink() && !stat.isFile()) {
+        return false;
+      }
+      return checkPathExt(path2, options);
+    }
+    function isexe(path2, options, cb) {
+      fs2.stat(path2, function(er, stat) {
+        cb(er, er ? false : checkStat(stat, path2, options));
+      });
+    }
+    function sync(path2, options) {
+      return checkStat(fs2.statSync(path2), path2, options);
+    }
+  }
+});
+var require_mode = __commonJS({
+  "../../node_modules/.pnpm/isexe@2.0.0/node_modules/isexe/mode.js"(exports, module) {
+    module.exports = isexe;
+    isexe.sync = sync;
+    var fs2 = __require2("fs");
+    function isexe(path2, options, cb) {
+      fs2.stat(path2, function(er, stat) {
+        cb(er, er ? false : checkStat(stat, options));
+      });
+    }
+    function sync(path2, options) {
+      return checkStat(fs2.statSync(path2), options);
+    }
+    function checkStat(stat, options) {
+      return stat.isFile() && checkMode(stat, options);
+    }
+    function checkMode(stat, options) {
+      var mod = stat.mode;
+      var uid = stat.uid;
+      var gid = stat.gid;
+      var myUid = options.uid !== void 0 ? options.uid : process.getuid && process.getuid();
+      var myGid = options.gid !== void 0 ? options.gid : process.getgid && process.getgid();
+      var u = parseInt("100", 8);
+      var g = parseInt("010", 8);
+      var o = parseInt("001", 8);
+      var ug = u | g;
+      var ret = mod & o || mod & g && gid === myGid || mod & u && uid === myUid || mod & ug && myUid === 0;
+      return ret;
+    }
+  }
+});
+var require_isexe = __commonJS({
+  "../../node_modules/.pnpm/isexe@2.0.0/node_modules/isexe/index.js"(exports, module) {
+    var fs2 = __require2("fs");
+    var core;
+    if (process.platform === "win32" || global.TESTING_WINDOWS) {
+      core = require_windows();
+    } else {
+      core = require_mode();
+    }
+    module.exports = isexe;
+    isexe.sync = sync;
+    function isexe(path2, options, cb) {
+      if (typeof options === "function") {
+        cb = options;
+        options = {};
+      }
+      if (!cb) {
+        if (typeof Promise !== "function") {
+          throw new TypeError("callback not provided");
+        }
+        return new Promise(function(resolve2, reject) {
+          isexe(path2, options || {}, function(er, is) {
+            if (er) {
+              reject(er);
+            } else {
+              resolve2(is);
+            }
+          });
+        });
+      }
+      core(path2, options || {}, function(er, is) {
+        if (er) {
+          if (er.code === "EACCES" || options && options.ignoreErrors) {
+            er = null;
+            is = false;
+          }
+        }
+        cb(er, is);
+      });
+    }
+    function sync(path2, options) {
+      try {
+        return core.sync(path2, options || {});
+      } catch (er) {
+        if (options && options.ignoreErrors || er.code === "EACCES") {
+          return false;
+        } else {
+          throw er;
+        }
+      }
+    }
+  }
+});
+var require_which = __commonJS({
+  "../../node_modules/.pnpm/which@2.0.2/node_modules/which/which.js"(exports, module) {
+    var isWindows = process.platform === "win32" || process.env.OSTYPE === "cygwin" || process.env.OSTYPE === "msys";
+    var path2 = __require2("path");
+    var COLON = isWindows ? ";" : ":";
+    var isexe = require_isexe();
+    var getNotFoundError = (cmd) => Object.assign(new Error(`not found: ${cmd}`), { code: "ENOENT" });
+    var getPathInfo = (cmd, opt) => {
+      const colon = opt.colon || COLON;
+      const pathEnv = cmd.match(/\//) || isWindows && cmd.match(/\\/) ? [""] : [
+        // windows always checks the cwd first
+        ...isWindows ? [process.cwd()] : [],
+        ...(opt.path || process.env.PATH || /* istanbul ignore next: very unusual */
+        "").split(colon)
+      ];
+      const pathExtExe = isWindows ? opt.pathExt || process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM" : "";
+      const pathExt = isWindows ? pathExtExe.split(colon) : [""];
+      if (isWindows) {
+        if (cmd.indexOf(".") !== -1 && pathExt[0] !== "")
+          pathExt.unshift("");
+      }
+      return {
+        pathEnv,
+        pathExt,
+        pathExtExe
+      };
+    };
+    var which = (cmd, opt, cb) => {
+      if (typeof opt === "function") {
+        cb = opt;
+        opt = {};
+      }
+      if (!opt)
+        opt = {};
+      const { pathEnv, pathExt, pathExtExe } = getPathInfo(cmd, opt);
+      const found = [];
+      const step = (i) => new Promise((resolve2, reject) => {
+        if (i === pathEnv.length)
+          return opt.all && found.length ? resolve2(found) : reject(getNotFoundError(cmd));
+        const ppRaw = pathEnv[i];
+        const pathPart = /^".*"$/.test(ppRaw) ? ppRaw.slice(1, -1) : ppRaw;
+        const pCmd = path2.join(pathPart, cmd);
+        const p = !pathPart && /^\.[\\\/]/.test(cmd) ? cmd.slice(0, 2) + pCmd : pCmd;
+        resolve2(subStep(p, i, 0));
+      });
+      const subStep = (p, i, ii) => new Promise((resolve2, reject) => {
+        if (ii === pathExt.length)
+          return resolve2(step(i + 1));
+        const ext = pathExt[ii];
+        isexe(p + ext, { pathExt: pathExtExe }, (er, is) => {
+          if (!er && is) {
+            if (opt.all)
+              found.push(p + ext);
+            else
+              return resolve2(p + ext);
+          }
+          return resolve2(subStep(p, i, ii + 1));
+        });
+      });
+      return cb ? step(0).then((res) => cb(null, res), cb) : step(0);
+    };
+    var whichSync = (cmd, opt) => {
+      opt = opt || {};
+      const { pathEnv, pathExt, pathExtExe } = getPathInfo(cmd, opt);
+      const found = [];
+      for (let i = 0; i < pathEnv.length; i++) {
+        const ppRaw = pathEnv[i];
+        const pathPart = /^".*"$/.test(ppRaw) ? ppRaw.slice(1, -1) : ppRaw;
+        const pCmd = path2.join(pathPart, cmd);
+        const p = !pathPart && /^\.[\\\/]/.test(cmd) ? cmd.slice(0, 2) + pCmd : pCmd;
+        for (let j = 0; j < pathExt.length; j++) {
+          const cur = p + pathExt[j];
+          try {
+            const is = isexe.sync(cur, { pathExt: pathExtExe });
+            if (is) {
+              if (opt.all)
+                found.push(cur);
+              else
+                return cur;
+            }
+          } catch (ex) {
+          }
+        }
+      }
+      if (opt.all && found.length)
+        return found;
+      if (opt.nothrow)
+        return null;
+      throw getNotFoundError(cmd);
+    };
+    module.exports = which;
+    which.sync = whichSync;
+  }
+});
+var require_path_key = __commonJS({
+  "../../node_modules/.pnpm/path-key@3.1.1/node_modules/path-key/index.js"(exports, module) {
+    "use strict";
+    var pathKey = (options = {}) => {
+      const environment = options.env || process.env;
+      const platform2 = options.platform || process.platform;
+      if (platform2 !== "win32") {
+        return "PATH";
+      }
+      return Object.keys(environment).reverse().find((key) => key.toUpperCase() === "PATH") || "Path";
+    };
+    module.exports = pathKey;
+    module.exports.default = pathKey;
+  }
+});
+var require_resolveCommand = __commonJS({
+  "../../node_modules/.pnpm/cross-spawn@7.0.6/node_modules/cross-spawn/lib/util/resolveCommand.js"(exports, module) {
+    "use strict";
+    var path2 = __require2("path");
+    var which = require_which();
+    var getPathKey = require_path_key();
+    function resolveCommandAttempt(parsed, withoutPathExt) {
+      const env = parsed.options.env || process.env;
+      const cwd = process.cwd();
+      const hasCustomCwd = parsed.options.cwd != null;
+      const shouldSwitchCwd = hasCustomCwd && process.chdir !== void 0 && !process.chdir.disabled;
+      if (shouldSwitchCwd) {
+        try {
+          process.chdir(parsed.options.cwd);
+        } catch (err) {
+        }
+      }
+      let resolved;
+      try {
+        resolved = which.sync(parsed.command, {
+          path: env[getPathKey({ env })],
+          pathExt: withoutPathExt ? path2.delimiter : void 0
+        });
+      } catch (e) {
+      } finally {
+        if (shouldSwitchCwd) {
+          process.chdir(cwd);
+        }
+      }
+      if (resolved) {
+        resolved = path2.resolve(hasCustomCwd ? parsed.options.cwd : "", resolved);
+      }
+      return resolved;
+    }
+    function resolveCommand(parsed) {
+      return resolveCommandAttempt(parsed) || resolveCommandAttempt(parsed, true);
+    }
+    module.exports = resolveCommand;
+  }
+});
+var require_escape = __commonJS({
+  "../../node_modules/.pnpm/cross-spawn@7.0.6/node_modules/cross-spawn/lib/util/escape.js"(exports, module) {
+    "use strict";
+    var metaCharsRegExp = /([()\][%!^"`<>&|;, *?])/g;
+    function escapeCommand(arg) {
+      arg = arg.replace(metaCharsRegExp, "^$1");
+      return arg;
+    }
+    function escapeArgument(arg, doubleEscapeMetaChars) {
+      arg = `${arg}`;
+      arg = arg.replace(/(?=(\\+?)?)\1"/g, '$1$1\\"');
+      arg = arg.replace(/(?=(\\+?)?)\1$/, "$1$1");
+      arg = `"${arg}"`;
+      arg = arg.replace(metaCharsRegExp, "^$1");
+      if (doubleEscapeMetaChars) {
+        arg = arg.replace(metaCharsRegExp, "^$1");
+      }
+      return arg;
+    }
+    module.exports.command = escapeCommand;
+    module.exports.argument = escapeArgument;
+  }
+});
+var require_shebang_regex = __commonJS({
+  "../../node_modules/.pnpm/shebang-regex@3.0.0/node_modules/shebang-regex/index.js"(exports, module) {
+    "use strict";
+    module.exports = /^#!(.*)/;
+  }
+});
+var require_shebang_command = __commonJS({
+  "../../node_modules/.pnpm/shebang-command@2.0.0/node_modules/shebang-command/index.js"(exports, module) {
+    "use strict";
+    var shebangRegex = require_shebang_regex();
+    module.exports = (string42 = "") => {
+      const match = string42.match(shebangRegex);
+      if (!match) {
+        return null;
+      }
+      const [path2, argument] = match[0].replace(/#! ?/, "").split(" ");
+      const binary = path2.split("/").pop();
+      if (binary === "env") {
+        return argument;
+      }
+      return argument ? `${binary} ${argument}` : binary;
+    };
+  }
+});
+var require_readShebang = __commonJS({
+  "../../node_modules/.pnpm/cross-spawn@7.0.6/node_modules/cross-spawn/lib/util/readShebang.js"(exports, module) {
+    "use strict";
+    var fs2 = __require2("fs");
+    var shebangCommand = require_shebang_command();
+    function readShebang(command) {
+      const size = 150;
+      const buffer = Buffer.alloc(size);
+      let fd;
+      try {
+        fd = fs2.openSync(command, "r");
+        fs2.readSync(fd, buffer, 0, size, 0);
+        fs2.closeSync(fd);
+      } catch (e) {
+      }
+      return shebangCommand(buffer.toString());
+    }
+    module.exports = readShebang;
+  }
+});
+var require_parse = __commonJS({
+  "../../node_modules/.pnpm/cross-spawn@7.0.6/node_modules/cross-spawn/lib/parse.js"(exports, module) {
+    "use strict";
+    var path2 = __require2("path");
+    var resolveCommand = require_resolveCommand();
+    var escape = require_escape();
+    var readShebang = require_readShebang();
+    var isWin = process.platform === "win32";
+    var isExecutableRegExp = /\.(?:com|exe)$/i;
+    var isCmdShimRegExp = /node_modules[\\/].bin[\\/][^\\/]+\.cmd$/i;
+    function detectShebang(parsed) {
+      parsed.file = resolveCommand(parsed);
+      const shebang = parsed.file && readShebang(parsed.file);
+      if (shebang) {
+        parsed.args.unshift(parsed.file);
+        parsed.command = shebang;
+        return resolveCommand(parsed);
+      }
+      return parsed.file;
+    }
+    function parseNonShell(parsed) {
+      if (!isWin) {
+        return parsed;
+      }
+      const commandFile = detectShebang(parsed);
+      const needsShell = !isExecutableRegExp.test(commandFile);
+      if (parsed.options.forceShell || needsShell) {
+        const needsDoubleEscapeMetaChars = isCmdShimRegExp.test(commandFile);
+        parsed.command = path2.normalize(parsed.command);
+        parsed.command = escape.command(parsed.command);
+        parsed.args = parsed.args.map((arg) => escape.argument(arg, needsDoubleEscapeMetaChars));
+        const shellCommand = [parsed.command].concat(parsed.args).join(" ");
+        parsed.args = ["/d", "/s", "/c", `"${shellCommand}"`];
+        parsed.command = process.env.comspec || "cmd.exe";
+        parsed.options.windowsVerbatimArguments = true;
+      }
+      return parsed;
+    }
+    function parse32(command, args, options) {
+      if (args && !Array.isArray(args)) {
+        options = args;
+        args = null;
+      }
+      args = args ? args.slice(0) : [];
+      options = Object.assign({}, options);
+      const parsed = {
+        command,
+        args,
+        options,
+        file: void 0,
+        original: {
+          command,
+          args
+        }
+      };
+      return options.shell ? parsed : parseNonShell(parsed);
+    }
+    module.exports = parse32;
+  }
+});
+var require_enoent = __commonJS({
+  "../../node_modules/.pnpm/cross-spawn@7.0.6/node_modules/cross-spawn/lib/enoent.js"(exports, module) {
+    "use strict";
+    var isWin = process.platform === "win32";
+    function notFoundError(original, syscall) {
+      return Object.assign(new Error(`${syscall} ${original.command} ENOENT`), {
+        code: "ENOENT",
+        errno: "ENOENT",
+        syscall: `${syscall} ${original.command}`,
+        path: original.command,
+        spawnargs: original.args
+      });
+    }
+    function hookChildProcess(cp, parsed) {
+      if (!isWin) {
+        return;
+      }
+      const originalEmit = cp.emit;
+      cp.emit = function(name, arg1) {
+        if (name === "exit") {
+          const err = verifyENOENT(arg1, parsed);
+          if (err) {
+            return originalEmit.call(cp, "error", err);
+          }
+        }
+        return originalEmit.apply(cp, arguments);
+      };
+    }
+    function verifyENOENT(status, parsed) {
+      if (isWin && status === 1 && !parsed.file) {
+        return notFoundError(parsed.original, "spawn");
+      }
+      return null;
+    }
+    function verifyENOENTSync(status, parsed) {
+      if (isWin && status === 1 && !parsed.file) {
+        return notFoundError(parsed.original, "spawnSync");
+      }
+      return null;
+    }
+    module.exports = {
+      hookChildProcess,
+      verifyENOENT,
+      verifyENOENTSync,
+      notFoundError
+    };
+  }
+});
+var require_cross_spawn = __commonJS({
+  "../../node_modules/.pnpm/cross-spawn@7.0.6/node_modules/cross-spawn/index.js"(exports, module) {
+    "use strict";
+    var cp = __require2("child_process");
+    var parse32 = require_parse();
+    var enoent = require_enoent();
+    function spawn2(command, args, options) {
+      const parsed = parse32(command, args, options);
+      const spawned = cp.spawn(parsed.command, parsed.args, parsed.options);
+      enoent.hookChildProcess(spawned, parsed);
+      return spawned;
+    }
+    function spawnSync(command, args, options) {
+      const parsed = parse32(command, args, options);
+      const result = cp.spawnSync(parsed.command, parsed.args, parsed.options);
+      result.error = result.error || enoent.verifyENOENTSync(result.status, parsed);
+      return result;
+    }
+    module.exports = spawn2;
+    module.exports.spawn = spawn2;
+    module.exports.sync = spawnSync;
+    module.exports._parse = parse32;
+    module.exports._enoent = enoent;
+  }
+});
 function experimental_defineHostEntry(args) {
   return {
     experimental_apiVersion: 1,
@@ -3054,7 +3565,7 @@ var $ZodObjectJIT = /* @__PURE__ */ $constructor("$ZodObjectJIT", (inst, def) =>
             })));
           }
         }
-
+        
         if (${id}.value === undefined) {
           if (${k} in input) {
             newResult[${k}] = undefined;
@@ -3062,7 +3573,7 @@ var $ZodObjectJIT = /* @__PURE__ */ $constructor("$ZodObjectJIT", (inst, def) =>
         } else {
           newResult[${k}] = ${id}.value;
         }
-
+        
       `);
       } else {
         doc.write(`
@@ -3072,7 +3583,7 @@ var $ZodObjectJIT = /* @__PURE__ */ $constructor("$ZodObjectJIT", (inst, def) =>
             path: iss.path ? [${k}, ...iss.path] : [${k}]
           })));
         }
-
+        
         if (${id}.value === undefined) {
           if (${k} in input) {
             newResult[${k}] = undefined;
@@ -3080,7 +3591,7 @@ var $ZodObjectJIT = /* @__PURE__ */ $constructor("$ZodObjectJIT", (inst, def) =>
         } else {
           newResult[${k}] = ${id}.value;
         }
-
+        
       `);
       }
     }
@@ -13881,6 +14392,7 @@ var claudePluginManifestSchema = external_exports.object({
   skills: claudePluginPathListSchema.optional(),
   commands: claudePluginPathListSchema.optional()
 }).passthrough();
+var import_cross_spawn = __toESM(require_cross_spawn(), 1);
 
 // bb-host-sdk-runtime:@get-bb/plugin-sdk
 var PLUGIN_CLI_OUTPUT_MAX_BYTES = 1024 * 1024;
@@ -17489,7 +18001,7 @@ var $ZodObjectJIT2 = /* @__PURE__ */ $constructor2("$ZodObjectJIT", (inst, def) 
         doc.write(`
         if (${id}.issues.length) {${prefixStr(id, k)}
         }
-
+        
         if (${id}.value === undefined) {
           if (${isPresent}) {
             newResult[${k}] = undefined;
@@ -32756,7 +33268,6 @@ function date8(params) {
 
 // src/contracts.ts
 var PANEL_STATE_SCHEMA = "margins.bb.recording.panel.v2";
-var CAPTURE_PROTOCOL_VERSION = 2;
 var clientCapabilitiesSchema = external_exports2.object({
   clientId: external_exports2.string().min(1),
   platform: external_exports2.enum(["macos", "mobile", "other"]),
@@ -32798,11 +33309,41 @@ var hostResultSchema = external_exports2.discriminatedUnion("ok", [
   external_exports2.object({ ok: external_exports2.literal(true), snapshot: hostCaptureSnapshotSchema.nullable() }).strict(),
   external_exports2.object({ ok: external_exports2.literal(false), error: hostErrorSchema }).strict()
 ]);
+var connectedNoteContextSchema = external_exports2.object({
+  schema: external_exports2.literal("margins.bb.connected-note-context.v1"),
+  instanceId: external_exports2.string().min(1),
+  workspaceId: external_exports2.string().min(1),
+  sessionId: external_exports2.string().min(1),
+  title: external_exports2.string().nullable(),
+  transcript: external_exports2.object({ terminal: external_exports2.boolean(), live: external_exports2.boolean(), updatedAtUnixMs: external_exports2.number().int().nonnegative() }).strict(),
+  memo: external_exports2.object({ revision: external_exports2.string().min(1), lineCount: external_exports2.number().int().nonnegative() }).strict(),
+  artifacts: external_exports2.array(external_exports2.object({ artifactId: external_exports2.string().min(1), kind: external_exports2.string().min(1), retentionClass: external_exports2.string().min(1) }).strict()),
+  noteAssociation: external_exports2.object({ sourceId: external_exports2.string().min(1), relativePath: external_exports2.string().min(1), revision: external_exports2.number().int().nonnegative() }).strict().nullable(),
+  instructions: external_exports2.string().min(1)
+}).strict();
+var connectedNoteResultSchema = external_exports2.discriminatedUnion("ok", [
+  external_exports2.object({ ok: external_exports2.literal(true), context: connectedNoteContextSchema }).strict(),
+  external_exports2.object({ ok: external_exports2.literal(false), error: hostErrorSchema }).strict()
+]);
 var ownedCaptureInputSchema = external_exports2.object({ target: projectTargetSchema }).extend({
   recordingId: external_exports2.string().min(1),
   ownerId: external_exports2.string().min(1)
 }).strict();
 var marginsHostContract = defineRpcContract2({
+  sessionExists: {
+    input: external_exports2.object({ target: projectTargetSchema, recordingId: external_exports2.string().min(1) }).strict(),
+    output: external_exports2.discriminatedUnion("ok", [
+      external_exports2.object({ ok: external_exports2.literal(true), found: external_exports2.boolean() }).strict(),
+      external_exports2.object({ ok: external_exports2.literal(false), error: hostErrorSchema }).strict()
+    ])
+  },
+  captureAuthority: {
+    input: external_exports2.object({ target: projectTargetSchema }).strict(),
+    output: external_exports2.discriminatedUnion("ok", [
+      external_exports2.object({ ok: external_exports2.literal(true), instanceId: external_exports2.string().min(1), workspaceId: external_exports2.string().min(1) }).strict(),
+      external_exports2.object({ ok: external_exports2.literal(false), error: hostErrorSchema }).strict()
+    ])
+  },
   startBrowserCapture: {
     input: external_exports2.object({ target: projectTargetSchema, ownerId: external_exports2.string().min(1), name: external_exports2.string().min(1).max(160) }).strict(),
     output: hostResultSchema
@@ -32819,6 +33360,10 @@ var marginsHostContract = defineRpcContract2({
   uploadChunk: {
     input: ownedCaptureInputSchema.extend({ sequence: external_exports2.number().int().nonnegative(), bytesBase64: external_exports2.string() }).strict(),
     output: external_exports2.object({ ok: external_exports2.boolean(), error: hostErrorSchema.optional() }).strict()
+  },
+  connectedNoteContext: {
+    input: external_exports2.object({ target: projectTargetSchema, recordingId: external_exports2.string().min(1) }).strict(),
+    output: connectedNoteResultSchema
   }
 });
 var hostSignals = {
@@ -32850,6 +33395,7 @@ var panelStateSchema = external_exports2.object({
   ownsRecording: external_exports2.boolean(),
   recordingId: external_exports2.string().nullable(),
   notepad: notepadSchema.nullable(),
+  lastSessionId: external_exports2.string().nullable(),
   error: hostErrorSchema.nullable()
 }).strict();
 var threadClientInputSchema = external_exports2.object({
@@ -32861,6 +33407,20 @@ var captureClientInputSchema = threadClientInputSchema.extend({
   operationId: external_exports2.string().min(1)
 }).strict();
 var marginsRpcContract = defineRpcContract2({
+  captureAuthority: {
+    input: external_exports2.object({ threadId: external_exports2.string().min(1) }).strict(),
+    output: external_exports2.discriminatedUnion("ok", [
+      external_exports2.object({ ok: external_exports2.literal(true), instanceId: external_exports2.string().min(1), workspaceId: external_exports2.string().min(1) }).strict(),
+      external_exports2.object({ ok: external_exports2.literal(false), error: hostErrorSchema }).strict()
+    ])
+  },
+  pinNativeSession: {
+    input: external_exports2.object({ threadId: external_exports2.string().min(1), sessionId: external_exports2.string().min(1), instanceId: external_exports2.string().min(1), workspaceId: external_exports2.string().min(1) }).strict(),
+    output: external_exports2.discriminatedUnion("ok", [
+      external_exports2.object({ ok: external_exports2.literal(true) }).strict(),
+      external_exports2.object({ ok: external_exports2.literal(false), error: hostErrorSchema }).strict()
+    ])
+  },
   getPanelState: { input: threadClientInputSchema, output: panelStateSchema },
   beginBrowserCapture: {
     input: threadClientInputSchema.extend({ ownerId: external_exports2.string().min(1), title: external_exports2.string().trim().max(160).optional() }).strict(),
@@ -32873,6 +33433,10 @@ var marginsRpcContract = defineRpcContract2({
   updateNotepad: {
     input: captureClientInputSchema.extend({ expectedRevision: external_exports2.string().min(1), text: external_exports2.string().max(1e5) }).strict(),
     output: panelStateSchema
+  },
+  connectedNoteContext: {
+    input: external_exports2.object({ threadId: external_exports2.string().min(1), sessionId: external_exports2.string().min(1) }).strict(),
+    output: connectedNoteResultSchema
   }
 });
 
@@ -33117,6 +33681,33 @@ var ProjectServerManager = class {
     return pending;
   }
   async start(target, dataDir, key, signal) {
+    const remoteUrl = process.env.MARGINS_BB_REMOTE_URL?.trim();
+    const remoteToken = process.env.MARGINS_BB_REMOTE_TOKEN?.trim();
+    const remoteWorkspace = process.env.MARGINS_BB_REMOTE_WORKSPACE?.trim();
+    if (remoteUrl || remoteToken || remoteWorkspace) {
+      if (!remoteUrl || !remoteToken || !remoteWorkspace) {
+        throw new Error("remote Margins selection requires URL, token, and Workspace together");
+      }
+      const parsed = new URL(remoteUrl);
+      const loopback = parsed.protocol === "http:" && ["127.0.0.1", "localhost", "::1"].includes(parsed.hostname);
+      if (parsed.protocol !== "https:" && !loopback) {
+        throw new Error("remote Margins requires HTTPS or loopback HTTP");
+      }
+      const baseUrl2 = remoteUrl.replace(/\/$/, "");
+      const response = await fetch(`${baseUrl2}/v1/capabilities`, {
+        signal,
+        headers: { authorization: `Bearer ${remoteToken}` }
+      });
+      const envelope = await response.json();
+      if (!response.ok || !envelope.ok) {
+        throw new Error(envelope.error?.message || `remote Margins capability check failed (${response.status})`);
+      }
+      if (envelope.result?.workspace_id !== remoteWorkspace) {
+        throw new Error("remote Margins capability Workspace does not match configured Workspace");
+      }
+      if (!envelope.result.instance_id) throw new Error("remote Margins capability response lacks an instance identity");
+      return { baseUrl: baseUrl2, token: remoteToken, workspaceId: remoteWorkspace, instanceId: envelope.result.instance_id };
+    }
     const binary = await this.runtime.ensureProjectServer({ dataDir, signal });
     const instanceDir = join2(dataDir, "projects", key);
     await mkdir2(instanceDir, { recursive: true });
@@ -33128,7 +33719,11 @@ var ProjectServerManager = class {
         MARGINS_HOST: "127.0.0.1",
         MARGINS_PORT: String(port),
         MARGINS_DATA_DIR: instanceDir,
-        MARGINS_WORK_DIR: target.projectRoot
+        MARGINS_WORK_DIR: target.projectRoot,
+        MARGINS_HOME: join2(instanceDir, "margins-home"),
+        MARGINS_INSTANCE_ID: `bb-host-${target.hostId}`,
+        MARGINS_WORKSPACE: `bb-${key}`,
+        MARGINS_SERVICE_PROVISION: "1"
       },
       stdio: "ignore"
     });
@@ -33138,11 +33733,11 @@ var ProjectServerManager = class {
       throw error108;
     });
     child.once("exit", () => this.handles.delete(key));
-    return { baseUrl, token, child };
+    return { baseUrl, token, workspaceId: `bb-${key}`, instanceId: `bb-host-${target.hostId}`, child };
   }
   async dispose() {
     for (const handle of await Promise.allSettled(this.handles.values())) {
-      if (handle.status === "fulfilled" && handle.value.child.exitCode === null) handle.value.child.kill("SIGTERM");
+      if (handle.status === "fulfilled" && handle.value.child?.exitCode === null) handle.value.child.kill("SIGTERM");
     }
     this.handles.clear();
   }
@@ -33152,16 +33747,43 @@ var ProjectMarginsTransport = class {
     this.manager = manager;
   }
   manager;
-  async invoke(handle, command, body, signal) {
-    const response = await fetch(`${handle.baseUrl}/api/invoke/${command}`, {
-      method: "POST",
+  async authority(target, dataDir) {
+    try {
+      const handle = await this.manager.ensure(target, dataDir);
+      return { ok: true, instanceId: handle.instanceId, workspaceId: handle.workspaceId };
+    } catch (cause) {
+      return { ok: false, error: hostError("project_recorder_unavailable", cause instanceof Error ? cause.message : String(cause)) };
+    }
+  }
+  async sessionExists(target, dataDir, recordingId) {
+    try {
+      const handle = await this.manager.ensure(target, dataDir);
+      let cursor = null;
+      for (let page = 0; page < 10; page += 1) {
+        const suffix = cursor ? `&after=${encodeURIComponent(cursor)}` : "";
+        const result = await this.request(
+          handle,
+          `sessions?limit=100${suffix}`,
+          "GET"
+        );
+        if (result.sessions.some((session) => session.session_id === recordingId)) return { ok: true, found: true };
+        if (!result.next_cursor) return { ok: true, found: false };
+        cursor = result.next_cursor;
+      }
+      return { ok: false, error: hostError("session_lookup_incomplete", "Margins could not verify the Mac session within the first 1,000 sessions") };
+    } catch (cause) {
+      return { ok: false, error: hostError("session_lookup_unavailable", cause instanceof Error ? cause.message : String(cause)) };
+    }
+  }
+  async request(handle, path2, method, body, signal) {
+    const response = await fetch(`${handle.baseUrl}/v1/workspaces/${handle.workspaceId}/${path2}`, {
+      method,
       signal,
       headers: {
         authorization: `Bearer ${handle.token}`,
-        "content-type": "application/json",
-        "x-margins-capture-protocol": String(CAPTURE_PROTOCOL_VERSION)
+        "content-type": "application/json"
       },
-      body: JSON.stringify(body)
+      body: body === void 0 ? void 0 : JSON.stringify(body)
     });
     if (!response.ok) throw new Error(`Margins could not save on the project machine (${response.status})`);
     const value = await response.json();
@@ -33169,15 +33791,7 @@ var ProjectMarginsTransport = class {
     return value.result;
   }
   async snapshot(handle, recordingId, ownerId, signal) {
-    const [status, notepad] = await Promise.all([
-      this.invoke(handle, "get_web_recording_status", { recordingId, ownerId }, signal),
-      this.invoke(handle, "get_web_recording_notepad", { recordingId, ownerId }, signal)
-    ]);
-    return {
-      recordingId,
-      status: status.capture_phase === "finalizing" ? "saving" : status.paused ? "paused" : "recording",
-      notepad
-    };
+    return this.request(handle, `browser/sessions/${recordingId}/snapshot?ownerId=${encodeURIComponent(ownerId)}`, "GET", void 0, signal);
   }
   async withHandle(target, dataDir, action) {
     try {
@@ -33188,8 +33802,7 @@ var ProjectMarginsTransport = class {
   }
   start(target, dataDir, ownerId, name) {
     return this.withHandle(target, dataDir, async (handle) => {
-      const started = await this.invoke(handle, "start_recording", { name, ownerId });
-      return this.snapshot(handle, started.recordingId, ownerId);
+      return this.request(handle, "browser/sessions", "POST", { name, ownerId });
     });
   }
   read(target, dataDir, recordingId, ownerId) {
@@ -33197,34 +33810,30 @@ var ProjectMarginsTransport = class {
   }
   mutate(target, dataDir, recordingId, ownerId, command) {
     return this.withHandle(target, dataDir, async (handle) => {
-      await this.invoke(handle, command, { recordingId, ownerId });
-      return this.snapshot(handle, recordingId, ownerId);
+      const action = command === "heartbeat_web_recording" ? "heartbeat" : command === "pause_recording" ? "pause" : "resume";
+      return this.request(handle, `browser/sessions/${recordingId}/${action}`, "POST", { ownerId });
     });
   }
   stop(target, dataDir, recordingId, ownerId) {
     return this.withHandle(target, dataDir, async (handle) => {
-      await this.invoke(handle, "stop_recording", { recordingId, ownerId });
+      await this.request(handle, `browser/sessions/${recordingId}/stop`, "POST", { ownerId });
       return null;
     });
   }
   updateNotepad(target, dataDir, recordingId, ownerId, expectedRevision, text) {
     return this.withHandle(target, dataDir, async (handle) => {
-      await this.invoke(handle, "update_web_recording_notepad", { recordingId, ownerId, expectedRevision, text });
-      return this.snapshot(handle, recordingId, ownerId);
+      return this.request(handle, `browser/sessions/${recordingId}/notepad`, "PUT", { ownerId, expectedRevision, text });
     });
   }
   async upload(target, dataDir, recordingId, ownerId, sequence, bytesBase64) {
     try {
       const handle = await this.manager.ensure(target, dataDir);
-      const response = await fetch(`${handle.baseUrl}/api/audio/chunk`, {
-        method: "POST",
+      const response = await fetch(`${handle.baseUrl}/v1/workspaces/${handle.workspaceId}/browser/sessions/${recordingId}/chunks/${sequence}`, {
+        method: "PUT",
         headers: {
           authorization: `Bearer ${handle.token}`,
           "content-type": "application/octet-stream",
-          "x-margins-capture-protocol": String(CAPTURE_PROTOCOL_VERSION),
-          "x-margins-recording-id": recordingId,
-          "x-margins-capture-owner": ownerId,
-          "x-margins-chunk-sequence": String(sequence)
+          "x-margins-capture-owner": ownerId
         },
         body: Buffer.from(bytesBase64, "base64")
       });
@@ -33234,6 +33843,34 @@ var ProjectMarginsTransport = class {
       return { ok: true };
     } catch (cause) {
       return { ok: false, error: hostError("audio_upload_failed", cause instanceof Error ? cause.message : String(cause)) };
+    }
+  }
+  async connectedNoteContext(target, dataDir, recordingId) {
+    try {
+      const handle = await this.manager.ensure(target, dataDir);
+      const [sessions, transcript, memo2, artifacts, noteAssociation] = await Promise.all([
+        this.request(handle, "sessions?limit=100", "GET"),
+        this.request(handle, `sessions/${recordingId}/transcript`, "GET"),
+        this.request(handle, `sessions/${recordingId}/memo`, "GET"),
+        this.request(handle, `sessions/${recordingId}/artifacts`, "GET"),
+        this.request(handle, `sessions/${recordingId}/note-association`, "GET")
+      ]);
+      const summary = sessions.sessions.find((candidate) => candidate.session_id === recordingId);
+      if (!summary) throw new Error("Pinned Margins session is not visible in the selected Workspace");
+      return { ok: true, context: {
+        schema: "margins.bb.connected-note-context.v1",
+        instanceId: handle.instanceId,
+        workspaceId: handle.workspaceId,
+        sessionId: recordingId,
+        title: summary.title,
+        transcript: { terminal: transcript.terminal, live: transcript.live, updatedAtUnixMs: transcript.updated_at_unix_ms },
+        memo: { revision: memo2.revision, lineCount: memo2.lines.length },
+        artifacts: artifacts.map((artifact) => ({ artifactId: artifact.artifact_id, kind: artifact.kind, retentionClass: artifact.retention_class })),
+        noteAssociation: noteAssociation ? { sourceId: noteAssociation.source_id, relativePath: noteAssociation.relative_path, revision: noteAssociation.revision } : null,
+        instructions: "Pin this exact session before recall. Fetch its transcript/artifacts from Margins, but read and write ordinary note bytes only through the existing project Source; link only the Source-relative reference after writing."
+      } };
+    } catch (cause) {
+      return { ok: false, error: hostError("connected_note_context_unavailable", cause instanceof Error ? cause.message : String(cause)) };
     }
   }
   dispose() {
@@ -33254,6 +33891,14 @@ function createMarginsHostEntry(transport) {
     contract: marginsHostContract,
     experimental_signals: hostSignals,
     handlers: {
+      sessionExists(input2, context) {
+        retain(context);
+        return transport.sessionExists(input2.target, context.experimental_paths.dataDir, input2.recordingId);
+      },
+      captureAuthority(input2, context) {
+        retain(context);
+        return transport.authority(input2.target, context.experimental_paths.dataDir);
+      },
       async startBrowserCapture(input2, context) {
         retain(context);
         const result = await transport.start(input2.target, context.experimental_paths.dataDir, input2.ownerId, input2.name);
@@ -33295,6 +33940,10 @@ function createMarginsHostEntry(transport) {
       uploadChunk(input2, context) {
         retain(context);
         return transport.upload(input2.target, context.experimental_paths.dataDir, input2.recordingId, input2.ownerId, input2.sequence, input2.bytesBase64);
+      },
+      connectedNoteContext(input2, context) {
+        retain(context);
+        return transport.connectedNoteContext(input2.target, context.experimental_paths.dataDir, input2.recordingId);
       }
     },
     async dispose() {

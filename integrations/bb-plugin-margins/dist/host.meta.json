@@ -1,12 +1,12 @@
 {
   "sdkMajor": 0,
-  "sdkVersion": "0.4.48",
+  "sdkVersion": "0.4.97",
   "artifactFormatVersion": 1,
   "pluginId": "margins",
   "pluginVersion": "0.1.0",
   "builtWith": {
     "bbVersion": "0.41.0",
-    "pluginSdkVersion": "0.4.48"
+    "pluginSdkVersion": "0.4.97"
   },
-  "artifactDigest": "c7860f8942d3ead7b97a6b11aa06c68598608769decdcab75e9da1fbd8458b06"
+  "artifactDigest": "48a5e54e6dd2145b2506b0057fe30f0405a8a5a11a3cffc2309beb01ecd0ff5d"
 }

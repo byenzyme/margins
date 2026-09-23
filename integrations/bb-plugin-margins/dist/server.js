@@ -3614,7 +3614,7 @@ var $ZodObjectJIT = /* @__PURE__ */ $constructor("$ZodObjectJIT", (inst, def) =>
         doc.write(`
         if (${id}.issues.length) {${prefixStr(id, k)}
         }
-
+        
         if (${id}.value === undefined) {
           if (${isPresent}) {
             newResult[${k}] = undefined;
@@ -18923,11 +18923,41 @@ var hostResultSchema = external_exports.discriminatedUnion("ok", [
   external_exports.object({ ok: external_exports.literal(true), snapshot: hostCaptureSnapshotSchema.nullable() }).strict(),
   external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
 ]);
+var connectedNoteContextSchema = external_exports.object({
+  schema: external_exports.literal("margins.bb.connected-note-context.v1"),
+  instanceId: external_exports.string().min(1),
+  workspaceId: external_exports.string().min(1),
+  sessionId: external_exports.string().min(1),
+  title: external_exports.string().nullable(),
+  transcript: external_exports.object({ terminal: external_exports.boolean(), live: external_exports.boolean(), updatedAtUnixMs: external_exports.number().int().nonnegative() }).strict(),
+  memo: external_exports.object({ revision: external_exports.string().min(1), lineCount: external_exports.number().int().nonnegative() }).strict(),
+  artifacts: external_exports.array(external_exports.object({ artifactId: external_exports.string().min(1), kind: external_exports.string().min(1), retentionClass: external_exports.string().min(1) }).strict()),
+  noteAssociation: external_exports.object({ sourceId: external_exports.string().min(1), relativePath: external_exports.string().min(1), revision: external_exports.number().int().nonnegative() }).strict().nullable(),
+  instructions: external_exports.string().min(1)
+}).strict();
+var connectedNoteResultSchema = external_exports.discriminatedUnion("ok", [
+  external_exports.object({ ok: external_exports.literal(true), context: connectedNoteContextSchema }).strict(),
+  external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
+]);
 var ownedCaptureInputSchema = external_exports.object({ target: projectTargetSchema }).extend({
   recordingId: external_exports.string().min(1),
   ownerId: external_exports.string().min(1)
 }).strict();
 var marginsHostContract = defineRpcContract({
+  sessionExists: {
+    input: external_exports.object({ target: projectTargetSchema, recordingId: external_exports.string().min(1) }).strict(),
+    output: external_exports.discriminatedUnion("ok", [
+      external_exports.object({ ok: external_exports.literal(true), found: external_exports.boolean() }).strict(),
+      external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
+    ])
+  },
+  captureAuthority: {
+    input: external_exports.object({ target: projectTargetSchema }).strict(),
+    output: external_exports.discriminatedUnion("ok", [
+      external_exports.object({ ok: external_exports.literal(true), instanceId: external_exports.string().min(1), workspaceId: external_exports.string().min(1) }).strict(),
+      external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
+    ])
+  },
   startBrowserCapture: {
     input: external_exports.object({ target: projectTargetSchema, ownerId: external_exports.string().min(1), name: external_exports.string().min(1).max(160) }).strict(),
     output: hostResultSchema
@@ -18944,6 +18974,10 @@ var marginsHostContract = defineRpcContract({
   uploadChunk: {
     input: ownedCaptureInputSchema.extend({ sequence: external_exports.number().int().nonnegative(), bytesBase64: external_exports.string() }).strict(),
     output: external_exports.object({ ok: external_exports.boolean(), error: hostErrorSchema.optional() }).strict()
+  },
+  connectedNoteContext: {
+    input: external_exports.object({ target: projectTargetSchema, recordingId: external_exports.string().min(1) }).strict(),
+    output: connectedNoteResultSchema
   }
 });
 var hostSignals = {
@@ -18975,6 +19009,7 @@ var panelStateSchema = external_exports.object({
   ownsRecording: external_exports.boolean(),
   recordingId: external_exports.string().nullable(),
   notepad: notepadSchema.nullable(),
+  lastSessionId: external_exports.string().nullable(),
   error: hostErrorSchema.nullable()
 }).strict();
 var threadClientInputSchema = external_exports.object({
@@ -18986,6 +19021,20 @@ var captureClientInputSchema = threadClientInputSchema.extend({
   operationId: external_exports.string().min(1)
 }).strict();
 var marginsRpcContract = defineRpcContract({
+  captureAuthority: {
+    input: external_exports.object({ threadId: external_exports.string().min(1) }).strict(),
+    output: external_exports.discriminatedUnion("ok", [
+      external_exports.object({ ok: external_exports.literal(true), instanceId: external_exports.string().min(1), workspaceId: external_exports.string().min(1) }).strict(),
+      external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
+    ])
+  },
+  pinNativeSession: {
+    input: external_exports.object({ threadId: external_exports.string().min(1), sessionId: external_exports.string().min(1), instanceId: external_exports.string().min(1), workspaceId: external_exports.string().min(1) }).strict(),
+    output: external_exports.discriminatedUnion("ok", [
+      external_exports.object({ ok: external_exports.literal(true) }).strict(),
+      external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
+    ])
+  },
   getPanelState: { input: threadClientInputSchema, output: panelStateSchema },
   beginBrowserCapture: {
     input: threadClientInputSchema.extend({ ownerId: external_exports.string().min(1), title: external_exports.string().trim().max(160).optional() }).strict(),
@@ -18998,15 +19047,23 @@ var marginsRpcContract = defineRpcContract({
   updateNotepad: {
     input: captureClientInputSchema.extend({ expectedRevision: external_exports.string().min(1), text: external_exports.string().max(1e5) }).strict(),
     output: panelStateSchema
+  },
+  connectedNoteContext: {
+    input: external_exports.object({ threadId: external_exports.string().min(1), sessionId: external_exports.string().min(1) }).strict(),
+    output: connectedNoteResultSchema
   }
 });
 
 // src/server.ts
 var CAPTURE_PREFIX = "capture:";
+var LAST_SESSION_PREFIX = "last-session:";
 var REALTIME_CHANNEL = "margins-recording";
 var DISCONNECT_GRACE_MS = CAPTURE_DISCONNECT_GRACE_MS;
 function captureKey(projectId) {
   return `${CAPTURE_PREFIX}${projectId}`;
+}
+function lastSessionKey(projectId) {
+  return `${LAST_SESSION_PREFIX}${projectId}`;
 }
 function meetingName(value) {
   const slug = (value || "meeting").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 90);
@@ -19094,7 +19151,7 @@ function stateCopy(state, sourceLabel, error61) {
   }
 }
 function sourceFor(client) {
-  if (client.platform === "macos") return client.nativeMacCapture ? "Microphone + computer audio" : null;
+  if (client.platform === "macos" && client.nativeMacCapture) return "Microphone + computer audio";
   return client.secureContext && client.browserMicrophone ? "Microphone only" : null;
 }
 function marginsPlugin(bb) {
@@ -19120,6 +19177,10 @@ function marginsPlugin(bb) {
   async function clearCapture(projectId) {
     await bb.storage.kv.delete(captureKey(projectId));
   }
+  async function readLastSession(projectId) {
+    const value = await bb.storage.kv.get(lastSessionKey(projectId));
+    return typeof value === "string" && value.length > 0 ? value : null;
+  }
   async function callHost(target, method, input2) {
     try {
       return await host.call(method, input2, { hostId: target.hostId });
@@ -19142,6 +19203,7 @@ function marginsPlugin(bb) {
       ownsRecording: owns,
       recordingId: options.capture?.recordingId || null,
       notepad: options.notepad || null,
+      lastSessionId: options.lastSessionId || null,
       error: options.error || null
     };
   }
@@ -19154,21 +19216,22 @@ function marginsPlugin(bb) {
       return basePanel(null, "unavailable", client, { error: error61 });
     }
     const capture = await readCapture(target.projectId);
+    const lastSessionId = await readLastSession(target.projectId);
     if (capture) {
       const owns = capture.clientId === client.clientId;
-      if (!owns) return basePanel(target.projectId, "recording_elsewhere", client, { capture });
+      if (!owns) return basePanel(target.projectId, "recording_elsewhere", client, { capture, lastSessionId });
       const result = await callHost(target, "readCapture", { target, recordingId: capture.recordingId, ownerId: capture.ownerId });
       if (!result.ok) {
         const withinGrace = Date.now() - capture.lastHeartbeatUnixMs <= DISCONNECT_GRACE_MS;
-        return basePanel(target.projectId, withinGrace ? "recovering" : "needs_attention", client, { capture, error: result.error });
+        return basePanel(target.projectId, withinGrace ? "recovering" : "needs_attention", client, { capture, lastSessionId, error: result.error });
       }
-      if (!result.snapshot) return basePanel(target.projectId, "saving", client, { capture });
+      if (!result.snapshot) return basePanel(target.projectId, "saving", client, { capture, lastSessionId });
       const state = result.snapshot.status === "paused" ? "paused" : result.snapshot.status === "saving" ? "saving" : "recording";
-      return basePanel(target.projectId, state, client, { capture, notepad: result.snapshot.notepad });
+      return basePanel(target.projectId, state, client, { capture, lastSessionId, notepad: result.snapshot.notepad });
     }
-    if (client.platform === "macos" && !client.nativeMacCapture) return basePanel(target.projectId, "needs_setup", client);
+    if (client.platform === "macos" && !sourceFor(client)) return basePanel(target.projectId, "needs_setup", client);
     if (!sourceFor(client)) return basePanel(target.projectId, "unavailable", client);
-    return basePanel(target.projectId, "ready", client);
+    return basePanel(target.projectId, "ready", client, { lastSessionId });
   }
   async function locked(projectId, action) {
     const prior = startLocks.get(projectId) || Promise.resolve();
@@ -19198,7 +19261,11 @@ function marginsPlugin(bb) {
             error: { code: "operation_conflict", message: "This control operation id was already used for different content.", retryable: false }
           });
         }
-        return operation === "stop" ? basePanel(target.projectId, "saved", client) : getPanelState(threadId, client);
+        if (operation === "stop") {
+          await bb.storage.kv.set(lastSessionKey(target.projectId), recordingId);
+          await clearCapture(target.projectId);
+        }
+        return operation === "stop" ? basePanel(target.projectId, "saved", client, { lastSessionId: recordingId }) : getPanelState(threadId, client);
       }
     }
     const capture = await readCapture(target.projectId);
@@ -19206,7 +19273,7 @@ function marginsPlugin(bb) {
     const result = await callHost(target, operation, { target, recordingId, ownerId: capture.ownerId });
     if (result.ok) {
       if (operation === "stop") {
-        await clearCapture(target.projectId);
+        await bb.storage.kv.set(lastSessionKey(target.projectId), recordingId);
       } else {
         capture.lastHeartbeatUnixMs = operation === "heartbeat" ? Date.now() : capture.lastHeartbeatUnixMs;
         await saveCapture(capture);
@@ -19214,17 +19281,44 @@ function marginsPlugin(bb) {
       if (operation !== "heartbeat") {
         await bb.storage.kv.set(receiptKey, { recordingId, operation, clientId: client.clientId });
       }
+      if (operation === "stop") await clearCapture(target.projectId);
     }
     bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: operation });
     if (!result.ok) return basePanel(target.projectId, "needs_attention", client, { capture, error: result.error });
-    if (operation === "stop") return basePanel(target.projectId, "saved", client);
+    if (operation === "stop") return basePanel(target.projectId, "saved", client, { lastSessionId: recordingId });
     return getPanelState(threadId, client);
   }
   bb.rpc.register(marginsRpcContract, {
+    async captureAuthority({ threadId }) {
+      try {
+        const target = await targetForThread(threadId);
+        return await callHost(target, "captureAuthority", { target });
+      } catch (cause) {
+        return { ok: false, error: { code: "project_folder_unavailable", message: cause instanceof Error ? cause.message : String(cause), retryable: false } };
+      }
+    },
+    async pinNativeSession({ threadId, sessionId, instanceId, workspaceId }) {
+      try {
+        const target = await targetForThread(threadId);
+        const authority = await callHost(target, "captureAuthority", { target });
+        if (!authority.ok) return authority;
+        if (authority.instanceId !== instanceId || authority.workspaceId !== workspaceId) {
+          return { ok: false, error: { code: "destination_changed", message: "The Mac recording belongs to a different Margins instance or Workspace.", retryable: false } };
+        }
+        const found = await callHost(target, "sessionExists", { target, recordingId: sessionId });
+        if (!found.ok) return { ok: false, error: found.error };
+        if (!found.found) return { ok: false, error: { code: "native_session_not_found", message: "The saved Mac session is not visible in this BB project's Margins Workspace yet.", retryable: true } };
+        await bb.storage.kv.set(lastSessionKey(target.projectId), sessionId);
+        bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: "stop" });
+        return { ok: true };
+      } catch (cause) {
+        return { ok: false, error: { code: "native_session_unavailable", message: cause instanceof Error ? cause.message : String(cause), retryable: true } };
+      }
+    },
     getPanelState: ({ threadId, client }) => getPanelState(threadId, client),
     async beginBrowserCapture({ threadId, client, ownerId, title }) {
       const target = await targetForThread(threadId);
-      if (client.platform === "macos" || !client.secureContext || !client.browserMicrophone) return getPanelState(threadId, client);
+      if (client.nativeMacCapture || !client.secureContext || !client.browserMicrophone) return getPanelState(threadId, client);
       return locked(target.projectId, async () => {
         if (await readCapture(target.projectId)) return getPanelState(threadId, client);
         const result = await callHost(target, "startBrowserCapture", { target, ownerId, name: meetingName(title) });
@@ -19253,6 +19347,14 @@ function marginsPlugin(bb) {
       const result = await callHost(target, "updateNotepad", { target, recordingId, ownerId: capture.ownerId, expectedRevision, text });
       if (!result.ok) return basePanel(target.projectId, "needs_attention", client, { capture, error: result.error });
       return getPanelState(threadId, client);
+    },
+    async connectedNoteContext({ threadId, sessionId }) {
+      const target = await targetForThread(threadId);
+      const pinned = await readLastSession(target.projectId);
+      if (pinned !== sessionId) {
+        return { ok: false, error: { code: "session_pin_stale", message: "The selected meeting is no longer this project's pinned latest session. Refresh before creating the note.", retryable: true } };
+      }
+      return callHost(target, "connectedNoteContext", { target, recordingId: sessionId });
     }
   });
   const chunkSchema = external_exports.object({

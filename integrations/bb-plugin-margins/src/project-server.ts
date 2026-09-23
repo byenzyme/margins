@@ -141,6 +141,36 @@ export class ProjectServerManager {
 export class ProjectMarginsTransport {
   constructor(private readonly manager = new ProjectServerManager()) {}
 
+  async authority(target: ProjectTarget, dataDir: string) {
+    try {
+      const handle = await this.manager.ensure(target, dataDir);
+      return { ok: true as const, instanceId: handle.instanceId, workspaceId: handle.workspaceId };
+    } catch (cause) {
+      return { ok: false as const, error: hostError("project_recorder_unavailable", cause instanceof Error ? cause.message : String(cause)) };
+    }
+  }
+
+  async sessionExists(target: ProjectTarget, dataDir: string, recordingId: string) {
+    try {
+      const handle = await this.manager.ensure(target, dataDir);
+      let cursor: string | null = null;
+      for (let page = 0; page < 10; page += 1) {
+        const suffix: string = cursor ? `&after=${encodeURIComponent(cursor)}` : "";
+        const result: { sessions: Array<{ session_id: string }>; next_cursor: string | null } = await this.request<{
+          sessions: Array<{ session_id: string }>; next_cursor: string | null;
+        }>(
+          handle, `sessions?limit=100${suffix}`, "GET",
+        );
+        if (result.sessions.some((session) => session.session_id === recordingId)) return { ok: true as const, found: true };
+        if (!result.next_cursor) return { ok: true as const, found: false };
+        cursor = result.next_cursor;
+      }
+      return { ok: false as const, error: hostError("session_lookup_incomplete", "Margins could not verify the Mac session within the first 1,000 sessions") };
+    } catch (cause) {
+      return { ok: false as const, error: hostError("session_lookup_unavailable", cause instanceof Error ? cause.message : String(cause)) };
+    }
+  }
+
   private async request<T>(handle: ServerHandle, path: string, method: "GET" | "POST" | "PUT", body?: object, signal?: AbortSignal): Promise<T> {
     const response = await fetch(`${handle.baseUrl}/v1/workspaces/${handle.workspaceId}/${path}`, {
       method,

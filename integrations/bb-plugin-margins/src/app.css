@@ -20,6 +20,22 @@
 .margins-connected-note { border:0; border-radius:7px; padding:7px 10px; background:var(--foreground); color:var(--background); font-size:12px; cursor:pointer; }
 .margins-quiet { border:0; padding:7px; background:transparent; color:var(--muted-foreground); font-size:12px; cursor:pointer; }
 .margins-seam,.margins-empty { margin:auto 0; color:var(--muted-foreground); font-size:12px; line-height:1.5; }
+.margins-overlay { position:fixed; z-index:50; right:16px; bottom:16px; display:flex; align-items:center; gap:5px; max-width:min(92vw,400px); padding:6px; border:1px solid var(--border); border-radius:12px; background:var(--background); color:var(--foreground); box-shadow:0 8px 30px color-mix(in srgb,var(--foreground) 14%,transparent); }
+.margins-overlay button { display:flex; align-items:center; justify-content:center; min-width:32px; min-height:32px; border:0; border-radius:8px; background:transparent; color:inherit; cursor:pointer; }
+.margins-overlay button:hover { background:var(--muted); }
+.margins-overlay button:disabled { cursor:default; opacity:.45; }
+.margins-overlay .margins-overlay-open { justify-content:flex-start; gap:6px; padding:0 8px; font-size:12px; font-weight:600; }
+.margins-overlay-error { max-width:160px; color:var(--destructive); font-size:11px; line-height:1.2; }
+.margins-native { display:flex; flex-direction:column; gap:8px; padding:10px; border:1px solid var(--border); border-radius:10px; background:color-mix(in srgb,var(--muted) 35%,transparent); font-size:12px; }
+.margins-native-heading { display:flex; flex-wrap:wrap; justify-content:space-between; gap:4px 10px; }
+.margins-native-heading span { color:var(--muted-foreground); text-transform:capitalize; }
+.margins-native p { margin:0; color:var(--muted-foreground); line-height:1.4; }
+.margins-native code { overflow-wrap:anywhere; color:var(--foreground); }
+.margins-native-pair,.margins-native-actions { display:flex; gap:6px; }
+.margins-native-pair input { min-width:0; flex:1; border:1px solid var(--border); border-radius:6px; padding:6px 8px; background:var(--background); color:var(--foreground); font:inherit; }
+.margins-native-pair input[type="number"] { flex:0 0 65px; }
+.margins-native button:not(.margins-quiet) { border:1px solid var(--border); border-radius:6px; padding:6px 9px; background:var(--background); color:var(--foreground); font:inherit; cursor:pointer; }
+.margins-native button:disabled { cursor:default; opacity:.5; }
 @media (max-width: 480px) { .margins-panel { min-height:240px; padding:12px; } .margins-notepad { min-height:170px; } }
 @media (pointer: coarse) { .margins-control { min-width:42px; min-height:42px; } .margins-control.margins-start { height:42px; border-radius:21px; padding:0 14px; } }
 @media (prefers-reduced-motion: reduce) { .margins-panel * { scroll-behavior:auto !important; } }

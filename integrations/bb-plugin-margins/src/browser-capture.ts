@@ -217,7 +217,7 @@ export class BrowserCaptureOwner {
   install(context: PluginContentScriptContext) {
     this.pluginId = context.pluginId;
     const stored = readStored();
-    if (stored && detectClientCapabilities().platform !== "macos") void this.recover(stored);
+    if (stored) void this.recover(stored);
     return () => this.disconnect();
   }
 
@@ -227,6 +227,7 @@ export class BrowserCaptureOwner {
   get recovering() { return this.heartbeatRecovering; }
   get hasPendingStop() { return readStored()?.pendingControl?.kind === "stop"; }
   get recordingId() { return this.capture?.recordingId ?? readStored()?.recordingId ?? this.endedRecordingId; }
+  get threadId() { return this.capture?.threadId ?? readStored()?.threadId ?? null; }
   panel(threadId: string) { return this.panels.get(threadId) ?? null; }
   acceptPanel(threadId: string, state: PanelState) {
     this.panels.set(threadId, state);

@@ -32,6 +32,10 @@ use std::sync::Mutex;
 #[cfg(any(test, feature = "audio-capture"))]
 use std::sync::{mpsc, Arc};
 
+#[cfg(feature = "audio-capture")]
+#[path = "cli/native_bridge.rs"]
+mod native_bridge;
+
 trait InteractiveSession {
     fn create(&self, work_dir: &Path, title: Option<&str>) -> Result<()>;
     fn attach(&self, work_dir: &Path, selected: Option<&str>) -> Result<()>;
@@ -231,6 +235,10 @@ where
     if let Some(code) = release_smoke(&args) {
         return code;
     }
+    #[cfg(feature = "audio-capture")]
+    if let Some(code) = native_bridge::maybe_main(&args) {
+        return code;
+    }
     let (workspace_selector, workspace_args) =
         match margins_cli::args::strip_workspace_arg(args.clone()) {
             Ok(value) => value,
@@ -278,7 +286,7 @@ where
                     "remote capture requires --workspace <id> or MARGINS_WORKSPACE",
                 );
             };
-            return match run_remote_native_capture(&remote, &workspace, &parsed.command) {
+            return match run_remote_native_capture(&remote, &workspace, &parsed.command, None) {
                 Ok(()) => 0,
                 Err(error) => {
                     let message = format!("{error:#}");
@@ -1887,6 +1895,7 @@ fn run_remote_native_capture(
     remote: &str,
     workspace_id: &str,
     command: &Option<Command>,
+    controller: Option<native_bridge::CaptureController>,
 ) -> Result<()> {
     use margins_meeting_protocol::{
         SegmentCloseReasonV1, SessionFinalizeReasonV1, WorkspaceAttachV1, WorkspaceMemoLineV1,
@@ -2244,7 +2253,7 @@ fn run_remote_native_capture(
         let recorder = match crate::recorder::RecorderHandle::start_with_live_audio(
             stop.clone(),
             selected_device.as_ref(),
-            Some(sink),
+            Some(sink.clone()),
         ) {
             Ok(recorder) => recorder,
             Err(error) => {
@@ -2281,6 +2290,7 @@ fn run_remote_native_capture(
             intent.remove(&transfer_dir)?;
         }
         let recovery_path = transfer.spool().recovery_path(&segment_id)?;
+        let active_transfer_id = transfer.spool().manifest().transfer_id.clone();
         let worker_stop = stop.clone();
         let worker = std::thread::Builder::new()
             .name("margins-remote-spool".into())
@@ -2312,8 +2322,18 @@ fn run_remote_native_capture(
         app.spk_silence = recorder.spk_silence();
         app.spk_frames = recorder.spk_frames();
         app.spk_rate = recorder.spk_rate();
-        let action = crate::tui::run_tui(&mut app, stop.clone())
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        if let Some(controller) = &controller {
+            controller.recording(&session_id, &active_transfer_id, &sink, &recorder);
+        }
+        // The recorder owns the sender from here. Keeping this clone alive
+        // would prevent the spool worker's receive loop from closing on stop.
+        drop(sink);
+        let action = if let Some(controller) = &controller {
+            controller.wait_action(&stop)?
+        } else {
+            crate::tui::run_tui(&mut app, stop.clone())
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?
+        };
         // run_tui set the stop flag before returning. This call synchronously
         // retires both native devices before memo/network/ASR work begins.
         recorder.stop_and_write(&recovery_path.to_string_lossy())?;
@@ -2327,12 +2347,19 @@ fn run_remote_native_capture(
             crate::tui::TuiAction::Pause => {
                 transfer.close_segment(SegmentCloseReasonV1::Pause)?;
                 app.set_capture_paused(true);
+                if let Some(controller) = &controller {
+                    controller.paused();
+                }
                 app.mic_level = Arc::new(AtomicU32::new(0));
                 app.spk_level = Arc::new(AtomicU32::new(0));
                 loop {
-                    match crate::tui::run_tui(&mut app, Arc::new(AtomicBool::new(false)))
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?
-                    {
+                    let paused_action = if let Some(controller) = &controller {
+                        controller.wait_paused_action()?
+                    } else {
+                        crate::tui::run_tui(&mut app, Arc::new(AtomicBool::new(false)))
+                            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+                    };
+                    match paused_action {
                         crate::tui::TuiAction::Resume => {
                             app.set_capture_paused(false);
                             break;
@@ -2373,6 +2400,9 @@ fn run_remote_native_capture(
     let final_ended_at_ms = transfer
         .last_closed_ended_at_ms()
         .context("remote capture stopped without a durable media boundary")?;
+    if let Some(controller) = &controller {
+        controller.saving();
+    }
     uploader_done.store(true, Ordering::Release);
     uploader
         .join()
