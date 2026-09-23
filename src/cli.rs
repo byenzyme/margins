@@ -106,7 +106,7 @@ fn ensure_capture_permissions(source: &dyn CapturePermissionSource) -> Result<()
         match permission_action(state) {
             PermissionAction::Proceed | PermissionAction::ProbeOnStart => {}
             PermissionAction::Blocked => match lane {
-                AudioLane::Microphone => bail!("Margins needs Microphone permission. Grant it to your terminal in System Settings > Privacy & Security > Microphone, then quit and reopen the terminal before running Margins again."),
+                AudioLane::Microphone => bail!("Margins needs Microphone permission. Grant access to the app or terminal running Margins in System Settings > Privacy & Security > Microphone, then restart it."),
                 AudioLane::System => bail!("{}", margins_cli::error::MACOS_SYSTEM_AUDIO_PERMISSION_DENIED_MESSAGE),
                 _ => bail!("Margins does not have the required capture permission."),
             },
