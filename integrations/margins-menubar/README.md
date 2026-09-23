@@ -32,7 +32,7 @@ nondefault `margins-live` profile.
 For a same-capture CoreML check, set absolute `MARGINS_MENU_TRANSCRIBE_BIN`,
 `MARGINS_MENU_TRANSCRIBE_VAULT`, and `MARGINS_MENU_TRANSCRIBE_HOME` paths. After
 the project capture reaches **saved**, click **Transcribe Mac copy**. This runs
-`margins --local transcribe` on each retained stereo WAV in the scoped vault,
+`margins transcribe` on each retained stereo WAV in the scoped vault,
 with a separate profile and no note generator. Keep the menu connected until
 the Mac transcript is complete; Disconnect removes the temporary WAV copies.
 

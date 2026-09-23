@@ -200,7 +200,7 @@ final class MenuRecorder: ObservableObject {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: binary)
             process.currentDirectoryURL = URL(fileURLWithPath: vault, isDirectory: true)
-            process.arguments = ["--local", "transcribe", audioPath, "--name", "menu-\(UUID().uuidString)-seg\(segmentIndex)"]
+            process.arguments = ["transcribe", audioPath, "--name", "menu-\(UUID().uuidString)-seg\(segmentIndex)"]
             var environment = ProcessInfo.processInfo.environment
             environment["MARGINS_HOME"] = home
             environment["MARGINS_PROFILE"] = "menu-test"
