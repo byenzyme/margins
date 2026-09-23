@@ -24,5 +24,16 @@ if [ "${1:-}" = "--build-only" ]; then
   printf '%s\n' "$APP_PATH"
   exit 0
 fi
-open -n -a "$APP_PATH"
+set -- -n
+if [ "${MARGINS_MENU_REMOTE+x}" = x ]; then set -- "$@" --env "MARGINS_MENU_REMOTE=$MARGINS_MENU_REMOTE"; fi
+if [ "${MARGINS_MENU_WORKSPACE+x}" = x ]; then set -- "$@" --env "MARGINS_MENU_WORKSPACE=$MARGINS_MENU_WORKSPACE"; fi
+if [ "${MARGINS_MENU_BRIDGE_APP+x}" = x ]; then set -- "$@" --env "MARGINS_MENU_BRIDGE_APP=$MARGINS_MENU_BRIDGE_APP"; fi
+if [ "${MARGINS_MENU_LOCAL_DISCOVERY+x}" = x ]; then set -- "$@" --env "MARGINS_MENU_LOCAL_DISCOVERY=$MARGINS_MENU_LOCAL_DISCOVERY"; fi
+if [ "${MARGINS_MENU_TRANSCRIBE_BIN+x}" = x ]; then set -- "$@" --env "MARGINS_MENU_TRANSCRIBE_BIN=$MARGINS_MENU_TRANSCRIBE_BIN"; fi
+if [ "${MARGINS_MENU_TRANSCRIBE_VAULT+x}" = x ]; then set -- "$@" --env "MARGINS_MENU_TRANSCRIBE_VAULT=$MARGINS_MENU_TRANSCRIBE_VAULT"; fi
+if [ "${MARGINS_MENU_TRANSCRIBE_HOME+x}" = x ]; then set -- "$@" --env "MARGINS_MENU_TRANSCRIBE_HOME=$MARGINS_MENU_TRANSCRIBE_HOME"; fi
+if [ "${MARGINS_MENU_SSH_REMOTE_BINARY+x}" = x ]; then set -- "$@" --env "MARGINS_MENU_SSH_REMOTE_BINARY=$MARGINS_MENU_SSH_REMOTE_BINARY"; fi
+if [ "${MARGINS_MENU_SSH_REMOTE_DATA_DIR+x}" = x ]; then set -- "$@" --env "MARGINS_MENU_SSH_REMOTE_DATA_DIR=$MARGINS_MENU_SSH_REMOTE_DATA_DIR"; fi
+if [ "${MARGINS_MENU_HOME+x}" = x ]; then set -- "$@" --env "MARGINS_MENU_HOME=$MARGINS_MENU_HOME"; fi
+open "$@" -a "$APP_PATH"
 printf 'Started %s\n' "$APP_PATH"
