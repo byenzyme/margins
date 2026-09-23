@@ -7,7 +7,12 @@ EXECUTABLE="$APP_PATH/Contents/MacOS/MarginsMenu"
 mkdir -p "$APP_PATH/Contents/MacOS"
 swiftc -parse-as-library -O -framework AppKit -framework SwiftUI \
   "$SCRIPT_DIR/MarginsMenu.swift" -o "$EXECUTABLE"
-cat > "$APP_PATH/Contents/Info.plist" <<'PLIST'
+if [ "${MARGINS_MENU_TEST_WINDOW:-0}" = 1 ]; then
+  UI_ELEMENT=false
+else
+  UI_ELEMENT=true
+fi
+cat > "$APP_PATH/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -15,7 +20,7 @@ cat > "$APP_PATH/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>Margins Menu Test</string>
   <key>CFBundleExecutable</key><string>MarginsMenu</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>LSUIElement</key><true/>
+  <key>LSUIElement</key><$UI_ELEMENT/>
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
@@ -35,5 +40,6 @@ if [ "${MARGINS_MENU_TRANSCRIBE_HOME+x}" = x ]; then set -- "$@" --env "MARGINS_
 if [ "${MARGINS_MENU_SSH_REMOTE_BINARY+x}" = x ]; then set -- "$@" --env "MARGINS_MENU_SSH_REMOTE_BINARY=$MARGINS_MENU_SSH_REMOTE_BINARY"; fi
 if [ "${MARGINS_MENU_SSH_REMOTE_DATA_DIR+x}" = x ]; then set -- "$@" --env "MARGINS_MENU_SSH_REMOTE_DATA_DIR=$MARGINS_MENU_SSH_REMOTE_DATA_DIR"; fi
 if [ "${MARGINS_MENU_HOME+x}" = x ]; then set -- "$@" --env "MARGINS_MENU_HOME=$MARGINS_MENU_HOME"; fi
+if [ "${MARGINS_MENU_TEST_WINDOW+x}" = x ]; then set -- "$@" --env "MARGINS_MENU_TEST_WINDOW=$MARGINS_MENU_TEST_WINDOW"; fi
 open "$@" -a "$APP_PATH"
 printf 'Started %s\n' "$APP_PATH"

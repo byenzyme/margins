@@ -277,56 +277,63 @@ private struct MenuError: LocalizedError {
     var errorDescription: String? { message }
 }
 
+private struct RecorderControls: View {
+    @ObservedObject var recorder: MenuRecorder
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Margins recorder").font(.headline)
+            Picker("Destination", selection: $recorder.mode) {
+                ForEach(CaptureMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
+            }.disabled(recorder.active)
+            if recorder.mode == .project {
+                TextField("SSH alias or HTTPS URL", text: $recorder.remote)
+                TextField("Workspace ID", text: $recorder.workspace)
+            }
+            TextField("Meeting title", text: $recorder.title).disabled(recorder.active)
+            Text(recorder.status).font(.caption).foregroundStyle(.secondary)
+            if let error = recorder.error { Text(error).font(.caption).foregroundStyle(.red) }
+            if let session = recorder.sessionID { Text("Session: \(session)").font(.caption2).textSelection(.enabled) }
+            if !recorder.localAudioPaths.isEmpty {
+                Text("Mac audio copy: \(recorder.localAudioPaths.count) segment(s)").font(.caption2)
+                Button("Transcribe Mac copy") { Task { await recorder.transcribeMacCopy() } }
+                    .disabled(recorder.active || recorder.transcribingOnMac)
+                if !recorder.macTranscription.isEmpty { Text(recorder.macTranscription).font(.caption2) }
+            }
+            HStack {
+                Button("Start") { Task { await recorder.start() } }.disabled(recorder.active)
+                Button("Pause") { Task { await recorder.control("pause") } }.disabled(recorder.state != "recording")
+                Button("Resume") { Task { await recorder.control("resume") } }.disabled(recorder.state != "paused")
+                Button("Stop") { Task { await recorder.control("stop") } }.disabled(!recorder.active)
+            }
+            HStack {
+                Button("Refresh") { Task { await recorder.refresh() } }
+                if recorder.mode == .project {
+                    Button("Disconnect") { Task { await recorder.disconnect() } }
+                        .disabled(recorder.active || recorder.transcribingOnMac)
+                }
+                Button("Quit") {
+                    Task {
+                        await recorder.disconnect()
+                        NSApp.terminate(nil)
+                    }
+                }.disabled(recorder.active || recorder.transcribingOnMac)
+            }
+        }
+        .padding(14)
+        .frame(width: 330)
+    }
+}
+
 @main
 struct MarginsMenuApp: App {
     @StateObject private var recorder = MenuRecorder()
 
     var body: some Scene {
-        MenuBarExtra("Margins", systemImage: "waveform") {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Margins recorder").font(.headline)
-                Picker("Destination", selection: $recorder.mode) {
-                    ForEach(CaptureMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
-                }.disabled(recorder.active)
-                if recorder.mode == .project {
-                    TextField("SSH alias or HTTPS URL", text: $recorder.remote)
-                    TextField("Workspace ID", text: $recorder.workspace)
-                }
-                TextField("Meeting title", text: $recorder.title).disabled(recorder.active)
-                Text(recorder.status).font(.caption).foregroundStyle(.secondary)
-                if let error = recorder.error { Text(error).font(.caption).foregroundStyle(.red) }
-                if let session = recorder.sessionID { Text("Session: \(session)").font(.caption2).textSelection(.enabled) }
-                if !recorder.localAudioPaths.isEmpty {
-                    Text("Mac audio copy: \(recorder.localAudioPaths.count) segment(s)").font(.caption2)
-                    Button("Transcribe Mac copy") { Task { await recorder.transcribeMacCopy() } }
-                        .disabled(recorder.active || recorder.transcribingOnMac)
-                    if !recorder.macTranscription.isEmpty {
-                        Text(recorder.macTranscription).font(.caption2)
-                    }
-                }
-                HStack {
-                    Button("Start") { Task { await recorder.start() } }.disabled(recorder.active)
-                    Button("Pause") { Task { await recorder.control("pause") } }.disabled(recorder.state != "recording")
-                    Button("Resume") { Task { await recorder.control("resume") } }.disabled(recorder.state != "paused")
-                    Button("Stop") { Task { await recorder.control("stop") } }.disabled(!recorder.active)
-                }
-                HStack {
-                    Button("Refresh") { Task { await recorder.refresh() } }
-                    if recorder.mode == .project {
-                        Button("Disconnect") { Task { await recorder.disconnect() } }
-                            .disabled(recorder.active || recorder.transcribingOnMac)
-                    }
-                    Button("Quit") {
-                        Task {
-                            await recorder.disconnect()
-                            NSApp.terminate(nil)
-                        }
-                    }.disabled(recorder.active || recorder.transcribingOnMac)
-                }
-            }
-            .padding(14)
-            .frame(width: 330)
+        MenuBarExtra("Margins", systemImage: "waveform") { RecorderControls(recorder: recorder) }
+            .menuBarExtraStyle(.window)
+        if ProcessInfo.processInfo.environment["MARGINS_MENU_TEST_WINDOW"] == "1" {
+            WindowGroup("Margins Menu Test Controls") { RecorderControls(recorder: recorder) }
         }
-        .menuBarExtraStyle(.window)
     }
 }

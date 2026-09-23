@@ -13,6 +13,11 @@ Build into this directory's ignored `.build/` and launch:
 ./build-and-run.sh
 ```
 
+For automation on a Mac where the accessibility driver cannot target menu bar
+extras, set `MARGINS_MENU_TEST_WINDOW=1`. This adds a temporary ordinary window
+containing the same controls and model as the menu extra; the default build has
+only the menu bar surface.
+
 For a scoped remote test, set `MARGINS_MENU_BRIDGE_APP` to the exact test helper
 `.app`, `MARGINS_MENU_REMOTE` to its SSH alias or HTTPS authority, and
 `MARGINS_MENU_WORKSPACE` to the provisioned Workspace. The optional
