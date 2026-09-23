@@ -56,11 +56,18 @@ test("Codex tools read one Workspace and save a revisioned memo", async () => {
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   try {
     const names = (await client.listTools()).tools.map((tool) => tool.name);
-    assert.deepEqual(names.sort(), ["list_meetings", "read_memo", "read_transcript", "recording_service_status", "save_memo"].sort());
+    assert.deepEqual(names.sort(), ["list_meetings", "open_memo_pad", "read_memo", "read_transcript", "recording_service_status", "save_memo"].sort());
+    const openTool = (await client.listTools()).tools.find(tool => tool.name === "open_memo_pad");
+    assert.equal(openTool._meta.ui.resourceUri, "ui://margins/memo-pad-v1.html");
+    const widget = await client.readResource({ uri: openTool._meta.ui.resourceUri });
+    assert.equal(widget.contents[0].mimeType, "text/html;profile=mcp-app");
+    assert.match(widget.contents[0].text, /Save memo/);
     const meetings = await client.callTool({ name: "list_meetings", arguments: {} });
     assert.equal(meetings.structuredContent.data.sessions[0].session_id, sessionId);
     const memo = await client.callTool({ name: "read_memo", arguments: { sessionId } });
     assert.equal(memo.structuredContent.data.revision, "rev-1");
+    const opened = await client.callTool({ name: "open_memo_pad", arguments: { sessionId } });
+    assert.equal(opened.structuredContent.data.revision, "rev-1");
     const saved = await client.callTool({ name: "save_memo", arguments: { sessionId, expectedRevision: "rev-1", text: "edited" } });
     assert.equal(saved.structuredContent.data.revision, "rev-2");
     assert.equal(calls.filter((call) => call.options.method === "PUT").length, 1);

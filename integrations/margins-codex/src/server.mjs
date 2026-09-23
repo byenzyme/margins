@@ -1,4 +1,5 @@
 import { pathToFileURL } from "node:url";
+import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -8,6 +9,8 @@ const sessionId = z.string().min(1).max(200).regex(/^[A-Za-z0-9_-]+$/);
 const dataOutput = { data: z.unknown() };
 const readOnly = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
 const writable = { readOnlyHint: false, destructiveHint: true, openWorldHint: false };
+const memoPadUri = "ui://margins/memo-pad-v1.html";
+const memoPadHtml = readFileSync(new URL("../web/memo-pad.html", import.meta.url), "utf8");
 
 function result(data) {
   return { structuredContent: { data }, content: [{ type: "text", text: JSON.stringify(data) }] };
@@ -24,8 +27,13 @@ function register(server, name, config, execute, serviceFactory) {
 
 export function createServer(serviceFactory = () => MarginsService.fromEnv()) {
   const server = new McpServer({ name: "margins-codex", version: "0.1.0" }, {
-    instructions: "Margins recordings belong to the configured Workspace. Read sessions and memo before editing. save_memo replaces the complete plain-text memo using its expected revision. The Mac menu app owns audio capture; these tools do not start or stop it.",
+    instructions: "Margins recordings belong to the configured Workspace. Read sessions and memo before editing. Use open_memo_pad for an editable saved-meeting memo when the host supports MCP Apps UI. save_memo replaces the complete plain-text memo using its expected revision. The Mac menu app owns audio capture; these tools do not start or stop it.",
   });
+
+  server.registerResource("margins-memo-pad", memoPadUri, {}, async () => ({
+    contents: [{ uri: memoPadUri, mimeType: "text/html;profile=mcp-app", text: memoPadHtml,
+      _meta: { ui: { prefersBorder: true } } }],
+  }));
 
   register(server, "recording_service_status", {
     title: "Check Margins recording service",
@@ -50,6 +58,19 @@ export function createServer(serviceFactory = () => MarginsService.fromEnv()) {
     description: "Read the editable memo and its revision for one exact meeting ID.",
     inputSchema: { sessionId }, annotations: readOnly,
   }, (service, { sessionId }) => service.memo(sessionId), serviceFactory);
+
+  register(server, "open_memo_pad", {
+    title: "Open Margins memo pad",
+    description: "Show the editable memo pad for one exact saved meeting ID. For hosts without MCP Apps UI, returns the memo and revision as data.",
+    inputSchema: { sessionId }, annotations: readOnly,
+    _meta: { ui: { resourceUri: memoPadUri }, "openai/outputTemplate": memoPadUri },
+  }, async (service, { sessionId }) => {
+    const summary = await service.summary(sessionId);
+    if (!summary) throw new Error("Meeting not found among the 100 most recent sessions");
+    if (!summary.input_finalized) throw new Error("The memo pad currently supports saved meetings only");
+    const memo = await service.memo(sessionId);
+    return { ...memo, session_id: sessionId, capture_duration_ms: summary.capture_duration_ms ?? 0 };
+  }, serviceFactory);
 
   register(server, "save_memo", {
     title: "Save a Margins memo",

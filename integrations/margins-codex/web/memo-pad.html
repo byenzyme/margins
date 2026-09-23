@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Margins memo pad</title>
+  <style>
+    :root { color-scheme: light dark; font: 14px system-ui, sans-serif; }
+    body { margin: 0; padding: 18px; color: CanvasText; background: Canvas; }
+    main { max-width: 720px; margin: auto; }
+    header { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    small { color: GrayText; overflow-wrap: anywhere; }
+    textarea { box-sizing: border-box; width: 100%; min-height: 230px; margin: 16px 0 10px; padding: 12px; resize: vertical; font: inherit; line-height: 1.5; color: CanvasText; background: Canvas; border: 1px solid GrayText; border-radius: 8px; }
+    .actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    button { font: inherit; padding: 7px 12px; border-radius: 7px; border: 1px solid GrayText; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: default; }
+    #status { min-height: 20px; }
+    #status[data-kind="error"] { color: #b3261e; }
+    @media (prefers-color-scheme: dark) { #status[data-kind="error"] { color: #ffb4ab; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header><div><h1>Meeting memo</h1><small id="session">Waiting for meeting…</small></div><small id="revision"></small></header>
+    <label for="memo">Notes</label>
+    <textarea id="memo" aria-label="Meeting memo" placeholder="Add your notes here" disabled></textarea>
+    <div class="actions">
+      <button id="save" type="button" disabled>Save memo</button>
+      <button id="reload" type="button" disabled>Reload saved memo</button>
+      <span id="status" role="status" aria-live="polite">Loading…</span>
+    </div>
+  </main>
+  <script>
+    (() => {
+      const sessionEl = document.getElementById("session");
+      const revisionEl = document.getElementById("revision");
+      const memoEl = document.getElementById("memo");
+      const saveEl = document.getElementById("save");
+      const reloadEl = document.getElementById("reload");
+      const statusEl = document.getElementById("status");
+      const pending = new Map();
+      let nextId = 1;
+      let sessionId;
+      let revision;
+      let savedText = "";
+      let busy = false;
+
+      function status(message, kind = "info") {
+        statusEl.textContent = message;
+        statusEl.dataset.kind = kind;
+      }
+      function controls() {
+        memoEl.disabled = !revision || busy;
+        saveEl.disabled = !revision || busy || memoEl.value === savedText;
+        reloadEl.disabled = !revision || busy;
+      }
+      function textOf(data) {
+        return Array.isArray(data.lines) ? data.lines.map(line => String(line.text ?? "")).join("\n") : "";
+      }
+      function apply(data) {
+        if (!data || typeof data.session_id !== "string" || typeof data.revision !== "string") throw new Error("Invalid memo response");
+        if (sessionId && sessionId !== data.session_id) throw new Error("Meeting changed; open a new memo pad");
+        sessionId = data.session_id;
+        revision = data.revision;
+        savedText = textOf(data);
+        memoEl.value = savedText;
+        sessionEl.textContent = sessionId;
+        revisionEl.textContent = `Revision ${revision}`;
+        status("Ready");
+        controls();
+      }
+      function request(method, params) {
+        const id = nextId++;
+        return new Promise((resolve, reject) => {
+          pending.set(id, { resolve, reject });
+          window.parent.postMessage({ jsonrpc: "2.0", id, method, params }, "*");
+        });
+      }
+      async function tool(name, args) {
+        const response = await request("tools/call", { name, arguments: args });
+        if (response?.isError) throw new Error(response.content?.[0]?.text || "Margins request failed");
+        if (!response?.structuredContent?.data) throw new Error("Missing Margins response");
+        return response.structuredContent.data;
+      }
+
+      window.addEventListener("message", event => {
+        if (event.source !== window.parent) return;
+        const message = event.data;
+        if (!message || message.jsonrpc !== "2.0") return;
+        if (message.id !== undefined && pending.has(message.id)) {
+          const callback = pending.get(message.id);
+          pending.delete(message.id);
+          if (message.error) callback.reject(new Error(message.error.message || "Host request failed"));
+          else callback.resolve(message.result);
+        } else if (message.method === "ui/notifications/tool-result") {
+          try {
+            if (revision && memoEl.value !== savedText) return;
+            apply(message.params?.structuredContent?.data);
+          } catch (error) { status(error.message, "error"); }
+        }
+      });
+
+      memoEl.addEventListener("input", () => { status("Unsaved changes"); controls(); });
+      saveEl.addEventListener("click", async () => {
+        if (!sessionId || !revision || busy) return;
+        const draft = memoEl.value;
+        busy = true; controls(); status("Saving…");
+        try {
+          const data = await tool("save_memo", { sessionId, expectedRevision: revision, text: draft });
+          apply(data);
+          status("Saved");
+        } catch (error) {
+          status(`${error.message}. Your draft is still here; reload to see the server version.`, "error");
+        } finally { busy = false; controls(); }
+      });
+      reloadEl.addEventListener("click", async () => {
+        if (!sessionId || busy) return;
+        if (memoEl.value !== savedText && !window.confirm("Discard your unsaved changes and reload the saved memo?")) return;
+        busy = true; controls(); status("Reloading…");
+        try { apply(await tool("read_memo", { sessionId })); }
+        catch (error) { status(error.message, "error"); }
+        finally { busy = false; controls(); }
+      });
+    })();
+  </script>
+</body>
+</html>

@@ -2,7 +2,7 @@
 
 This local Codex plugin connects to one existing Margins Workspace service. It
 lets Codex check transcription readiness, list meetings, read a transcript,
-read a memo, and save the complete plain-text memo with a revision check. The
+open an editable memo pad, and save the complete plain-text memo with a revision check. The
 Mac menu app still owns microphone and computer-audio recording. The plugin
 does not read audio or hold macOS capture permission.
 
@@ -23,23 +23,28 @@ revision returned by `read_memo`. For a saved meeting, the service supplies the
 capture duration as the memo timestamp. A live memo edit requires an explicit
 `observedAtMs` from the recording timeline.
 
-The Codex plugin source lives here under `integrations/margins-codex`. It is not
-installed into a personal marketplace or published. A Codex session must load
-this package in its environment before its tools appear; existing sessions do
-not gain newly installed tools automatically.
+The Codex plugin source lives here under `integrations/margins-codex`. A Codex
+session must load this package in its environment before its tools appear;
+existing sessions do not gain newly installed tools automatically.
+
+Call `open_memo_pad` with a saved meeting ID to show the editor in an MCP Apps
+compatible host. The widget uses `save_memo` over the host's MCP bridge, so the
+service token stays in the server process. A stale revision leaves the draft in
+place; Reload asks before discarding it. Hosts that do not render MCP Apps UI
+still receive the memo and revision in the tool result and can use `save_memo`.
+Live meeting memo editing remains available through `save_memo` with a timeline
+offset, but the widget currently opens saved meetings only.
 
 ## Verify
 
-Run `npm test` for the MCP protocol and Workspace authorization fixture. The
-tests use a fake service and do not change any real memo. For a read-only live
+Run `npm test` for the MCP protocol, Workspace authorization, and widget
+interaction fixtures. The tests use a fake service and do not change any real memo. For a read-only live
 check, configure the variables above, then ask Codex to check the Margins
 recording service and list recent meetings.
 
 ## Product boundary
 
-This is the tool-backed Codex integration. The five tools work without a custom
-component. An embedded editable memo widget is not included; current official
-OpenAI documentation describes the MCP Apps component path for ChatGPT and
-compatible hosts, and does not establish that this Codex surface renders it.
-Pairing/setup UI, model downloads, and live recording controls remain future
-integration work.
+The six MCP tools work without a custom component. The editable widget uses
+the MCP Apps UI resource protocol. Whether a particular Codex client renders
+that resource must be checked in that client. Pairing/setup UI, model
+downloads, and live recording controls remain future integration work.
