@@ -29,7 +29,7 @@ function register(server, name, config, execute, serviceFactory) {
 
 export function createServer(serviceFactory = () => MarginsService.fromEnv()) {
   const server = new McpServer({ name: "margins-codex", version: "0.1.0" }, {
-    instructions: "Margins recordings belong to the configured Workspace. Read sessions and memo before editing. Use open_memo_pad for an editable saved-meeting memo or open_live_meeting for a chat-bound status view of one exact session when the host supports MCP Apps UI. During capture, optional Mac CoreML words are provisional; the final Linux transcript replaces them after Stop. save_memo replaces the complete plain-text memo using its expected revision. The Mac menu app owns audio capture; these tools do not start or stop it.",
+    instructions: "Margins recordings belong to the configured Workspace. For live feedback, use watermark_snapshot on each request and ground the answer in its newest transcript; live CoreML words are provisional. For post-meeting synthesis, use get_distillation_context and preserve the memo's emphasis; the final Linux transcript replaces provisional words after Stop. Use recall_workspace only when the Workspace has declared Sources and a connection would help. Use open_memo_pad for an editable saved-meeting memo or open_live_meeting for a chat-bound status view when the host supports MCP Apps UI. save_memo replaces the complete plain-text memo using its expected revision. The Mac menu app owns audio capture; these tools do not start or stop it.",
   });
 
   server.registerResource("margins-memo-pad", memoPadUri, {}, async () => ({
@@ -70,6 +70,24 @@ export function createServer(serviceFactory = () => MarginsService.fromEnv()) {
     description: "Read capture status and available transcript for one exact meeting ID. Optional Mac CoreML words during recording are provisional; Linux finalizes after Stop.",
     inputSchema: { sessionId }, annotations: readOnly,
   }, (service, { sessionId }) => service.liveMeeting(sessionId), serviceFactory);
+
+  register(server, "watermark_snapshot", {
+    title: "Get current meeting watermark",
+    description: "Get a fresh transcript snapshot for in-meeting feedback. Resolves the sole active capture unless sessionId pins one; returns candidate IDs if ambiguous. CoreML words are provisional.",
+    inputSchema: { sessionId: sessionId.optional() }, annotations: readOnly,
+  }, (service, { sessionId }) => service.watermarkSnapshot(sessionId), serviceFactory);
+
+  register(server, "get_distillation_context", {
+    title: "Get meeting distillation context",
+    description: "Get the final transcript, original memo, artifacts, and status for one saved meeting. Defaults to the latest visible meeting and says when final transcription is pending.",
+    inputSchema: { sessionId: sessionId.optional() }, annotations: readOnly,
+  }, (service, { sessionId }) => service.distillationContext(sessionId), serviceFactory);
+
+  register(server, "recall_workspace", {
+    title: "Recall declared meeting notes",
+    description: "Search only this Margins Workspace's declared Sources for context relevant to a finished meeting. Returns evidence references, not permission to read arbitrary paths.",
+    inputSchema: { query: z.string().min(1).max(1000), source: z.string().min(1).max(200).optional() }, annotations: readOnly,
+  }, (service, { query, source }) => service.recall(query, source), serviceFactory);
 
   register(server, "open_live_meeting", {
     title: "Open Margins live meeting view",

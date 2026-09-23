@@ -104,6 +104,46 @@ export class MarginsService {
     return this.scoped(`sessions/${encodeURIComponent(sessionId)}/transcript`);
   }
 
+  async artifacts(sessionId) {
+    return this.scoped(`sessions/${encodeURIComponent(sessionId)}/artifacts`);
+  }
+
+  async recall(query, source) {
+    if (!query?.trim()) throw new Error("Recall query cannot be empty");
+    return this.scoped("recall", "POST", { query, source: source || null });
+  }
+
+  async watermarkSnapshot(sessionId) {
+    const selection = sessionId
+      ? { current_session_id: sessionId, candidates: [sessionId] }
+      : await this.currentSession();
+    if (!selection.current_session_id) {
+      return { session_id: null, candidates: selection.candidates, transcript: null };
+    }
+    return this.liveMeeting(selection.current_session_id);
+  }
+
+  async distillationContext(sessionId) {
+    const selected = sessionId ?? (await this.sessions(1)).sessions[0]?.session_id;
+    if (!selected) throw new Error("No saved meeting found in this Workspace");
+    const summary = await this.exactSummary(selected);
+    if (!summary.input_finalized) {
+      return { session_id: selected, ready: false, reason: "capture_not_finalized", summary };
+    }
+    const [memo, artifacts] = await Promise.all([this.memo(selected), this.artifacts(selected)]);
+    let transcript = null;
+    try { transcript = await this.transcript(selected); }
+    catch (error) {
+      if (!/No aligned transcript or capture context found/.test(String(error?.message ?? error))) throw error;
+    }
+    return {
+      session_id: selected,
+      ready: transcript?.terminal === true,
+      reason: transcript?.terminal === true ? null : "transcript_not_final",
+      summary, transcript, memo, artifacts,
+    };
+  }
+
   async liveMeeting(sessionId) {
     const summary = await this.exactSummary(sessionId);
     let transcript = null;
@@ -125,6 +165,8 @@ export class MarginsService {
         live: transcript.live,
         terminal: transcript.terminal,
         view: transcript.view,
+        decoded_until_ms: transcript.decoded_until_ms ?? null,
+        committed_until_ms: transcript.committed_until_ms ?? null,
         updated_at_unix_ms: transcript.updated_at_unix_ms,
       },
     };

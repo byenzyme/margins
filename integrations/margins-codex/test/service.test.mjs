@@ -36,7 +36,12 @@ function fixture() {
         assert.equal(body.text, "edited");
         result = { session_id: sessionId, revision: "rev-2", lines: [{ text: "edited" }] };
       } else if (parsed.pathname.endsWith("/transcript")) {
-        result = { session_id: sessionId, body: "system and mic words", terminal: true };
+        result = { session_id: sessionId, body: "system and mic words", terminal: true, decoded_until_ms: 1200, committed_until_ms: 1200 };
+      } else if (parsed.pathname.endsWith("/artifacts")) {
+        result = [{ kind: "transcript", path: "artifacts/test/transcript.md" }];
+      } else if (parsed.pathname === "/v1/workspaces/journal/recall") {
+        assert.equal(body.query, "unusual memo phrase");
+        result = { matches: [{ source: "notes", excerpt: "earlier idea" }] };
       } else throw new Error(`unexpected fixture path: ${parsed.pathname}`);
     }
     return new Response(JSON.stringify({ ok: true, result }), { headers: { "content-type": "application/json" } });
@@ -62,7 +67,7 @@ test("Codex tools read one Workspace and save a revisioned memo", async () => {
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   try {
     const names = (await client.listTools()).tools.map((tool) => tool.name);
-    assert.deepEqual(names.sort(), ["find_current_meeting", "list_meetings", "open_live_meeting", "open_memo_pad", "read_live_meeting", "read_memo", "read_transcript", "recording_service_status", "save_memo"].sort());
+    assert.deepEqual(names.sort(), ["find_current_meeting", "get_distillation_context", "list_meetings", "open_live_meeting", "open_memo_pad", "read_live_meeting", "read_memo", "read_transcript", "recall_workspace", "recording_service_status", "save_memo", "watermark_snapshot"].sort());
     const openTool = (await client.listTools()).tools.find(tool => tool.name === "open_memo_pad");
     assert.equal(openTool._meta.ui.resourceUri, "ui://margins/memo-pad-v2.html");
     const widget = await client.readResource({ uri: openTool._meta.ui.resourceUri });
@@ -87,6 +92,15 @@ test("Codex tools read one Workspace and save a revisioned memo", async () => {
     assert.equal(calls.filter((call) => call.options.method === "PUT").length, 1);
     const transcript = await client.callTool({ name: "read_transcript", arguments: { sessionId } });
     assert.equal(transcript.structuredContent.data.terminal, true);
+    const watermark = await client.callTool({ name: "watermark_snapshot", arguments: {} });
+    assert.equal(watermark.structuredContent.data.session_id, sessionId);
+    assert.equal(watermark.structuredContent.data.transcript.decoded_until_ms, 1200);
+    const context = await client.callTool({ name: "get_distillation_context", arguments: {} });
+    assert.equal(context.structuredContent.data.ready, true);
+    assert.equal(context.structuredContent.data.memo.revision, "rev-1");
+    assert.equal(context.structuredContent.data.artifacts.length, 1);
+    const recall = await client.callTool({ name: "recall_workspace", arguments: { query: "unusual memo phrase" } });
+    assert.equal(recall.structuredContent.data.matches[0].source, "notes");
   } finally {
     await client.close();
     await server.close();
@@ -101,4 +115,10 @@ test("live meeting reports a pending transcript without claiming terminal text",
   assert.equal(state.input_finalized, false);
   assert.equal(state.segment_count, 1);
   assert.equal(state.transcript, null);
+  const watermark = await service.watermarkSnapshot(sessionId);
+  assert.equal(watermark.transcript, null);
+  service.sessions = async () => ({ sessions: [{ session_id: sessionId }] });
+  const pending = await service.distillationContext();
+  assert.equal(pending.ready, false);
+  assert.equal(pending.reason, "capture_not_finalized");
 });

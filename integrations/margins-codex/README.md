@@ -7,6 +7,12 @@ chat-bound view, and save the complete plain-text memo with a revision check. Th
 Mac menu app still owns microphone and computer-audio recording. The plugin
 does not read audio or hold macOS capture permission.
 
+The bundled `margins-watermark` skill fetches a fresh, provisional transcript
+snapshot when asked for feedback during a meeting. The `margins-distill` skill
+uses the final transcript and original memo after capture; it can recall the
+Workspace's declared notes when useful. It drafts in Codex and writes to a
+notes folder only when that destination is accessible and requested.
+
 ## Connect one Workspace
 
 Install dependencies in this directory with `npm ci`. Set these variables in
@@ -62,5 +68,7 @@ recording service and list recent meetings.
 The MCP tools work without a custom component. The widgets use
 the MCP Apps UI resource protocol. Whether a particular Codex client renders
 that resource must be checked in that client. Pairing/setup UI, model
-downloads, live recording controls, and rolling transcript production remain
-future integration work.
+downloads, and live recording controls remain outside the plugin. Rolling
+transcript production runs in the Mac native helper when the CoreML feature
+and models are available; the plugin reads the Workspace checkpoint and does
+not transcribe audio itself.

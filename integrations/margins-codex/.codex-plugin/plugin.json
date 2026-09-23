@@ -14,5 +14,6 @@
     "capabilities": ["Read", "Write"],
     "defaultPrompt": "Show my recent Margins meeting and its memo."
   },
-  "mcpServers": "./.mcp.json"
+  "mcpServers": "./.mcp.json",
+  "skills": "./skills/"
 }
