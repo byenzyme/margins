@@ -76,7 +76,7 @@ describe("Margins recording panel", () => {
       getPanelState: () => saved,
       connectedNoteContext: () => ({ ok: true, context: {
         schema: "margins.bb.connected-note-context.v1", instanceId: "instance-1", workspaceId: "workspace-1", sessionId: "rec-pinned", title: "Pinned",
-        transcript: { terminal: true, live: false, updatedAtUnixMs: 2 }, memo: { revision: "memo-1", lineCount: 1 }, artifacts: [], noteAssociation: null, instructions: "Pin exact session",
+        transcript: { available: true, terminal: true, live: false, updatedAtUnixMs: 2 }, memo: { revision: "memo-1", lineCount: 1 }, artifacts: [], noteAssociation: null, instructions: "Pin exact session",
       } }),
     }, composer: { text: "Keep this draft." } });
     const screen = within(slot.container);

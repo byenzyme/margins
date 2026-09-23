@@ -187,6 +187,25 @@ export class ProjectMarginsTransport {
     return value.result as T;
   }
 
+  private async transcriptSummary(handle: ServerHandle, recordingId: string) {
+    const response = await fetch(`${handle.baseUrl}/v1/workspaces/${handle.workspaceId}/sessions/${recordingId}/transcript`, {
+      headers: { authorization: `Bearer ${handle.token}` },
+    });
+    const envelope = await response.json() as {
+      ok?: boolean;
+      result?: { terminal: boolean; live: boolean; updated_at_unix_ms: number };
+      error?: { code?: string; message?: string };
+    };
+    if (response.status === 422 && envelope.error?.code === "invalid_request"
+      && envelope.error.message === `No aligned transcript or capture context found for '${recordingId}'.`) {
+      return null;
+    }
+    if (!response.ok || !envelope.ok || !envelope.result) {
+      throw new Error(envelope.error?.message || `Margins transcript lookup failed (${response.status})`);
+    }
+    return envelope.result;
+  }
+
   private async snapshot(handle: ServerHandle, recordingId: string, ownerId: string, signal?: AbortSignal): Promise<HostCaptureSnapshot> {
     return this.request<HostCaptureSnapshot>(handle, `browser/sessions/${recordingId}/snapshot?ownerId=${encodeURIComponent(ownerId)}`, "GET", undefined, signal);
   }
@@ -255,7 +274,7 @@ export class ProjectMarginsTransport {
       const handle = await this.manager.ensure(target, dataDir);
       const [sessions, transcript, memo, artifacts, noteAssociation] = await Promise.all([
         this.request<{ sessions: Array<{ session_id: string; title: string | null }> }>(handle, "sessions?limit=100", "GET"),
-        this.request<{ terminal: boolean; live: boolean; updated_at_unix_ms: number }>(handle, `sessions/${recordingId}/transcript`, "GET"),
+        this.transcriptSummary(handle, recordingId),
         this.request<{ revision: string; lines: unknown[] }>(handle, `sessions/${recordingId}/memo`, "GET"),
         this.request<Array<{ artifact_id: string; kind: string; retention_class: string }>>(handle, `sessions/${recordingId}/artifacts`, "GET"),
         this.request<{ source_id: string; relative_path: string; revision: number } | null>(handle, `sessions/${recordingId}/note-association`, "GET"),
@@ -268,11 +287,13 @@ export class ProjectMarginsTransport {
         workspaceId: handle.workspaceId,
         sessionId: recordingId,
         title: summary.title,
-        transcript: { terminal: transcript.terminal, live: transcript.live, updatedAtUnixMs: transcript.updated_at_unix_ms },
+        transcript: transcript
+          ? { available: true, terminal: transcript.terminal, live: transcript.live, updatedAtUnixMs: transcript.updated_at_unix_ms }
+          : { available: false, terminal: false, live: false, updatedAtUnixMs: 0 },
         memo: { revision: memo.revision, lineCount: memo.lines.length },
         artifacts: artifacts.map((artifact) => ({ artifactId: artifact.artifact_id, kind: artifact.kind, retentionClass: artifact.retention_class })),
         noteAssociation: noteAssociation ? { sourceId: noteAssociation.source_id, relativePath: noteAssociation.relative_path, revision: noteAssociation.revision } : null,
-        instructions: "Pin this exact session before recall. Fetch its transcript/artifacts from Margins, but read and write ordinary note bytes only through the existing project Source; link only the Source-relative reference after writing.",
+        instructions: "Pin this exact session before recall. If transcript.available is false, obtain or wait for transcription of this exact session before writing a grounded note. Fetch transcript/artifacts from Margins, but read and write ordinary note bytes only through the existing project Source; link only the Source-relative reference after writing.",
       } };
     } catch (cause) {
       return { ok: false, error: hostError("connected_note_context_unavailable", cause instanceof Error ? cause.message : String(cause)) };

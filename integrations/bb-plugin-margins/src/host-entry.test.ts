@@ -19,7 +19,7 @@ describe("Margins project host entry", () => {
       upload: vi.fn(async () => ({ ok: true as const })),
       connectedNoteContext: vi.fn(async () => ({ ok: true as const, context: {
         schema: "margins.bb.connected-note-context.v1" as const, instanceId: "instance-1", workspaceId: "workspace-1", sessionId: "rec-1", title: null,
-        transcript: { terminal: true, live: false, updatedAtUnixMs: 1 }, memo: { revision: "memo-1", lineCount: 0 }, artifacts: [], noteAssociation: null, instructions: "pin",
+        transcript: { available: true, terminal: true, live: false, updatedAtUnixMs: 1 }, memo: { revision: "memo-1", lineCount: 0 }, artifacts: [], noteAssociation: null, instructions: "pin",
       } })),
       dispose: vi.fn(async () => undefined),
     } as unknown as ProjectMarginsTransport;

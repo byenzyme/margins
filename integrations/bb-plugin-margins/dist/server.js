@@ -18929,7 +18929,7 @@ var connectedNoteContextSchema = external_exports.object({
   workspaceId: external_exports.string().min(1),
   sessionId: external_exports.string().min(1),
   title: external_exports.string().nullable(),
-  transcript: external_exports.object({ terminal: external_exports.boolean(), live: external_exports.boolean(), updatedAtUnixMs: external_exports.number().int().nonnegative() }).strict(),
+  transcript: external_exports.object({ available: external_exports.boolean(), terminal: external_exports.boolean(), live: external_exports.boolean(), updatedAtUnixMs: external_exports.number().int().nonnegative() }).strict(),
   memo: external_exports.object({ revision: external_exports.string().min(1), lineCount: external_exports.number().int().nonnegative() }).strict(),
   artifacts: external_exports.array(external_exports.object({ artifactId: external_exports.string().min(1), kind: external_exports.string().min(1), retentionClass: external_exports.string().min(1) }).strict()),
   noteAssociation: external_exports.object({ sourceId: external_exports.string().min(1), relativePath: external_exports.string().min(1), revision: external_exports.number().int().nonnegative() }).strict().nullable(),

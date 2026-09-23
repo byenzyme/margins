@@ -63,10 +63,51 @@ describe("ProjectServerManager remote adapter", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     const result = await new ProjectMarginsTransport(manager).connectedNoteContext({ projectId: "project", projectRoot: "/tmp/project", hostId: "host" }, "/tmp/data", "rec-1");
-    expect(result).toMatchObject({ ok: true, context: { instanceId: "instance-remote", workspaceId: "practice", sessionId: "rec-1", memo: { lineCount: 1 }, noteAssociation: { relativePath: "Meetings/pinned.md" } } });
+    expect(result).toMatchObject({ ok: true, context: { instanceId: "instance-remote", workspaceId: "practice", sessionId: "rec-1", transcript: { available: true, terminal: true }, memo: { lineCount: 1 }, noteAssociation: { relativePath: "Meetings/pinned.md" } } });
     expect(JSON.stringify(result)).not.toContain("private memo");
     expect(JSON.stringify(result)).not.toContain("must not cross host contract");
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/artifacts/artifact-1/content"))).toBe(false);
+  });
+
+  it("reports a saved capture awaiting transcription without exposing note bytes", async () => {
+    const manager = { ensure: vi.fn(async () => ({
+      baseUrl: "https://margins.example.test", token: "scoped-token", workspaceId: "practice", instanceId: "instance-remote",
+    })) } as unknown as ProjectServerManager;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith("/transcript")) return new Response(JSON.stringify({
+        ok: false,
+        error: { code: "invalid_request", message: "No aligned transcript or capture context found for 'rec-1'." },
+      }), { status: 422 });
+      let result: unknown;
+      if (url.includes("/sessions?")) result = { sessions: [{ session_id: "rec-1", title: "Saved capture" }] };
+      else if (url.endsWith("/memo")) result = { revision: "memo-1", lines: [] };
+      else if (url.endsWith("/artifacts")) result = [];
+      else if (url.endsWith("/note-association")) result = null;
+      else throw new Error(`unexpected URL ${url}`);
+      return new Response(JSON.stringify({ ok: true, result }), { status: 200 });
+    }));
+    const result = await new ProjectMarginsTransport(manager).connectedNoteContext(
+      { projectId: "project", projectRoot: "/tmp/project", hostId: "host" }, "/tmp/data", "rec-1",
+    );
+    expect(result).toMatchObject({ ok: true, context: { sessionId: "rec-1", transcript: { available: false, terminal: false, live: false } } });
+    expect(JSON.stringify(result)).toContain("obtain or wait for transcription of this exact session");
+  });
+
+  it("does not mistake another transcript failure for pending transcription", async () => {
+    const manager = { ensure: vi.fn(async () => ({
+      baseUrl: "https://margins.example.test", token: "scoped-token", workspaceId: "practice", instanceId: "instance-remote",
+    })) } as unknown as ProjectServerManager;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      if (String(input).endsWith("/transcript")) return new Response(JSON.stringify({
+        ok: false, error: { code: "invalid_request", message: "Transcript rejected for another reason" },
+      }), { status: 422 });
+      return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 });
+    }));
+    const result = await new ProjectMarginsTransport(manager).connectedNoteContext(
+      { projectId: "project", projectRoot: "/tmp/project", hostId: "host" }, "/tmp/data", "rec-1",
+    );
+    expect(result).toMatchObject({ ok: false, error: { code: "connected_note_context_unavailable" } });
   });
 
   it("rejects incomplete or non-TLS remote configuration before transport", async () => {

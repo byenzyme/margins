@@ -27,7 +27,7 @@ function harness(options: { heartbeatFails?: boolean } = {}) {
       if (method === "uploadChunk") return { ok: true };
       if (method === "connectedNoteContext") return { ok: true, context: {
         schema: "margins.bb.connected-note-context.v1", instanceId: "instance-1", workspaceId: "workspace-1", sessionId: "rec-1", title: "Customer call",
-        transcript: { terminal: true, live: false, updatedAtUnixMs: 10 }, memo: { revision: "memo-1", lineCount: 1 }, artifacts: [], noteAssociation: null, instructions: "Pin exact session",
+        transcript: { available: true, terminal: true, live: false, updatedAtUnixMs: 10 }, memo: { revision: "memo-1", lineCount: 1 }, artifacts: [], noteAssociation: null, instructions: "Pin exact session",
       } };
       if (method === "heartbeat" && options.heartbeatFails) return { ok: false, error: { code: "offline", message: "offline", retryable: true } };
       return { ok: true, snapshot: stopped ? null : snapshot };

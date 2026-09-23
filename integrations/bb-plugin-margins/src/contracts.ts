@@ -41,7 +41,7 @@ export const connectedNoteContextSchema = z.object({
   workspaceId: z.string().min(1),
   sessionId: z.string().min(1),
   title: z.string().nullable(),
-  transcript: z.object({ terminal: z.boolean(), live: z.boolean(), updatedAtUnixMs: z.number().int().nonnegative() }).strict(),
+  transcript: z.object({ available: z.boolean(), terminal: z.boolean(), live: z.boolean(), updatedAtUnixMs: z.number().int().nonnegative() }).strict(),
   memo: z.object({ revision: z.string().min(1), lineCount: z.number().int().nonnegative() }).strict(),
   artifacts: z.array(z.object({ artifactId: z.string().min(1), kind: z.string().min(1), retentionClass: z.string().min(1) }).strict()),
   noteAssociation: z.object({ sourceId: z.string().min(1), relativePath: z.string().min(1), revision: z.number().int().nonnegative() }).strict().nullable(),
