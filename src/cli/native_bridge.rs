@@ -163,6 +163,7 @@ struct Bridge {
     pair_code: Option<String>,
     token: Option<String>,
     sender: Option<mpsc::Sender<CaptureAction>>,
+    permission_request: mpsc::Sender<mpsc::Sender<Result<(), String>>>,
     status: Arc<Mutex<CaptureStatus>>,
 }
 
@@ -217,6 +218,7 @@ fn run_bridge(args: &[OsString]) -> Result<()> {
     );
     eprintln!("Margins native bridge on http://127.0.0.1:{port} for {instance} / {workspace}");
     eprintln!("Pairing code (paste into your BB recording panel): {pair_code}");
+    let (permission_request, permission_receiver) = mpsc::channel();
     let mut bridge = Bridge {
         port,
         remote,
@@ -226,17 +228,30 @@ fn run_bridge(args: &[OsString]) -> Result<()> {
         pair_code: Some(pair_code),
         token: None,
         sender: None,
+        permission_request,
         status: Arc::new(Mutex::new(CaptureStatus::default())),
     };
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                if let Err(error) = handle_stream(stream, &mut bridge) {
-                    eprintln!("native bridge request failed: {error:#}");
+    std::thread::Builder::new()
+        .name("margins-native-bridge-http".into())
+        .spawn(move || {
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(stream) => {
+                        if let Err(error) = handle_stream(stream, &mut bridge) {
+                            eprintln!("native bridge request failed: {error:#}");
+                        }
+                    }
+                    Err(error) => eprintln!("native bridge accept failed: {error}"),
                 }
             }
-            Err(error) => eprintln!("native bridge accept failed: {error}"),
-        }
+        })?;
+    // AVFoundation presents the permission alert for this process. Keep that
+    // request on the executable's main thread, while HTTP status and Stop stay
+    // responsive on the server thread during the system-owned dialog.
+    for reply in permission_receiver {
+        let result = super::ensure_capture_permissions(&super::NativeCapturePermissionSource)
+            .map_err(|error| format!("{error:#}"));
+        let _ = reply.send(result);
     }
     Ok(())
 }
@@ -377,18 +392,26 @@ fn handle_stream(mut stream: TcpStream, bridge: &mut Bridge) -> Result<()> {
                     receiver,
                     status: bridge.status.clone(),
                 };
+                let (permission_reply, permission_result) = mpsc::channel();
+                bridge.permission_request.send(permission_reply)?;
                 let remote = bridge.remote.clone();
                 let workspace = bridge.workspace.clone();
                 let bridge_status = bridge.status.clone();
                 std::thread::Builder::new()
                     .name("margins-native-bridge-capture".into())
                     .spawn(move || {
-                        let result = super::run_remote_native_capture(
-                            &remote,
-                            &workspace,
-                            &Some(Command::New { title }),
-                            Some(controller),
-                        );
+                        let result = permission_result
+                            .recv()
+                            .context("microphone permission request did not complete")
+                            .and_then(|result| result.map_err(anyhow::Error::msg))
+                            .and_then(|()| {
+                                super::run_remote_native_capture(
+                                    &remote,
+                                    &workspace,
+                                    &Some(Command::New { title }),
+                                    Some(controller),
+                                )
+                            });
                         let mut state = bridge_status.lock().unwrap();
                         match result {
                             Ok(()) => state.state = "saved",
@@ -579,6 +602,7 @@ mod tests {
             pair_code: Some("secret-code".into()),
             token: None,
             sender: None,
+            permission_request: mpsc::channel().0,
             status: Arc::new(Mutex::new(CaptureStatus::default())),
         }
     }
@@ -643,6 +667,38 @@ mod tests {
         assert!(parse_port("0").is_err());
         assert!(parse_port("65536").is_err());
         assert_eq!(parse_port("65535").unwrap(), 65535);
+    }
+
+    #[test]
+    fn start_keeps_status_responsive_while_main_thread_requests_permission() {
+        let mut bridge = bridge();
+        bridge.token = Some("paired-token".into());
+        let (permission_request, permission_receiver) = mpsc::channel();
+        bridge.permission_request = permission_request;
+        let request = |method: &str, path: &str, body: &str| {
+            format!(
+                "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:18765\r\nOrigin: https://example.test\r\nAuthorization: Bearer paired-token\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+        };
+        assert!(
+            exchange(&mut bridge, &request("POST", "/v1/start", "{}")).starts_with("HTTP/1.1 202")
+        );
+        let reply = permission_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        let pending = exchange(&mut bridge, &request("GET", "/v1/status", ""));
+        assert!(pending.contains("\"state\":\"getting_ready\""));
+        reply.send(Err("microphone denied".into())).unwrap();
+        for _ in 0..20 {
+            let status = exchange(&mut bridge, &request("GET", "/v1/status", ""));
+            if status.contains("\"state\":\"needs_attention\"") {
+                assert!(status.contains("microphone denied"));
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("capture worker did not publish the permission error");
     }
 
     #[test]
