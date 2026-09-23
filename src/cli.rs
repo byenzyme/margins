@@ -286,7 +286,7 @@ where
                     "remote capture requires --workspace <id> or MARGINS_WORKSPACE",
                 );
             };
-            return match run_remote_native_capture(&remote, &workspace, &parsed.command, None) {
+            return match run_remote_native_capture(&remote, &workspace, &parsed.command, None, None) {
                 Ok(()) => 0,
                 Err(error) => {
                     let message = format!("{error:#}");
@@ -1891,11 +1891,55 @@ where
 }
 
 #[cfg(feature = "audio-capture")]
+fn copy_remote_recovery_for_local_asr(
+    source: &Path,
+    directory: &Path,
+    transfer_id: &str,
+    segment_index: usize,
+) -> Result<std::path::PathBuf> {
+    use std::fs::OpenOptions;
+    use std::io::copy;
+
+    if !directory.is_absolute() {
+        bail!("local audio directory must be absolute");
+    }
+    std::fs::create_dir_all(directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+        let name = format!("{transfer_id}-seg{segment_index}.wav");
+        let destination = directory.join(name);
+        let temporary = destination.with_extension("wav.partial");
+        let mut input = std::fs::File::open(source)?;
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        copy(&mut input, &mut output)?;
+        output.sync_all()?;
+        std::fs::rename(&temporary, &destination)?;
+        return Ok(destination);
+    }
+    #[cfg(not(unix))]
+    {
+        let destination = directory.join(format!("{transfer_id}-seg{segment_index}.wav"));
+        let mut input = std::fs::File::open(source)?;
+        let mut output = OpenOptions::new().write(true).create_new(true).open(&destination)?;
+        copy(&mut input, &mut output)?;
+        output.sync_all()?;
+        Ok(destination)
+    }
+}
+
+#[cfg(feature = "audio-capture")]
 fn run_remote_native_capture(
     remote: &str,
     workspace_id: &str,
     command: &Option<Command>,
     controller: Option<native_bridge::CaptureController>,
+    local_audio_dir: Option<&Path>,
 ) -> Result<()> {
     use margins_meeting_protocol::{
         SegmentCloseReasonV1, SessionFinalizeReasonV1, WorkspaceAttachV1, WorkspaceMemoLineV1,
@@ -2229,6 +2273,7 @@ fn run_remote_native_capture(
     let mut selected_device: Option<crate::recorder::InputDevice> = None;
     let capture_started = std::time::Instant::now();
     let mut announced_sources = false;
+    let mut local_segment_index = 0usize;
     'capture: loop {
         let offset_ms =
             initial_offset_ms.saturating_add(capture_started.elapsed().as_millis() as u64);
@@ -2337,6 +2382,26 @@ fn run_remote_native_capture(
         // run_tui set the stop flag before returning. This call synchronously
         // retires both native devices before memo/network/ASR work begins.
         recorder.stop_and_write(&recovery_path.to_string_lossy())?;
+        if let Some(directory) = local_audio_dir {
+            match copy_remote_recovery_for_local_asr(
+                &recovery_path,
+                directory,
+                &active_transfer_id,
+                local_segment_index,
+            ) {
+                Ok(path) => {
+                    if let Some(controller) = &controller {
+                        controller.local_audio_saved(&path);
+                    }
+                }
+                Err(error) => {
+                    if let Some(controller) = &controller {
+                        controller.local_audio_failed(&format!("{error:#}"));
+                    }
+                }
+            }
+            local_segment_index += 1;
+        }
         let (returned, spool_result) = worker
             .join()
             .map_err(|_| anyhow::anyhow!("remote spool worker panicked"))?;
@@ -3450,6 +3515,24 @@ mod tests {
     use std::sync::Mutex;
 
     static PROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(feature = "audio-capture")]
+    #[test]
+    fn remote_recovery_copy_is_private_and_keeps_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("recovery.wav");
+        std::fs::write(&source, b"RIFF-test-audio").unwrap();
+        let directory = temp.path().join("local-audio");
+        let copied = copy_remote_recovery_for_local_asr(&source, &directory, "transfer-a", 0).unwrap();
+        assert_eq!(std::fs::read(&copied).unwrap(), b"RIFF-test-audio");
+        assert_eq!(std::fs::read(&source).unwrap(), b"RIFF-test-audio");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&copied).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+    }
 
     #[test]
     fn remote_recorder_start_failure_seals_abort_removes_reservation_and_joins_uploader() {

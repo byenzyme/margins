@@ -45,6 +45,7 @@ struct CaptureStatus {
     session_id: Option<String>,
     transfer_id: Option<String>,
     error: Option<String>,
+    local_audio_paths: Vec<String>,
     completed: Counters,
     live: LiveCounters,
 }
@@ -58,6 +59,7 @@ impl CaptureStatus {
             "state": if self.state.is_empty() { "ready" } else { self.state },
             "instanceId": instance_id,
             "workspaceId": workspace_id,
+            "pid": std::process::id(),
             "sessionId": self.session_id,
             "transferId": self.transfer_id,
             "microphoneSamples": self.completed.mic + load(&self.live.mic),
@@ -67,6 +69,7 @@ impl CaptureStatus {
             "systemFrames": self.completed.frames + load(&self.live.frames),
             "systemSilentSamples": self.completed.silent + load(&self.live.silent),
             "error": self.error,
+            "localAudioPaths": self.local_audio_paths,
         })
     }
 
@@ -152,6 +155,18 @@ impl CaptureController {
         state.fold_live();
         state.state = "saving";
     }
+
+    pub(super) fn local_audio_saved(&self, path: &std::path::Path) {
+        self.status
+            .lock()
+            .unwrap()
+            .local_audio_paths
+            .push(path.to_string_lossy().into_owned());
+    }
+
+    pub(super) fn local_audio_failed(&self, error: &str) {
+        self.status.lock().unwrap().error = Some(format!("Local audio copy failed: {error}"));
+    }
 }
 
 struct Bridge {
@@ -160,7 +175,9 @@ struct Bridge {
     workspace: String,
     instance: String,
     origin: String,
+    local_audio_dir: Option<std::path::PathBuf>,
     pair_code: Option<String>,
+    pair_code_file: Option<std::path::PathBuf>,
     token: Option<String>,
     sender: Option<mpsc::Sender<CaptureAction>>,
     permission_request: mpsc::Sender<mpsc::Sender<Result<(), String>>>,
@@ -181,6 +198,8 @@ fn run_bridge(args: &[OsString]) -> Result<()> {
     let mut remote = None;
     let mut workspace = None;
     let mut origin = None;
+    let mut local_audio_dir = None;
+    let mut pair_code_file = None;
     let mut port = DEFAULT_PORT;
     let mut iter = args[2..].iter();
     while let Some(flag) = iter.next() {
@@ -193,12 +212,26 @@ fn run_bridge(args: &[OsString]) -> Result<()> {
             Some("--workspace") => workspace = Some(value.to_string()),
             Some("--origin") => origin = Some(value.to_string()),
             Some("--port") => port = parse_port(value)?,
+            Some("--local-audio-dir") => local_audio_dir = Some(std::path::PathBuf::from(value)),
+            Some("--pair-code-file") => pair_code_file = Some(std::path::PathBuf::from(value)),
             _ => bail!("unknown native-bridge option"),
         }
     }
     let remote = remote.context("native-bridge requires --remote")?;
     let workspace = workspace.context("native-bridge requires --workspace")?;
     let origin = origin.context("native-bridge requires --origin")?;
+    if local_audio_dir
+        .as_ref()
+        .is_some_and(|path| !path.is_absolute())
+    {
+        bail!("--local-audio-dir must be an absolute path");
+    }
+    if pair_code_file
+        .as_ref()
+        .is_some_and(|path| !path.is_absolute())
+    {
+        bail!("--pair-code-file must be an absolute path");
+    }
     if !valid_origin(&origin) {
         bail!("--origin must be one exact HTTPS origin (HTTP localhost is allowed for local development)");
     }
@@ -218,6 +251,9 @@ fn run_bridge(args: &[OsString]) -> Result<()> {
     );
     eprintln!("Margins native bridge on http://127.0.0.1:{port} for {instance} / {workspace}");
     eprintln!("Pairing code (paste into your BB recording panel): {pair_code}");
+    if let Some(path) = &pair_code_file {
+        write_private_pair_code(path, &pair_code)?;
+    }
     let (permission_request, permission_receiver) = mpsc::channel();
     let mut bridge = Bridge {
         port,
@@ -225,7 +261,9 @@ fn run_bridge(args: &[OsString]) -> Result<()> {
         workspace,
         instance,
         origin,
+        local_audio_dir,
         pair_code: Some(pair_code),
+        pair_code_file,
         token: None,
         sender: None,
         permission_request,
@@ -264,6 +302,21 @@ fn parse_port(value: &str) -> Result<u16> {
         bail!("--port must be an integer from 1 to 65535");
     }
     Ok(port)
+}
+
+fn write_private_pair_code(path: &std::path::Path, code: &str) -> Result<()> {
+    use std::fs::OpenOptions;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    writeln!(file, "{code}")?;
+    file.sync_all()?;
+    Ok(())
 }
 
 fn valid_origin(value: &str) -> bool {
@@ -337,6 +390,9 @@ fn handle_stream(mut stream: TcpStream, bridge: &mut Bridge) -> Result<()> {
             return Ok(());
         }
         bridge.pair_code = None;
+        if let Some(path) = bridge.pair_code_file.take() {
+            let _ = std::fs::remove_file(path);
+        }
         let token = format!(
             "{}{}",
             uuid::Uuid::new_v4().simple(),
@@ -396,6 +452,7 @@ fn handle_stream(mut stream: TcpStream, bridge: &mut Bridge) -> Result<()> {
                 bridge.permission_request.send(permission_reply)?;
                 let remote = bridge.remote.clone();
                 let workspace = bridge.workspace.clone();
+                let local_audio_dir = bridge.local_audio_dir.clone();
                 let bridge_status = bridge.status.clone();
                 std::thread::Builder::new()
                     .name("margins-native-bridge-capture".into())
@@ -410,6 +467,7 @@ fn handle_stream(mut stream: TcpStream, bridge: &mut Bridge) -> Result<()> {
                                     &workspace,
                                     &Some(Command::New { title }),
                                     Some(controller),
+                                    local_audio_dir.as_deref(),
                                 )
                             });
                         let mut state = bridge_status.lock().unwrap();
@@ -599,7 +657,9 @@ mod tests {
             workspace: "journal".into(),
             instance: "linux-instance".into(),
             origin: "https://example.test".into(),
+            local_audio_dir: None,
             pair_code: Some("secret-code".into()),
+            pair_code_file: None,
             token: None,
             sender: None,
             permission_request: mpsc::channel().0,
@@ -649,6 +709,31 @@ mod tests {
         ));
         assert!(status.starts_with("HTTP/1.1 200"));
         assert!(status.contains("\"state\":\"ready\""));
+    }
+
+    #[test]
+    fn private_pair_file_is_removed_after_pairing() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("pair-code");
+        write_private_pair_code(&path, "secret-code").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "secret-code\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let mut bridge = bridge();
+        bridge.pair_code_file = Some(path.clone());
+        let body = r#"{"code":"secret-code"}"#;
+        let raw = format!(
+            "POST /v1/pair HTTP/1.1\r\nHost: 127.0.0.1:18765\r\nOrigin: https://example.test\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        assert!(exchange(&mut bridge, &raw).starts_with("HTTP/1.1 200"));
+        assert!(!path.exists());
     }
 
     #[test]
