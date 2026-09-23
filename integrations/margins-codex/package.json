@@ -1,0 +1,17 @@
+{
+  "name": "margins-codex",
+  "version": "0.1.0",
+  "description": "Codex tools for Margins meetings and memos",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.6.5"
+  }
+}

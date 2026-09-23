@@ -1,0 +1,73 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { MarginsService } from "../src/service.mjs";
+import { createServer } from "../src/server.mjs";
+
+const sessionId = "remote-2026-09-23-test";
+
+function fixture() {
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    const parsed = new URL(url);
+    const body = options.body && JSON.parse(options.body);
+    calls.push({ path: parsed.pathname + parsed.search, options, body });
+    assert.equal(options.headers.authorization, "Bearer scoped-token");
+    let result;
+    if (parsed.pathname === "/v1/capabilities") {
+      result = { workspace_id: "journal", instance_id: "instance", asr_available: true };
+    } else {
+      assert.equal(options.headers["X-Margins-Instance-Id"], "instance");
+      if (parsed.pathname === "/v1/workspaces/journal/sessions") {
+        result = { sessions: [{ session_id: sessionId, input_finalized: true, capture_duration_ms: 1200 }], next_cursor: null };
+      } else if (parsed.pathname.endsWith("/memo") && options.method === "GET") {
+        result = { session_id: sessionId, revision: "rev-1", lines: [{ text: "first" }] };
+      } else if (parsed.pathname.endsWith("/memo") && options.method === "PUT") {
+        assert.equal(body.expected_revision, "rev-1");
+        assert.equal(body.observed_at_ms, 1200);
+        assert.equal(body.paused, true);
+        assert.equal(body.text, "edited");
+        result = { session_id: sessionId, revision: "rev-2", lines: [{ text: "edited" }] };
+      } else if (parsed.pathname.endsWith("/transcript")) {
+        result = { session_id: sessionId, body: "system and mic words", terminal: true };
+      } else throw new Error(`unexpected fixture path: ${parsed.pathname}`);
+    }
+    return new Response(JSON.stringify({ ok: true, result }), { headers: { "content-type": "application/json" } });
+  };
+  return { service: new MarginsService({ url: "http://127.0.0.1:18765", workspace: "journal", token: "scoped-token", fetchImpl }), calls };
+}
+
+test("service accepts only HTTPS or loopback and checks Workspace identity", async () => {
+  assert.throws(() => new MarginsService({ url: "http://example.com", workspace: "journal", token: "x" }), /HTTPS or loopback/);
+  assert.throws(() => new MarginsService({ url: "https://example.com/other", workspace: "journal", token: "x" }), /only an origin/);
+  const service = new MarginsService({
+    url: "http://localhost:1", workspace: "wrong", token: "x",
+    fetchImpl: async () => new Response(JSON.stringify({ ok: true, result: { workspace_id: "journal", instance_id: "instance" } })),
+  });
+  await assert.rejects(service.capabilities(), /does not match/);
+});
+
+test("Codex tools read one Workspace and save a revisioned memo", async () => {
+  const { service, calls } = fixture();
+  const server = createServer(() => service);
+  const client = new Client({ name: "margins-test", version: "0.1.0" }, { capabilities: {} });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const names = (await client.listTools()).tools.map((tool) => tool.name);
+    assert.deepEqual(names.sort(), ["list_meetings", "read_memo", "read_transcript", "recording_service_status", "save_memo"].sort());
+    const meetings = await client.callTool({ name: "list_meetings", arguments: {} });
+    assert.equal(meetings.structuredContent.data.sessions[0].session_id, sessionId);
+    const memo = await client.callTool({ name: "read_memo", arguments: { sessionId } });
+    assert.equal(memo.structuredContent.data.revision, "rev-1");
+    const saved = await client.callTool({ name: "save_memo", arguments: { sessionId, expectedRevision: "rev-1", text: "edited" } });
+    assert.equal(saved.structuredContent.data.revision, "rev-2");
+    assert.equal(calls.filter((call) => call.options.method === "PUT").length, 1);
+    const transcript = await client.callTool({ name: "read_transcript", arguments: { sessionId } });
+    assert.equal(transcript.structuredContent.data.terminal, true);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});

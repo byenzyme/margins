@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "margins": {
+      "command": "node",
+      "args": ["./src/server.mjs"],
+      "cwd": ".",
+      "env_vars": [
+        "MARGINS_CODEX_URL",
+        "MARGINS_CODEX_WORKSPACE",
+        "MARGINS_CODEX_TOKEN",
+        "MARGINS_CODEX_TOKEN_FILE"
+      ]
+    }
+  }
+}
