@@ -83,6 +83,11 @@ export class MarginsService {
     return this.scoped(`sessions?limit=${limit}`);
   }
 
+  async currentSession() {
+    const current = await this.scoped("current");
+    return { current_session_id: typeof current === "string" ? current : null };
+  }
+
   async summary(sessionId) {
     const page = await this.sessions(100);
     return page.sessions.find((session) => session.session_id === sessionId) ?? null;
@@ -90,6 +95,33 @@ export class MarginsService {
 
   async transcript(sessionId) {
     return this.scoped(`sessions/${encodeURIComponent(sessionId)}/transcript`);
+  }
+
+  async liveMeeting(sessionId) {
+    const summary = await this.summary(sessionId);
+    if (!summary) throw new Error("Meeting not found among the 100 most recent sessions");
+    let transcript = null;
+    try { transcript = await this.transcript(sessionId); }
+    catch (error) {
+      // The native bridge uploads audio while recording; remote ASR publishes
+      // the first transcript only after input is finalized.
+      if (!/No aligned transcript or capture context found/.test(String(error?.message ?? error))) throw error;
+    }
+    return {
+      session_id: sessionId,
+      title: summary.title ?? null,
+      input_finalized: summary.input_finalized,
+      segment_count: summary.segment_count ?? 0,
+      processing_state: summary.processing_state ?? "none",
+      capture_duration_ms: summary.capture_duration_ms ?? null,
+      transcript: transcript && {
+        body: transcript.body,
+        live: transcript.live,
+        terminal: transcript.terminal,
+        view: transcript.view,
+        updated_at_unix_ms: transcript.updated_at_unix_ms,
+      },
+    };
   }
 
   async memo(sessionId) {

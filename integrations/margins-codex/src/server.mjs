@@ -11,6 +11,8 @@ const readOnly = { readOnlyHint: true, destructiveHint: false, openWorldHint: fa
 const writable = { readOnlyHint: false, destructiveHint: true, openWorldHint: false };
 const memoPadUri = "ui://margins/memo-pad-v2.html";
 const memoPadHtml = readFileSync(new URL("../web/memo-pad.html", import.meta.url), "utf8");
+const liveMeetingUri = "ui://margins/live-meeting-v1.html";
+const liveMeetingHtml = readFileSync(new URL("../web/live-meeting.html", import.meta.url), "utf8");
 
 function result(data) {
   return { structuredContent: { data }, content: [{ type: "text", text: JSON.stringify(data) }] };
@@ -27,11 +29,15 @@ function register(server, name, config, execute, serviceFactory) {
 
 export function createServer(serviceFactory = () => MarginsService.fromEnv()) {
   const server = new McpServer({ name: "margins-codex", version: "0.1.0" }, {
-    instructions: "Margins recordings belong to the configured Workspace. Read sessions and memo before editing. Use open_memo_pad for an editable saved-meeting memo when the host supports MCP Apps UI. save_memo replaces the complete plain-text memo using its expected revision. The Mac menu app owns audio capture; these tools do not start or stop it.",
+    instructions: "Margins recordings belong to the configured Workspace. Read sessions and memo before editing. Use open_memo_pad for an editable saved-meeting memo or open_live_meeting for a chat-bound status view of one exact session when the host supports MCP Apps UI. The remote native capture path publishes transcript words after finalization, not during recording. save_memo replaces the complete plain-text memo using its expected revision. The Mac menu app owns audio capture; these tools do not start or stop it.",
   });
 
   server.registerResource("margins-memo-pad", memoPadUri, {}, async () => ({
     contents: [{ uri: memoPadUri, mimeType: "text/html;profile=mcp-app", text: memoPadHtml,
+      _meta: { ui: { prefersBorder: true } } }],
+  }));
+  server.registerResource("margins-live-meeting", liveMeetingUri, {}, async () => ({
+    contents: [{ uri: liveMeetingUri, mimeType: "text/html;profile=mcp-app", text: liveMeetingHtml,
       _meta: { ui: { prefersBorder: true } } }],
   }));
 
@@ -47,11 +53,30 @@ export function createServer(serviceFactory = () => MarginsService.fromEnv()) {
     inputSchema: { limit: z.number().int().min(1).max(100).optional() }, annotations: readOnly,
   }, (service, { limit }) => service.sessions(limit ?? 20), serviceFactory);
 
+  register(server, "find_current_meeting", {
+    title: "Find current Margins meeting",
+    description: "Find the current meeting ID in the configured Workspace, including the brief period before an active capture appears in list_meetings. Returns null if this service identity has no current session.",
+    inputSchema: {}, annotations: readOnly,
+  }, (service) => service.currentSession(), serviceFactory);
+
   register(server, "read_transcript", {
     title: "Read a Margins transcript",
     description: "Read the transcript for one exact saved meeting ID from list_meetings.",
     inputSchema: { sessionId }, annotations: readOnly,
   }, (service, { sessionId }) => service.transcript(sessionId), serviceFactory);
+
+  register(server, "read_live_meeting", {
+    title: "Read Margins meeting status",
+    description: "Read capture-finalization status and available transcript for one exact meeting ID. During native remote recording, audio uploads live but transcription starts after Stop.",
+    inputSchema: { sessionId }, annotations: readOnly,
+  }, (service, { sessionId }) => service.liveMeeting(sessionId), serviceFactory);
+
+  register(server, "open_live_meeting", {
+    title: "Open Margins live meeting view",
+    description: "Show a chat-bound, refreshing status and transcript view for one exact meeting ID. First use list_meetings to select the intended session. Recording remains controlled by the Mac menu app; remote transcript words appear after Stop.",
+    inputSchema: { sessionId }, annotations: readOnly,
+    _meta: { ui: { resourceUri: liveMeetingUri }, "openai/outputTemplate": liveMeetingUri },
+  }, (service, { sessionId }) => service.liveMeeting(sessionId), serviceFactory);
 
   register(server, "read_memo", {
     title: "Read a Margins memo",

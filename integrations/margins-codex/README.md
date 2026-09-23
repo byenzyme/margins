@@ -2,7 +2,8 @@
 
 This local Codex plugin connects to one existing Margins Workspace service. It
 lets Codex check transcription readiness, list meetings, read a transcript,
-open an editable memo pad, and save the complete plain-text memo with a revision check. The
+open an editable memo pad, follow one meeting's status and transcript in a
+chat-bound view, and save the complete plain-text memo with a revision check. The
 Mac menu app still owns microphone and computer-audio recording. The plugin
 does not read audio or hold macOS capture permission.
 
@@ -35,16 +36,27 @@ still receive the memo and revision in the tool result and can use `save_memo`.
 Live meeting memo editing remains available through `save_memo` with a timeline
 offset, but the widget currently opens saved meetings only.
 
+Use `find_current_meeting` or `list_meetings` to find the intended session ID,
+then `open_live_meeting` to keep a view pinned to that one session. It polls the
+Workspace for capture-finalization status and any available transcript. The
+floating-view button requests picture-in-picture when the host supports it.
+This is a read-only view: the Mac menu app still starts, pauses, and stops
+recording. In the current native remote path, Linux begins ONNX transcription
+after Stop, so live audio upload is visible as an unfinished session but words
+do not appear until transcription publishes them. The view does not show Mac
+microphone/system sample counters because those live in the Mac bridge process.
+
 ## Verify
 
-Run `npm test` for the MCP protocol, Workspace authorization, and widget
+Run `npm test` for the MCP protocol, Workspace authorization, and widgets'
 interaction fixtures. The tests use a fake service and do not change any real memo. For a read-only live
 check, configure the variables above, then ask Codex to check the Margins
 recording service and list recent meetings.
 
 ## Product boundary
 
-The six MCP tools work without a custom component. The editable widget uses
+The MCP tools work without a custom component. The widgets use
 the MCP Apps UI resource protocol. Whether a particular Codex client renders
 that resource must be checked in that client. Pairing/setup UI, model
-downloads, and live recording controls remain future integration work.
+downloads, live recording controls, and rolling transcript production remain
+future integration work.

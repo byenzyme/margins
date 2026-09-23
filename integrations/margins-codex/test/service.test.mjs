@@ -21,6 +21,8 @@ function fixture() {
       assert.equal(options.headers["X-Margins-Instance-Id"], "instance");
       if (parsed.pathname === "/v1/workspaces/journal/sessions") {
         result = { sessions: [{ session_id: sessionId, input_finalized: true, capture_duration_ms: 1200 }], next_cursor: null };
+      } else if (parsed.pathname === "/v1/workspaces/journal/current") {
+        result = sessionId;
       } else if (parsed.pathname.endsWith("/memo") && options.method === "GET") {
         result = { session_id: sessionId, revision: "rev-1", lines: [{ text: "first" }] };
       } else if (parsed.pathname.endsWith("/memo") && options.method === "PUT") {
@@ -56,7 +58,7 @@ test("Codex tools read one Workspace and save a revisioned memo", async () => {
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   try {
     const names = (await client.listTools()).tools.map((tool) => tool.name);
-    assert.deepEqual(names.sort(), ["list_meetings", "open_memo_pad", "read_memo", "read_transcript", "recording_service_status", "save_memo"].sort());
+    assert.deepEqual(names.sort(), ["find_current_meeting", "list_meetings", "open_live_meeting", "open_memo_pad", "read_live_meeting", "read_memo", "read_transcript", "recording_service_status", "save_memo"].sort());
     const openTool = (await client.listTools()).tools.find(tool => tool.name === "open_memo_pad");
     assert.equal(openTool._meta.ui.resourceUri, "ui://margins/memo-pad-v2.html");
     const widget = await client.readResource({ uri: openTool._meta.ui.resourceUri });
@@ -64,6 +66,14 @@ test("Codex tools read one Workspace and save a revisioned memo", async () => {
     assert.match(widget.contents[0].text, /Save memo/);
     const meetings = await client.callTool({ name: "list_meetings", arguments: {} });
     assert.equal(meetings.structuredContent.data.sessions[0].session_id, sessionId);
+    const current = await client.callTool({ name: "find_current_meeting", arguments: {} });
+    assert.equal(current.structuredContent.data.current_session_id, sessionId);
+    const live = await client.callTool({ name: "open_live_meeting", arguments: { sessionId } });
+    assert.equal(live.structuredContent.data.session_id, sessionId);
+    const liveTool = (await client.listTools()).tools.find(tool => tool.name === "open_live_meeting");
+    assert.equal(liveTool._meta.ui.resourceUri, "ui://margins/live-meeting-v1.html");
+    const liveResource = await client.readResource({ uri: liveTool._meta.ui.resourceUri });
+    assert.equal(liveResource.contents[0].mimeType, "text/html;profile=mcp-app");
     const memo = await client.callTool({ name: "read_memo", arguments: { sessionId } });
     assert.equal(memo.structuredContent.data.revision, "rev-1");
     const opened = await client.callTool({ name: "open_memo_pad", arguments: { sessionId } });
@@ -77,4 +87,14 @@ test("Codex tools read one Workspace and save a revisioned memo", async () => {
     await client.close();
     await server.close();
   }
+});
+
+test("live meeting reports a pending transcript without claiming terminal text", async () => {
+  const service = new MarginsService({ url: "http://127.0.0.1:18765", workspace: "journal", token: "scoped-token" });
+  service.summary = async () => ({ session_id: sessionId, input_finalized: false, segment_count: 1, processing_state: "none" });
+  service.transcript = async () => { throw new Error("No aligned transcript or capture context found"); };
+  const state = await service.liveMeeting(sessionId);
+  assert.equal(state.input_finalized, false);
+  assert.equal(state.segment_count, 1);
+  assert.equal(state.transcript, null);
 });
