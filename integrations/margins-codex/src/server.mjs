@@ -9,7 +9,7 @@ const sessionId = z.string().min(1).max(200).regex(/^[A-Za-z0-9_-]+$/);
 const dataOutput = { data: z.unknown() };
 const readOnly = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
 const writable = { readOnlyHint: false, destructiveHint: true, openWorldHint: false };
-const memoPadUri = "ui://margins/memo-pad-v1.html";
+const memoPadUri = "ui://margins/memo-pad-v2.html";
 const memoPadHtml = readFileSync(new URL("../web/memo-pad.html", import.meta.url), "utf8");
 
 function result(data) {

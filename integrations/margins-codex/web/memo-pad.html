@@ -70,6 +70,11 @@
         status("Ready");
         controls();
       }
+      function hydrate(output) {
+        const data = output?.structuredContent?.data ?? output?.data ?? output;
+        if (!data || (revision && memoEl.value !== savedText)) return;
+        try { apply(data); } catch (error) { status(error.message, "error"); }
+      }
       function request(method, params) {
         const id = nextId++;
         return new Promise((resolve, reject) => {
@@ -94,11 +99,23 @@
           if (message.error) callback.reject(new Error(message.error.message || "Host request failed"));
           else callback.resolve(message.result);
         } else if (message.method === "ui/notifications/tool-result") {
-          try {
-            if (revision && memoEl.value !== savedText) return;
-            apply(message.params?.structuredContent?.data);
-          } catch (error) { status(error.message, "error"); }
+          hydrate(message.params);
         }
+      });
+      window.addEventListener("openai:set_globals", event => {
+        hydrate(event.detail?.globals?.toolOutput);
+      });
+
+      request("ui/initialize", {
+        appCapabilities: {},
+        appInfo: { name: "margins-memo-pad", version: "0.2.0" },
+        protocolVersion: "2026-01-26",
+      }).then(() => {
+        window.parent.postMessage({ jsonrpc: "2.0", method: "ui/notifications/initialized" }, "*");
+        hydrate(window.openai?.toolOutput);
+      }).catch(error => {
+        if (window.openai?.toolOutput) hydrate(window.openai.toolOutput);
+        else status(`Unable to initialize memo pad: ${error.message}`, "error");
       });
 
       memoEl.addEventListener("input", () => { status("Unsaved changes"); controls(); });

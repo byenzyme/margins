@@ -58,7 +58,7 @@ test("Codex tools read one Workspace and save a revisioned memo", async () => {
     const names = (await client.listTools()).tools.map((tool) => tool.name);
     assert.deepEqual(names.sort(), ["list_meetings", "open_memo_pad", "read_memo", "read_transcript", "recording_service_status", "save_memo"].sort());
     const openTool = (await client.listTools()).tools.find(tool => tool.name === "open_memo_pad");
-    assert.equal(openTool._meta.ui.resourceUri, "ui://margins/memo-pad-v1.html");
+    assert.equal(openTool._meta.ui.resourceUri, "ui://margins/memo-pad-v2.html");
     const widget = await client.readResource({ uri: openTool._meta.ui.resourceUri });
     assert.equal(widget.contents[0].mimeType, "text/html;profile=mcp-app");
     assert.match(widget.contents[0].text, /Save memo/);
