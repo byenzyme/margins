@@ -54,9 +54,12 @@
         sessionEl.textContent = sessionId;
         titleEl.textContent = data.title || "Meeting status";
         const transcript = data.transcript;
-        if (!data.input_finalized) {
+        if (!data.input_finalized && transcript?.body) {
+          statusEl.textContent = "Live transcript draft";
+          detailEl.textContent = "On-device words may change. The Linux transcript replaces this draft after Stop.";
+        } else if (!data.input_finalized) {
           statusEl.textContent = "Capture not finalized";
-          detailEl.textContent = "Audio may still be uploading. Remote transcription begins after Stop in the Mac menu app.";
+          detailEl.textContent = "Audio may still be uploading. Waiting for on-device words; Linux transcription begins after Stop.";
         } else if (!transcript) {
           statusEl.textContent = "Waiting for transcription";
           detailEl.textContent = "Recording is saved; the Linux service has not published a transcript yet.";

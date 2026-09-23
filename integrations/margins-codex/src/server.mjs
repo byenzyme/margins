@@ -29,7 +29,7 @@ function register(server, name, config, execute, serviceFactory) {
 
 export function createServer(serviceFactory = () => MarginsService.fromEnv()) {
   const server = new McpServer({ name: "margins-codex", version: "0.1.0" }, {
-    instructions: "Margins recordings belong to the configured Workspace. Read sessions and memo before editing. Use open_memo_pad for an editable saved-meeting memo or open_live_meeting for a chat-bound status view of one exact session when the host supports MCP Apps UI. The remote native capture path publishes transcript words after finalization, not during recording. save_memo replaces the complete plain-text memo using its expected revision. The Mac menu app owns audio capture; these tools do not start or stop it.",
+    instructions: "Margins recordings belong to the configured Workspace. Read sessions and memo before editing. Use open_memo_pad for an editable saved-meeting memo or open_live_meeting for a chat-bound status view of one exact session when the host supports MCP Apps UI. During capture, optional Mac CoreML words are provisional; the final Linux transcript replaces them after Stop. save_memo replaces the complete plain-text memo using its expected revision. The Mac menu app owns audio capture; these tools do not start or stop it.",
   });
 
   server.registerResource("margins-memo-pad", memoPadUri, {}, async () => ({
@@ -67,13 +67,13 @@ export function createServer(serviceFactory = () => MarginsService.fromEnv()) {
 
   register(server, "read_live_meeting", {
     title: "Read Margins meeting status",
-    description: "Read capture-finalization status and available transcript for one exact meeting ID. During native remote recording, audio uploads live but transcription starts after Stop.",
+    description: "Read capture status and available transcript for one exact meeting ID. Optional Mac CoreML words during recording are provisional; Linux finalizes after Stop.",
     inputSchema: { sessionId }, annotations: readOnly,
   }, (service, { sessionId }) => service.liveMeeting(sessionId), serviceFactory);
 
   register(server, "open_live_meeting", {
     title: "Open Margins live meeting view",
-    description: "Show a chat-bound, refreshing status and transcript view for one exact meeting ID. Use find_current_meeting for an open capture, or list_meetings for a saved one. Recording remains controlled by the Mac menu app; remote transcript words appear after Stop.",
+    description: "Show a chat-bound, refreshing status and transcript view for one exact meeting ID. Use find_current_meeting for an open capture, or list_meetings for a saved one. Recording remains controlled by the Mac menu app; live CoreML words are provisional until Linux finishes after Stop.",
     inputSchema: { sessionId }, annotations: readOnly,
     _meta: { ui: { resourceUri: liveMeetingUri }, "openai/outputTemplate": liveMeetingUri },
   }, (service, { sessionId }) => service.liveMeeting(sessionId), serviceFactory);

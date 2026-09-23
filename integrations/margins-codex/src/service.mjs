@@ -109,8 +109,8 @@ export class MarginsService {
     let transcript = null;
     try { transcript = await this.transcript(sessionId); }
     catch (error) {
-      // The native bridge uploads audio while recording; remote ASR publishes
-      // the first transcript only after input is finalized.
+      // The native bridge uploads audio while recording. CoreML checkpoints
+      // are optional, so no transcript before finalization is expected too.
       if (!/No aligned transcript or capture context found/.test(String(error?.message ?? error))) throw error;
     }
     return {

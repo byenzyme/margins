@@ -44,9 +44,10 @@ floating-view button requests picture-in-picture when the host supports it.
 several exist, it returns candidate IDs and leaves selection to the user.
 An open reservation is not proof that its Mac recorder is still healthy.
 This is a read-only view: the Mac menu app still starts, pauses, and stops
-recording. In the current native remote path, Linux begins ONNX transcription
-after Stop, so live audio upload is visible as an unfinished session but words
-do not appear until transcription publishes them. The view does not show Mac
+recording. With Mac CoreML assets available, the native helper may publish
+provisional words while audio uploads. Linux begins ONNX transcription after
+Stop and replaces that draft with the final transcript. If CoreML is unavailable,
+words may first appear after Stop. The view does not show Mac
 microphone/system sample counters because those live in the Mac bridge process.
 
 ## Verify

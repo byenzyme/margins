@@ -29,6 +29,10 @@ test("chat-bound live view initializes, polls one session, and waits honestly fo
     notify({ session_id: "remote-live", input_finalized: false, transcript: null });
     assert.equal(get("status").textContent, "Capture not finalized");
     assert.match(get("detail").textContent, /after Stop/);
+    notify({ session_id: "remote-live", input_finalized: false, transcript: { body: "[mic] live words", terminal: false } });
+    assert.equal(get("status").textContent, "Live transcript draft");
+    assert.equal(get("transcript").textContent, "[mic] live words");
+    assert.match(get("detail").textContent, /replaces this draft/);
     poll();
     const refresh = calls.find(call => call.method === "tools/call");
     assert.deepEqual(JSON.parse(JSON.stringify(refresh.params)), { name: "read_live_meeting", arguments: { sessionId: "remote-live" } });
