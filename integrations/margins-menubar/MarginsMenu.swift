@@ -332,8 +332,10 @@ struct MarginsMenuApp: App {
     var body: some Scene {
         MenuBarExtra("Margins", systemImage: "waveform") { RecorderControls(recorder: recorder) }
             .menuBarExtraStyle(.window)
-        if ProcessInfo.processInfo.environment["MARGINS_MENU_TEST_WINDOW"] == "1" {
-            WindowGroup("Margins Menu Test Controls") { RecorderControls(recorder: recorder) }
+#if MARGINS_MENU_TEST_WINDOW
+        WindowGroup("Margins Menu Test Controls", id: "menu-test-controls") {
+            RecorderControls(recorder: recorder)
         }
+#endif
     }
 }

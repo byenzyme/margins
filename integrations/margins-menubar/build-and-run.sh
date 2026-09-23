@@ -4,14 +4,17 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 APP_PATH=${MARGINS_MENU_APP_PATH:-"$SCRIPT_DIR/.build/Margins Menu Test.app"}
 EXECUTABLE="$APP_PATH/Contents/MacOS/MarginsMenu"
+BUILD_ONLY=${1:-}
 mkdir -p "$APP_PATH/Contents/MacOS"
-swiftc -parse-as-library -O -framework AppKit -framework SwiftUI \
-  "$SCRIPT_DIR/MarginsMenu.swift" -o "$EXECUTABLE"
 if [ "${MARGINS_MENU_TEST_WINDOW:-0}" = 1 ]; then
   UI_ELEMENT=false
+  set -- -D MARGINS_MENU_TEST_WINDOW
 else
   UI_ELEMENT=true
+  set --
 fi
+swiftc -parse-as-library -O -framework AppKit -framework SwiftUI "$@" \
+  "$SCRIPT_DIR/MarginsMenu.swift" -o "$EXECUTABLE"
 cat > "$APP_PATH/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -25,7 +28,7 @@ cat > "$APP_PATH/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 codesign --force --sign - "$APP_PATH"
-if [ "${1:-}" = "--build-only" ]; then
+if [ "$BUILD_ONLY" = "--build-only" ]; then
   printf '%s\n' "$APP_PATH"
   exit 0
 fi
