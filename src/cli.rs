@@ -286,7 +286,14 @@ where
                     "remote capture requires --workspace <id> or MARGINS_WORKSPACE",
                 );
             };
-            return match run_remote_native_capture(&remote, &workspace, &parsed.command, None, None) {
+            return match run_remote_native_capture(
+                &remote,
+                &workspace,
+                &parsed.command,
+                None,
+                None,
+                None,
+            ) {
                 Ok(()) => 0,
                 Err(error) => {
                     let message = format!("{error:#}");
@@ -1940,6 +1947,7 @@ fn run_remote_native_capture(
     command: &Option<Command>,
     controller: Option<native_bridge::CaptureController>,
     local_audio_dir: Option<&Path>,
+    mic_device_name: Option<&str>,
 ) -> Result<()> {
     use margins_meeting_protocol::{
         SegmentCloseReasonV1, SessionFinalizeReasonV1, WorkspaceAttachV1, WorkspaceMemoLineV1,
@@ -1953,6 +1961,15 @@ fn run_remote_native_capture(
     };
 
     ensure_capture_permissions(&NativeCapturePermissionSource)?;
+    let mut selected_device = mic_device_name
+        .map(|name| {
+            crate::recorder::list_input_devices()
+                .into_iter()
+                .find(|(available, _)| available == name)
+                .map(|(_, device)| device)
+                .with_context(|| format!("microphone input device not found: {name}"))
+        })
+        .transpose()?;
     let token = std::env::var("MARGINS_REMOTE_TOKEN").ok();
     let connection = RemoteConnection::connect(remote, workspace_id, token.as_deref())?;
     let capabilities = &connection.capabilities;
@@ -2270,7 +2287,6 @@ fn run_remote_native_capture(
                 std::thread::sleep(backoff);
             }
         })?;
-    let mut selected_device: Option<crate::recorder::InputDevice> = None;
     let capture_started = std::time::Instant::now();
     let mut announced_sources = false;
     let mut local_segment_index = 0usize;

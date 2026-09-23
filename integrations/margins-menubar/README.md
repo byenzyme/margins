@@ -24,6 +24,8 @@ For a scoped remote test, set `MARGINS_MENU_BRIDGE_APP` to the exact test helper
 `MARGINS_MENU_SSH_REMOTE_BINARY`, `MARGINS_MENU_SSH_REMOTE_DATA_DIR`, and
 `MARGINS_MENU_HOME` variables are forwarded only to the launched helper. The
 helper needs its own microphone and system-audio permissions. The menu app
+uses the default microphone unless `MARGINS_MENU_MIC_DEVICE` names an available
+input device exactly; this does not change the macOS system default. The menu app
 uses a private temporary pairing file, removes it after pairing, and keeps the
 bearer in memory. Its scoped local WAV copies are removed when Disconnect is
 clicked, after the recording is saved. Use `MARGINS_MENU_LOCAL_DISCOVERY` for a

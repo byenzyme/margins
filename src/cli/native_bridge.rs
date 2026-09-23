@@ -175,6 +175,7 @@ struct Bridge {
     workspace: String,
     instance: String,
     origin: String,
+    mic_device_name: Option<String>,
     local_audio_dir: Option<std::path::PathBuf>,
     pair_code: Option<String>,
     pair_code_file: Option<std::path::PathBuf>,
@@ -198,6 +199,7 @@ fn run_bridge(args: &[OsString]) -> Result<()> {
     let mut remote = None;
     let mut workspace = None;
     let mut origin = None;
+    let mut mic_device_name = None;
     let mut local_audio_dir = None;
     let mut pair_code_file = None;
     let mut port = DEFAULT_PORT;
@@ -212,6 +214,7 @@ fn run_bridge(args: &[OsString]) -> Result<()> {
             Some("--workspace") => workspace = Some(value.to_string()),
             Some("--origin") => origin = Some(value.to_string()),
             Some("--port") => port = parse_port(value)?,
+            Some("--mic-device") => mic_device_name = Some(value.to_string()),
             Some("--local-audio-dir") => local_audio_dir = Some(std::path::PathBuf::from(value)),
             Some("--pair-code-file") => pair_code_file = Some(std::path::PathBuf::from(value)),
             _ => bail!("unknown native-bridge option"),
@@ -220,6 +223,12 @@ fn run_bridge(args: &[OsString]) -> Result<()> {
     let remote = remote.context("native-bridge requires --remote")?;
     let workspace = workspace.context("native-bridge requires --workspace")?;
     let origin = origin.context("native-bridge requires --origin")?;
+    if mic_device_name
+        .as_ref()
+        .is_some_and(|name: &String| name.trim().is_empty())
+    {
+        bail!("--mic-device must name an input device");
+    }
     if local_audio_dir
         .as_ref()
         .is_some_and(|path| !path.is_absolute())
@@ -261,6 +270,7 @@ fn run_bridge(args: &[OsString]) -> Result<()> {
         workspace,
         instance,
         origin,
+        mic_device_name,
         local_audio_dir,
         pair_code: Some(pair_code),
         pair_code_file,
@@ -452,6 +462,7 @@ fn handle_stream(mut stream: TcpStream, bridge: &mut Bridge) -> Result<()> {
                 bridge.permission_request.send(permission_reply)?;
                 let remote = bridge.remote.clone();
                 let workspace = bridge.workspace.clone();
+                let mic_device_name = bridge.mic_device_name.clone();
                 let local_audio_dir = bridge.local_audio_dir.clone();
                 let bridge_status = bridge.status.clone();
                 std::thread::Builder::new()
@@ -468,6 +479,7 @@ fn handle_stream(mut stream: TcpStream, bridge: &mut Bridge) -> Result<()> {
                                     &Some(Command::New { title }),
                                     Some(controller),
                                     local_audio_dir.as_deref(),
+                                    mic_device_name.as_deref(),
                                 )
                             });
                         let mut state = bridge_status.lock().unwrap();
@@ -657,6 +669,7 @@ mod tests {
             workspace: "journal".into(),
             instance: "linux-instance".into(),
             origin: "https://example.test".into(),
+            mic_device_name: None,
             local_audio_dir: None,
             pair_code: Some("secret-code".into()),
             pair_code_file: None,

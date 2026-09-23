@@ -128,6 +128,9 @@ final class MenuRecorder: ObservableObject {
         args += ["-a", bridgeApp, "--args", "native-bridge", "--remote", remote,
                  "--workspace", workspace, "--origin", bridgeOrigin, "--port", String(bridgePort),
                  "--pair-code-file", pairFile.path, "--local-audio-dir", audioDirectory.path]
+        if let micDevice = ProcessInfo.processInfo.environment["MARGINS_MENU_MIC_DEVICE"], !micDevice.isEmpty {
+            args += ["--mic-device", micDevice]
+        }
         let launcher = Process()
         launcher.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         launcher.arguments = args
