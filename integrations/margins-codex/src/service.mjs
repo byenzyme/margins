@@ -124,7 +124,14 @@ export class MarginsService {
   }
 
   async distillationContext(sessionId) {
-    const selected = sessionId ?? (await this.sessions(1)).sessions[0]?.session_id;
+    let selected = sessionId;
+    if (!selected) {
+      const active = await this.currentSession();
+      if (active.candidates.length > 1) {
+        return { session_id: null, ready: false, reason: "multiple_active_sessions", candidates: active.candidates };
+      }
+      selected = active.current_session_id ?? (await this.sessions(1)).sessions[0]?.session_id;
+    }
     if (!selected) throw new Error("No saved meeting found in this Workspace");
     const summary = await this.exactSummary(selected);
     if (!summary.input_finalized) {

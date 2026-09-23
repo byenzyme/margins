@@ -118,7 +118,11 @@ test("live meeting reports a pending transcript without claiming terminal text",
   const watermark = await service.watermarkSnapshot(sessionId);
   assert.equal(watermark.transcript, null);
   service.sessions = async () => ({ sessions: [{ session_id: sessionId }] });
+  service.currentSession = async () => ({ current_session_id: sessionId, candidates: [sessionId] });
   const pending = await service.distillationContext();
   assert.equal(pending.ready, false);
   assert.equal(pending.reason, "capture_not_finalized");
+  service.currentSession = async () => ({ current_session_id: null, candidates: [sessionId, "another-session"] });
+  const ambiguous = await service.distillationContext();
+  assert.equal(ambiguous.reason, "multiple_active_sessions");
 });
