@@ -122,7 +122,8 @@ final class MenuRecorder: ObservableObject {
         var args = ["-n"]
         for (source, target) in [("MARGINS_MENU_SSH_REMOTE_BINARY", "MARGINS_SSH_REMOTE_BINARY"),
                                  ("MARGINS_MENU_SSH_REMOTE_DATA_DIR", "MARGINS_SSH_REMOTE_DATA_DIR"),
-                                 ("MARGINS_MENU_HOME", "MARGINS_HOME")] {
+                                 ("MARGINS_MENU_HOME", "MARGINS_HOME"),
+                                 ("MARGINS_MENU_TRANSFER_DIR", "MARGINS_TRANSFER_DIR")] {
             if let value = ProcessInfo.processInfo.environment[source] { args += ["--env", "\(target)=\(value)"] }
         }
         args += ["-a", bridgeApp, "--args", "native-bridge", "--remote", remote,

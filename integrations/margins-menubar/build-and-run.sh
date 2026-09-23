@@ -43,6 +43,7 @@ if [ "${MARGINS_MENU_TRANSCRIBE_HOME+x}" = x ]; then set -- "$@" --env "MARGINS_
 if [ "${MARGINS_MENU_SSH_REMOTE_BINARY+x}" = x ]; then set -- "$@" --env "MARGINS_MENU_SSH_REMOTE_BINARY=$MARGINS_MENU_SSH_REMOTE_BINARY"; fi
 if [ "${MARGINS_MENU_SSH_REMOTE_DATA_DIR+x}" = x ]; then set -- "$@" --env "MARGINS_MENU_SSH_REMOTE_DATA_DIR=$MARGINS_MENU_SSH_REMOTE_DATA_DIR"; fi
 if [ "${MARGINS_MENU_HOME+x}" = x ]; then set -- "$@" --env "MARGINS_MENU_HOME=$MARGINS_MENU_HOME"; fi
+if [ "${MARGINS_MENU_TRANSFER_DIR+x}" = x ]; then set -- "$@" --env "MARGINS_MENU_TRANSFER_DIR=$MARGINS_MENU_TRANSFER_DIR"; fi
 if [ "${MARGINS_MENU_MIC_DEVICE+x}" = x ]; then set -- "$@" --env "MARGINS_MENU_MIC_DEVICE=$MARGINS_MENU_MIC_DEVICE"; fi
 if [ "${MARGINS_MENU_TEST_WINDOW+x}" = x ]; then set -- "$@" --env "MARGINS_MENU_TEST_WINDOW=$MARGINS_MENU_TEST_WINDOW"; fi
 open "$@" -a "$APP_PATH"

@@ -22,7 +22,9 @@ For a scoped remote test, set `MARGINS_MENU_BRIDGE_APP` to the exact test helper
 `.app`, `MARGINS_MENU_REMOTE` to its SSH alias or HTTPS authority, and
 `MARGINS_MENU_WORKSPACE` to the provisioned Workspace. The optional
 `MARGINS_MENU_SSH_REMOTE_BINARY`, `MARGINS_MENU_SSH_REMOTE_DATA_DIR`, and
-`MARGINS_MENU_HOME` variables are forwarded only to the launched helper. The
+`MARGINS_MENU_HOME` variables are forwarded only to the launched helper. Set
+`MARGINS_MENU_TRANSFER_DIR` to an absolute scoped directory to keep recoverable
+remote audio transfers out of the normal user home. The
 helper needs its own microphone and system-audio permissions. The menu app
 uses the default microphone unless `MARGINS_MENU_MIC_DEVICE` names an available
 input device exactly; this does not change the macOS system default. The menu app
