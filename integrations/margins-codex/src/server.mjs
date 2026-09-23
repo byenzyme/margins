@@ -73,7 +73,7 @@ export function createServer(serviceFactory = () => MarginsService.fromEnv()) {
 
   register(server, "open_live_meeting", {
     title: "Open Margins live meeting view",
-    description: "Show a chat-bound, refreshing status and transcript view for one exact meeting ID. First use list_meetings to select the intended session. Recording remains controlled by the Mac menu app; remote transcript words appear after Stop.",
+    description: "Show a chat-bound, refreshing status and transcript view for one exact meeting ID. Use find_current_meeting for an open capture, or list_meetings for a saved one. Recording remains controlled by the Mac menu app; remote transcript words appear after Stop.",
     inputSchema: { sessionId }, annotations: readOnly,
     _meta: { ui: { resourceUri: liveMeetingUri }, "openai/outputTemplate": liveMeetingUri },
   }, (service, { sessionId }) => service.liveMeeting(sessionId), serviceFactory);
