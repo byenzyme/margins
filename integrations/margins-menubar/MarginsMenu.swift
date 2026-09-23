@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-private enum CaptureMode: String, CaseIterable, Identifiable {
+enum CaptureMode: String, CaseIterable, Identifiable {
     case mac = "On this Mac"
     case project = "BB project"
     var id: String { rawValue }
@@ -18,6 +18,8 @@ final class MenuRecorder: ObservableObject {
     @Published var error: String?
     @Published var sessionID: String?
     @Published var localAudioPaths: [String] = []
+    @Published var macTranscription = ""
+    @Published var transcribingOnMac = false
 
     private var generation: Int?
     private var bridgeToken: String?
@@ -159,7 +161,71 @@ final class MenuRecorder: ObservableObject {
         bridgePID = nil
         if let pairDirectory { try? FileManager.default.removeItem(at: pairDirectory) }
         pairDirectory = nil
+        localAudioPaths = []
+        sessionID = nil
         await refresh()
+    }
+
+    func transcribeMacCopy() async {
+        guard !active, !localAudioPaths.isEmpty else { return }
+        guard let binary = ProcessInfo.processInfo.environment["MARGINS_MENU_TRANSCRIBE_BIN"],
+              let vault = ProcessInfo.processInfo.environment["MARGINS_MENU_TRANSCRIBE_VAULT"],
+              let home = ProcessInfo.processInfo.environment["MARGINS_MENU_TRANSCRIBE_HOME"],
+              binary.hasPrefix("/"), vault.hasPrefix("/"), home.hasPrefix("/") else {
+            error = "Set absolute MARGINS_MENU_TRANSCRIBE_BIN, VAULT, and HOME paths"
+            return
+        }
+        transcribingOnMac = true
+        macTranscription = "Transcribing on this Mac…"
+        error = nil
+        do {
+            try FileManager.default.createDirectory(atPath: vault, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
+            let paths = localAudioPaths
+            for (index, path) in paths.enumerated() {
+                try await Self.runLocalTranscription(binary: binary, vault: vault, home: home,
+                                                     audioPath: path, segmentIndex: index)
+            }
+            macTranscription = "Mac CoreML transcript saved for \(paths.count) segment(s)"
+        } catch {
+            self.error = error.localizedDescription
+            macTranscription = "Mac transcription needs attention"
+        }
+        transcribingOnMac = false
+    }
+
+    private nonisolated static func runLocalTranscription(binary: String, vault: String, home: String,
+                                                           audioPath: String, segmentIndex: Int) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: binary)
+            process.currentDirectoryURL = URL(fileURLWithPath: vault, isDirectory: true)
+            process.arguments = ["--local", "transcribe", audioPath, "--name", "menu-\(UUID().uuidString)-seg\(segmentIndex)"]
+            var environment = ProcessInfo.processInfo.environment
+            environment["MARGINS_HOME"] = home
+            environment["MARGINS_PROFILE"] = "menu-test"
+            environment.removeValue(forKey: "MARGINS_REMOTE")
+            process.environment = environment
+            let log = URL(fileURLWithPath: vault).appendingPathComponent("menu-transcribe-\(UUID().uuidString).log")
+            FileManager.default.createFile(atPath: log.path, contents: nil,
+                                           attributes: [.posixPermissions: 0o600])
+            guard let output = FileHandle(forWritingAtPath: log.path) else {
+                continuation.resume(throwing: MenuError("Could not open Mac transcription log"))
+                return
+            }
+            process.standardOutput = output
+            process.standardError = output
+            process.terminationHandler = { finished in
+                try? output.close()
+                if finished.terminationStatus == 0 { continuation.resume(returning: ()) }
+                else { continuation.resume(throwing: MenuError("Mac transcription failed; inspect \(log.path)")) }
+            }
+            do { try process.run() }
+            catch {
+                try? output.close()
+                continuation.resume(throwing: error)
+            }
+        }
     }
 
     private func bridgeRequest(_ path: String, body: [String: Any]? = nil) async throws -> [String: Any] {
@@ -232,6 +298,11 @@ struct MarginsMenuApp: App {
                 if let session = recorder.sessionID { Text("Session: \(session)").font(.caption2).textSelection(.enabled) }
                 if !recorder.localAudioPaths.isEmpty {
                     Text("Mac audio copy: \(recorder.localAudioPaths.count) segment(s)").font(.caption2)
+                    Button("Transcribe Mac copy") { Task { await recorder.transcribeMacCopy() } }
+                        .disabled(recorder.active || recorder.transcribingOnMac)
+                    if !recorder.macTranscription.isEmpty {
+                        Text(recorder.macTranscription).font(.caption2)
+                    }
                 }
                 HStack {
                     Button("Start") { Task { await recorder.start() } }.disabled(recorder.active)
@@ -242,14 +313,15 @@ struct MarginsMenuApp: App {
                 HStack {
                     Button("Refresh") { Task { await recorder.refresh() } }
                     if recorder.mode == .project {
-                        Button("Disconnect") { Task { await recorder.disconnect() } }.disabled(recorder.active)
+                        Button("Disconnect") { Task { await recorder.disconnect() } }
+                            .disabled(recorder.active || recorder.transcribingOnMac)
                     }
                     Button("Quit") {
                         Task {
                             await recorder.disconnect()
                             NSApp.terminate(nil)
                         }
-                    }.disabled(recorder.active)
+                    }.disabled(recorder.active || recorder.transcribingOnMac)
                 }
             }
             .padding(14)

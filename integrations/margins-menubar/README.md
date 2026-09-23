@@ -24,9 +24,14 @@ bearer in memory. Its scoped local WAV copies are removed when Disconnect is
 clicked, after the recording is saved. Use `MARGINS_MENU_LOCAL_DISCOVERY` for a
 nondefault `margins-live` profile.
 
-The BB project service starts transcription after remote finalization. A local
-recording and a remote recording are separate sessions; this client does not
-claim a byte-for-byte ASR comparison across them. For an exact comparison,
-the bridge's `--local-audio-dir` option retains a copy of the native capture
-before its recovery audio is reclaimed; that copy can be transcribed on Mac
-while the project service transcribes its remote lanes.
+For a same-capture CoreML check, set absolute `MARGINS_MENU_TRANSCRIBE_BIN`,
+`MARGINS_MENU_TRANSCRIBE_VAULT`, and `MARGINS_MENU_TRANSCRIBE_HOME` paths. After
+the project capture reaches **saved**, click **Transcribe Mac copy**. This runs
+`margins --local transcribe` on each retained stereo WAV in the scoped vault,
+with a separate profile and no note generator. Keep the menu connected until
+the Mac transcript is complete; Disconnect removes the temporary WAV copies.
+
+The BB project service starts transcription after remote finalization. The Mac
+CoreML and Linux ONNX jobs can therefore overlap; **Transcribe Mac copy** does
+not enforce which job starts first. The retained stereo WAV and remote Opus
+lanes come from the same native capture, though their encodings differ.
