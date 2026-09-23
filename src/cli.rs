@@ -2181,6 +2181,40 @@ fn run_remote_native_capture(
         .unwrap_or(initial_offset_ms)
         .max(initial_offset_ms);
 
+    // The CoreML worker is optional. Its checkpoint stays inside this scoped
+    // transfer until a separate publisher sends a bounded copy to the service.
+    let checkpoint_path = transfer.spool().root().join("live-checkpoint.json");
+    let live_status = Arc::new(AtomicU8::new(crate::app::LIVE_TRANSCRIPTION_WARMING));
+    let live = start_live_transcript_worker(
+        checkpoint_path.clone(),
+        initial_offset_ms,
+        live_status.clone(),
+    );
+    let checkpoint_publisher = if live.is_some() {
+        let client = connection.client.clone();
+        let session = session_id.clone();
+        let producer_token = transfer.spool().producer_token()?;
+        let done = Arc::new(AtomicBool::new(false));
+        let thread_done = done.clone();
+        let join = std::thread::Builder::new()
+            .name("margins-remote-live-checkpoint".into())
+            .spawn(move || {
+                publish_remote_live_checkpoints(
+                    &client,
+                    &session,
+                    &producer_token,
+                    &checkpoint_path,
+                    &thread_done,
+                );
+            })?;
+        Some(RemoteCheckpointPublisher {
+            done,
+            join: Some(join),
+        })
+    } else {
+        None
+    };
+
     let initial_memo = connection.client.memo(&session_id)?;
     let initial_revision = initial_memo.revision.clone();
     let started_at = Local::now()
@@ -2219,6 +2253,7 @@ fn run_remote_native_capture(
     app.remote_delivery_state = uploader_state.clone();
     app.remote_pending_chunks = uploader_pending_chunks.clone();
     app.remote_pending_bytes = uploader_pending_bytes.clone();
+    app.live_transcription_status = live_status;
     let uploader_parent = transfer
         .spool()
         .root()
@@ -2353,6 +2388,13 @@ fn run_remote_native_capture(
         let recovery_path = transfer.spool().recovery_path(&segment_id)?;
         let active_transfer_id = transfer.spool().manifest().transfer_id.clone();
         let worker_stop = stop.clone();
+        let live_sink = live.as_ref().map(|worker| {
+            let mut sink = worker.sink_for_offset(offset_ms);
+            // Native devices can deliver 48 kHz on both lanes. Bound the
+            // unresampled queue to roughly thirty seconds of those samples.
+            sink.queue_max_samples = 48_000 * 30 * 2;
+            sink
+        });
         let worker = std::thread::Builder::new()
             .name("margins-remote-spool".into())
             .spawn(move || {
@@ -2367,6 +2409,9 @@ fn run_remote_native_capture(
                         let append = transfer.append_f32(lane, chunk.sample_rate, &chunk.samples);
                         queued_samples.fetch_sub(count, Ordering::Relaxed);
                         append?;
+                        if let Some(sink) = &live_sink {
+                            enqueue_remote_live_chunk(sink, &chunk);
+                        }
                     }
                     Ok(())
                 })();
@@ -2484,6 +2529,12 @@ fn run_remote_native_capture(
     if let Some(controller) = &controller {
         controller.saving();
     }
+    if let Some(worker) = live {
+        let _ = worker
+            .begin_finish(final_ended_at_ms.saturating_sub(initial_offset_ms))
+            .complete();
+    }
+    drop(checkpoint_publisher);
     uploader_done.store(true, Ordering::Release);
     uploader
         .join()
@@ -2578,6 +2629,97 @@ fn remote_delivery_requires_credentials(error: &anyhow::Error) -> bool {
     ]
     .iter()
     .any(|needle| message.contains(needle))
+}
+
+#[cfg(feature = "audio-capture")]
+struct RemoteCheckpointPublisher {
+    done: Arc<AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(feature = "audio-capture")]
+impl Drop for RemoteCheckpointPublisher {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Release);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+#[cfg(feature = "audio-capture")]
+fn enqueue_remote_live_chunk(
+    sink: &crate::recorder::LiveAudioSink,
+    chunk: &crate::recorder::LiveAudioChunk,
+) {
+    use crate::recorder::LiveAudioChannel;
+    let count = chunk.samples.len() as u64;
+    let dropped = match chunk.channel {
+        LiveAudioChannel::Mic => &sink.mic_dropped_samples,
+        LiveAudioChannel::System => &sink.system_dropped_samples,
+    };
+    let accepted = match chunk.channel {
+        LiveAudioChannel::Mic => &sink.mic_accepted_samples,
+        LiveAudioChannel::System => &sink.system_accepted_samples,
+    };
+    let reserved = sink
+        .queued_samples
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+            let next = queued.checked_add(count)?;
+            (next <= sink.queue_max_samples).then_some(next)
+        })
+        .is_ok();
+    if !reserved {
+        dropped.fetch_add(count, Ordering::Relaxed);
+        return;
+    }
+    let mut copy = chunk.clone();
+    copy.generation = sink.generation;
+    if sink.sender.send(copy).is_ok() {
+        accepted.fetch_add(count, Ordering::Relaxed);
+    } else {
+        sink.queued_samples.fetch_sub(count, Ordering::AcqRel);
+        dropped.fetch_add(count, Ordering::Relaxed);
+    }
+}
+
+#[cfg(feature = "audio-capture")]
+fn publish_remote_live_checkpoints(
+    client: &margins_workflows::remote_workspace::WorkspaceHttpClient,
+    session: &str,
+    producer_token: &str,
+    path: &Path,
+    done: &AtomicBool,
+) {
+    const MAX_BYTES: u64 = 256 * 1024;
+    let mut last_sent = Vec::new();
+    let mut last_attempt = std::time::Instant::now() - std::time::Duration::from_secs(3);
+    loop {
+        let closing = done.load(Ordering::Acquire);
+        if closing || last_attempt.elapsed() >= std::time::Duration::from_secs(3) {
+            if let Ok(metadata) = std::fs::metadata(path) {
+                if metadata.len() > 0 && metadata.len() <= MAX_BYTES {
+                    if let Ok(body) = std::fs::read(path) {
+                        if body != last_sent {
+                            last_attempt = std::time::Instant::now();
+                            match client.put_live_checkpoint(session, producer_token, body.clone())
+                            {
+                                Ok(()) => last_sent = body,
+                                Err(error) => crate::cli_log::event(
+                                    "remote_live_checkpoint_upload_failed",
+                                    crate::cli_log::error_summary(&error),
+                                ),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if closing {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
 }
 
 #[cfg(feature = "audio-capture")]
@@ -3531,6 +3673,49 @@ mod tests {
     use std::sync::Mutex;
 
     static PROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(feature = "audio-capture")]
+    #[test]
+    fn remote_live_tee_preserves_generation_and_drops_when_bounded() {
+        use crate::recorder::{
+            LiveAudioChannel, LiveAudioChunk, LiveAudioSink, LiveGenerationClock,
+        };
+        let (sender, receiver) = mpsc::channel();
+        let queued = Arc::new(AtomicU64::new(0));
+        let accepted = Arc::new(AtomicU64::new(0));
+        let dropped = Arc::new(AtomicU64::new(0));
+        let sink = LiveAudioSink {
+            sender,
+            generation: 7,
+            generation_clock: Arc::new(Mutex::new(LiveGenerationClock {
+                generation: 7,
+                session_offset_ms: 4_250,
+            })),
+            mic_accepted_samples: accepted.clone(),
+            system_accepted_samples: Arc::new(AtomicU64::new(0)),
+            mic_dropped_samples: dropped.clone(),
+            system_dropped_samples: Arc::new(AtomicU64::new(0)),
+            queued_samples: queued.clone(),
+            queue_max_samples: 3,
+        };
+        let chunk = LiveAudioChunk {
+            channel: LiveAudioChannel::Mic,
+            generation: 1,
+            session_offset_ms: 4_250,
+            sample_rate: 48_000,
+            samples: vec![0.2, 0.3],
+        };
+        enqueue_remote_live_chunk(&sink, &chunk);
+        enqueue_remote_live_chunk(&sink, &chunk);
+        let delivered = receiver.try_recv().unwrap();
+        assert_eq!(delivered.generation, 7);
+        assert_eq!(delivered.session_offset_ms, 4_250);
+        assert_eq!(delivered.samples, chunk.samples);
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(queued.load(Ordering::Acquire), 2);
+        assert_eq!(accepted.load(Ordering::Acquire), 2);
+        assert_eq!(dropped.load(Ordering::Acquire), 2);
+    }
 
     #[cfg(feature = "audio-capture")]
     #[test]

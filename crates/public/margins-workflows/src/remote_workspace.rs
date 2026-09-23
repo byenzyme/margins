@@ -443,6 +443,32 @@ impl WorkspaceHttpClient {
         ))
     }
 
+    /// Provisional on-device words are best-effort; durable audio delivery is
+    /// independent of this request. Send the worker's exact v2 checkpoint.
+    pub fn put_live_checkpoint(
+        &self,
+        session: &str,
+        producer_token: &str,
+        checkpoint: Vec<u8>,
+    ) -> Result<()> {
+        if checkpoint.len() > 256 * 1024 {
+            bail!("live checkpoint exceeds 256 KiB");
+        }
+        let request = self
+            .client
+            .put(self.url(&format!(
+                "v1/workspaces/{}/sessions/{}/live-checkpoint",
+                self.workspace_id,
+                urlencoding(session)
+            ))?)
+            .header("X-Margins-Producer-Token", producer_token)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .timeout(std::time::Duration::from_secs(3))
+            .body(checkpoint);
+        let _: serde_json::Value = self.request_json(self.capture_request(request)?)?;
+        Ok(())
+    }
+
     pub fn artifacts(
         &self,
         session: &str,
