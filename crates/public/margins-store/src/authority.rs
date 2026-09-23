@@ -170,6 +170,25 @@ impl SqliteWorkspaceAuthorityStorage {
         Ok(())
     }
 
+    pub fn authorize_active_producer(
+        &self,
+        session_id: &str,
+        principal_id: &str,
+        producer_token: &str,
+    ) -> Result<()> {
+        self.authorize_producer(session_id, principal_id, producer_token)?;
+        let connection = self.connection()?;
+        let state: String = connection.query_row(
+            "SELECT state FROM workspace_session_producers WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )?;
+        if state != "active" {
+            bail!("capture producer is no longer active");
+        }
+        Ok(())
+    }
+
     pub fn rename_session(
         &self,
         session_id: &str,

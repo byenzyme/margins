@@ -24,6 +24,7 @@ use margins_store::{
     SqliteWorkspaceAuthorityStorage,
 };
 use rand::{distributions::Alphanumeric, Rng};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
@@ -36,6 +37,7 @@ pub const DEFAULT_MAX_IN_FLIGHT_CHUNKS: u32 = 16;
 pub const DEFAULT_MAX_EVENT_PAGE: u32 = 256;
 pub const DEFAULT_MAX_IMPORT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub const DEFAULT_SPOOL_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
+pub const MAX_LIVE_CHECKPOINT_BYTES: usize = 256 * 1024;
 
 pub const OP_WORKSPACE_READ: &str = "workspace.read";
 pub const OP_SESSION_READ: &str = "session.read";
@@ -690,6 +692,105 @@ impl WorkspaceService {
     ) -> Result<WorkspaceSessionSummaryV1> {
         principal.require(self.workspace_id(), OP_SESSION_READ)?;
         self.session_summary(session_id.as_ref())
+    }
+
+    /// A provisional CoreML view from the active capture producer. Audio and
+    /// final ONNX transcription remain authoritative; this view is replaceable.
+    pub fn publish_live_checkpoint(
+        &self,
+        principal: &ServicePrincipal,
+        producer_token: &str,
+        session_id: &SessionId,
+        checkpoint: &Value,
+    ) -> Result<()> {
+        principal.require(self.workspace_id(), OP_CAPTURE_WRITE)?;
+        self.authority.authorize_active_producer(
+            session_id.as_ref(),
+            &principal.id,
+            producer_token,
+        )?;
+        let name = session_id.as_ref();
+        if name.len() > 200
+            || name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            bail!("invalid checkpoint session ID");
+        }
+        let bytes = serde_json::to_vec(checkpoint)?;
+        if bytes.len() > MAX_LIVE_CHECKPOINT_BYTES {
+            bail!("live checkpoint exceeds size limit");
+        }
+        let decoded = checkpoint
+            .get("decoded_until_ms")
+            .and_then(Value::as_u64)
+            .context("live checkpoint lacks decoded watermark")?;
+        let committed = checkpoint
+            .get("committed_until_ms")
+            .and_then(Value::as_u64)
+            .context("live checkpoint lacks committed watermark")?;
+        if checkpoint.get("version").and_then(Value::as_u64) != Some(2)
+            || checkpoint
+                .get("terminal")
+                .and_then(Value::as_bool)
+                .is_none()
+            || committed > decoded
+            || decoded > 12 * 60 * 60 * 1_000
+        {
+            bail!("invalid live checkpoint watermarks or version");
+        }
+        let words = checkpoint
+            .get("transcripts")
+            .and_then(Value::as_array)
+            .filter(|entries| entries.len() == 1)
+            .and_then(|entries| entries[0].get("words"))
+            .cloned()
+            .context("live checkpoint lacks transcript words")?;
+        let words: Vec<margins_media::transcript::TranscriptWordEntry> =
+            serde_json::from_value(words).context("invalid live checkpoint words")?;
+        if words.len() > 10_000
+            || words.iter().any(|word| {
+                word.channel > 1
+                    || word.start_ms > word.end_ms
+                    || word.end_ms > decoded
+                    || word.text.len() > 512
+            })
+        {
+            bail!("invalid live checkpoint word timeline");
+        }
+        let lock_path = self.margins_dir.join(format!("{name}_remote_live.lock"));
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(lock_path)?;
+        lock.lock_exclusive()?;
+        let path = self
+            .margins_dir
+            .join(format!("{name}_remote.live-transcript.json"));
+        if let Ok(previous) = std::fs::read(&path) {
+            if let Ok(previous) = serde_json::from_slice::<Value>(&previous) {
+                let old_decoded = previous
+                    .get("decoded_until_ms")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let old_committed = previous
+                    .get("committed_until_ms")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                if decoded < old_decoded || committed < old_committed {
+                    bail!("live checkpoint watermarks cannot move backwards");
+                }
+            }
+        }
+        let mut staged = tempfile::NamedTempFile::new_in(&self.margins_dir)?;
+        use std::io::Write as _;
+        staged.write_all(&bytes)?;
+        staged.write_all(b"\n")?;
+        staged.as_file().sync_all()?;
+        staged.persist(&path).map_err(|error| error.error)?;
+        std::fs::File::open(&self.margins_dir)?.sync_all()?;
+        Ok(())
     }
 
     pub fn sessions(

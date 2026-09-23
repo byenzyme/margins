@@ -99,27 +99,52 @@ pub fn load_transcript_view(
 ) -> Result<TranscriptView> {
     let name = resolve_session_name(margins_dir, requested)?;
     let meta = canonical::get_session_meta(margins_dir, &name).ok();
-    let (source, view) =
-        if let Some(source) = read_freshest_live_transcript(work_dir, margins_dir, &name)? {
-            (source, "full")
-        } else if let Some(source) =
-            read_terminal_checkpoint_body(work_dir, margins_dir, &name, meta.as_ref())?
-        {
-            (source, "full")
-        } else {
-            let (path, body) = read_registered_or_fallback(work_dir, margins_dir, &name)?;
-            (
-                TranscriptSource {
-                    source_path: path,
-                    body,
-                    decoded_until_ms: 0,
-                    committed_until_ms: 0,
-                    terminal: true,
-                    live_checkpoint: false,
-                },
-                "aligned",
-            )
-        };
+    let final_path = transcript_artifact_path(margins_dir, &name);
+    let final_source = if meta
+        .as_ref()
+        .and_then(|value| value.processing_state.as_deref())
+        == Some("done")
+    {
+        std::fs::read_to_string(&final_path)
+            .ok()
+            .filter(|body| !body.trim().is_empty())
+            .map(|body| TranscriptSource {
+                source_path: final_path,
+                body,
+                decoded_until_ms: 0,
+                committed_until_ms: 0,
+                terminal: true,
+                live_checkpoint: false,
+            })
+    } else {
+        None
+    };
+    let (source, view) = if let Some(source) = final_source {
+        (source, "aligned")
+    } else if let Some(source) =
+        read_remote_live_checkpoint(work_dir, margins_dir, &name, meta.as_ref())?
+    {
+        (source, "full")
+    } else if let Some(source) = read_freshest_live_transcript(work_dir, margins_dir, &name)? {
+        (source, "full")
+    } else if let Some(source) =
+        read_terminal_checkpoint_body(work_dir, margins_dir, &name, meta.as_ref())?
+    {
+        (source, "full")
+    } else {
+        let (path, body) = read_registered_or_fallback(work_dir, margins_dir, &name)?;
+        (
+            TranscriptSource {
+                source_path: path,
+                body,
+                decoded_until_ms: 0,
+                committed_until_ms: 0,
+                terminal: true,
+                live_checkpoint: false,
+            },
+            "aligned",
+        )
+    };
     // The public store has no process-level capture status. A current session
     // with a non-terminal live source is the strongest honest available signal.
     let live =
@@ -197,6 +222,30 @@ fn read_terminal_checkpoint_body(
     let Some(path) = checkpoint else {
         return Ok(None);
     };
+    read_checkpoint_body_at(work_dir, margins_dir, name, meta, path, false)
+}
+
+fn read_remote_live_checkpoint(
+    work_dir: &Path,
+    margins_dir: &Path,
+    name: &str,
+    meta: Option<&canonical::SessionMeta>,
+) -> Result<Option<TranscriptSource>> {
+    let path = margins_dir.join(format!("{name}_remote.live-transcript.json"));
+    if !path.is_file() {
+        return Ok(None);
+    }
+    read_checkpoint_body_at(work_dir, margins_dir, name, meta, path, true)
+}
+
+fn read_checkpoint_body_at(
+    work_dir: &Path,
+    margins_dir: &Path,
+    name: &str,
+    meta: Option<&canonical::SessionMeta>,
+    path: PathBuf,
+    provisional: bool,
+) -> Result<Option<TranscriptSource>> {
     let raw = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
     let checkpoint: Value = serde_json::from_str(&raw)
@@ -213,10 +262,11 @@ fn read_terminal_checkpoint_body(
         .and_then(Value::as_u64)
         .unwrap_or(decoded_until_ms)
         .min(decoded_until_ms);
-    let terminal = checkpoint
-        .get("terminal")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let terminal = !provisional
+        && checkpoint
+            .get("terminal")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
     let entries = margins_media::transcript::merge_word_entries_to_phrases(
         crate::processing::read_transcript_entries(&path)?,
         2_000,
@@ -693,6 +743,48 @@ fn artifact_session_names(dir: &Path) -> Vec<String> {
 mod tests {
     use super::*;
     use chrono::Local;
+
+    #[test]
+    fn provisional_remote_words_yield_to_completed_final_transcript() {
+        let temp = tempfile::tempdir().unwrap();
+        let work_dir = temp.path();
+        let margins_dir = work_dir.join(".margins");
+        canonical::create_session(&margins_dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
+        std::fs::write(margins_dir.join("meet.md"), "").unwrap();
+        std::fs::write(
+            margins_dir.join("meet_remote.live-transcript.json"),
+            serde_json::json!({
+                "version":2,"terminal":true,"decoded_until_ms":1000,"committed_until_ms":900,
+                "transcripts":[{"words":[{"channel":0,"start_ms":100,"end_ms":500,"text":" provisional"}]}]
+            }).to_string(),
+        ).unwrap();
+        let interim = load_transcript_view(work_dir, &margins_dir, "meet").unwrap();
+        assert!(interim.body.contains("provisional"));
+        assert!(!interim.terminal);
+
+        let final_path = transcript_artifact_path(&margins_dir, "meet");
+        std::fs::create_dir_all(final_path.parent().unwrap()).unwrap();
+        std::fs::write(&final_path, "# Final\n\nrecognized remotely\n").unwrap();
+        let job =
+            canonical::begin_processing_job(&margins_dir, "meet", "job-1", "transcribe", "input-1")
+                .unwrap();
+        canonical::update_processing_job(
+            &margins_dir,
+            "job-1",
+            job.attempt,
+            "complete",
+            Some(1.0),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let final_view = load_transcript_view(work_dir, &margins_dir, "meet").unwrap();
+        assert_eq!(final_view.view, "aligned");
+        assert!(final_view.terminal);
+        assert!(final_view.body.contains("recognized remotely"));
+        assert!(!final_view.body.contains("provisional"));
+    }
 
     #[test]
     fn empty_segment_journal_falls_back_to_filtered_legacy_checkpoints() {

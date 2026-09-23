@@ -90,6 +90,12 @@ pub fn build_router(state: ServerState) -> Router {
             post(workspace_session_command),
         )
         .route(
+            "/v1/workspaces/:workspace/sessions/:session/live-checkpoint",
+            put(workspace_live_checkpoint).layer(DefaultBodyLimit::max(
+                margins_workflows::workspace_service::MAX_LIVE_CHECKPOINT_BYTES,
+            )),
+        )
+        .route(
             "/v1/workspaces/:workspace/sessions/:session/attach",
             post(workspace_attach_session),
         )
@@ -445,6 +451,44 @@ async fn workspace_session(
         .workspace_service
         .session(&principal, &SessionId(session))
         .map(workspace_ok)
+        .unwrap_or_else(service_error)
+}
+
+async fn workspace_live_checkpoint(
+    State(state): State<ServerState>,
+    Path((workspace, session)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(checkpoint): Json<Value>,
+) -> Response {
+    let principal = match workspace_auth(&state, &headers, Some(&workspace)) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(response) = workspace_instance_fence(&state, &headers) {
+        return response;
+    }
+    let Some(token) = headers
+        .get("X-Margins-Producer-Token")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+    else {
+        return workspace_error(
+            StatusCode::UNAUTHORIZED,
+            "producer_token_required",
+            false,
+            "Missing producer token",
+        );
+    };
+    state
+        .workspace_service
+        .publish_live_checkpoint(&principal, token, &SessionId(session), &checkpoint)
+        .map(|_| {
+            workspace_ok(json!({
+                "accepted": true,
+                "decoded_until_ms": checkpoint["decoded_until_ms"],
+                "committed_until_ms": checkpoint["committed_until_ms"],
+            }))
+        })
         .unwrap_or_else(service_error)
 }
 

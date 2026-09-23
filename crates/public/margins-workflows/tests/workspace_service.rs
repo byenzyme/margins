@@ -177,6 +177,46 @@ fn workspace_reader_can_follow_an_unclosed_capture_without_producer_access() {
             .unwrap(),
         active.sessions[0]
     );
+    let checkpoint = serde_json::json!({
+        "version": 2,
+        "terminal": false,
+        "decoded_until_ms": 1400,
+        "committed_until_ms": 1200,
+        "transcripts": [{"words": [{
+            "channel": 0, "start_ms": 100, "end_ms": 500, "text": " hello"
+        }]}]
+    });
+    assert!(service
+        .publish_live_checkpoint(
+            &reader,
+            &reservation.producer_token,
+            &SessionId("live-a".into()),
+            &checkpoint
+        )
+        .is_err());
+    assert!(service
+        .publish_live_checkpoint(&producer, "wrong", &SessionId("live-a".into()), &checkpoint)
+        .is_err());
+    service
+        .publish_live_checkpoint(
+            &producer,
+            &reservation.producer_token,
+            &SessionId("live-a".into()),
+            &checkpoint,
+        )
+        .unwrap();
+    let interim = service.transcript(&reader, "live-a").unwrap();
+    assert!(!interim.terminal);
+    assert!(interim.body.contains("hello"));
+    let old = serde_json::json!({"version":2,"terminal":false,"decoded_until_ms":1000,"committed_until_ms":800,"transcripts":[{"words":[]}]});
+    assert!(service
+        .publish_live_checkpoint(
+            &producer,
+            &reservation.producer_token,
+            &SessionId("live-a".into()),
+            &old
+        )
+        .is_err());
 
     for lane in ["mic", "system"] {
         for sequence in 0..2 {
@@ -199,6 +239,14 @@ fn workspace_reader_can_follow_an_unclosed_capture_without_producer_access() {
     service
         .execute_capture(&producer, &reservation.producer_token, finalize("live-a"))
         .unwrap();
+    assert!(service
+        .publish_live_checkpoint(
+            &producer,
+            &reservation.producer_token,
+            &SessionId("live-a".into()),
+            &checkpoint
+        )
+        .is_err());
     assert!(service
         .active_sessions(&reader)
         .unwrap()
