@@ -21,8 +21,12 @@ function fixture() {
       assert.equal(options.headers["X-Margins-Instance-Id"], "instance");
       if (parsed.pathname === "/v1/workspaces/journal/sessions") {
         result = { sessions: [{ session_id: sessionId, input_finalized: true, capture_duration_ms: 1200 }], next_cursor: null };
+      } else if (parsed.pathname === "/v1/workspaces/journal/active-sessions") {
+        result = { sessions: [{ session_id: sessionId, input_finalized: false, segment_count: 0 }], next_cursor: null };
       } else if (parsed.pathname === "/v1/workspaces/journal/current") {
         result = sessionId;
+      } else if (parsed.pathname === `/v1/workspaces/journal/sessions/${sessionId}`) {
+        result = { session_id: sessionId, input_finalized: true, capture_duration_ms: 1200 };
       } else if (parsed.pathname.endsWith("/memo") && options.method === "GET") {
         result = { session_id: sessionId, revision: "rev-1", lines: [{ text: "first" }] };
       } else if (parsed.pathname.endsWith("/memo") && options.method === "PUT") {
@@ -91,7 +95,7 @@ test("Codex tools read one Workspace and save a revisioned memo", async () => {
 
 test("live meeting reports a pending transcript without claiming terminal text", async () => {
   const service = new MarginsService({ url: "http://127.0.0.1:18765", workspace: "journal", token: "scoped-token" });
-  service.summary = async () => ({ session_id: sessionId, input_finalized: false, segment_count: 1, processing_state: "none" });
+  service.exactSummary = async () => ({ session_id: sessionId, input_finalized: false, segment_count: 1, processing_state: "none" });
   service.transcript = async () => { throw new Error("No aligned transcript or capture context found"); };
   const state = await service.liveMeeting(sessionId);
   assert.equal(state.input_finalized, false);

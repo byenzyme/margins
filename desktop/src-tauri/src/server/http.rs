@@ -6,28 +6,28 @@ use crate::ctx::Ctx;
 use crate::server::events::WsSink;
 use anyhow::Context as _;
 use axum::{
-    Json, Router,
     body::Bytes,
     extract::{
-        DefaultBodyLimit, Multipart, Path, Query, Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
+        DefaultBodyLimit, Multipart, Path, Query, Request, State,
     },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post, put},
+    Json, Router,
 };
 use margins_meeting_protocol::{
-    AUDIO_CHUNK_BATCH_CONTENT_TYPE_V1, AudioChunkBatchV1, AudioChunkV1, ClientMessageBodyV1,
-    ClientMessageV1, ContentDigestV1, DigestAlgorithmV1, DurationMillis, MessageId,
-    ProtocolVersionV1, SessionId, SessionMillis, UnixMillis, WorkspaceAttachV1, WorkspaceErrorV1,
-    WorkspaceMemoReplaceV1, WorkspaceMemoUpdateV1, WorkspaceNoteAssociationUpdateV1,
-    WorkspaceRenameV1, WorkspaceResponseV1,
+    AudioChunkBatchV1, AudioChunkV1, ClientMessageBodyV1, ClientMessageV1, ContentDigestV1,
+    DigestAlgorithmV1, DurationMillis, MessageId, ProtocolVersionV1, SessionId, SessionMillis,
+    UnixMillis, WorkspaceAttachV1, WorkspaceErrorV1, WorkspaceMemoReplaceV1, WorkspaceMemoUpdateV1,
+    WorkspaceNoteAssociationUpdateV1, WorkspaceRenameV1, WorkspaceResponseV1,
+    AUDIO_CHUNK_BATCH_CONTENT_TYPE_V1,
 };
 use margins_workflows::workspace_service::{
-    OP_CAPTURE_WRITE, OP_MEMO_WRITE, OP_SESSION_CREATE, OP_SESSION_READ, OP_SESSION_WRITE, ScopedCredentialStore,
-    ServicePrincipal, WorkspaceService,
+    ScopedCredentialStore, ServicePrincipal, WorkspaceService, OP_CAPTURE_WRITE, OP_MEMO_WRITE,
+    OP_SESSION_CREATE, OP_SESSION_READ, OP_SESSION_WRITE,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -74,8 +74,16 @@ pub fn build_router(state: ServerState) -> Router {
         .route("/v1/workspaces/:workspace/recall", post(workspace_recall))
         .route("/v1/workspaces/:workspace/current", get(workspace_current))
         .route(
+            "/v1/workspaces/:workspace/active-sessions",
+            get(workspace_active_sessions),
+        )
+        .route(
             "/v1/workspaces/:workspace/sessions",
             get(workspace_sessions).post(workspace_create_session),
+        )
+        .route(
+            "/v1/workspaces/:workspace/sessions/:session",
+            get(workspace_session),
         )
         .route(
             "/v1/workspaces/:workspace/sessions/:session/commands",
@@ -404,6 +412,38 @@ async fn workspace_current(
     state
         .workspace_service
         .current(&principal)
+        .map(workspace_ok)
+        .unwrap_or_else(service_error)
+}
+
+async fn workspace_active_sessions(
+    State(state): State<ServerState>,
+    Path(workspace): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match workspace_auth(&state, &headers, Some(&workspace)) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    state
+        .workspace_service
+        .active_sessions(&principal)
+        .map(workspace_ok)
+        .unwrap_or_else(service_error)
+}
+
+async fn workspace_session(
+    State(state): State<ServerState>,
+    Path((workspace, session)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match workspace_auth(&state, &headers, Some(&workspace)) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    state
+        .workspace_service
+        .session(&principal, &SessionId(session))
         .map(workspace_ok)
         .unwrap_or_else(service_error)
 }
@@ -1572,14 +1612,14 @@ async fn handle_ws(mut socket: WebSocket, sink: Arc<WsSink>) {
 #[cfg(all(test, feature = "parakeet-asr"))]
 mod remote_finalize_authority_tests {
     use super::*;
-    use axum::http::{HeaderValue, header::AUTHORIZATION};
+    use axum::http::{header::AUTHORIZATION, HeaderValue};
     use margins_meeting_protocol::{
         ClientMessageBodyV1, SegmentCloseReasonV1, SessionFinalizeReasonV1,
     };
     use margins_workflows::{
         remote_workspace::{
-            DurableTransferSpool, NativeRemoteLane, NativeRemoteTransfer,
-            native_create_session_command,
+            native_create_session_command, DurableTransferSpool, NativeRemoteLane,
+            NativeRemoteTransfer,
         },
         workspace::ensure_service_workspace,
         workspace_service::{OP_CAPTURE_WRITE, OP_SESSION_CREATE},

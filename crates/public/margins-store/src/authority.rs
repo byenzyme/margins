@@ -381,6 +381,19 @@ impl SqliteWorkspaceAuthorityStorage {
             .map_err(Into::into)
     }
 
+    /// Producer reservations are Workspace-local. Readers can discover their
+    /// session IDs without receiving a producer identity or secret.
+    pub fn active_session_ids(&self) -> Result<Vec<String>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT session_id FROM workspace_session_producers WHERE state = 'active' ORDER BY updated_at_ms DESC, session_id DESC LIMIT 100",
+        )?;
+        let sessions = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(sessions)
+    }
+
     pub fn memo(&self, session_id: &str) -> Result<AuthorityMemoReceipt> {
         let connection = self.connection()?;
         let stored: Option<(String, String)> = connection

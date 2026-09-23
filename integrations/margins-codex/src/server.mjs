@@ -55,7 +55,7 @@ export function createServer(serviceFactory = () => MarginsService.fromEnv()) {
 
   register(server, "find_current_meeting", {
     title: "Find current Margins meeting",
-    description: "Find the current meeting ID in the configured Workspace, including the brief period before an active capture appears in list_meetings. Returns null if this service identity has no current session.",
+    description: "Find an open capture in the configured Workspace, including before its first segment closes. Returns its ID when unambiguous, otherwise null with candidate IDs. This is not a recording-health signal.",
     inputSchema: {}, annotations: readOnly,
   }, (service) => service.currentSession(), serviceFactory);
 

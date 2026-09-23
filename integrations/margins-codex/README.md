@@ -40,6 +40,9 @@ Use `find_current_meeting` or `list_meetings` to find the intended session ID,
 then `open_live_meeting` to keep a view pinned to that one session. It polls the
 Workspace for capture-finalization status and any available transcript. The
 floating-view button requests picture-in-picture when the host supports it.
+`find_current_meeting` reads Workspace-wide open producer reservations; when
+several exist, it returns candidate IDs and leaves selection to the user.
+An open reservation is not proof that its Mac recorder is still healthy.
 This is a read-only view: the Mac menu app still starts, pauses, and stops
 recording. In the current native remote path, Linux begins ONNX transcription
 after Stop, so live audio upload is visible as an unfinished session but words

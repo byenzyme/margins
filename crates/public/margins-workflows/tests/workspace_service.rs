@@ -136,6 +136,83 @@ fn finalize(session: &str) -> ClientMessageV1 {
 }
 
 #[test]
+fn workspace_reader_can_follow_an_unclosed_capture_without_producer_access() {
+    let temp = tempfile::tempdir().unwrap();
+    let notes = temp.path().join("notes");
+    let captures = temp.path().join("captures");
+    std::fs::create_dir_all(&notes).unwrap();
+    let workspace =
+        ensure_service_workspace(&temp.path().join("state"), "team", None, &notes, &captures)
+            .unwrap();
+    let service = WorkspaceService::open("host-a", workspace).unwrap();
+    let producer = ServicePrincipal::full("native-producer", "team");
+    let reader = ServicePrincipal::scoped(
+        "codex-reader",
+        ["team".to_string()],
+        [OP_SESSION_READ.to_string()],
+    );
+    let denied = ServicePrincipal::scoped(
+        "wrong-workspace",
+        ["other".to_string()],
+        [OP_SESSION_READ.to_string()],
+    );
+    let reservation = service
+        .reserve_session(&producer, create("live-a"))
+        .unwrap();
+    assert_eq!(service.current(&reader).unwrap(), None);
+    assert!(service
+        .sessions(&reader, None, 10)
+        .unwrap()
+        .sessions
+        .is_empty());
+    assert!(service.active_sessions(&denied).is_err());
+    let active = service.active_sessions(&reader).unwrap();
+    assert_eq!(active.sessions.len(), 1);
+    assert_eq!(active.sessions[0].session_id.as_ref(), "live-a");
+    assert_eq!(active.sessions[0].segment_count, 0);
+    assert!(!active.sessions[0].input_finalized);
+    assert_eq!(
+        service
+            .session(&reader, &SessionId("live-a".into()))
+            .unwrap(),
+        active.sessions[0]
+    );
+
+    for lane in ["mic", "system"] {
+        for sequence in 0..2 {
+            service
+                .execute_capture(
+                    &producer,
+                    &reservation.producer_token,
+                    chunk("live-a", &format!("{lane}-{sequence}"), lane, sequence),
+                )
+                .unwrap();
+        }
+    }
+    assert_eq!(
+        service.active_sessions(&reader).unwrap().sessions[0].segment_count,
+        0
+    );
+    service
+        .execute_capture(&producer, &reservation.producer_token, close("live-a"))
+        .unwrap();
+    service
+        .execute_capture(&producer, &reservation.producer_token, finalize("live-a"))
+        .unwrap();
+    assert!(service
+        .active_sessions(&reader)
+        .unwrap()
+        .sessions
+        .is_empty());
+    assert!(
+        service
+            .session(&reader, &SessionId("live-a".into()))
+            .unwrap()
+            .input_finalized
+    );
+}
+
+#[test]
 fn composed_service_is_the_same_canonical_store_across_retry_and_restart() {
     let temp = tempfile::tempdir().unwrap();
     let notes = temp.path().join("notes");

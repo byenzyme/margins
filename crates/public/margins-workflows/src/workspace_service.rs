@@ -669,6 +669,29 @@ impl WorkspaceService {
             .map(SessionId))
     }
 
+    pub fn active_sessions(&self, principal: &ServicePrincipal) -> Result<WorkspaceSessionPageV1> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        let sessions = self
+            .authority
+            .active_session_ids()?
+            .into_iter()
+            .map(|id| self.session_summary(&id))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(WorkspaceSessionPageV1 {
+            sessions,
+            next_cursor: None,
+        })
+    }
+
+    pub fn session(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+    ) -> Result<WorkspaceSessionSummaryV1> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        self.session_summary(session_id.as_ref())
+    }
+
     pub fn sessions(
         &self,
         principal: &ServicePrincipal,

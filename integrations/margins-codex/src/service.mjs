@@ -84,8 +84,15 @@ export class MarginsService {
   }
 
   async currentSession() {
-    const current = await this.scoped("current");
-    return { current_session_id: typeof current === "string" ? current : null };
+    const active = await this.scoped("active-sessions");
+    const candidates = active.sessions.map((session) => session.session_id);
+    const own = await this.scoped("current");
+    const current = candidates.includes(own) ? own : candidates.length === 1 ? candidates[0] : null;
+    return { current_session_id: current, candidates };
+  }
+
+  async exactSummary(sessionId) {
+    return this.scoped(`sessions/${encodeURIComponent(sessionId)}`);
   }
 
   async summary(sessionId) {
@@ -98,8 +105,7 @@ export class MarginsService {
   }
 
   async liveMeeting(sessionId) {
-    const summary = await this.summary(sessionId);
-    if (!summary) throw new Error("Meeting not found among the 100 most recent sessions");
+    const summary = await this.exactSummary(sessionId);
     let transcript = null;
     try { transcript = await this.transcript(sessionId); }
     catch (error) {
