@@ -51,6 +51,10 @@ export const connectedNoteResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), context: connectedNoteContextSchema }).strict(),
   z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
 ]);
+export const transcriptionRequestResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), status: z.enum(["queued", "running", "complete", "failed"]), attempt: z.number().int().positive() }).strict(),
+  z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
+]);
 
 const ownedCaptureInputSchema = z.object({ target: projectTargetSchema }).extend({
   recordingId: z.string().min(1), ownerId: z.string().min(1),
@@ -90,6 +94,10 @@ export const marginsHostContract = defineRpcContract({
   connectedNoteContext: {
     input: z.object({ target: projectTargetSchema, recordingId: z.string().min(1) }).strict(),
     output: connectedNoteResultSchema,
+  },
+  requestTranscription: {
+    input: z.object({ target: projectTargetSchema, recordingId: z.string().min(1) }).strict(),
+    output: transcriptionRequestResultSchema,
   },
 });
 export const hostSignals = {
@@ -154,6 +162,10 @@ export const marginsRpcContract = defineRpcContract({
     input: z.object({ threadId: z.string().min(1), sessionId: z.string().min(1) }).strict(),
     output: connectedNoteResultSchema,
   },
+  transcribePinnedSession: {
+    input: z.object({ threadId: z.string().min(1), sessionId: z.string().min(1) }).strict(),
+    output: transcriptionRequestResultSchema,
+  },
 });
 
 export type ClientCapabilities = z.infer<typeof clientCapabilitiesSchema>;
@@ -165,5 +177,6 @@ export type HostCaptureSnapshot = z.infer<typeof hostCaptureSnapshotSchema>;
 export type HostResult = z.infer<typeof hostResultSchema>;
 export type ConnectedNoteContext = z.infer<typeof connectedNoteContextSchema>;
 export type ConnectedNoteResult = z.infer<typeof connectedNoteResultSchema>;
+export type TranscriptionRequestResult = z.infer<typeof transcriptionRequestResultSchema>;
 export type CaptureRecord = z.infer<typeof captureRecordSchema>;
 export type PanelState = z.infer<typeof panelStateSchema>;

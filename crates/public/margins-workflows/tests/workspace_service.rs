@@ -584,8 +584,34 @@ fn finalized_asr_capable_service_durably_admits_one_revision_stable_job() {
         WorkspaceService::open_with_capabilities("host-a", workspace, true, false).unwrap();
     assert_eq!(
         restarted.pending_transcription_jobs().unwrap(),
-        vec![admitted]
+        vec![admitted.clone()]
     );
+    let read_only =
+        ServicePrincipal::scoped("reader", ["team".to_string()], ["session.read".to_string()]);
+    assert!(restarted
+        .request_transcription_job(&read_only, &SessionId("asr-a".into()))
+        .is_err());
+    assert_eq!(
+        restarted
+            .request_transcription_job(&owner, &SessionId("asr-a".into()))
+            .unwrap(),
+        admitted
+    );
+    restarted
+        .update_transcription_job(
+            &admitted.job_id,
+            admitted.attempt,
+            "failed",
+            None,
+            None,
+            Some("model unavailable"),
+        )
+        .unwrap();
+    let retried = restarted
+        .request_transcription_job(&owner, &SessionId("asr-a".into()))
+        .unwrap();
+    assert_eq!(retried.attempt, admitted.attempt + 1);
+    assert_eq!(retried.status, "queued");
 }
 
 #[test]

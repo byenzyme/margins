@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ProjectMarginsTransport, ProjectServerManager } from "./project-server.js";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { ProjectMarginsTransport, ProjectServerManager, readAsrRuntimeConfig } from "./project-server.js";
 
 const saved = {
   url: process.env.MARGINS_BB_REMOTE_URL,
@@ -110,6 +113,24 @@ describe("ProjectServerManager remote adapter", () => {
     expect(result).toMatchObject({ ok: false, error: { code: "connected_note_context_unavailable" } });
   });
 
+  it("requests transcription for an exact saved session over the selected Workspace", async () => {
+    const manager = { ensure: vi.fn(async () => ({
+      baseUrl: "https://margins.example.test", token: "scoped-token", workspaceId: "practice", instanceId: "instance-remote",
+    })) } as unknown as ProjectServerManager;
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true, result: {
+      status: "queued", attempt: 1,
+    } }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await new ProjectMarginsTransport(manager).requestTranscription(
+      { projectId: "project", projectRoot: "/tmp/project", hostId: "host" }, "/tmp/data", "rec-1",
+    );
+    expect(result).toEqual({ ok: true, status: "queued", attempt: 1 });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://margins.example.test/v1/workspaces/practice/sessions/rec-1/jobs/transcribe",
+      expect.objectContaining({ method: "POST", headers: expect.objectContaining({ authorization: "Bearer scoped-token" }) }),
+    );
+  });
+
   it("rejects incomplete or non-TLS remote configuration before transport", async () => {
     process.env.MARGINS_BB_REMOTE_URL = "http://remote.example.test";
     process.env.MARGINS_BB_REMOTE_TOKEN = "scoped-token";
@@ -119,5 +140,26 @@ describe("ProjectServerManager remote adapter", () => {
       projectRoot: "/tmp/project",
       hostId: "host",
     }, "/tmp/plugin-data")).rejects.toThrow("HTTPS or loopback");
+  });
+});
+
+describe("scoped ASR runtime configuration", () => {
+  it("selects only complete absolute paths inside the plugin data scope", async () => {
+    const root = await mkdtemp(join(tmpdir(), "margins-bb-asr-config-"));
+    try {
+      const serverPath = join(root, "margins-server");
+      const modelDir = join(root, "model");
+      const ortLibraryPath = join(root, "libonnxruntime.so");
+      await mkdir(modelDir);
+      await writeFile(serverPath, "binary");
+      await chmod(serverPath, 0o755);
+      await writeFile(ortLibraryPath, "library");
+      await writeFile(join(root, "asr-runtime.json"), JSON.stringify({ serverPath, modelDir, ortLibraryPath }));
+      await expect(readAsrRuntimeConfig(root)).resolves.toEqual({ serverPath, modelDir, ortLibraryPath });
+      await writeFile(join(root, "asr-runtime.json"), JSON.stringify({ serverPath: "../margins-server", modelDir, ortLibraryPath }));
+      await expect(readAsrRuntimeConfig(root)).rejects.toThrow("absolute path");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

@@ -16,8 +16,10 @@ the project’s primary folder under its existing `.margins` store.
   controls for browser and paired Mac recordings.
 - A 25-second reconnect grace. After it expires, the project machine stops and
   saves the audio it received.
-- Saved recordings are ordinary Margins sessions. The normal `margins` CLI
-  continues to own transcription, diarization, distillation, and retention.
+- Saved recordings are ordinary Margins sessions. An ASR-enabled project service
+  transcribes finalized audio there. **Make connected note** requests
+  transcription for an older saved session when needed; Margins still owns
+  diarization, distillation, and retention.
 - **Make connected note** fills and focuses the bb composer without sending.
 - Bundled `watermark` and `workspace-setup` skills; no recording agent tool.
 
@@ -37,6 +39,22 @@ The service is launched with the bb project’s default source path as
 `MARGINS_WORK_DIR`, so it writes to `<project>/.margins`, never an environment
 worktree or the recording device’s personal Margins store. For local development,
 `MARGINS_PROJECT_SERVER_PATH` may point at an already-built `margins-server`.
+
+For an explicitly provisioned project host, `asr-runtime.json` in the plugin's
+host data directory can select a server with the `hosted-web` feature and its
+local Parakeet model and ONNX Runtime library. It contains absolute paths:
+
+```json
+{
+  "serverPath": "/path/to/margins-server",
+  "modelDir": "/path/to/parakeet-tdt-v2",
+  "ortLibraryPath": "/path/to/libonnxruntime.so"
+}
+```
+
+The project-host worker validates those paths before launch. Without this
+configuration, it uses the version-pinned installation as before. The service
+stores transcripts alongside the project's sessions, not in plugin storage.
 
 ## Mac PWA recording
 

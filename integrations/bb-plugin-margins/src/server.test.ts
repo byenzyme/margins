@@ -29,6 +29,7 @@ function harness(options: { heartbeatFails?: boolean } = {}) {
         schema: "margins.bb.connected-note-context.v1", instanceId: "instance-1", workspaceId: "workspace-1", sessionId: "rec-1", title: "Customer call",
         transcript: { available: true, terminal: true, live: false, updatedAtUnixMs: 10 }, memo: { revision: "memo-1", lineCount: 1 }, artifacts: [], noteAssociation: null, instructions: "Pin exact session",
       } };
+      if (method === "requestTranscription") return { ok: true, status: "queued", attempt: 1 };
       if (method === "heartbeat" && options.heartbeatFails) return { ok: false, error: { code: "offline", message: "offline", retryable: true } };
       return { ok: true, snapshot: stopped ? null : snapshot };
     },
@@ -99,6 +100,9 @@ describe("Margins project recording server", () => {
     await expect(host.harness.behavior.callRpc("connectedNoteContext", { threadId: "thr-1", sessionId: "rec-1" })).resolves.toMatchObject({ ok: true, context: { sessionId: "rec-1" } });
     await expect(host.harness.behavior.callRpc("connectedNoteContext", { threadId: "thr-1", sessionId: "stale" })).resolves.toMatchObject({ ok: false, error: { code: "session_pin_stale" } });
     expect(host.harness.inspection.experimental_hostRpcCalls.filter(call => call.method === "connectedNoteContext")).toHaveLength(1);
+    await expect(host.harness.behavior.callRpc("transcribePinnedSession", { threadId: "thr-1", sessionId: "stale" })).resolves.toMatchObject({ ok: false, error: { code: "session_pin_stale" } });
+    await expect(host.harness.behavior.callRpc("transcribePinnedSession", { threadId: "thr-1", sessionId: "rec-1" })).resolves.toMatchObject({ ok: true, status: "queued", attempt: 1 });
+    expect(host.harness.inspection.experimental_hostRpcCalls.filter(call => call.method === "requestTranscription")).toHaveLength(1);
   });
 
   it("pins a saved Mac session only in the project's verified destination", async () => {

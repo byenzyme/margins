@@ -88,6 +88,24 @@ describe("Margins recording panel", () => {
     slot.lifecycle.unmount();
   });
 
+  it("requests remote transcription before drafting a note for an audio-only session", async () => {
+    const saved = panel({ state: "saved", title: "Meeting saved", primaryAction: "none", primaryLabel: "Meeting saved", canStop: false, canEditNotepad: false, ownsRecording: false, recordingId: null, notepad: null, lastSessionId: "rec-pinned" });
+    const slot = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-1", params: null }, { rpc: {
+      getPanelState: () => saved,
+      connectedNoteContext: () => ({ ok: true, context: {
+        schema: "margins.bb.connected-note-context.v1", instanceId: "instance-1", workspaceId: "workspace-1", sessionId: "rec-pinned", title: "Pinned",
+        transcript: { available: false, terminal: false, live: false, updatedAtUnixMs: 0 }, memo: { revision: "memo-1", lineCount: 0 }, artifacts: [], noteAssociation: null, instructions: "Wait for transcription",
+      } }),
+      transcribePinnedSession: () => ({ ok: true, status: "queued", attempt: 1 }),
+    } });
+    const screen = within(slot.container);
+    fireEvent.click(await screen.findByRole("button", { name: "Make connected note" }));
+    await waitFor(() => expect(slot.inspection.rpcCalls.some((call) => call.method === "transcribePinnedSession")).toBe(true));
+    expect(slot.inspection.composer.text).toBe("");
+    expect(screen.getByText(/Transcribing this meeting/)).toBeDefined();
+    slot.lifecycle.unmount();
+  });
+
   it("keeps an unsaved notepad edit when the panel is collapsed and reopened", async () => {
     const failedUpdate = vi.fn(async () => { throw new Error("offline"); });
     const first = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-1", params: null }, {

@@ -13,6 +13,7 @@ import {
   type HostError,
   type HostResult,
   type ConnectedNoteResult,
+  type TranscriptionRequestResult,
   type PanelState,
   type ProjectTarget,
 } from "./contracts.js";
@@ -280,6 +281,14 @@ export default function marginsPlugin(bb: BbPluginApi) {
         return { ok: false as const, error: { code: "session_pin_stale", message: "The selected meeting is no longer this project's pinned latest session. Refresh before creating the note.", retryable: true } };
       }
       return callHost(target, "connectedNoteContext", { target, recordingId: sessionId }) as Promise<ConnectedNoteResult>;
+    },
+    async transcribePinnedSession({ threadId, sessionId }): Promise<TranscriptionRequestResult> {
+      const target = await targetForThread(threadId);
+      const pinned = await readLastSession(target.projectId);
+      if (pinned !== sessionId) {
+        return { ok: false, error: { code: "session_pin_stale", message: "Refresh before transcribing this meeting.", retryable: true } };
+      }
+      return callHost(target, "requestTranscription", { target, recordingId: sessionId }) as Promise<TranscriptionRequestResult>;
     },
   });
 

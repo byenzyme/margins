@@ -76,6 +76,10 @@ export function createMarginsHostEntry(transport: Transport) {
         retain(context);
         return transport.connectedNoteContext(input.target, context.experimental_paths.dataDir, input.recordingId);
       },
+      requestTranscription(input, context) {
+        retain(context);
+        return transport.requestTranscription(input.target, context.experimental_paths.dataDir, input.recordingId);
+      },
     },
     async dispose() {
       await transport.dispose();

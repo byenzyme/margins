@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, readFile } from "node:fs/promises";
+import { lstat, mkdir, readFile } from "node:fs/promises";
 import { createServer } from "node:net";
-import { join } from "node:path";
-import type { ConnectedNoteResult, HostCaptureSnapshot, HostError, HostResult, ProjectTarget } from "./contracts.js";
+import { isAbsolute, join } from "node:path";
+import type { ConnectedNoteResult, HostCaptureSnapshot, HostError, HostResult, ProjectTarget, TranscriptionRequestResult } from "./contracts.js";
 import { createRuntimeManager } from "./runtime-manager.js";
 
 interface ServerHandle {
@@ -12,6 +12,41 @@ interface ServerHandle {
   workspaceId: string;
   instanceId: string;
   child?: ChildProcess;
+}
+
+interface AsrRuntimeConfig {
+  serverPath: string;
+  modelDir: string;
+  ortLibraryPath: string;
+}
+
+export async function readAsrRuntimeConfig(dataDir: string): Promise<AsrRuntimeConfig | null> {
+  const path = join(dataDir, "asr-runtime.json");
+  const raw = await readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (raw === null) return null;
+  let value: unknown;
+  try { value = JSON.parse(raw); }
+  catch { throw new Error("Invalid Margins ASR runtime configuration"); }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Invalid Margins ASR runtime configuration");
+  }
+  const config = value as Record<string, unknown>;
+  for (const key of ["serverPath", "modelDir", "ortLibraryPath"] as const) {
+    if (typeof config[key] !== "string" || !isAbsolute(config[key])) {
+      throw new Error(`Margins ASR runtime ${key} must be an absolute path`);
+    }
+  }
+  const selected = config as unknown as AsrRuntimeConfig;
+  const [server, model, ort] = await Promise.all([
+    lstat(selected.serverPath), lstat(selected.modelDir), lstat(selected.ortLibraryPath),
+  ]);
+  if (!server.isFile() || (server.mode & 0o111) === 0 || !model.isDirectory() || !ort.isFile()) {
+    throw new Error("Margins ASR runtime files are not ready");
+  }
+  return selected;
 }
 
 function hostError(code: string, message: string, retryable = true): HostError {
@@ -102,7 +137,8 @@ export class ProjectServerManager {
       if (!envelope.result.instance_id) throw new Error("remote Margins capability response lacks an instance identity");
       return { baseUrl, token: remoteToken, workspaceId: remoteWorkspace, instanceId: envelope.result.instance_id };
     }
-    const binary = await this.runtime.ensureProjectServer({ dataDir, signal });
+    const asrRuntime = await readAsrRuntimeConfig(dataDir);
+    const binary = asrRuntime?.serverPath ?? await this.runtime.ensureProjectServer({ dataDir, signal });
     const instanceDir = join(dataDir, "projects", key);
     await mkdir(instanceDir, { recursive: true });
     const port = await availablePort();
@@ -118,6 +154,11 @@ export class ProjectServerManager {
         MARGINS_INSTANCE_ID: `bb-host-${target.hostId}`,
         MARGINS_WORKSPACE: `bb-${key}`,
         MARGINS_SERVICE_PROVISION: "1",
+        ...(asrRuntime ? {
+          MARGINS_PARAKEET_MODEL_DIR: asrRuntime.modelDir,
+          MARGINS_PARAKEET_MODEL_KIND: "tdt-v2",
+          ORT_DYLIB_PATH: asrRuntime.ortLibraryPath,
+        } : {}),
       },
       stdio: "ignore",
     });
@@ -178,6 +219,7 @@ export class ProjectMarginsTransport {
       headers: {
         authorization: `Bearer ${handle.token}`,
         "content-type": "application/json",
+        "X-Margins-Instance-Id": handle.instanceId,
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
@@ -297,6 +339,18 @@ export class ProjectMarginsTransport {
       } };
     } catch (cause) {
       return { ok: false, error: hostError("connected_note_context_unavailable", cause instanceof Error ? cause.message : String(cause)) };
+    }
+  }
+
+  async requestTranscription(target: ProjectTarget, dataDir: string, recordingId: string): Promise<TranscriptionRequestResult> {
+    try {
+      const handle = await this.manager.ensure(target, dataDir);
+      const job = await this.request<{ status: "queued" | "running" | "complete" | "failed"; attempt: number }>(
+        handle, `sessions/${recordingId}/jobs/transcribe`, "POST",
+      );
+      return { ok: true, status: job.status, attempt: job.attempt };
+    } catch (cause) {
+      return { ok: false, error: hostError("transcription_unavailable", cause instanceof Error ? cause.message : String(cause)) };
     }
   }
 

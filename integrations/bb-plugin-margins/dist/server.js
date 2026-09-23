@@ -18939,6 +18939,10 @@ var connectedNoteResultSchema = external_exports.discriminatedUnion("ok", [
   external_exports.object({ ok: external_exports.literal(true), context: connectedNoteContextSchema }).strict(),
   external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
 ]);
+var transcriptionRequestResultSchema = external_exports.discriminatedUnion("ok", [
+  external_exports.object({ ok: external_exports.literal(true), status: external_exports.enum(["queued", "running", "complete", "failed"]), attempt: external_exports.number().int().positive() }).strict(),
+  external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
+]);
 var ownedCaptureInputSchema = external_exports.object({ target: projectTargetSchema }).extend({
   recordingId: external_exports.string().min(1),
   ownerId: external_exports.string().min(1)
@@ -18978,6 +18982,10 @@ var marginsHostContract = defineRpcContract({
   connectedNoteContext: {
     input: external_exports.object({ target: projectTargetSchema, recordingId: external_exports.string().min(1) }).strict(),
     output: connectedNoteResultSchema
+  },
+  requestTranscription: {
+    input: external_exports.object({ target: projectTargetSchema, recordingId: external_exports.string().min(1) }).strict(),
+    output: transcriptionRequestResultSchema
   }
 });
 var hostSignals = {
@@ -19051,6 +19059,10 @@ var marginsRpcContract = defineRpcContract({
   connectedNoteContext: {
     input: external_exports.object({ threadId: external_exports.string().min(1), sessionId: external_exports.string().min(1) }).strict(),
     output: connectedNoteResultSchema
+  },
+  transcribePinnedSession: {
+    input: external_exports.object({ threadId: external_exports.string().min(1), sessionId: external_exports.string().min(1) }).strict(),
+    output: transcriptionRequestResultSchema
   }
 });
 
@@ -19355,6 +19367,14 @@ function marginsPlugin(bb) {
         return { ok: false, error: { code: "session_pin_stale", message: "The selected meeting is no longer this project's pinned latest session. Refresh before creating the note.", retryable: true } };
       }
       return callHost(target, "connectedNoteContext", { target, recordingId: sessionId });
+    },
+    async transcribePinnedSession({ threadId, sessionId }) {
+      const target = await targetForThread(threadId);
+      const pinned = await readLastSession(target.projectId);
+      if (pinned !== sessionId) {
+        return { ok: false, error: { code: "session_pin_stale", message: "Refresh before transcribing this meeting.", retryable: true } };
+      }
+      return callHost(target, "requestTranscription", { target, recordingId: sessionId });
     }
   });
   const chunkSchema = external_exports.object({

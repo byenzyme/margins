@@ -24,7 +24,7 @@ use margins_meeting_protocol::{
     WorkspaceRenameV1, WorkspaceResponseV1,
 };
 use margins_workflows::workspace_service::{
-    OP_CAPTURE_WRITE, OP_MEMO_WRITE, OP_SESSION_CREATE, OP_SESSION_READ, ScopedCredentialStore,
+    OP_CAPTURE_WRITE, OP_MEMO_WRITE, OP_SESSION_CREATE, OP_SESSION_READ, OP_SESSION_WRITE, ScopedCredentialStore,
     ServicePrincipal, WorkspaceService,
 };
 use serde_json::{Value, json};
@@ -135,6 +135,10 @@ pub fn build_router(state: ServerState) -> Router {
         .route(
             "/v1/workspaces/:workspace/sessions/:session/jobs/latest",
             get(workspace_latest_job),
+        )
+        .route(
+            "/v1/workspaces/:workspace/sessions/:session/jobs/transcribe",
+            post(workspace_request_transcription),
         )
         .route(
             "/v1/workspaces/:workspace/imports",
@@ -905,6 +909,34 @@ async fn workspace_latest_job(
         .latest_job(&principal, &SessionId(session))
         .map(workspace_ok)
         .unwrap_or_else(service_error)
+}
+
+async fn workspace_request_transcription(
+    State(state): State<ServerState>,
+    Path((workspace, session)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match workspace_auth_operation(&state, &headers, &workspace, OP_SESSION_WRITE) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(response) = workspace_instance_fence(&state, &headers) {
+        return response;
+    }
+    let job = match state
+        .workspace_service
+        .request_transcription_job(&principal, &SessionId(session))
+    {
+        Ok(value) => value,
+        Err(error) => return service_error(error),
+    };
+    #[cfg(feature = "parakeet-asr")]
+    state.remote_asr_jobs.schedule(
+        state.workspace_service.clone(),
+        state.service_principal.clone(),
+        job.clone(),
+    );
+    workspace_ok(job)
 }
 
 async fn workspace_import(

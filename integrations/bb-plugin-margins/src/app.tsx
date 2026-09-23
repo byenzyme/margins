@@ -277,6 +277,14 @@ function MarginsPanel({ threadId, params }: { threadId: string; params: JsonValu
     await action("connected-note", async () => {
       const result = await rpc.call("connectedNoteContext", { threadId, sessionId: state.lastSessionId! });
       if (!result.ok) throw new Error(result.error.message);
+      if (!result.context.transcript.available) {
+        const requested = await rpc.call("transcribePinnedSession", { threadId, sessionId: state.lastSessionId! });
+        if (!requested.ok) throw new Error(requested.error.message);
+        setMessage(requested.status === "complete"
+          ? "Transcription is ready. Make the connected note again."
+          : "Transcribing this meeting on the project machine. Make the connected note when it finishes.");
+        return;
+      }
       const context = JSON.stringify(result.context);
       const request = `Create a connected note for the pinned Margins session below. Resolve transcript/artifact/recall data for this exact session before writing. Read and write note files only through the project's native filesystem Source; never proxy note bytes through Margins.\n\n${context}`;
       composer.updateText((current) => current.trim() ? `${current.trimEnd()}\n\n${request}` : request);

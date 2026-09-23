@@ -1050,6 +1050,15 @@ impl WorkspaceService {
         .map(processing_job)
     }
 
+    pub fn request_transcription_job(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+    ) -> Result<WorkspaceProcessingJobV1> {
+        principal.require(self.workspace_id(), OP_SESSION_WRITE)?;
+        self.admit_transcription_job(session_id)
+    }
+
     pub fn update_transcription_job(
         &self,
         job_id: &str,

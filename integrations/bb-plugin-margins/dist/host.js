@@ -33325,6 +33325,10 @@ var connectedNoteResultSchema = external_exports2.discriminatedUnion("ok", [
   external_exports2.object({ ok: external_exports2.literal(true), context: connectedNoteContextSchema }).strict(),
   external_exports2.object({ ok: external_exports2.literal(false), error: hostErrorSchema }).strict()
 ]);
+var transcriptionRequestResultSchema = external_exports2.discriminatedUnion("ok", [
+  external_exports2.object({ ok: external_exports2.literal(true), status: external_exports2.enum(["queued", "running", "complete", "failed"]), attempt: external_exports2.number().int().positive() }).strict(),
+  external_exports2.object({ ok: external_exports2.literal(false), error: hostErrorSchema }).strict()
+]);
 var ownedCaptureInputSchema = external_exports2.object({ target: projectTargetSchema }).extend({
   recordingId: external_exports2.string().min(1),
   ownerId: external_exports2.string().min(1)
@@ -33364,6 +33368,10 @@ var marginsHostContract = defineRpcContract2({
   connectedNoteContext: {
     input: external_exports2.object({ target: projectTargetSchema, recordingId: external_exports2.string().min(1) }).strict(),
     output: connectedNoteResultSchema
+  },
+  requestTranscription: {
+    input: external_exports2.object({ target: projectTargetSchema, recordingId: external_exports2.string().min(1) }).strict(),
+    output: transcriptionRequestResultSchema
   }
 });
 var hostSignals = {
@@ -33437,15 +33445,19 @@ var marginsRpcContract = defineRpcContract2({
   connectedNoteContext: {
     input: external_exports2.object({ threadId: external_exports2.string().min(1), sessionId: external_exports2.string().min(1) }).strict(),
     output: connectedNoteResultSchema
+  },
+  transcribePinnedSession: {
+    input: external_exports2.object({ threadId: external_exports2.string().min(1), sessionId: external_exports2.string().min(1) }).strict(),
+    output: transcriptionRequestResultSchema
   }
 });
 
 // ../aside-desktop-bb-pwa/integrations/bb-plugin-margins/src/project-server.ts
 import { createHash as createHash2 } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdir as mkdir2, readFile as readFile2 } from "node:fs/promises";
+import { lstat as lstat2, mkdir as mkdir2, readFile as readFile2 } from "node:fs/promises";
 import { createServer } from "node:net";
-import { join as join2 } from "node:path";
+import { isAbsolute, join as join2 } from "node:path";
 
 // ../aside-desktop-bb-pwa/integrations/bb-plugin-margins/src/runtime-manager.ts
 import { createHash } from "node:crypto";
@@ -33631,6 +33643,39 @@ function createRuntimeManager(options = {}) {
 }
 
 // ../aside-desktop-bb-pwa/integrations/bb-plugin-margins/src/project-server.ts
+async function readAsrRuntimeConfig(dataDir) {
+  const path2 = join2(dataDir, "asr-runtime.json");
+  const raw = await readFile2(path2, "utf8").catch((error108) => {
+    if (error108.code === "ENOENT") return null;
+    throw error108;
+  });
+  if (raw === null) return null;
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error("Invalid Margins ASR runtime configuration");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Invalid Margins ASR runtime configuration");
+  }
+  const config3 = value;
+  for (const key of ["serverPath", "modelDir", "ortLibraryPath"]) {
+    if (typeof config3[key] !== "string" || !isAbsolute(config3[key])) {
+      throw new Error(`Margins ASR runtime ${key} must be an absolute path`);
+    }
+  }
+  const selected = config3;
+  const [server, model, ort] = await Promise.all([
+    lstat2(selected.serverPath),
+    lstat2(selected.modelDir),
+    lstat2(selected.ortLibraryPath)
+  ]);
+  if (!server.isFile() || (server.mode & 73) === 0 || !model.isDirectory() || !ort.isFile()) {
+    throw new Error("Margins ASR runtime files are not ready");
+  }
+  return selected;
+}
 function hostError(code, message, retryable = true) {
   return { code, message, retryable };
 }
@@ -33708,7 +33753,8 @@ var ProjectServerManager = class {
       if (!envelope.result.instance_id) throw new Error("remote Margins capability response lacks an instance identity");
       return { baseUrl: baseUrl2, token: remoteToken, workspaceId: remoteWorkspace, instanceId: envelope.result.instance_id };
     }
-    const binary = await this.runtime.ensureProjectServer({ dataDir, signal });
+    const asrRuntime = await readAsrRuntimeConfig(dataDir);
+    const binary = asrRuntime?.serverPath ?? await this.runtime.ensureProjectServer({ dataDir, signal });
     const instanceDir = join2(dataDir, "projects", key);
     await mkdir2(instanceDir, { recursive: true });
     const port = await availablePort();
@@ -33723,7 +33769,12 @@ var ProjectServerManager = class {
         MARGINS_HOME: join2(instanceDir, "margins-home"),
         MARGINS_INSTANCE_ID: `bb-host-${target.hostId}`,
         MARGINS_WORKSPACE: `bb-${key}`,
-        MARGINS_SERVICE_PROVISION: "1"
+        MARGINS_SERVICE_PROVISION: "1",
+        ...asrRuntime ? {
+          MARGINS_PARAKEET_MODEL_DIR: asrRuntime.modelDir,
+          MARGINS_PARAKEET_MODEL_KIND: "tdt-v2",
+          ORT_DYLIB_PATH: asrRuntime.ortLibraryPath
+        } : {}
       },
       stdio: "ignore"
     });
@@ -33781,7 +33832,8 @@ var ProjectMarginsTransport = class {
       signal,
       headers: {
         authorization: `Bearer ${handle.token}`,
-        "content-type": "application/json"
+        "content-type": "application/json",
+        "X-Margins-Instance-Id": handle.instanceId
       },
       body: body === void 0 ? void 0 : JSON.stringify(body)
     });
@@ -33886,6 +33938,19 @@ var ProjectMarginsTransport = class {
       return { ok: false, error: hostError("connected_note_context_unavailable", cause instanceof Error ? cause.message : String(cause)) };
     }
   }
+  async requestTranscription(target, dataDir, recordingId) {
+    try {
+      const handle = await this.manager.ensure(target, dataDir);
+      const job = await this.request(
+        handle,
+        `sessions/${recordingId}/jobs/transcribe`,
+        "POST"
+      );
+      return { ok: true, status: job.status, attempt: job.attempt };
+    } catch (cause) {
+      return { ok: false, error: hostError("transcription_unavailable", cause instanceof Error ? cause.message : String(cause)) };
+    }
+  }
   dispose() {
     return this.manager.dispose();
   }
@@ -33957,6 +34022,10 @@ function createMarginsHostEntry(transport) {
       connectedNoteContext(input2, context) {
         retain(context);
         return transport.connectedNoteContext(input2.target, context.experimental_paths.dataDir, input2.recordingId);
+      },
+      requestTranscription(input2, context) {
+        retain(context);
+        return transport.requestTranscription(input2.target, context.experimental_paths.dataDir, input2.recordingId);
       }
     },
     async dispose() {
