@@ -4,7 +4,7 @@ import { AlertCircle, Check, Pause, Play, Square } from "lucide-react";
 import type { marginsRpcContract } from "../server.js";
 import { browserCaptureOwner, detectClientCapabilities } from "./browser-capture.js";
 import { nativeBridgeOwner, type CaptureAuthority, type NativeStatus } from "./native-bridge-client.js";
-import type { PanelState } from "./contracts.js";
+import type { PanelState, WorkspaceMeeting } from "./contracts.js";
 
 function paramsTitle(params: JsonValue | null) {
   return params && typeof params === "object" && !Array.isArray(params) && typeof params.title === "string" ? params.title : undefined;
@@ -175,6 +175,71 @@ function NativeCapturePanel({ threadId, title }: { threadId: string; title?: str
   </div>;
 }
 
+function WorkspaceMeetingNotes({ threadId, onMeetingChange }: { threadId: string; onMeetingChange: (active: boolean) => void }) {
+  const rpc = useRpc<typeof marginsRpcContract>();
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [meeting, setMeeting] = useState<WorkspaceMeeting | null>(null);
+  const [draft, setDraft] = useState("");
+  const [message, setMessage] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const revision = useRef<string | null>(null);
+  const dirty = useRef(false);
+  const latestDraft = useRef("");
+
+  const refresh = useCallback(async () => {
+    const result = await rpc.call("readWorkspaceMeeting", { threadId, ...(sessionId ? { sessionId } : {}) });
+    if (!result.ok) { setMessage(result.error.message); return; }
+    if (!result.meeting) {
+      onMeetingChange(result.candidates.length > 0);
+      if (result.candidates.length > 1) setMessage("Several Workspace meetings are active. Finish one before joining from this panel.");
+      return;
+    }
+    onMeetingChange(true);
+    if (!dirty.current || result.meeting.sessionId !== sessionId) {
+      setDraft(result.meeting.notepad.text);
+      latestDraft.current = result.meeting.notepad.text;
+      revision.current = result.meeting.notepad.revision;
+      dirty.current = false;
+    }
+    setSessionId(result.meeting.sessionId);
+    setMeeting(result.meeting);
+  }, [onMeetingChange, rpc, sessionId, threadId]);
+
+  useEffect(() => {
+    void refresh().catch((error) => setMessage(String(error)));
+    const timer = setInterval(() => void refresh().catch((error) => setMessage(String(error))), 3000);
+    return () => clearInterval(timer);
+  }, [refresh]);
+
+  async function save() {
+    if (!meeting || !dirty.current || !revision.current || saving) return;
+    setSaving(true); setMessage(null);
+    try {
+      const result = await rpc.call("saveWorkspaceMemo", {
+        threadId, sessionId: meeting.sessionId, expectedRevision: revision.current, text: draft,
+      });
+      if (!result.ok) throw new Error(result.error.message);
+      if (!result.meeting) throw new Error("Meeting was unavailable after saving");
+      revision.current = result.meeting.notepad.revision;
+      dirty.current = latestDraft.current !== draft;
+      setMeeting(result.meeting);
+      setMessage("Note saved");
+    } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
+    finally { setSaving(false); }
+  }
+
+  if (!meeting) return message ? <p className="margins-detail">{message}</p> : null;
+  return <div className="margins-workspace-meeting">
+    <p className="margins-detail">{meeting.inputFinalized ? "Saved meeting" : "Recording in Margins Menu"} · {meeting.title || meeting.sessionId}</p>
+    <textarea className="margins-notepad" aria-label="Workspace meeting notepad"
+      placeholder="Take notes while Margins records…" value={draft}
+      onChange={(event) => { dirty.current = true; latestDraft.current = event.target.value; setDraft(event.target.value); setMessage(null); }}
+      onBlur={() => void save()} />
+    <button className="margins-quiet" onClick={() => void save()} disabled={!dirty.current || saving}>Save note</button>
+    {message && <p className="margins-detail">{message}</p>}
+  </div>;
+}
+
 function MarginsPanel({ threadId, params }: { threadId: string; params: JsonValue | null }) {
   const rpc = useRpc<typeof marginsRpcContract>();
   const composer = useComposer();
@@ -183,6 +248,7 @@ function MarginsPanel({ threadId, params }: { threadId: string; params: JsonValu
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [externalMeeting, setExternalMeeting] = useState(false);
   const desiredDraft = useRef("");
   const savedDraft = useRef("");
   const revision = useRef<string | null>(null);
@@ -303,6 +369,8 @@ function MarginsPanel({ threadId, params }: { threadId: string; params: JsonValu
 
   return <section className="margins-panel" data-state={visibleState}>
     {client.platform === "macos" && <NativeCapturePanel threadId={threadId} title={paramsTitle(params)} />}
+    {!state.ownsRecording && <WorkspaceMeetingNotes threadId={threadId} onMeetingChange={setExternalMeeting} />}
+    {!externalMeeting && <>
     <header className="margins-header">
       <div className="margins-heading">
         <Signal state={visibleState} />
@@ -329,6 +397,7 @@ function MarginsPanel({ threadId, params }: { threadId: string; params: JsonValu
       <button className="margins-quiet" onClick={() => void action("dismiss", refresh)}>Not now</button>
     </div>}
     {state.state === "needs_setup" && <p className="margins-seam">Recording with computer audio isn’t available in this browser yet.</p>}
+    </>}
   </section>;
 }
 

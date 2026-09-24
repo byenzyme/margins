@@ -207,6 +207,7 @@ fn workspace_reader_can_follow_an_unclosed_capture_without_producer_access() {
         .unwrap();
     let interim = service.transcript(&reader, "live-a").unwrap();
     assert!(!interim.terminal);
+    assert!(interim.live);
     assert!(interim.body.contains("hello"));
     let old = serde_json::json!({"version":2,"terminal":false,"decoded_until_ms":1000,"committed_until_ms":800,"transcripts":[{"words":[]}]});
     assert!(service

@@ -16,6 +16,9 @@ the project’s primary folder under its existing `.margins` store.
   controls for browser and paired Mac recordings.
 - A 25-second reconnect grace. After it expires, the project machine stops and
   saves the audio it received.
+- A menu-recorded meeting in the same Workspace can be joined from the bb
+  panel. Its active session appears with one revisioned notepad; bb does not
+  start another browser recording for that meeting.
 - Saved recordings are ordinary Margins sessions. An ASR-enabled project service
   transcribes finalized audio there. **Make connected note** requests
   transcription for an older saved session when needed; Margins still owns
@@ -89,8 +92,9 @@ the remote server acknowledges it.
 
 The native bridge has passed a scoped Mac device test with both audio lanes,
 pause, resume, and a finalized Linux session. Pairing and controls through an
-authenticated Mac BB browser remain to be verified. Native notepad editing is
-not exposed through this bridge yet. The plugin's release-pinned installation also requires a published
+authenticated Mac BB browser remain to be verified. A menu-owned meeting's
+memo is editable in bb through the Workspace service; the native bridge
+itself carries audio and control only. The plugin's release-pinned installation also requires a published
 release archive containing both `margins` and `margins-server`. The currently
 published CLI does not contain the new `native-bridge` command; use the built
 `margins-private` executable for development until a matching release ships.

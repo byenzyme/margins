@@ -23,6 +23,40 @@ afterEach(() => {
 });
 
 describe("ProjectServerManager remote adapter", () => {
+  it("joins one active menu meeting and saves its revisioned memo in that Workspace", async () => {
+    const manager = { ensure: vi.fn(async () => ({
+      baseUrl: "https://margins.example.test", token: "scoped-token", workspaceId: "practice", instanceId: "instance-remote",
+    })) } as unknown as ProjectServerManager;
+    let memo = { revision: "rev-1", lines: [{ text: "First point" }] };
+    const fetchMock = vi.fn(async (input: string | URL | Request, options?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/active-sessions")) return new Response(JSON.stringify({ ok: true, result: { sessions: [{ session_id: "remote-menu-1" }] } }));
+      if (url.endsWith("/sessions/remote-menu-1")) return new Response(JSON.stringify({ ok: true, result: {
+        session_id: "remote-menu-1", title: "Planning", started_at: "2026-09-24T03:00:00Z",
+        input_finalized: false, capture_duration_ms: null,
+      } }));
+      if (url.endsWith("/sessions/remote-menu-1/memo")) {
+        if (options?.method === "PUT") {
+          const body = JSON.parse(String(options.body));
+          expect(body).toMatchObject({ expected_revision: "rev-1", text: "First point\nSecond point", paused: false });
+          expect(body.observed_at_ms).toBeGreaterThanOrEqual(0);
+          expect(body.request_id).toBeTruthy();
+          memo = { revision: "rev-2", lines: [{ text: "First point" }, { text: "Second point" }] };
+        }
+        return new Response(JSON.stringify({ ok: true, result: memo }));
+      }
+      throw new Error(`unexpected URL ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const transport = new ProjectMarginsTransport(manager);
+    const target = { projectId: "project", projectRoot: "/tmp/project", hostId: "host" };
+    const active = await transport.readWorkspaceMeeting(target, "/tmp/data");
+    expect(active).toMatchObject({ ok: true, meeting: { sessionId: "remote-menu-1", notepad: { text: "First point", revision: "rev-1" } } });
+    const savedMemo = await transport.saveWorkspaceMemo(target, "/tmp/data", "remote-menu-1", "rev-1", "First point\nSecond point");
+    expect(savedMemo).toMatchObject({ ok: true, meeting: { sessionId: "remote-menu-1", notepad: { revision: "rev-2", text: "First point\nSecond point" } } });
+    expect(fetchMock.mock.calls.every(([, options]) => (options?.headers as Record<string, string>)?.["X-Margins-Instance-Id"] === "instance-remote")).toBe(true);
+  });
+
   it("uses a negotiated HTTPS Workspace without starting a local runtime", async () => {
     process.env.MARGINS_BB_REMOTE_URL = "https://margins.example.test/";
     process.env.MARGINS_BB_REMOTE_TOKEN = "scoped-token";

@@ -24,6 +24,10 @@ export const projectTargetSchema = z.object({
   projectId: z.string().min(1), hostId: z.string().min(1), projectRoot: z.string().min(1),
 }).strict();
 export const notepadSchema = z.object({ text: z.string(), revision: z.string().min(1) }).strict();
+export const workspaceMeetingSchema = z.object({
+  sessionId: z.string().min(1), title: z.string().nullable(),
+  startedAt: z.string().min(1), inputFinalized: z.boolean(), notepad: notepadSchema,
+}).strict();
 export const hostCaptureSnapshotSchema = z.object({
   recordingId: z.string().min(1), status: z.enum(["recording", "paused", "saving"]),
   notepad: notepadSchema,
@@ -31,6 +35,10 @@ export const hostCaptureSnapshotSchema = z.object({
 export const hostErrorSchema = z.object({
   code: z.string().min(1), message: z.string().min(1), retryable: z.boolean(),
 }).strict();
+export const workspaceMeetingResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), meeting: workspaceMeetingSchema.nullable(), candidates: z.array(z.string()) }).strict(),
+  z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
+]);
 export const hostResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), snapshot: hostCaptureSnapshotSchema.nullable() }).strict(),
   z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
@@ -60,6 +68,16 @@ const ownedCaptureInputSchema = z.object({ target: projectTargetSchema }).extend
   recordingId: z.string().min(1), ownerId: z.string().min(1),
 }).strict();
 export const marginsHostContract = defineRpcContract({
+  readWorkspaceMeeting: {
+    input: z.object({ target: projectTargetSchema, sessionId: z.string().min(1).optional() }).strict(),
+    output: workspaceMeetingResultSchema,
+  },
+  saveWorkspaceMemo: {
+    input: z.object({ target: projectTargetSchema, sessionId: z.string().min(1),
+      expectedRevision: z.string().min(1), text: z.string().max(100_000),
+    }).strict(),
+    output: workspaceMeetingResultSchema,
+  },
   sessionExists: {
     input: z.object({ target: projectTargetSchema, recordingId: z.string().min(1) }).strict(),
     output: z.discriminatedUnion("ok", [
@@ -131,6 +149,15 @@ const captureClientInputSchema = threadClientInputSchema.extend({
   operationId: z.string().min(1),
 }).strict();
 export const marginsRpcContract = defineRpcContract({
+  readWorkspaceMeeting: {
+    input: z.object({ threadId: z.string().min(1), sessionId: z.string().min(1).optional() }).strict(),
+    output: workspaceMeetingResultSchema,
+  },
+  saveWorkspaceMemo: {
+    input: z.object({ threadId: z.string().min(1), sessionId: z.string().min(1),
+      expectedRevision: z.string().min(1), text: z.string().max(100_000),
+    }).strict(), output: workspaceMeetingResultSchema,
+  },
   captureAuthority: {
     input: z.object({ threadId: z.string().min(1) }).strict(),
     output: z.discriminatedUnion("ok", [
@@ -180,3 +207,4 @@ export type ConnectedNoteResult = z.infer<typeof connectedNoteResultSchema>;
 export type TranscriptionRequestResult = z.infer<typeof transcriptionRequestResultSchema>;
 export type CaptureRecord = z.infer<typeof captureRecordSchema>;
 export type PanelState = z.infer<typeof panelStateSchema>;
+export type WorkspaceMeeting = z.infer<typeof workspaceMeetingSchema>;

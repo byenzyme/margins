@@ -904,6 +904,11 @@ impl WorkspaceService {
             &self.margins_dir,
             requested,
         )?;
+        // Remote producers publish provisional checkpoints without writing the
+        // CLI's process-local `current` file. The Workspace authority owns the
+        // active reservation, including across reader/producer principals.
+        let live = view.live || (!view.terminal
+            && self.authority.active_session_ids()?.contains(&view.session_name));
         Ok(WorkspaceTranscriptV1 {
             session_id: SessionId(view.session_name),
             body: view.body,
@@ -911,7 +916,7 @@ impl WorkspaceService {
             decoded_until_ms: view.decoded_until_ms,
             committed_until_ms: view.committed_until_ms,
             updated_at_unix_ms: view.updated_at_unix_ms,
-            live: view.live,
+            live,
             terminal: view.terminal,
             source_artifact: view.source_path.to_string_lossy().into_owned(),
         })

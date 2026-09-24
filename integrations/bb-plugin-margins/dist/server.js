@@ -18909,6 +18909,13 @@ var projectTargetSchema = external_exports.object({
   projectRoot: external_exports.string().min(1)
 }).strict();
 var notepadSchema = external_exports.object({ text: external_exports.string(), revision: external_exports.string().min(1) }).strict();
+var workspaceMeetingSchema = external_exports.object({
+  sessionId: external_exports.string().min(1),
+  title: external_exports.string().nullable(),
+  startedAt: external_exports.string().min(1),
+  inputFinalized: external_exports.boolean(),
+  notepad: notepadSchema
+}).strict();
 var hostCaptureSnapshotSchema = external_exports.object({
   recordingId: external_exports.string().min(1),
   status: external_exports.enum(["recording", "paused", "saving"]),
@@ -18919,6 +18926,10 @@ var hostErrorSchema = external_exports.object({
   message: external_exports.string().min(1),
   retryable: external_exports.boolean()
 }).strict();
+var workspaceMeetingResultSchema = external_exports.discriminatedUnion("ok", [
+  external_exports.object({ ok: external_exports.literal(true), meeting: workspaceMeetingSchema.nullable(), candidates: external_exports.array(external_exports.string()) }).strict(),
+  external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
+]);
 var hostResultSchema = external_exports.discriminatedUnion("ok", [
   external_exports.object({ ok: external_exports.literal(true), snapshot: hostCaptureSnapshotSchema.nullable() }).strict(),
   external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
@@ -18948,6 +18959,19 @@ var ownedCaptureInputSchema = external_exports.object({ target: projectTargetSch
   ownerId: external_exports.string().min(1)
 }).strict();
 var marginsHostContract = defineRpcContract({
+  readWorkspaceMeeting: {
+    input: external_exports.object({ target: projectTargetSchema, sessionId: external_exports.string().min(1).optional() }).strict(),
+    output: workspaceMeetingResultSchema
+  },
+  saveWorkspaceMemo: {
+    input: external_exports.object({
+      target: projectTargetSchema,
+      sessionId: external_exports.string().min(1),
+      expectedRevision: external_exports.string().min(1),
+      text: external_exports.string().max(1e5)
+    }).strict(),
+    output: workspaceMeetingResultSchema
+  },
   sessionExists: {
     input: external_exports.object({ target: projectTargetSchema, recordingId: external_exports.string().min(1) }).strict(),
     output: external_exports.discriminatedUnion("ok", [
@@ -19029,6 +19053,19 @@ var captureClientInputSchema = threadClientInputSchema.extend({
   operationId: external_exports.string().min(1)
 }).strict();
 var marginsRpcContract = defineRpcContract({
+  readWorkspaceMeeting: {
+    input: external_exports.object({ threadId: external_exports.string().min(1), sessionId: external_exports.string().min(1).optional() }).strict(),
+    output: workspaceMeetingResultSchema
+  },
+  saveWorkspaceMemo: {
+    input: external_exports.object({
+      threadId: external_exports.string().min(1),
+      sessionId: external_exports.string().min(1),
+      expectedRevision: external_exports.string().min(1),
+      text: external_exports.string().max(1e5)
+    }).strict(),
+    output: workspaceMeetingResultSchema
+  },
   captureAuthority: {
     input: external_exports.object({ threadId: external_exports.string().min(1) }).strict(),
     output: external_exports.discriminatedUnion("ok", [
@@ -19301,6 +19338,14 @@ function marginsPlugin(bb) {
     return getPanelState(threadId, client);
   }
   bb.rpc.register(marginsRpcContract, {
+    async readWorkspaceMeeting({ threadId, sessionId }) {
+      const target = await targetForThread(threadId);
+      return callHost(target, "readWorkspaceMeeting", { target, sessionId });
+    },
+    async saveWorkspaceMemo({ threadId, sessionId, expectedRevision, text }) {
+      const target = await targetForThread(threadId);
+      return callHost(target, "saveWorkspaceMemo", { target, sessionId, expectedRevision, text });
+    },
     async captureAuthority({ threadId }) {
       try {
         const target = await targetForThread(threadId);

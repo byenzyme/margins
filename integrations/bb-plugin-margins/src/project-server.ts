@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { lstat, mkdir, readFile } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -181,6 +181,51 @@ export class ProjectServerManager {
 
 export class ProjectMarginsTransport {
   constructor(private readonly manager = new ProjectServerManager()) {}
+
+  async readWorkspaceMeeting(target: ProjectTarget, dataDir: string, sessionId?: string) {
+    try {
+      const handle = await this.manager.ensure(target, dataDir);
+      let selected = sessionId;
+      let candidates = sessionId ? [sessionId] : [];
+      if (!selected) {
+        const active = await this.request<{ sessions: Array<{ session_id: string }> }>(handle, "active-sessions", "GET");
+        candidates = active.sessions.map((session) => session.session_id);
+        selected = candidates.length === 1 ? candidates[0] : undefined;
+      }
+      if (!selected) return { ok: true as const, meeting: null, candidates };
+      const [summary, memo] = await Promise.all([
+        this.request<{ session_id: string; title: string | null; started_at: string; input_finalized: boolean }>(handle, `sessions/${encodeURIComponent(selected)}`, "GET"),
+        this.request<{ revision: string; lines: Array<{ text: string }> }>(handle, `sessions/${encodeURIComponent(selected)}/memo`, "GET"),
+      ]);
+      return { ok: true as const, candidates, meeting: {
+        sessionId: summary.session_id, title: summary.title, startedAt: summary.started_at,
+        inputFinalized: summary.input_finalized,
+        notepad: { revision: memo.revision, text: memo.lines.map((line) => line.text).join("\n") },
+      } };
+    } catch (cause) {
+      return { ok: false as const, error: hostError("workspace_meeting_unavailable", cause instanceof Error ? cause.message : String(cause)) };
+    }
+  }
+
+  async saveWorkspaceMemo(target: ProjectTarget, dataDir: string, sessionId: string, expectedRevision: string, text: string) {
+    try {
+      const handle = await this.manager.ensure(target, dataDir);
+      const summary = await this.request<{ started_at: string; input_finalized: boolean; capture_duration_ms: number | null }>(
+        handle, `sessions/${encodeURIComponent(sessionId)}`, "GET",
+      );
+      const started = Date.parse(summary.started_at);
+      if (!Number.isFinite(started)) throw new Error("Meeting start time is invalid");
+      const observedAtMs = summary.input_finalized && summary.capture_duration_ms !== null
+        ? summary.capture_duration_ms : Math.max(0, Date.now() - started);
+      await this.request(handle, `sessions/${encodeURIComponent(sessionId)}/memo`, "PUT", {
+        request_id: randomUUID(), expected_revision: expectedRevision,
+        observed_at_ms: Math.floor(observedAtMs), paused: false, text,
+      });
+      return this.readWorkspaceMeeting(target, dataDir, sessionId);
+    } catch (cause) {
+      return { ok: false as const, error: hostError("workspace_memo_save_failed", cause instanceof Error ? cause.message : String(cause)) };
+    }
+  }
 
   async authority(target: ProjectTarget, dataDir: string) {
     try {
