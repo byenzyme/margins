@@ -2554,14 +2554,19 @@ fn run_remote_native_capture(
             block_ordinal: line.block_ordinal,
         })
         .collect();
-    let memo_request_id = format!("native-memo-{}", transfer.spool().manifest().transfer_id);
-    transfer
-        .spool_mut()
-        .set_memo_intent(WorkspaceMemoReplaceV1 {
-            request_id: memo_request_id,
-            expected_revision: initial_revision,
-            lines,
-        })?;
+    // The native bridge has no memo editor. BB/Codex may have edited the
+    // Workspace memo during capture, so sending our initial snapshot here
+    // would overwrite it (or block finalization with a revision conflict).
+    if controller.is_none() {
+        let memo_request_id = format!("native-memo-{}", transfer.spool().manifest().transfer_id);
+        transfer
+            .spool_mut()
+            .set_memo_intent(WorkspaceMemoReplaceV1 {
+                request_id: memo_request_id,
+                expected_revision: initial_revision,
+                lines,
+            })?;
+    }
     transfer.seal_session(final_ended_at_ms, SessionFinalizeReasonV1::Completed)?;
     let transfer_id = transfer.spool().manifest().transfer_id.clone();
     let mut spool = transfer.into_spool();
