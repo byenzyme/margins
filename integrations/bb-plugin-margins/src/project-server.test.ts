@@ -23,6 +23,27 @@ afterEach(() => {
 });
 
 describe("ProjectServerManager remote adapter", () => {
+  it("reopens the newest saved Workspace meeting after recording ends", async () => {
+    const manager = { ensure: vi.fn(async () => ({
+      baseUrl: "https://margins.example.test", token: "scoped-token", workspaceId: "practice", instanceId: "instance-remote",
+    })) } as unknown as ProjectServerManager;
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      let result: unknown;
+      if (url.endsWith("/active-sessions")) result = { sessions: [] };
+      else if (url.endsWith("/sessions?limit=1")) result = { sessions: [{ session_id: "remote-newest" }], next_cursor: null };
+      else if (url.endsWith("/sessions/remote-newest")) result = {
+        session_id: "remote-newest", title: "Saved menu meeting", started_at: "2026-09-24T03:00:00Z", input_finalized: true,
+      };
+      else if (url.endsWith("/sessions/remote-newest/memo")) result = { revision: "rev-new", lines: [{ text: "BB note" }] };
+      else throw new Error(`unexpected URL ${url}`);
+      return new Response(JSON.stringify({ ok: true, result }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const meeting = await new ProjectMarginsTransport(manager).readWorkspaceMeeting({ projectId: "project", projectRoot: "/tmp/project", hostId: "host" }, "/tmp/data");
+    expect(meeting).toMatchObject({ ok: true, meeting: { sessionId: "remote-newest", inputFinalized: true, notepad: { text: "BB note", revision: "rev-new" } } });
+  });
+
   it("joins one active menu meeting and saves its revisioned memo in that Workspace", async () => {
     const manager = { ensure: vi.fn(async () => ({
       baseUrl: "https://margins.example.test", token: "scoped-token", workspaceId: "practice", instanceId: "instance-remote",

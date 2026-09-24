@@ -191,6 +191,12 @@ export class ProjectMarginsTransport {
         const active = await this.request<{ sessions: Array<{ session_id: string }> }>(handle, "active-sessions", "GET");
         candidates = active.sessions.map((session) => session.session_id);
         selected = candidates.length === 1 ? candidates[0] : undefined;
+        if (candidates.length === 0) {
+          // The service orders ordinary sessions newest first. Keep the saved
+          // meeting and its note available after a browser refresh or Stop.
+          const recent = await this.request<{ sessions: Array<{ session_id: string }> }>(handle, "sessions?limit=1", "GET");
+          selected = recent.sessions[0]?.session_id;
+        }
       }
       if (!selected) return { ok: true as const, meeting: null, candidates };
       const [summary, memo] = await Promise.all([

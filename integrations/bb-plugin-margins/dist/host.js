@@ -33844,6 +33844,10 @@ var ProjectMarginsTransport = class {
         const active = await this.request(handle, "active-sessions", "GET");
         candidates = active.sessions.map((session) => session.session_id);
         selected = candidates.length === 1 ? candidates[0] : void 0;
+        if (candidates.length === 0) {
+          const recent = await this.request(handle, "sessions?limit=1", "GET");
+          selected = recent.sessions[0]?.session_id;
+        }
       }
       if (!selected) return { ok: true, meeting: null, candidates };
       const [summary, memo2] = await Promise.all([
