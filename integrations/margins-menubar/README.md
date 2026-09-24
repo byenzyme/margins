@@ -1,46 +1,46 @@
-# Margins menu bar test client
+# Margins menu bar recorder
 
-This scoped macOS menu bar app controls existing Margins recorders. **On this
-Mac** uses the private `margins-live` loopback API, including its CoreML live
-transcription. **BB project** launches a configured `native-bridge` helper and
-sends separate microphone and system lanes to the selected Linux Workspace,
-where the project service owns ONNX transcription and storage. The menu app
-does not capture audio or hold an audio permission itself.
+The menu offers one first-run destination choice: **On this Mac** or
+**Connected Workspace**. It remembers that choice in its own preferences.
+The everyday surface has one primary action, **Record meeting** or **Finish
+meeting**; Pause, Resume, Change destination, and Quit are in **More**.
 
-Build into this directory's ignored `.build/` and launch:
+**On this Mac** talks to the `margins-live` loopback API. Its CoreML worker
+transcribes locally and saves to the selected Mac profile's Margins store. The
+menu starts a configured `margins-live` app if that local service is not yet
+running. This path does not send audio to Linux. The local model must already be
+installed; a clean-install model downloader is still needed before shipping.
 
-```sh
-./build-and-run.sh
-```
+**Connected Workspace** launches a `native-bridge` helper and sends microphone
+and system audio to the selected Linux Workspace. The menu checks that pairing
+returns the requested Workspace. The Linux service stores the recording and
+runs its configured ASR. A CoreML-enabled bridge can currently publish
+provisional words during recording; that is a development behavior, not an
+additional Mac transcription choice shown in this menu.
 
-For automation on a Mac where the accessibility driver cannot target menu bar
-extras, set `MARGINS_MENU_TEST_WINDOW=1`. This builds a temporary ordinary window
-with the same controls and model as the menu extra. The default build has only
-the menu bar surface.
+The menu app controls recording but does not acquire audio permission itself.
+The signed capture process needs its own Microphone and System Audio grants.
+The menu does not run a second `margins transcribe` pass after Stop.
 
-For a scoped remote test, set `MARGINS_MENU_BRIDGE_APP` to the exact test helper
-`.app`, `MARGINS_MENU_REMOTE` to its SSH alias or HTTPS authority, and
-`MARGINS_MENU_WORKSPACE` to the provisioned Workspace. The optional
-`MARGINS_MENU_SSH_REMOTE_BINARY`, `MARGINS_MENU_SSH_REMOTE_DATA_DIR`, and
-`MARGINS_MENU_HOME` variables are forwarded only to the launched helper. Set
-`MARGINS_MENU_TRANSFER_DIR` to an absolute scoped directory to keep recoverable
-remote audio transfers out of the normal user home. The
-helper needs its own microphone and system-audio permissions. The menu app
-uses the default microphone unless `MARGINS_MENU_MIC_DEVICE` names an available
-input device exactly; this does not change the macOS system default. The menu app
-uses a private temporary pairing file, removes it after pairing, and keeps the
-bearer in memory. Its scoped local WAV copies are removed when Disconnect is
-clicked, after the recording is saved. Use `MARGINS_MENU_LOCAL_DISCOVERY` for a
-nondefault `margins-live` profile.
+## Scoped Mac build
 
-For a same-capture CoreML check, set absolute `MARGINS_MENU_TRANSCRIBE_BIN`,
-`MARGINS_MENU_TRANSCRIBE_VAULT`, and `MARGINS_MENU_TRANSCRIBE_HOME` paths. After
-the project capture reaches **saved**, click **Transcribe Mac copy**. This runs
-`margins transcribe` on each retained stereo WAV in the scoped vault,
-with a separate profile and no note generator. Keep the menu connected until
-the Mac transcript is complete; Disconnect removes the temporary WAV copies.
+Run `./build-and-run.sh` to build and launch the menu-only app. Set
+`MARGINS_MENU_TEST_WINDOW=1` to compile the same controls as a normal window for
+accessibility automation. `--build-only` compiles and signs without launching.
 
-The BB project service starts transcription after remote finalization. The Mac
-CoreML and Linux ONNX jobs can therefore overlap; **Transcribe Mac copy** does
-not enforce which job starts first. The retained stereo WAV and remote Opus
-lanes come from the same native capture, though their encodings differ.
+For a scoped test, set `MARGINS_MENU_SETTINGS_DOMAIN` to a unique preferences
+suite. `MARGINS_MENU_BRIDGE_APP` and `MARGINS_MENU_LIVE_APP` select signed test
+bundles; a packaged app can instead include them at
+`Contents/Helpers/Margins Capture.app` and `Contents/Helpers/Margins Live.app`.
+`MARGINS_MENU_REMOTE` and `MARGINS_MENU_WORKSPACE` prefill the connection fields.
+The optional SSH binary/data-dir and home overrides are forwarded only to the
+bridge. Set `MARGINS_MENU_TRANSFER_DIR` for an isolated recoverable transfer
+spool, and `MARGINS_MENU_MIC_DEVICE` to select an exact input device without
+changing the macOS default. Set `MARGINS_MENU_LOCAL_DISCOVERY`,
+`MARGINS_MENU_LOCAL_HOME`, `MARGINS_MENU_LOCAL_PROFILE`, and
+`MARGINS_MENU_LOCAL_WORK_DIR` for a separate local runtime profile.
+
+The helper uses a private one-time pairing file. The menu removes it after
+pairing and keeps the bearer in memory. Disconnecting after a saved recording
+removes scoped temporary audio copies; the remote transfer spool persists until
+the service acknowledges it.
