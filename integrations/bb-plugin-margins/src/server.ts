@@ -38,8 +38,8 @@ function stateCopy(state: PanelState["state"], sourceLabel: string | null, error
       primaryAction: "none" as const, primaryLabel: "Recording unavailable",
     };
     case "ready": return {
-      title: "Ready to record", detail: `${sourceLabel}. Audio and notes will be saved to this bb project.`,
-      primaryAction: "start" as const, primaryLabel: "Start recording",
+      title: "Record with your browser", detail: "Browser microphone only. To capture computer audio here, choose Connected Workspace in Margins Menu on your Mac.",
+      primaryAction: "start" as const, primaryLabel: "Use browser microphone",
     };
     case "getting_ready": return {
       title: "Getting recording ready", detail: "Nothing is being recorded until your microphone and the project are both ready.",
@@ -129,7 +129,7 @@ export default function marginsPlugin(bb: BbPluginApi) {
     const owns = Boolean(options.capture && options.capture.clientId === client.clientId);
     return {
       schema: PANEL_STATE_SCHEMA, state, ...copy,
-      sourceLabel, storageLabel: projectId ? "Saved to this bb project" : null,
+      sourceLabel, storageLabel: projectId ? (state === "saved" ? "Saved to this bb project" : "Saves to this bb project") : null,
       canStop: owns && ["recording", "paused", "recovering"].includes(state),
       canEditNotepad: owns && ["recording", "paused", "recovering"].includes(state),
       ownsRecording: owns, recordingId: options.capture?.recordingId || null,

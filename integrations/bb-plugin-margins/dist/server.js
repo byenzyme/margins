@@ -19129,10 +19129,10 @@ function stateCopy(state, sourceLabel, error61) {
       };
     case "ready":
       return {
-        title: "Ready to record",
-        detail: `${sourceLabel}. Audio and notes will be saved to this bb project.`,
+        title: "Record with your browser",
+        detail: "Browser microphone only. To capture computer audio here, choose Connected Workspace in Margins Menu on your Mac.",
         primaryAction: "start",
-        primaryLabel: "Start recording"
+        primaryLabel: "Use browser microphone"
       };
     case "getting_ready":
       return {
@@ -19246,7 +19246,7 @@ function marginsPlugin(bb) {
       state,
       ...copy,
       sourceLabel,
-      storageLabel: projectId ? "Saved to this bb project" : null,
+      storageLabel: projectId ? state === "saved" ? "Saved to this bb project" : "Saves to this bb project" : null,
       canStop: owns && ["recording", "paused", "recovering"].includes(state),
       canEditNotepad: owns && ["recording", "paused", "recovering"].includes(state),
       ownsRecording: owns,

@@ -150,12 +150,11 @@ function NativeCapturePanel({ threadId, title }: { threadId: string; title?: str
     try { await run(); } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setBusy(false); }
   }
-  return <div className="margins-native">
-    <div className="margins-native-heading"><strong>Mac microphone + computer audio</strong><span>{pairedHere ? status?.state?.replaceAll("_", " ") || "Connecting" : "Connect Mac recorder"}</span></div>
+  const controls = <>
     {!pairedHere && <>
       {pairedThread && <p>A Mac recording is paired to another bb thread. Open that thread to control it.</p>}
       {!pairedThread && <>
-        <p>Run <code>margins native-bridge --remote &lt;Linux Margins URL or SSH alias&gt; --workspace &lt;Workspace ID&gt; --origin {window.location.origin} --port {port || "18765"}</code> on this Mac. Enter its pairing code here.</p>
+        <p>For a manually started recorder, run <code>margins native-bridge --remote &lt;Workspace URL or SSH alias&gt; --workspace &lt;Workspace ID&gt; --origin {window.location.origin} --port {port || "18765"}</code> on this Mac, then enter its pairing code.</p>
         <div className="margins-native-pair"><input aria-label="Mac recorder port" type="number" min="1" max="65535" value={port} onChange={(event) => setPort(event.target.value)} /><input aria-label="Mac recorder pairing code" autoComplete="off" value={code} onChange={(event) => setCode(event.target.value)} placeholder="Pairing code" /><button disabled={busy || !code.trim()} onClick={() => void act(async () => { await nativeBridgeOwner.pair(threadId, code.trim(), await authority(), Number(port)); setCode(""); })}>Connect</button></div>
       </>}
     </>}
@@ -163,16 +162,19 @@ function NativeCapturePanel({ threadId, title }: { threadId: string; title?: str
       {status?.state === "ready" && <button disabled={busy} onClick={() => void act(async () => { if (browserCaptureOwner.active) throw new Error("Stop the microphone-only recording before starting Mac audio."); await nativeBridgeOwner.verify(await authority()); await nativeBridgeOwner.control("start", title); })}>Start Mac recording</button>}
       {status?.state === "recording" && <div className="margins-native-actions"><button disabled={busy} onClick={() => void act(() => nativeBridgeOwner.control("pause"))}>Pause</button><button disabled={busy} onClick={() => void act(() => nativeBridgeOwner.control("stop"))}>Stop and save</button></div>}
       {status?.state === "paused" && <div className="margins-native-actions"><button disabled={busy} onClick={() => void act(() => nativeBridgeOwner.control("resume"))}>Resume</button><button disabled={busy} onClick={() => void act(() => nativeBridgeOwner.control("stop"))}>Stop and save</button></div>}
-      {status?.state === "getting_ready" && <p>Getting Mac audio and the Linux Workspace ready…</p>}
-      {status?.state === "saving" && <p>Saving both audio lanes to Linux…</p>}
+      {status?.state === "getting_ready" && <p>Getting microphone and computer audio ready…</p>}
+      {status?.state === "saving" && <p>Saving the meeting…</p>}
       {status?.state === "saved" && <p>Mac recording saved. The connected note action will appear in this thread once BB confirms the session.</p>}
       {status?.state === "needs_attention" && <p>{status.error || "Mac recording needs attention. The local transfer spool may still need delivery."}</p>}
       {connectionError && <p className="margins-error"><AlertCircle size={13} />Cannot reach the Mac recorder: {connectionError}</p>}
-      {status && ["recording", "paused", "saving", "saved"].includes(status.state) && <p>Microphone samples: {status.microphoneSamples.toLocaleString()} · Computer audio samples: {status.systemSamples.toLocaleString()} · Computer audio frames: {status.systemFrames.toLocaleString()}</p>}
+      {status && ["recording", "paused", "saving", "saved"].includes(status.state) && <details><summary>Recording details</summary><p>Microphone samples: {status.microphoneSamples.toLocaleString()} · Computer audio samples: {status.systemSamples.toLocaleString()} · Computer audio frames: {status.systemFrames.toLocaleString()}</p></details>}
       {(!status || ["ready", "saved", "needs_attention"].includes(status.state)) && <button className="margins-quiet" disabled={busy} onClick={() => void act(async () => nativeBridgeOwner.forget())}>Disconnect Mac recorder</button>}
     </>}
     {error && <p className="margins-error"><AlertCircle size={13} />{error}</p>}
-  </div>;
+  </>;
+  return pairedHere || pairedThread
+    ? <div className="margins-native"><div className="margins-native-heading"><strong>Mac microphone + computer audio</strong><span>{status?.state?.replaceAll("_", " ") || "Connected"}</span></div>{controls}</div>
+    : <details className="margins-native margins-native-manual"><summary>Connect a Mac recorder manually</summary>{controls}</details>;
 }
 
 function WorkspaceMeetingNotes({ threadId, onMeetingChange }: { threadId: string; onMeetingChange: (active: boolean) => void }) {
@@ -195,7 +197,7 @@ function WorkspaceMeetingNotes({ threadId, onMeetingChange }: { threadId: string
       if (result.candidates.length > 1) setMessage("Several Workspace meetings are active. Finish one before joining from this panel.");
       return;
     }
-    onMeetingChange(true);
+    onMeetingChange(!result.meeting.inputFinalized);
     if (!dirty.current || result.meeting.sessionId !== sessionId) {
       setDraft(result.meeting.notepad.text);
       latestDraft.current = result.meeting.notepad.text;
@@ -256,7 +258,8 @@ function WorkspaceMeetingNotes({ threadId, onMeetingChange }: { threadId: string
 
   if (!meeting) return message ? <p className="margins-detail">{message}</p> : null;
   return <div className="margins-workspace-meeting">
-    <p className="margins-detail">{meeting.inputFinalized ? "Saved meeting" : "Recording in Margins Menu"} · {meeting.title || meeting.sessionId}</p>
+    <p className="margins-detail">{meeting.inputFinalized ? "Latest saved meeting" : "Recording in Margins Menu"} · {meeting.title || meeting.sessionId}</p>
+    {meeting.inputFinalized && <p className="margins-detail"><time dateTime={meeting.startedAt}>{new Date(meeting.startedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}</time></p>}
     <textarea className="margins-notepad" aria-label="Workspace meeting notepad"
       placeholder="Take notes while Margins records…" value={draft}
       onChange={(event) => { dirty.current = true; latestDraft.current = event.target.value; setDraft(event.target.value); setMessage(null); }}
@@ -395,7 +398,7 @@ function MarginsPanel({ threadId, params }: { threadId: string; params: JsonValu
   const disabled = busy !== null || disconnectedLocal;
 
   return <section className="margins-panel" data-state={visibleState}>
-    {client.platform === "macos" && <NativeCapturePanel threadId={threadId} title={paramsTitle(params)} />}
+    {client.platform === "macos" && (!externalMeeting || nativeBridgeOwner.threadId) && <NativeCapturePanel threadId={threadId} title={paramsTitle(params)} />}
     {!state.ownsRecording && <WorkspaceMeetingNotes threadId={threadId} onMeetingChange={setExternalMeeting} />}
     {!externalMeeting && <>
     <header className="margins-header">
@@ -419,9 +422,8 @@ function MarginsPanel({ threadId, params }: { threadId: string; params: JsonValu
       value={draft} onChange={(event) => edit(event.target.value)} onBlur={() => void saveNotepad()}
       disabled={busy === "pause" || busy === "stop"}
     />}
-    {state.lastSessionId && <div className="margins-saved-actions">
+    {state.state === "saved" && state.lastSessionId && <div className="margins-saved-actions">
       <button className="margins-connected-note" onClick={() => void connectedNote()} disabled={busy !== null}>Make connected note</button>
-      <button className="margins-quiet" onClick={() => void action("dismiss", refresh)}>Not now</button>
     </div>}
     {state.state === "needs_setup" && <p className="margins-seam">Recording with computer audio isn’t available in this browser yet.</p>}
     </>}

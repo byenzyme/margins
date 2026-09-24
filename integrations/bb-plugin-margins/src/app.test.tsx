@@ -71,6 +71,42 @@ describe("Margins recording panel", () => {
     slot.lifecycle.unmount();
   });
 
+  it("keeps manual Mac pairing out of the ordinary browser recording flow", async () => {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Macintosh");
+    const ready = panel({ state: "ready", title: "Record with your browser", primaryAction: "start",
+      primaryLabel: "Use browser microphone", canStop: false, canEditNotepad: false,
+      ownsRecording: false, recordingId: null, notepad: null });
+    const slot = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-1", params: null }, {
+      rpc: { getPanelState: () => ready, readWorkspaceMeeting: noWorkspaceMeeting },
+    });
+    const screen = within(slot.container);
+    await screen.findByRole("button", { name: "Use browser microphone" });
+    const manual = slot.container.querySelector("details.margins-native-manual") as HTMLDetailsElement | null;
+    expect(manual).not.toBeNull();
+    expect(manual?.open).toBe(false);
+    expect(manual?.textContent).toContain("Connect a Mac recorder manually");
+    slot.lifecycle.unmount();
+  });
+
+  it("keeps the latest saved note visible while a new browser recording remains available", async () => {
+    const ready = panel({ state: "ready", title: "Record with your browser", primaryAction: "start",
+      primaryLabel: "Use browser microphone", canStop: false, canEditNotepad: false,
+      ownsRecording: false, recordingId: null, notepad: null, lastSessionId: "older-session" });
+    const meeting = { sessionId: "newest-session", title: "Planning", startedAt: "2026-09-24T03:00:00Z",
+      inputFinalized: true, notepad: { text: "Saved BB note", revision: "rev-new" } };
+    const slot = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-1", params: null }, { rpc: {
+      getPanelState: () => ready,
+      readWorkspaceMeeting: () => ({ ok: true, candidates: [], meeting }),
+    } });
+    const screen = within(slot.container);
+    expect((await screen.findByRole("textbox", { name: "Workspace meeting notepad" }) as HTMLTextAreaElement).value).toBe("Saved BB note");
+    expect(screen.getByText(/Latest saved meeting/)).toBeDefined();
+    expect(slot.container.querySelector("time")?.getAttribute("datetime")).toBe(meeting.startedAt);
+    expect(screen.getByRole("button", { name: "Use browser microphone" })).toBeDefined();
+    expect(screen.getAllByRole("button", { name: "Make connected note" })).toHaveLength(1);
+    slot.lifecycle.unmount();
+  });
+
   it("puts a natural connected-note request in the composer without sending", async () => {
     const saved = panel({ state: "saved", title: "Meeting saved", primaryAction: "none", primaryLabel: "Meeting saved", canStop: false, canEditNotepad: false, ownsRecording: false, recordingId: null, notepad: null, lastSessionId: "rec-pinned" });
     const slot = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-1", params: null }, { rpc: {
@@ -128,6 +164,7 @@ describe("Margins recording panel", () => {
   });
 
   it("joins a menu-recorded Workspace meeting and saves its memo without starting browser capture", async () => {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Macintosh");
     const ready = panel({ state: "ready", title: "Ready to record", primaryAction: "start", primaryLabel: "Start recording",
       canStop: false, canEditNotepad: false, ownsRecording: false, recordingId: null, notepad: null });
     const meeting = { sessionId: "remote-menu-1", title: "Planning", startedAt: "2026-09-24T03:00:00Z",
@@ -141,6 +178,7 @@ describe("Margins recording panel", () => {
     } });
     const screen = within(slot.container);
     const note = await screen.findByRole("textbox", { name: "Workspace meeting notepad" });
+    await waitFor(() => expect(slot.container.querySelector("details.margins-native-manual")).toBeNull());
     expect((note as HTMLTextAreaElement).value).toBe("First point");
     fireEvent.change(note, { target: { value: "First point\nSecond point" } });
     fireEvent.click(screen.getByRole("button", { name: "Save note" }));

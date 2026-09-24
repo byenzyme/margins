@@ -27,6 +27,10 @@
 .margins-overlay .margins-overlay-open { justify-content:flex-start; gap:6px; padding:0 8px; font-size:12px; font-weight:600; }
 .margins-overlay-error { max-width:160px; color:var(--destructive); font-size:11px; line-height:1.2; }
 .margins-native { display:flex; flex-direction:column; gap:8px; padding:10px; border:1px solid var(--border); border-radius:10px; background:color-mix(in srgb,var(--muted) 35%,transparent); font-size:12px; }
+.margins-native-manual { display:block; padding:0; border:0; background:transparent; }
+.margins-native-manual[open] { display:flex; padding:10px; border:1px solid var(--border); }
+.margins-native summary { color:var(--muted-foreground); cursor:pointer; }
+.margins-native summary:hover { color:var(--foreground); }
 .margins-native-heading { display:flex; flex-wrap:wrap; justify-content:space-between; gap:4px 10px; }
 .margins-native-heading span { color:var(--muted-foreground); text-transform:capitalize; }
 .margins-native p { margin:0; color:var(--muted-foreground); line-height:1.4; }
