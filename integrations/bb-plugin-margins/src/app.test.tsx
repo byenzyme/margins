@@ -151,6 +151,32 @@ describe("Margins recording panel", () => {
     slot.lifecycle.unmount();
   });
 
+  it("drafts a connected note for the same saved menu session", async () => {
+    const ready = panel({ state: "ready", title: "Ready to record", primaryAction: "start", primaryLabel: "Start recording",
+      canStop: false, canEditNotepad: false, ownsRecording: false, recordingId: null, notepad: null });
+    const meeting = { sessionId: "remote-menu-2", title: "Planning", startedAt: "2026-09-24T03:00:00Z",
+      inputFinalized: true, notepad: { text: "Follow-up", revision: "rev-2" } };
+    const slot = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-1", params: null }, { rpc: {
+      getPanelState: () => ready,
+      readWorkspaceMeeting: () => ({ ok: true, candidates: [meeting.sessionId], meeting }),
+      captureAuthority: () => ({ ok: true, instanceId: "instance", workspaceId: "workspace" }),
+      pinNativeSession: () => ({ ok: true }),
+      connectedNoteContext: () => ({ ok: true, context: {
+        schema: "margins.bb.connected-note-context.v1", instanceId: "instance", workspaceId: "workspace",
+        sessionId: meeting.sessionId, title: meeting.title,
+        transcript: { available: true, terminal: true, live: false, updatedAtUnixMs: 2 },
+        memo: { revision: "rev-2", lineCount: 1 }, artifacts: [], noteAssociation: null,
+        instructions: "Use this exact meeting",
+      } }),
+    } });
+    const screen = within(slot.container);
+    fireEvent.click(await screen.findByRole("button", { name: "Make connected note" }));
+    await waitFor(() => expect(slot.inspection.composer.text).toContain('"sessionId":"remote-menu-2"'));
+    expect(slot.inspection.rpcCalls.some((call) => call.method === "pinNativeSession" &&
+      (call.input as { sessionId?: string }).sessionId === "remote-menu-2")).toBe(true);
+    slot.lifecycle.unmount();
+  });
+
   it("does not put Pause behind a stalled notepad save", async () => {
     const pause = vi.spyOn(browserCaptureOwner, "pause").mockResolvedValue(panel({ state: "paused" }));
     const slot = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-pause", params: null }, {

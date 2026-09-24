@@ -177,6 +177,7 @@ function NativeCapturePanel({ threadId, title }: { threadId: string; title?: str
 
 function WorkspaceMeetingNotes({ threadId, onMeetingChange }: { threadId: string; onMeetingChange: (active: boolean) => void }) {
   const rpc = useRpc<typeof marginsRpcContract>();
+  const composer = useComposer();
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [meeting, setMeeting] = useState<WorkspaceMeeting | null>(null);
   const [draft, setDraft] = useState("");
@@ -228,6 +229,31 @@ function WorkspaceMeetingNotes({ threadId, onMeetingChange }: { threadId: string
     finally { setSaving(false); }
   }
 
+  async function makeConnectedNote() {
+    if (!meeting?.inputFinalized) return;
+    setMessage(null);
+    try {
+      const authority = await rpc.call("captureAuthority", { threadId });
+      if (!authority.ok) throw new Error(authority.error.message);
+      const pin = await rpc.call("pinNativeSession", {
+        threadId, sessionId: meeting.sessionId,
+        instanceId: authority.instanceId, workspaceId: authority.workspaceId,
+      });
+      if (!pin.ok) throw new Error(pin.error.message);
+      const result = await rpc.call("connectedNoteContext", { threadId, sessionId: meeting.sessionId });
+      if (!result.ok) throw new Error(result.error.message);
+      if (!result.context.transcript.available) {
+        const requested = await rpc.call("transcribePinnedSession", { threadId, sessionId: meeting.sessionId });
+        if (!requested.ok) throw new Error(requested.error.message);
+        setMessage("Transcription is finishing. Make the connected note when it is ready.");
+        return;
+      }
+      const request = `Create a connected note for this exact Margins meeting. Resolve transcript, memo, artifacts, and declared Sources before writing. Read and write note files only through the project's native filesystem Source; never proxy note bytes through Margins.\n\n${JSON.stringify(result.context)}`;
+      composer.updateText((current) => current.trim() ? `${current.trimEnd()}\n\n${request}` : request);
+      composer.focus();
+    } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
+  }
+
   if (!meeting) return message ? <p className="margins-detail">{message}</p> : null;
   return <div className="margins-workspace-meeting">
     <p className="margins-detail">{meeting.inputFinalized ? "Saved meeting" : "Recording in Margins Menu"} · {meeting.title || meeting.sessionId}</p>
@@ -236,6 +262,7 @@ function WorkspaceMeetingNotes({ threadId, onMeetingChange }: { threadId: string
       onChange={(event) => { dirty.current = true; latestDraft.current = event.target.value; setDraft(event.target.value); setMessage(null); }}
       onBlur={() => void save()} />
     <button className="margins-quiet" onClick={() => void save()} disabled={!dirty.current || saving}>Save note</button>
+    {meeting.inputFinalized && <button className="margins-connected-note" onClick={() => void makeConnectedNote()}>Make connected note</button>}
     {message && <p className="margins-detail">{message}</p>}
   </div>;
 }

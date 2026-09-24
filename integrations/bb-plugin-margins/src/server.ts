@@ -221,7 +221,11 @@ export default function marginsPlugin(bb: BbPluginApi) {
   bb.rpc.register(marginsRpcContract, {
     async readWorkspaceMeeting({ threadId, sessionId }) {
       const target = await targetForThread(threadId);
-      return callHost(target, "readWorkspaceMeeting", { target, sessionId });
+      const result = await callHost(target, "readWorkspaceMeeting", { target, sessionId });
+      if (!sessionId && result.ok && result.meeting) {
+        await bb.storage.kv.set(lastSessionKey(target.projectId), result.meeting.sessionId);
+      }
+      return result;
     },
     async saveWorkspaceMemo({ threadId, sessionId, expectedRevision, text }) {
       const target = await targetForThread(threadId);
