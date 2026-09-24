@@ -1,15 +1,20 @@
 # Margins for bb
 
-Margins adds a small recording panel and an editable meeting notepad to bb.
-The current bb window supplies the audio; the recording and notes are saved in
-the project’s primary folder under its existing `.margins` store.
+Margins adds a recording panel and an editable meeting notepad to bb. The
+browser can supply microphone audio, or Margins Menu on a Mac can record both
+microphone and computer audio. Meetings connected to this bb Workspace are
+saved in the project’s primary folder under its existing `.margins` store.
+Meetings saved **On this Mac** use a separate local store and do not appear in
+this bb project automatically.
 
 ## What works in this version
 
 - Browser, Mac PWA, and mobile microphone recording, labelled **Microphone only**.
 - Paired Mac-local `margins native-bridge` recording with separate microphone and
   computer-audio lanes delivered to the configured Linux Margins Workspace.
-- One Start action: permission is requested before a project meeting exists.
+- **Use browser microphone** starts the browser-only fallback. For both audio
+  lanes, choose **Connected Workspace** in Margins Menu and record there; bb
+  joins its active meeting without starting a second capture.
 - Small pause/stop controls and one full, editable notepad.
 - Recording ownership survives panel close and thread navigation because a bb
   content script owns the browser stream. An app overlay provides persistent
@@ -29,6 +34,9 @@ the project’s primary folder under its existing `.margins` store.
 The panel does not show a live transcript, host picker, elapsed-time dashboard,
 meeting library, or processing controls. Plugin storage holds only routing and
 heartbeat facts. It never holds audio, transcript, or notepad bodies.
+The normal panel keeps the native port and pairing code inside **Connect a Mac
+recorder manually**. Saved meetings show their date and one connected-note
+action tied to that meeting.
 
 ## Installation shape
 
@@ -70,8 +78,9 @@ sharing can offer an audio track, but that depends on the user's selected
 surface and browser support. Browser permission cannot grant audio access to a
 separate native executable.
 
-For separate microphone and full computer-audio lanes, run an audio-capture-enabled
-Margins build **on the Mac running the browser**:
+Margins Menu handles pairing when **Connected Workspace** is selected. For a
+manual or older recorder, expand **Connect a Mac recorder manually** and run
+an audio-capture-enabled Margins build **on the Mac running the browser**:
 
 ```sh
 margins native-bridge --remote ssh://<configured-Linux-alias> \
@@ -90,11 +99,12 @@ lets browser requests change its remote destination. The token stays in the
 browser tab's session storage. Stopping retains the native transfer spool until
 the remote server acknowledges it.
 
-The native bridge has passed a scoped Mac device test with both audio lanes,
-pause, resume, and a finalized Linux session. Pairing and controls through an
-authenticated Mac BB browser remain to be verified. A menu-owned meeting's
-memo is editable in bb through the Workspace service; the native bridge
-itself carries audio and control only. The plugin's release-pinned installation also requires a published
+The scoped Mac menu and authenticated Helium bb panel have passed an end-to-end
+test: bb joined the active two-lane recording, saved its memo, and retained that
+memo through Finish and Linux transcription. This was a development bundle,
+not an installed-app first-run test. A menu-owned meeting's memo is editable in
+bb through the Workspace service; the native bridge itself carries audio and
+control only. The plugin's release-pinned installation also requires a published
 release archive containing both `margins` and `margins-server`. The currently
 published CLI does not contain the new `native-bridge` command; use the built
 `margins-private` executable for development until a matching release ships.
