@@ -2541,7 +2541,7 @@ fn run_remote_native_capture(
         .join()
         .map_err(|_| anyhow::anyhow!("remote delivery worker panicked"))?;
     app.save().context("remote memo draft could not be saved")?;
-    let lines = app
+    let lines: Vec<WorkspaceMemoLineV1> = app
         .memo
         .lines()
         .iter()
