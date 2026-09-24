@@ -2217,6 +2217,7 @@ fn run_remote_native_capture(
 
     let initial_memo = connection.client.memo(&session_id)?;
     let initial_revision = initial_memo.revision.clone();
+    let initial_lines = initial_memo.lines.clone();
     let started_at = Local::now()
         - chrono::Duration::milliseconds(initial_offset_ms.min(i64::MAX as u64) as i64);
     let draft_path = transfer.spool().root().join("memo-draft.md");
@@ -2557,7 +2558,7 @@ fn run_remote_native_capture(
     // The native bridge has no memo editor. BB/Codex may have edited the
     // Workspace memo during capture, so sending our initial snapshot here
     // would overwrite it (or block finalization with a revision conflict).
-    if controller.is_none() {
+    if controller.is_none() && remote_memo_was_edited(&initial_lines, &lines) {
         let memo_request_id = format!("native-memo-{}", transfer.spool().manifest().transfer_id);
         transfer
             .spool_mut()
@@ -2579,6 +2580,25 @@ fn run_remote_native_capture(
             "recording stopped; upload pending in transfer {transfer_id}. Retry with `margins transfers retry {transfer_id}`: {error}"
         ),
     }
+}
+
+#[cfg(feature = "audio-capture")]
+fn remote_memo_was_edited(
+    initial: &[margins_meeting_protocol::WorkspaceMemoLineV1],
+    final_lines: &[margins_meeting_protocol::WorkspaceMemoLineV1],
+) -> bool {
+    // App::from_memo appends one empty TUI draft even if nobody types. A
+    // capture-only session must not turn that draft into a remote replacement.
+    let actual = if final_lines.len() == initial.len() + 1
+        && final_lines
+            .last()
+            .is_some_and(|line| line.text.trim().is_empty())
+    {
+        &final_lines[..initial.len()]
+    } else {
+        final_lines
+    };
+    actual != initial
 }
 
 #[cfg(feature = "audio-capture")]
@@ -3678,6 +3698,32 @@ mod tests {
     use std::sync::Mutex;
 
     static PROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(feature = "audio-capture")]
+    #[test]
+    fn untouched_remote_memo_does_not_replace_concurrent_workspace_notes() {
+        use margins_meeting_protocol::WorkspaceMemoLineV1;
+
+        let line = |text: &str| WorkspaceMemoLineV1 {
+            text: text.into(),
+            created_secs: 0.0,
+            edited_secs: None,
+            draft_started_secs: None,
+            audio_pending_at_mark: false,
+            block_ordinal: None,
+        };
+        let initial = vec![line("Existing note")];
+        assert!(!remote_memo_was_edited(&initial, &initial));
+        assert!(!remote_memo_was_edited(
+            &initial,
+            &[line("Existing note"), line("")]
+        ));
+        assert!(!remote_memo_was_edited(&[], &[line("")]));
+        assert!(remote_memo_was_edited(
+            &initial,
+            &[line("Edited note"), line("")]
+        ));
+    }
 
     #[cfg(feature = "audio-capture")]
     #[test]
