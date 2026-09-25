@@ -22,6 +22,10 @@ export function createMarginsHostEntry(transport: Transport) {
     contract: marginsHostContract,
     experimental_signals: hostSignals,
     handlers: {
+      listWorkspaceMeetings(input, context) {
+        retain(context);
+        return transport.listWorkspaceMeetings(input.target, context.experimental_paths.dataDir);
+      },
       readWorkspaceMeeting(input, context) {
         retain(context);
         return transport.readWorkspaceMeeting(input.target, context.experimental_paths.dataDir, input.sessionId);

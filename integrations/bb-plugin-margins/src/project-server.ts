@@ -201,6 +201,25 @@ export class ProjectServerManager {
 export class ProjectMarginsTransport {
   constructor(private readonly manager = new ProjectServerManager()) {}
 
+  async listWorkspaceMeetings(target: ProjectTarget, dataDir: string) {
+    try {
+      const handle = await this.manager.ensure(target, dataDir);
+      const listed = await this.request<{ sessions: Array<{ session_id: string }> }>(handle, "sessions?limit=50", "GET");
+      const meetings = await Promise.all(listed.sessions.map(async ({ session_id }) => {
+        const id = encodeURIComponent(session_id);
+        const [summary, note] = await Promise.all([
+          this.request<{ session_id: string; title: string | null; started_at: string; input_finalized: boolean }>(handle, `sessions/${id}`, "GET"),
+          this.request<{ relative_path: string } | null>(handle, `sessions/${id}/note-association`, "GET"),
+        ]);
+        return { sessionId: summary.session_id, title: summary.title, startedAt: summary.started_at,
+          inputFinalized: summary.input_finalized, notePath: note?.relative_path || null };
+      }));
+      return { ok: true as const, meetings };
+    } catch (cause) {
+      return { ok: false as const, error: hostError("workspace_meetings_unavailable", cause instanceof Error ? cause.message : String(cause)) };
+    }
+  }
+
   async readWorkspaceMeeting(target: ProjectTarget, dataDir: string, sessionId?: string) {
     try {
       const handle = await this.manager.ensure(target, dataDir);

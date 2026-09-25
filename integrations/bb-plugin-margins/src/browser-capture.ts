@@ -9,6 +9,7 @@ const CAPTURE_KEY = "margins.bb.capture.v1";
 
 interface StoredCapture {
   sessionId: string;
+  startedAtMs: number;
   nextSequence: number;
   paused: boolean;
   pendingControl?: { kind: "pause" | "resume" | "stop"; operationId: string };
@@ -24,6 +25,7 @@ interface LocalCapture extends StoredCapture {
   heartbeatInFlight: boolean;
   generation: number;
   uploadErrors: Error[];
+  levelMonitor?: { dispose(): void };
 }
 
 type Subscriber = () => void;
@@ -122,7 +124,8 @@ function readStored(): StoredCapture | null {
     const value = JSON.parse(sessionStorage.getItem(CAPTURE_KEY) || "null") as (Partial<StoredCapture> & { recordingId?: string }) | null;
     const sessionId = value?.sessionId || value?.recordingId;
     return value && typeof sessionId === "string" && Number.isInteger(value.nextSequence)
-      ? { ...value, sessionId, paused: value.paused === true, nextSequence: value.nextSequence! } : null;
+      ? { ...value, sessionId, startedAtMs: typeof value.startedAtMs === "number" ? value.startedAtMs : Date.now(),
+          paused: value.paused === true, nextSequence: value.nextSequence! } : null;
   }
   catch { return null; }
 }
@@ -131,6 +134,7 @@ function writeStored(value: StoredCapture | null) {
     if (value) {
       const stored: StoredCapture = {
         sessionId: value.sessionId,
+        startedAtMs: value.startedAtMs,
         nextSequence: value.nextSequence,
         paused: value.paused,
         ...(value.pendingControl ? { pendingControl: value.pendingControl } : {}),
@@ -215,6 +219,7 @@ export class BrowserCaptureOwner {
   private readonly panels = new Map<string, PanelState>();
   private readonly routePanels = new Map<string, PanelState>();
   private latestPanel: PanelState | null = null;
+  private inputLevel = 0;
   private readonly drafts = new Map<string, string>();
 
   constructor(private readonly dependencies: BrowserCaptureDependencies = defaultDependencies) {}
@@ -230,8 +235,10 @@ export class BrowserCaptureOwner {
   private emit() { for (const fn of this.subscribers) fn(); }
   get active() { return this.capture !== null; }
   get recovering() { return this.heartbeatRecovering; }
+  get level() { return this.inputLevel; }
   get hasPendingStop() { return readStored()?.pendingControl?.kind === "stop"; }
   get recordingId() { return this.capture?.sessionId ?? readStored()?.sessionId ?? this.endedRecordingId; }
+  get elapsedMs() { return this.capture ? Date.now() - this.capture.startedAtMs : 0; }
   panel(threadId?: string) {
     if (threadId && this.routePanels.has(threadId)) return this.routePanels.get(threadId)!;
     const sessionId = this.recordingId;
@@ -272,6 +279,29 @@ export class BrowserCaptureOwner {
   }
 
   private fenceRefreshes() { ++this.refreshGeneration; }
+
+  private monitorLevel(stream: MediaStream): { dispose(): void } | undefined {
+    if (typeof AudioContext === "undefined") return undefined;
+    try {
+      const context = new AudioContext();
+      const source = context.createMediaStreamSource(stream);
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 512;
+      const silent = context.createGain();
+      silent.gain.value = 0;
+      source.connect(analyser);
+      analyser.connect(silent);
+      silent.connect(context.destination);
+      const values = new Uint8Array(analyser.fftSize);
+      const timer = setInterval(() => {
+        analyser.getByteTimeDomainData(values);
+        const sum = values.reduce((total, value) => total + ((value - 128) / 128) ** 2, 0);
+        this.inputLevel = Math.min(1, Math.sqrt(sum / values.length) * 5);
+        this.emit();
+      }, 90);
+      return { dispose: () => { clearInterval(timer); this.inputLevel = 0; void context.close(); this.emit(); } };
+    } catch { return undefined; }
+  }
 
   private async createLocal(stored: StoredCapture, stream: MediaStream) {
     if (!this.pluginId) throw new Error("Margins is still loading");
@@ -338,7 +368,8 @@ export class BrowserCaptureOwner {
     }, this.dependencies.heartbeatMs);
     recorder.start(3_000);
     if (stored.paused) recorder.pause();
-    this.capture = { ...stored, stream, recorder, uploads, heartbeat, reachability, heartbeatInFlight: false, generation, uploadErrors };
+    this.capture = { ...stored, stream, recorder, uploads, heartbeat, reachability, heartbeatInFlight: false, generation, uploadErrors,
+      levelMonitor: this.monitorLevel(stream) };
     reachability.start();
     this.heartbeatRecovering = false;
     writeStored(stored);
@@ -360,6 +391,14 @@ export class BrowserCaptureOwner {
   }
 
   async start(threadId: string, title?: string) {
+    return this.begin("beginBrowserCapture", { threadId }, title);
+  }
+
+  async startFromProject(projectId: string, title?: string) {
+    return this.begin("beginProjectCapture", { projectId }, title);
+  }
+
+  private async begin(method: "beginBrowserCapture" | "beginProjectCapture", target: { threadId: string } | { projectId: string }, title?: string) {
     if (!this.pluginId) throw new Error("Margins is still loading");
     if (this.capture) throw new Error("This bb window is already recording");
     this.endedRecordingId = null;
@@ -371,11 +410,11 @@ export class BrowserCaptureOwner {
     catch (cause) { stream.getTracks().forEach((track) => track.stop()); throw cause; }
     const ownerId = id();
     try {
-      const state = await this.dependencies.rpc<PanelState>(this.pluginId, "beginBrowserCapture", {
-        threadId, client: detectClientCapabilities(), ownerId, ...(title ? { title } : {}),
+      const state = await this.dependencies.rpc<PanelState>(this.pluginId, method, {
+        ...target, client: detectClientCapabilities(), ownerId, ...(title ? { title } : {}),
       });
       if (!state.recordingId || !state.ownsRecording) throw new Error(state.detail);
-      await this.createLocal({ sessionId: state.recordingId, nextSequence: 0, paused: false }, stream);
+      await this.createLocal({ sessionId: state.recordingId, startedAtMs: Date.now(), nextSequence: 0, paused: false }, stream);
       return state;
     } catch (cause) {
       stream.getTracks().forEach((track) => track.stop());
@@ -431,6 +470,7 @@ export class BrowserCaptureOwner {
     ++this.generation;
     this.fenceRefreshes();
     this.heartbeatRecovering = false;
+    current.levelMonitor?.dispose();
     current.reachability.dispose();
     clearInterval(current.heartbeat);
     const pendingControl = current.pendingControl?.kind === "stop"
@@ -534,6 +574,7 @@ export class BrowserCaptureOwner {
     ++this.generation;
     this.heartbeatRecovering = true;
     this.endedRecordingId = current.sessionId;
+    current.levelMonitor?.dispose();
     current.reachability.dispose();
     clearInterval(current.heartbeat);
     current.pendingControl = current.pendingControl?.kind === "stop"
@@ -562,6 +603,7 @@ export class BrowserCaptureOwner {
     this.capture = null;
     ++this.generation;
     this.heartbeatRecovering = true;
+    current.levelMonitor?.dispose();
     clearInterval(current.heartbeat);
     current.reachability.dispose();
     void releaseBrowserMedia(current);

@@ -18931,6 +18931,13 @@ var workspaceMeetingResultSchema = external_exports.discriminatedUnion("ok", [
   external_exports.object({ ok: external_exports.literal(true), meeting: workspaceMeetingSchema.nullable(), candidates: external_exports.array(external_exports.string()) }).strict(),
   external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
 ]);
+var workspaceMeetingSummarySchema = workspaceMeetingSchema.omit({ notepad: true }).extend({
+  notePath: external_exports.string().nullable()
+}).strict();
+var workspaceMeetingsResultSchema = external_exports.discriminatedUnion("ok", [
+  external_exports.object({ ok: external_exports.literal(true), meetings: external_exports.array(workspaceMeetingSummarySchema) }).strict(),
+  external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
+]);
 var hostResultSchema = external_exports.discriminatedUnion("ok", [
   external_exports.object({ ok: external_exports.literal(true), snapshot: hostCaptureSnapshotSchema.nullable() }).strict(),
   external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
@@ -18960,6 +18967,10 @@ var ownedCaptureInputSchema = external_exports.object({ target: projectTargetSch
   ownerId: external_exports.string().min(1)
 }).strict();
 var marginsHostContract = defineRpcContract({
+  listWorkspaceMeetings: {
+    input: external_exports.object({ target: projectTargetSchema }).strict(),
+    output: workspaceMeetingsResultSchema
+  },
   readWorkspaceMeeting: {
     input: external_exports.object({ target: projectTargetSchema, sessionId: external_exports.string().min(1).optional() }).strict(),
     output: workspaceMeetingResultSchema
@@ -19056,17 +19067,39 @@ var captureClientInputSchema = external_exports.object({
   operationId: external_exports.string().min(1)
 }).strict();
 var marginsRpcContract = defineRpcContract({
+  availableProjects: {
+    input: external_exports.object({}).strict(),
+    output: external_exports.object({ projects: external_exports.array(external_exports.object({ id: external_exports.string(), name: external_exports.string() }).strict()) }).strict()
+  },
+  getProjectPanelState: {
+    input: external_exports.object({ projectId: external_exports.string().min(1), client: clientCapabilitiesSchema }).strict(),
+    output: panelStateSchema
+  },
+  beginProjectCapture: {
+    input: external_exports.object({
+      projectId: external_exports.string().min(1),
+      client: clientCapabilitiesSchema,
+      ownerId: external_exports.string().min(1),
+      title: external_exports.string().trim().max(160).optional()
+    }).strict(),
+    output: panelStateSchema
+  },
+  listWorkspaceMeetings: {
+    input: external_exports.object({ projectId: external_exports.string().min(1) }).strict(),
+    output: workspaceMeetingsResultSchema
+  },
   projectWorkspace: {
-    input: external_exports.object({ threadId: external_exports.string().min(1), workspaceId: external_exports.string().optional() }).strict(),
+    input: external_exports.object({ threadId: external_exports.string().min(1).optional(), projectId: external_exports.string().min(1).optional(), workspaceId: external_exports.string().optional() }).strict(),
     output: external_exports.object({ workspaceId: external_exports.string().nullable() }).strict()
   },
   readWorkspaceMeeting: {
-    input: external_exports.object({ threadId: external_exports.string().min(1), sessionId: external_exports.string().min(1).optional() }).strict(),
+    input: external_exports.object({ threadId: external_exports.string().min(1).optional(), projectId: external_exports.string().min(1).optional(), sessionId: external_exports.string().min(1).optional() }).strict(),
     output: workspaceMeetingResultSchema
   },
   saveWorkspaceMemo: {
     input: external_exports.object({
-      threadId: external_exports.string().min(1),
+      threadId: external_exports.string().min(1).optional(),
+      projectId: external_exports.string().min(1).optional(),
       sessionId: external_exports.string().min(1),
       expectedRevision: external_exports.string().min(1),
       text: external_exports.string().max(1e5)
@@ -19074,14 +19107,14 @@ var marginsRpcContract = defineRpcContract({
     output: workspaceMeetingResultSchema
   },
   captureAuthority: {
-    input: external_exports.object({ threadId: external_exports.string().min(1) }).strict(),
+    input: external_exports.object({ threadId: external_exports.string().min(1).optional(), projectId: external_exports.string().min(1).optional() }).strict(),
     output: external_exports.discriminatedUnion("ok", [
       external_exports.object({ ok: external_exports.literal(true), instanceId: external_exports.string().min(1), workspaceId: external_exports.string().min(1) }).strict(),
       external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
     ])
   },
   pinNativeSession: {
-    input: external_exports.object({ threadId: external_exports.string().min(1), sessionId: external_exports.string().min(1), instanceId: external_exports.string().min(1), workspaceId: external_exports.string().min(1) }).strict(),
+    input: external_exports.object({ threadId: external_exports.string().min(1).optional(), projectId: external_exports.string().min(1).optional(), sessionId: external_exports.string().min(1), instanceId: external_exports.string().min(1), workspaceId: external_exports.string().min(1) }).strict(),
     output: external_exports.discriminatedUnion("ok", [
       external_exports.object({ ok: external_exports.literal(true) }).strict(),
       external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
@@ -19222,7 +19255,10 @@ function marginsPlugin(bb) {
   host.experimental_onWorkerExit(({ hostId }) => bb.realtime.publish(REALTIME_CHANNEL, { hostId, reason: "project-recorder-offline" }));
   async function targetForThread(threadId) {
     const thread = await bb.sdk.threads.get({ threadId });
-    const project = await bb.sdk.projects.get({ projectId: thread.projectId });
+    return targetForProject(thread.projectId);
+  }
+  async function targetForProject(projectId) {
+    const project = await bb.sdk.projects.get({ projectId });
     if (project.kind === "personal") throw new Error("Choose a project with a stable folder before recording.");
     const source = project.sources.find((candidate) => candidate.isDefault);
     if (!source) throw new Error("This project does not have a primary folder for recordings.");
@@ -19233,6 +19269,11 @@ function marginsPlugin(bb) {
       projectRoot: source.path,
       ...typeof workspaceId === "string" && workspaceId ? { workspaceId } : {}
     };
+  }
+  async function targetForSelection(input2) {
+    if (input2.projectId) return targetForProject(input2.projectId);
+    if (input2.threadId) return targetForThread(input2.threadId);
+    throw new Error("Choose a bb project for this meeting.");
   }
   async function readCapture(sessionId) {
     const parsed = captureRecordSchema.safeParse(await bb.storage.kv.get(sessionKey(sessionId)));
@@ -19290,6 +19331,9 @@ function marginsPlugin(bb) {
       const error61 = { code: "project_folder_unavailable", message: cause instanceof Error ? cause.message : String(cause), retryable: false };
       return basePanel(null, "unavailable", client, { error: error61 });
     }
+    return getPanelStateForTarget(target, client);
+  }
+  async function getPanelStateForTarget(target, client) {
     const authority = await callHost(target, "captureAuthority", { target });
     if (!authority.ok) return basePanel(target.projectId, "unavailable", client, { error: authority.error });
     const workspaceId = authority.workspaceId;
@@ -19397,9 +19441,52 @@ function marginsPlugin(bb) {
     if (!result.snapshot) return basePanel(capture.projectId, "saving", client, { capture });
     return basePanel(capture.projectId, result.snapshot.status, client, { capture, notepad: result.snapshot.notepad });
   }
+  async function beginForTarget(target, client, ownerId, title) {
+    if (client.nativeMacCapture || !client.secureContext || !client.browserMicrophone) return getPanelStateForTarget(target, client);
+    const authority = await callHost(target, "captureAuthority", { target });
+    if (!authority.ok) return basePanel(target.projectId, "unavailable", client, { error: authority.error });
+    const workspaceId = authority.workspaceId;
+    return locked(workspaceId, async () => {
+      if (await readLiveCapture(workspaceId)) return getPanelStateForTarget(target, client);
+      const result = await callHost(target, "startBrowserCapture", { target, ownerId, name: meetingName(title) });
+      if (!result.ok || !result.snapshot) return basePanel(target.projectId, "needs_attention", client, { error: result.ok ? null : result.error });
+      await saveCapture({
+        projectId: target.projectId,
+        hostId: target.hostId,
+        projectRoot: target.projectRoot,
+        workspaceId,
+        recordingId: result.snapshot.recordingId,
+        clientId: client.clientId,
+        ownerId,
+        lastHeartbeatUnixMs: Date.now()
+      });
+      bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: "start" });
+      return getPanelStateForTarget(target, client);
+    });
+  }
   bb.rpc.register(marginsRpcContract, {
-    async projectWorkspace({ threadId, workspaceId }) {
-      const target = await targetForThread(threadId);
+    async availableProjects() {
+      const projects = await bb.sdk.projects.list();
+      return { projects: projects.filter((project) => project.kind !== "personal").map((project) => ({ id: project.id, name: project.name })) };
+    },
+    async getProjectPanelState({ projectId, client }) {
+      try {
+        return await getPanelStateForTarget(await targetForProject(projectId), client);
+      } catch (cause) {
+        return basePanel(null, "unavailable", client, {
+          error: { code: "project_unavailable", message: cause instanceof Error ? cause.message : String(cause), retryable: false }
+        });
+      }
+    },
+    async beginProjectCapture({ projectId, client, ownerId, title }) {
+      return beginForTarget(await targetForProject(projectId), client, ownerId, title);
+    },
+    async listWorkspaceMeetings({ projectId }) {
+      const target = await targetForProject(projectId);
+      return callHost(target, "listWorkspaceMeetings", { target });
+    },
+    async projectWorkspace({ threadId, projectId, workspaceId }) {
+      const target = await targetForSelection({ threadId, projectId });
       if (workspaceId !== void 0) {
         const selected = workspaceId.trim();
         if (selected && !/^[a-z0-9][a-z0-9-]*$/.test(selected)) throw new Error("Invalid Workspace id");
@@ -19409,8 +19496,8 @@ function marginsPlugin(bb) {
       const value = await bb.storage.kv.get(`${PROJECT_WORKSPACE_PREFIX}${target.projectId}`);
       return { workspaceId: typeof value === "string" && value ? value : null };
     },
-    async readWorkspaceMeeting({ threadId, sessionId }) {
-      const target = await targetForThread(threadId);
+    async readWorkspaceMeeting({ threadId, projectId, sessionId }) {
+      const target = await targetForSelection({ threadId, projectId });
       const result = await callHost(target, "readWorkspaceMeeting", { target, sessionId });
       if (!sessionId && result.ok && result.meeting) {
         const authority = await callHost(target, "captureAuthority", { target });
@@ -19418,21 +19505,21 @@ function marginsPlugin(bb) {
       }
       return result;
     },
-    async saveWorkspaceMemo({ threadId, sessionId, expectedRevision, text }) {
-      const target = await targetForThread(threadId);
+    async saveWorkspaceMemo({ threadId, projectId, sessionId, expectedRevision, text }) {
+      const target = await targetForSelection({ threadId, projectId });
       return callHost(target, "saveWorkspaceMemo", { target, sessionId, expectedRevision, text });
     },
-    async captureAuthority({ threadId }) {
+    async captureAuthority({ threadId, projectId }) {
       try {
-        const target = await targetForThread(threadId);
+        const target = await targetForSelection({ threadId, projectId });
         return await callHost(target, "captureAuthority", { target });
       } catch (cause) {
         return { ok: false, error: { code: "project_folder_unavailable", message: cause instanceof Error ? cause.message : String(cause), retryable: false } };
       }
     },
-    async pinNativeSession({ threadId, sessionId, instanceId, workspaceId }) {
+    async pinNativeSession({ threadId, projectId, sessionId, instanceId, workspaceId }) {
       try {
-        const target = await targetForThread(threadId);
+        const target = await targetForSelection({ threadId, projectId });
         const authority = await callHost(target, "captureAuthority", { target });
         if (!authority.ok) return authority;
         if (authority.instanceId !== instanceId || authority.workspaceId !== workspaceId) {
@@ -19450,28 +19537,7 @@ function marginsPlugin(bb) {
     },
     getPanelState: ({ threadId, client }) => getPanelState(threadId, client),
     async beginBrowserCapture({ threadId, client, ownerId, title }) {
-      const target = await targetForThread(threadId);
-      if (client.nativeMacCapture || !client.secureContext || !client.browserMicrophone) return getPanelState(threadId, client);
-      const authority = await callHost(target, "captureAuthority", { target });
-      if (!authority.ok) return basePanel(target.projectId, "unavailable", client, { error: authority.error });
-      const workspaceId = authority.workspaceId;
-      return locked(workspaceId, async () => {
-        if (await readLiveCapture(workspaceId)) return getPanelState(threadId, client);
-        const result = await callHost(target, "startBrowserCapture", { target, ownerId, name: meetingName(title) });
-        if (!result.ok || !result.snapshot) return basePanel(target.projectId, "needs_attention", client, { error: result.ok ? null : result.error });
-        await saveCapture({
-          projectId: target.projectId,
-          hostId: target.hostId,
-          projectRoot: target.projectRoot,
-          workspaceId,
-          recordingId: result.snapshot.recordingId,
-          clientId: client.clientId,
-          ownerId,
-          lastHeartbeatUnixMs: Date.now()
-        });
-        bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: "start" });
-        return getPanelState(threadId, client);
-      });
+      return beginForTarget(await targetForThread(threadId), client, ownerId, title);
     },
     heartbeat: ({ sessionId, client, operationId }) => operate(sessionId, client, operationId, "heartbeat"),
     pause: ({ sessionId, client, operationId }) => operate(sessionId, client, operationId, "pause"),

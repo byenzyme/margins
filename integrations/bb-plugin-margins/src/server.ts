@@ -98,13 +98,23 @@ export default function marginsPlugin(bb: BbPluginApi) {
 
   async function targetForThread(threadId: string): Promise<ProjectTarget> {
     const thread = await bb.sdk.threads.get({ threadId }) as unknown as { projectId: string };
-    const project = await bb.sdk.projects.get({ projectId: thread.projectId });
+    return targetForProject(thread.projectId);
+  }
+
+  async function targetForProject(projectId: string): Promise<ProjectTarget> {
+    const project = await bb.sdk.projects.get({ projectId });
     if (project.kind === "personal") throw new Error("Choose a project with a stable folder before recording.");
     const source = project.sources.find((candidate) => candidate.isDefault);
     if (!source) throw new Error("This project does not have a primary folder for recordings.");
     const workspaceId = await bb.storage.kv.get(`${PROJECT_WORKSPACE_PREFIX}${project.id}`);
     return { projectId: project.id, hostId: source.hostId, projectRoot: source.path,
       ...(typeof workspaceId === "string" && workspaceId ? { workspaceId } : {}) };
+  }
+
+  async function targetForSelection(input: { threadId?: string; projectId?: string }): Promise<ProjectTarget> {
+    if (input.projectId) return targetForProject(input.projectId);
+    if (input.threadId) return targetForThread(input.threadId);
+    throw new Error("Choose a bb project for this meeting.");
   }
 
   async function readCapture(sessionId: string): Promise<CaptureRecord | null> {
@@ -163,6 +173,10 @@ export default function marginsPlugin(bb: BbPluginApi) {
       const error = { code: "project_folder_unavailable", message: cause instanceof Error ? cause.message : String(cause), retryable: false };
       return basePanel(null, "unavailable", client, { error });
     }
+    return getPanelStateForTarget(target, client);
+  }
+
+  async function getPanelStateForTarget(target: ProjectTarget, client: ClientCapabilities): Promise<PanelState> {
     const authority = await callHost(target, "captureAuthority", { target });
     if (!authority.ok) return basePanel(target.projectId, "unavailable", client, { error: authority.error });
     const workspaceId = authority.workspaceId as string;
@@ -253,9 +267,46 @@ export default function marginsPlugin(bb: BbPluginApi) {
     return basePanel(capture.projectId, result.snapshot.status, client, { capture, notepad: result.snapshot.notepad });
   }
 
+  async function beginForTarget(target: ProjectTarget, client: ClientCapabilities, ownerId: string, title?: string): Promise<PanelState> {
+    if (client.nativeMacCapture || !client.secureContext || !client.browserMicrophone) return getPanelStateForTarget(target, client);
+    const authority = await callHost(target, "captureAuthority", { target });
+    if (!authority.ok) return basePanel(target.projectId, "unavailable", client, { error: authority.error });
+    const workspaceId = authority.workspaceId as string;
+    return locked(workspaceId, async () => {
+      if (await readLiveCapture(workspaceId)) return getPanelStateForTarget(target, client);
+      const result = await callHost(target, "startBrowserCapture", { target, ownerId, name: meetingName(title) }) as HostResult;
+      if (!result.ok || !result.snapshot) return basePanel(target.projectId, "needs_attention", client, { error: result.ok ? null : result.error });
+      await saveCapture({
+        projectId: target.projectId, hostId: target.hostId, projectRoot: target.projectRoot,
+        workspaceId, recordingId: result.snapshot.recordingId, clientId: client.clientId,
+        ownerId, lastHeartbeatUnixMs: Date.now(),
+      });
+      bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: "start" });
+      return getPanelStateForTarget(target, client);
+    });
+  }
+
   bb.rpc.register(marginsRpcContract, {
-    async projectWorkspace({ threadId, workspaceId }) {
-      const target = await targetForThread(threadId);
+    async availableProjects() {
+      const projects = await bb.sdk.projects.list();
+      return { projects: projects.filter((project) => project.kind !== "personal")
+        .map((project) => ({ id: project.id, name: project.name })) };
+    },
+    async getProjectPanelState({ projectId, client }) {
+      try { return await getPanelStateForTarget(await targetForProject(projectId), client); }
+      catch (cause) { return basePanel(null, "unavailable", client, {
+        error: { code: "project_unavailable", message: cause instanceof Error ? cause.message : String(cause), retryable: false },
+      }); }
+    },
+    async beginProjectCapture({ projectId, client, ownerId, title }) {
+      return beginForTarget(await targetForProject(projectId), client, ownerId, title);
+    },
+    async listWorkspaceMeetings({ projectId }) {
+      const target = await targetForProject(projectId);
+      return callHost(target, "listWorkspaceMeetings", { target });
+    },
+    async projectWorkspace({ threadId, projectId, workspaceId }) {
+      const target = await targetForSelection({ threadId, projectId });
       if (workspaceId !== undefined) {
         const selected = workspaceId.trim();
         if (selected && !/^[a-z0-9][a-z0-9-]*$/.test(selected)) throw new Error("Invalid Workspace id");
@@ -265,8 +316,8 @@ export default function marginsPlugin(bb: BbPluginApi) {
       const value = await bb.storage.kv.get(`${PROJECT_WORKSPACE_PREFIX}${target.projectId}`);
       return { workspaceId: typeof value === "string" && value ? value : null };
     },
-    async readWorkspaceMeeting({ threadId, sessionId }) {
-      const target = await targetForThread(threadId);
+    async readWorkspaceMeeting({ threadId, projectId, sessionId }) {
+      const target = await targetForSelection({ threadId, projectId });
       const result = await callHost(target, "readWorkspaceMeeting", { target, sessionId });
       if (!sessionId && result.ok && result.meeting) {
         const authority = await callHost(target, "captureAuthority", { target });
@@ -274,21 +325,21 @@ export default function marginsPlugin(bb: BbPluginApi) {
       }
       return result;
     },
-    async saveWorkspaceMemo({ threadId, sessionId, expectedRevision, text }) {
-      const target = await targetForThread(threadId);
+    async saveWorkspaceMemo({ threadId, projectId, sessionId, expectedRevision, text }) {
+      const target = await targetForSelection({ threadId, projectId });
       return callHost(target, "saveWorkspaceMemo", { target, sessionId, expectedRevision, text });
     },
-    async captureAuthority({ threadId }) {
+    async captureAuthority({ threadId, projectId }) {
       try {
-        const target = await targetForThread(threadId);
+        const target = await targetForSelection({ threadId, projectId });
         return await callHost(target, "captureAuthority", { target });
       } catch (cause) {
         return { ok: false as const, error: { code: "project_folder_unavailable", message: cause instanceof Error ? cause.message : String(cause), retryable: false } };
       }
     },
-    async pinNativeSession({ threadId, sessionId, instanceId, workspaceId }) {
+    async pinNativeSession({ threadId, projectId, sessionId, instanceId, workspaceId }) {
       try {
-        const target = await targetForThread(threadId);
+        const target = await targetForSelection({ threadId, projectId });
         const authority = await callHost(target, "captureAuthority", { target });
         if (!authority.ok) return authority;
         if (authority.instanceId !== instanceId || authority.workspaceId !== workspaceId) {
@@ -306,24 +357,7 @@ export default function marginsPlugin(bb: BbPluginApi) {
     },
     getPanelState: ({ threadId, client }) => getPanelState(threadId, client),
     async beginBrowserCapture({ threadId, client, ownerId, title }) {
-      const target = await targetForThread(threadId);
-      if (client.nativeMacCapture || !client.secureContext || !client.browserMicrophone) return getPanelState(threadId, client);
-      const authority = await callHost(target, "captureAuthority", { target });
-      if (!authority.ok) return basePanel(target.projectId, "unavailable", client, { error: authority.error });
-      const workspaceId = authority.workspaceId as string;
-      return locked(workspaceId, async () => {
-        if (await readLiveCapture(workspaceId)) return getPanelState(threadId, client);
-        const result = await callHost(target, "startBrowserCapture", { target, ownerId, name: meetingName(title) }) as HostResult;
-        if (!result.ok || !result.snapshot) return basePanel(target.projectId, "needs_attention", client, { error: result.ok ? null : result.error });
-        await saveCapture({
-          projectId: target.projectId, hostId: target.hostId, projectRoot: target.projectRoot,
-          workspaceId,
-          recordingId: result.snapshot.recordingId,
-          clientId: client.clientId, ownerId, lastHeartbeatUnixMs: Date.now(),
-        });
-        bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: "start" });
-        return getPanelState(threadId, client);
-      });
+      return beginForTarget(await targetForThread(threadId), client, ownerId, title);
     },
     heartbeat: ({ sessionId, client, operationId }) => operate(sessionId, client, operationId, "heartbeat"),
     pause: ({ sessionId, client, operationId }) => operate(sessionId, client, operationId, "pause"),

@@ -5,6 +5,7 @@ import type { marginsRpcContract } from "../server.js";
 import { browserCaptureOwner, detectClientCapabilities } from "./browser-capture.js";
 import { nativeBridgeOwner, type CaptureAuthority, type NativeStatus } from "./native-bridge-client.js";
 import type { PanelState, WorkspaceMeeting } from "./contracts.js";
+import { MeetingsAccessory, MeetingsPage } from "./meetings-page.js";
 
 function paramsTitle(params: JsonValue | null) {
   return params && typeof params === "object" && !Array.isArray(params) && typeof params.title === "string" ? params.title : undefined;
@@ -16,18 +17,18 @@ function Signal({ state }: { state: PanelState["state"] }) {
   </div>;
 }
 
-function ProjectWorkspaceSetting({ threadId, onSaved }: { threadId: string; onSaved: () => void }) {
+function ProjectWorkspaceSetting({ threadId, projectId, onSaved }: { threadId?: string; projectId?: string; onSaved: () => void }) {
   const rpc = useRpc<typeof marginsRpcContract>();
   const [value, setValue] = useState("");
   const [message, setMessage] = useState("");
   useEffect(() => {
-    void rpc.call("projectWorkspace", { threadId }).then((result) => setValue(result.workspaceId || "")).catch(() => setMessage("Workspace setting unavailable"));
-  }, [rpc, threadId]);
+    void rpc.call("projectWorkspace", { threadId, projectId }).then((result) => setValue(result.workspaceId || "")).catch(() => setMessage("Workspace setting unavailable"));
+  }, [rpc, threadId, projectId]);
   return <div className="margins-workspace-setting">
     <label htmlFor="margins-project-workspace">Margins Workspace for this project</label>
     <input id="margins-project-workspace" aria-label="Margins Workspace for this project" value={value}
       onChange={(event) => setValue(event.target.value)} placeholder="Use machine default" />
-    <button onClick={() => void rpc.call("projectWorkspace", { threadId, workspaceId: value }).then(() => { setMessage("Workspace preference saved"); onSaved(); }).catch((error) => setMessage(String(error)))}>Save</button>
+    <button onClick={() => void rpc.call("projectWorkspace", { threadId, projectId, workspaceId: value }).then(() => { setMessage("Workspace preference saved"); onSaved(); }).catch((error) => setMessage(String(error)))}>Save</button>
     {message && <span role="status">{message}</span>}
   </div>;
 }
@@ -35,74 +36,55 @@ function ProjectWorkspaceSetting({ threadId, onSaved }: { threadId: string; onSa
 function RecordingOverlay() {
   const navigate = useBbNavigate();
   const context = useBbContext();
-  const [sessionId, setSessionId] = useState(() => browserCaptureOwner.recordingId);
-  const [state, setState] = useState<PanelState | null>(() => browserCaptureOwner.panel());
+  const [tick, setTick] = useState(0);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [nativeSessionId, setNativeSessionId] = useState(() => nativeBridgeOwner.sessionId);
-  const [nativeStatus, setNativeStatus] = useState(() => nativeBridgeOwner.status);
-  const [nativeError, setNativeError] = useState(() => nativeBridgeOwner.connectionError);
+  const [failure, setFailure] = useState(false);
   useEffect(() => {
-    const unsubscribe = browserCaptureOwner.subscribe(() => {
-      setSessionId(browserCaptureOwner.recordingId);
-      setState(browserCaptureOwner.panel());
-    });
+    const unsubscribe = browserCaptureOwner.subscribe(() => setTick((value) => value + 1));
     return () => { unsubscribe(); };
   }, []);
-  useEffect(() => nativeBridgeOwner.subscribe(() => {
-    setNativeSessionId(nativeBridgeOwner.sessionId);
-    setNativeStatus(nativeBridgeOwner.status);
-    setNativeError(nativeBridgeOwner.connectionError);
-  }), []);
-  async function nativeControl(operation: "pause" | "resume" | "stop") {
-    setBusy(true); setError(null);
-    try { await nativeBridgeOwner.control(operation); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
-    finally { setBusy(false); }
-  }
-  if (nativeSessionId && nativeStatus && ["getting_ready", "recording", "paused", "saving", "needs_attention"].includes(nativeStatus.state)) {
-    const nativeBusy = ["getting_ready", "saving"].includes(nativeStatus.state);
-    return <aside className="margins-overlay" role="status" aria-label="Margins Mac recording">
-      <button className="margins-overlay-open" onClick={() => {
-        if (context.threadId) navigate.openThreadPanel({ actionId: "live" });
-      }}><Signal state={nativeStatus.state === "paused" ? "paused" : nativeBusy ? "recovering" : "recording"} /><span>{nativeStatus.state === "paused" ? "Mac recording paused" : nativeStatus.state === "saving" ? "Saving Mac recording" : nativeStatus.state === "needs_attention" ? "Mac recording needs attention" : "Mac recording"}</span></button>
-      {["recording", "paused"].includes(nativeStatus.state) && <>
-        <button disabled={busy} onClick={() => void nativeControl(nativeStatus.state === "paused" ? "resume" : "pause")} aria-label={nativeStatus.state === "paused" ? "Resume Mac recording" : "Pause Mac recording"}>{nativeStatus.state === "paused" ? <Play size={13} /> : <Pause size={13} />}</button>
-        <button disabled={busy} onClick={() => void nativeControl("stop")} aria-label="Stop and save Mac recording"><Square size={12} /></button>
-      </>}
-      {(error || nativeError) && <span className="margins-overlay-error">{error || nativeError}</span>}
-    </aside>;
-  }
-  if (!sessionId || !state) return null;
-  const recording = state.state === "recording" && browserCaptureOwner.active && !browserCaptureOwner.recovering;
-  const paused = state.state === "paused" && browserCaptureOwner.active && !browserCaptureOwner.recovering;
-  const pending = ["recovering", "saving", "needs_attention"].includes(state.state) || browserCaptureOwner.recovering;
-  if (!recording && !paused && !pending) return null;
-  async function control(operation: "pause" | "resume" | "stop") {
+  useEffect(() => nativeBridgeOwner.subscribe(() => setTick((value) => value + 1)), []);
+  useEffect(() => {
+    const timer = setInterval(() => setTick((value) => value + 1), 1_000);
+    return () => clearInterval(timer);
+  }, []);
+  void tick;
+  const native = nativeBridgeOwner.status;
+  const nativeLive = native?.sessionId && ["recording", "paused", "saving", "needs_attention"].includes(native.state);
+  const state = browserCaptureOwner.panel();
+  const browserLive = browserCaptureOwner.recordingId && state && ["recording", "paused", "saving", "recovering", "needs_attention"].includes(state.state);
+  if (!nativeLive && !browserLive) return null;
+  const sessionId = nativeLive ? native!.sessionId! : browserCaptureOwner.recordingId!;
+  const status = nativeLive ? native!.state : state!.state;
+  const paused = status === "paused";
+  const recording = status === "recording";
+  const seconds = nativeLive ? Math.floor((native!.microphoneSamples || 0) / 16_000) : Math.floor(browserCaptureOwner.elapsedMs / 1_000);
+  const elapsed = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+  async function control(action: "pause" | "resume" | "stop") {
     setBusy(true);
-    setError(null);
     try {
-      const next = await browserCaptureOwner[operation]();
-      if (next) browserCaptureOwner.acceptPanel(sessionId!, next);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+      if (nativeLive) await nativeBridgeOwner.control(action);
+      else {
+        const next = await browserCaptureOwner[action]();
+        if (next) browserCaptureOwner.acceptPanel(sessionId, next);
+      }
+      setFailure(false);
+    } catch { setFailure(true); }
     finally { setBusy(false); }
   }
   return <aside className="margins-overlay" role="status" aria-label="Margins recording">
     <button className="margins-overlay-open" onClick={() => {
-      if (context.threadId) navigate.openThreadPanel({ actionId: "live" });
-    }}>
-      <Signal state={paused ? "paused" : pending ? "recovering" : "recording"} />
-      <span>{paused ? "Recording paused" : pending ? "Recording needs attention" : "Recording"}</span>
-    </button>
+      const projectId = (() => { try { return sessionStorage.getItem("margins.bb.meetings-project") || context.projectId || ""; } catch { return context.projectId || ""; } })();
+      navigate.toPluginPanel("meetings", { subPath: projectId ? `${projectId}/${sessionId}` : "" });
+    }}><i className="margins-overlay-dot" aria-hidden="true" /><span>{failure ? "Needs attention" : paused ? "Paused" : recording ? `Recording ${elapsed}` : "Saving"}</span></button>
     {(recording || paused) && <>
       <button onClick={() => void control(paused ? "resume" : "pause")} disabled={busy} aria-label={paused ? "Resume recording" : "Pause recording"}>{paused ? <Play size={13} /> : <Pause size={13} />}</button>
       <button onClick={() => void control("stop")} disabled={busy} aria-label="Stop and save recording"><Square size={12} /></button>
     </>}
-    {error && <span className="margins-overlay-error">{error}</span>}
   </aside>;
 }
 
-function NativeCapturePanel({ threadId, title }: { threadId: string; title?: string }) {
+function NativeCapturePanel({ projectId, title }: { projectId: string; title?: string }) {
   const rpc = useRpc<typeof marginsRpcContract>();
   const [status, setStatus] = useState<NativeStatus | null>(() => nativeBridgeOwner.status);
   const [paired, setPaired] = useState(() => nativeBridgeOwner.paired);
@@ -126,7 +108,7 @@ function NativeCapturePanel({ threadId, title }: { threadId: string; title?: str
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     pinned.current = status.sessionId;
     void rpc.call("pinNativeSession", {
-      threadId, sessionId: status.sessionId!, instanceId: status.instanceId, workspaceId: status.workspaceId,
+      projectId, sessionId: status.sessionId!, instanceId: status.instanceId, workspaceId: status.workspaceId,
     }).then((result) => {
       if (disposed) return;
       if (result.ok) succeeded = true;
@@ -144,9 +126,9 @@ function NativeCapturePanel({ threadId, title }: { threadId: string; title?: str
       if (!succeeded && pinned.current === status.sessionId) pinned.current = null;
       if (retryTimer) clearTimeout(retryTimer);
     };
-  }, [rpc, saved, status?.sessionId, threadId, pinRetry]);
+  }, [rpc, saved, status?.sessionId, projectId, pinRetry]);
   async function authority(): Promise<CaptureAuthority> {
-    const result = await rpc.call("captureAuthority", { threadId });
+    const result = await rpc.call("captureAuthority", { projectId });
     if (!result.ok) throw new Error(result.error.message);
     return result;
   }
@@ -161,7 +143,7 @@ function NativeCapturePanel({ threadId, title }: { threadId: string; title?: str
         <div className="margins-native-pair"><input aria-label="Mac recorder port" type="number" min="1" max="65535" value={port} onChange={(event) => setPort(event.target.value)} /><input aria-label="Mac recorder pairing code" autoComplete="off" value={code} onChange={(event) => setCode(event.target.value)} placeholder="Pairing code" /><button disabled={busy || !code.trim()} onClick={() => void act(async () => { await nativeBridgeOwner.pair(code.trim(), await authority(), Number(port)); setCode(""); })}>Connect</button></div>
     </>}
     {paired && <>
-      {status?.state === "ready" && <button disabled={busy} onClick={() => void act(async () => { if (browserCaptureOwner.active) throw new Error("Stop the microphone-only recording before starting Mac audio."); await nativeBridgeOwner.verify(await authority()); await nativeBridgeOwner.control("start", title); })}>Start Mac recording</button>}
+      {status?.state === "ready" && <button disabled={busy} onClick={() => void act(async () => { if (browserCaptureOwner.active) throw new Error("Stop the microphone-only recording before starting Mac audio."); await nativeBridgeOwner.verify(await authority()); try { sessionStorage.setItem("margins.bb.meetings-project", projectId); } catch { /* private browser */ } await nativeBridgeOwner.control("start", title); })}>Start Mac recording</button>}
       {status?.state === "recording" && <div className="margins-native-actions"><button disabled={busy} onClick={() => void act(() => nativeBridgeOwner.control("pause"))}>Pause</button><button disabled={busy} onClick={() => void act(() => nativeBridgeOwner.control("stop"))}>Stop and save</button></div>}
       {status?.state === "paused" && <div className="margins-native-actions"><button disabled={busy} onClick={() => void act(() => nativeBridgeOwner.control("resume"))}>Resume</button><button disabled={busy} onClick={() => void act(() => nativeBridgeOwner.control("stop"))}>Stop and save</button></div>}
       {status?.state === "getting_ready" && <p>Getting microphone and computer audio ready…</p>}
@@ -274,6 +256,7 @@ function WorkspaceMeetingNotes({ threadId, onMeetingChange }: { threadId: string
 
 function MarginsPanel({ threadId, params }: { threadId: string; params: JsonValue | null }) {
   const rpc = useRpc<typeof marginsRpcContract>();
+  const context = useBbContext();
   const composer = useComposer();
   const client = detectClientCapabilities();
   const [state, setState] = useState<PanelState | null>(() => browserCaptureOwner.panel(threadId));
@@ -361,6 +344,7 @@ function MarginsPanel({ threadId, params }: { threadId: string; params: JsonValu
         return;
       }
       setState({ ...state, state: "getting_ready", title: "Getting recording ready", detail: "Waiting for microphone permission and this bb project." });
+      if (context.projectId) try { sessionStorage.setItem("margins.bb.meetings-project", context.projectId); } catch { /* private browser */ }
       await action("start", () => browserCaptureOwner.start(threadId, paramsTitle(params)));
     } else if (state.primaryAction === "pause") await action("pause", () => browserCaptureOwner.pause());
     else if (state.primaryAction === "resume") await action("resume", () => browserCaptureOwner.resume());
@@ -400,8 +384,6 @@ function MarginsPanel({ threadId, params }: { threadId: string; params: JsonValu
   const disabled = busy !== null || disconnectedLocal;
 
   return <section className="margins-panel" data-state={visibleState}>
-    <ProjectWorkspaceSetting threadId={threadId} onSaved={() => { void refresh(); }} />
-    {client.platform === "macos" && (!externalMeeting || nativeBridgeOwner.paired) && <NativeCapturePanel threadId={threadId} title={paramsTitle(params)} />}
     {!state.ownsRecording && <WorkspaceMeetingNotes threadId={threadId} onMeetingChange={setExternalMeeting} />}
     {!externalMeeting && <>
     <header className="margins-header">
@@ -433,9 +415,34 @@ function MarginsPanel({ threadId, params }: { threadId: string; params: JsonValu
   </section>;
 }
 
+function MarginsSettings() {
+  const rpc = useRpc<typeof marginsRpcContract>();
+  const context = useBbContext();
+  const [projects, setProjects] = useState<Array<{ id: string; name: string }>>([]);
+  const [projectId, setProjectId] = useState(context.projectId || "");
+  useEffect(() => {
+    void rpc.call("availableProjects", {}).then(({ projects: available }) => {
+      setProjects(available);
+      setProjectId((current) => current || available[0]?.id || "");
+    });
+  }, [rpc]);
+  return <div className="margins-settings">
+    <label>bb project <select aria-label="bb project for Margins settings" value={projectId} onChange={(event) => setProjectId(event.target.value)}>
+      {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+    </select></label>
+    {projectId && <>
+      <ProjectWorkspaceSetting key={projectId} projectId={projectId} onSaved={() => undefined} />
+      <NativeCapturePanel key={`native-${projectId}`} projectId={projectId} />
+    </>}
+  </div>;
+}
+
 export default definePluginApp((app) => {
   app.contentScripts.register({ id: "recording-owner", mount: (context) => browserCaptureOwner.install(context) });
   app.slots.experimental_appOverlay({ id: "recording-status", component: RecordingOverlay });
+  app.slots.navPanel({ id: "meetings", title: "Meetings", icon: "Mic", path: "meetings",
+    component: MeetingsPage, experimental_sidebarAccessory: MeetingsAccessory });
+  app.slots.settingsSection({ id: "recording", title: "Margins recording", component: MarginsSettings });
   app.slots.threadPanelAction({
     id: "live", title: "Margins", icon: "Mic", layout: "flush",
     component: ({ threadId, params }) => <MarginsPanel threadId={threadId} params={params} />,

@@ -21,11 +21,13 @@ function panel(changes: Partial<PanelState> = {}): PanelState {
 afterEach(() => vi.restoreAllMocks());
 
 describe("Margins recording panel", () => {
-  it("registers a route-independent owner, persistent status, and one compact thread panel", () => {
+  it("registers Meetings navigation, a sidebar level, persistent status, and one compact thread panel", () => {
     expect(app.contentScripts).toHaveLength(1);
     expect(app.appOverlays).toMatchObject([{ id: "recording-status" }]);
     expect(app.threadPanelActions).toMatchObject([{ id: "live", title: "Margins", layout: "flush" }]);
-    expect(app.navPanels).toEqual([]);
+    expect(app.navPanels).toMatchObject([{ id: "meetings", title: "Meetings", icon: "Mic" }]);
+    expect(app.navPanels[0]?.experimental_sidebarAccessory).toBeDefined();
+    expect(app.settingsSections).toMatchObject([{ id: "recording" }]);
     expect(app.messageActions).toEqual([]);
   });
 
@@ -39,8 +41,28 @@ describe("Margins recording panel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Pause recording" }));
     await waitFor(() => expect(pause).toHaveBeenCalledOnce());
     fireEvent.click(screen.getByRole("button", { name: /Recording/ }));
-    expect(overlay.inspection.navigateCalls).toContainEqual({ method: "openThreadPanel", options: { actionId: "live" } });
+    expect(overlay.inspection.navigateCalls).toContainEqual({ method: "toPluginPanel", path: "meetings", options: { subPath: "" } });
     overlay.lifecycle.unmount();
+  });
+
+  it("switches meeting memo pads without controlling the live capture", async () => {
+    const live = { sessionId: "live-1", title: "Planning", startedAt: "2026-09-25T01:00:00Z", inputFinalized: false,
+      notepad: { text: "Live memo", revision: "live-r1" }, notePath: null };
+    const ended = { sessionId: "ended-1", title: "Review", startedAt: "2026-09-24T01:00:00Z", inputFinalized: true,
+      notepad: { text: "Ended memo", revision: "ended-r1" }, notePath: null };
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "project-1" }, { rpc: {
+      availableProjects: () => ({ projects: [{ id: "project-1", name: "Project" }] }),
+      getProjectPanelState: () => panel({ state: "recording", recordingId: "live-1" }),
+      listWorkspaceMeetings: () => ({ ok: true, meetings: [live, ended] }),
+      readWorkspaceMeeting: (input: unknown) => ({ ok: true, candidates: [], meeting: (input as { sessionId: string }).sessionId === live.sessionId ? live : ended }),
+    } });
+    const screen = within(slot.container);
+    expect((await screen.findByRole("textbox", { name: "Meeting memo pad" }) as HTMLTextAreaElement).value).toBe("Live memo");
+    expect(screen.getByText("Ready to refine")).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Review" }));
+    await waitFor(() => expect((screen.getByRole("textbox", { name: "Meeting memo pad" }) as HTMLTextAreaElement).value).toBe("Ended memo"));
+    expect(slot.inspection.rpcCalls.some((call) => ["pauseBrowserCapture", "stopBrowserCapture"].includes(call.method))).toBe(false);
+    slot.lifecycle.unmount();
   });
 
   it("shows the truthful microphone source, project storage, and one editable notepad", async () => {
@@ -81,11 +103,14 @@ describe("Margins recording panel", () => {
     });
     const screen = within(slot.container);
     await screen.findByRole("button", { name: "Use browser microphone" });
-    const manual = slot.container.querySelector("details.margins-native-manual") as HTMLDetailsElement | null;
-    expect(manual).not.toBeNull();
-    expect(manual?.open).toBe(false);
-    expect(manual?.textContent).toContain("Connect a Mac recorder manually");
+    expect(slot.container.querySelector("details.margins-native-manual")).toBeNull();
     slot.lifecycle.unmount();
+    const settings = renderSlot(app.settingsSections[0]!, {}, { rpc: { availableProjects: () => ({ projects: [{ id: "project-1", name: "Project" }] }) } });
+    await waitFor(() => expect(settings.container.querySelector("details.margins-native-manual")).not.toBeNull());
+    const manual = settings.container.querySelector("details.margins-native-manual") as HTMLDetailsElement;
+    expect(manual.open).toBe(false);
+    expect(manual.textContent).toContain("Connect a Mac recorder manually");
+    settings.lifecycle.unmount();
   });
 
   it("keeps the latest saved note visible while a new browser recording remains available", async () => {

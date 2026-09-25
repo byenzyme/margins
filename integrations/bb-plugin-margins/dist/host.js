@@ -33317,6 +33317,13 @@ var workspaceMeetingResultSchema = external_exports2.discriminatedUnion("ok", [
   external_exports2.object({ ok: external_exports2.literal(true), meeting: workspaceMeetingSchema.nullable(), candidates: external_exports2.array(external_exports2.string()) }).strict(),
   external_exports2.object({ ok: external_exports2.literal(false), error: hostErrorSchema }).strict()
 ]);
+var workspaceMeetingSummarySchema = workspaceMeetingSchema.omit({ notepad: true }).extend({
+  notePath: external_exports2.string().nullable()
+}).strict();
+var workspaceMeetingsResultSchema = external_exports2.discriminatedUnion("ok", [
+  external_exports2.object({ ok: external_exports2.literal(true), meetings: external_exports2.array(workspaceMeetingSummarySchema) }).strict(),
+  external_exports2.object({ ok: external_exports2.literal(false), error: hostErrorSchema }).strict()
+]);
 var hostResultSchema = external_exports2.discriminatedUnion("ok", [
   external_exports2.object({ ok: external_exports2.literal(true), snapshot: hostCaptureSnapshotSchema.nullable() }).strict(),
   external_exports2.object({ ok: external_exports2.literal(false), error: hostErrorSchema }).strict()
@@ -33346,6 +33353,10 @@ var ownedCaptureInputSchema = external_exports2.object({ target: projectTargetSc
   ownerId: external_exports2.string().min(1)
 }).strict();
 var marginsHostContract = defineRpcContract2({
+  listWorkspaceMeetings: {
+    input: external_exports2.object({ target: projectTargetSchema }).strict(),
+    output: workspaceMeetingsResultSchema
+  },
   readWorkspaceMeeting: {
     input: external_exports2.object({ target: projectTargetSchema, sessionId: external_exports2.string().min(1).optional() }).strict(),
     output: workspaceMeetingResultSchema
@@ -33442,17 +33453,39 @@ var captureClientInputSchema = external_exports2.object({
   operationId: external_exports2.string().min(1)
 }).strict();
 var marginsRpcContract = defineRpcContract2({
+  availableProjects: {
+    input: external_exports2.object({}).strict(),
+    output: external_exports2.object({ projects: external_exports2.array(external_exports2.object({ id: external_exports2.string(), name: external_exports2.string() }).strict()) }).strict()
+  },
+  getProjectPanelState: {
+    input: external_exports2.object({ projectId: external_exports2.string().min(1), client: clientCapabilitiesSchema }).strict(),
+    output: panelStateSchema
+  },
+  beginProjectCapture: {
+    input: external_exports2.object({
+      projectId: external_exports2.string().min(1),
+      client: clientCapabilitiesSchema,
+      ownerId: external_exports2.string().min(1),
+      title: external_exports2.string().trim().max(160).optional()
+    }).strict(),
+    output: panelStateSchema
+  },
+  listWorkspaceMeetings: {
+    input: external_exports2.object({ projectId: external_exports2.string().min(1) }).strict(),
+    output: workspaceMeetingsResultSchema
+  },
   projectWorkspace: {
-    input: external_exports2.object({ threadId: external_exports2.string().min(1), workspaceId: external_exports2.string().optional() }).strict(),
+    input: external_exports2.object({ threadId: external_exports2.string().min(1).optional(), projectId: external_exports2.string().min(1).optional(), workspaceId: external_exports2.string().optional() }).strict(),
     output: external_exports2.object({ workspaceId: external_exports2.string().nullable() }).strict()
   },
   readWorkspaceMeeting: {
-    input: external_exports2.object({ threadId: external_exports2.string().min(1), sessionId: external_exports2.string().min(1).optional() }).strict(),
+    input: external_exports2.object({ threadId: external_exports2.string().min(1).optional(), projectId: external_exports2.string().min(1).optional(), sessionId: external_exports2.string().min(1).optional() }).strict(),
     output: workspaceMeetingResultSchema
   },
   saveWorkspaceMemo: {
     input: external_exports2.object({
-      threadId: external_exports2.string().min(1),
+      threadId: external_exports2.string().min(1).optional(),
+      projectId: external_exports2.string().min(1).optional(),
       sessionId: external_exports2.string().min(1),
       expectedRevision: external_exports2.string().min(1),
       text: external_exports2.string().max(1e5)
@@ -33460,14 +33493,14 @@ var marginsRpcContract = defineRpcContract2({
     output: workspaceMeetingResultSchema
   },
   captureAuthority: {
-    input: external_exports2.object({ threadId: external_exports2.string().min(1) }).strict(),
+    input: external_exports2.object({ threadId: external_exports2.string().min(1).optional(), projectId: external_exports2.string().min(1).optional() }).strict(),
     output: external_exports2.discriminatedUnion("ok", [
       external_exports2.object({ ok: external_exports2.literal(true), instanceId: external_exports2.string().min(1), workspaceId: external_exports2.string().min(1) }).strict(),
       external_exports2.object({ ok: external_exports2.literal(false), error: hostErrorSchema }).strict()
     ])
   },
   pinNativeSession: {
-    input: external_exports2.object({ threadId: external_exports2.string().min(1), sessionId: external_exports2.string().min(1), instanceId: external_exports2.string().min(1), workspaceId: external_exports2.string().min(1) }).strict(),
+    input: external_exports2.object({ threadId: external_exports2.string().min(1).optional(), projectId: external_exports2.string().min(1).optional(), sessionId: external_exports2.string().min(1), instanceId: external_exports2.string().min(1), workspaceId: external_exports2.string().min(1) }).strict(),
     output: external_exports2.discriminatedUnion("ok", [
       external_exports2.object({ ok: external_exports2.literal(true) }).strict(),
       external_exports2.object({ ok: external_exports2.literal(false), error: hostErrorSchema }).strict()
@@ -33859,6 +33892,29 @@ var ProjectMarginsTransport = class {
     this.manager = manager;
   }
   manager;
+  async listWorkspaceMeetings(target, dataDir) {
+    try {
+      const handle = await this.manager.ensure(target, dataDir);
+      const listed = await this.request(handle, "sessions?limit=50", "GET");
+      const meetings = await Promise.all(listed.sessions.map(async ({ session_id }) => {
+        const id = encodeURIComponent(session_id);
+        const [summary, note] = await Promise.all([
+          this.request(handle, `sessions/${id}`, "GET"),
+          this.request(handle, `sessions/${id}/note-association`, "GET")
+        ]);
+        return {
+          sessionId: summary.session_id,
+          title: summary.title,
+          startedAt: summary.started_at,
+          inputFinalized: summary.input_finalized,
+          notePath: note?.relative_path || null
+        };
+      }));
+      return { ok: true, meetings };
+    } catch (cause) {
+      return { ok: false, error: hostError("workspace_meetings_unavailable", cause instanceof Error ? cause.message : String(cause)) };
+    }
+  }
   async readWorkspaceMeeting(target, dataDir, sessionId) {
     try {
       const handle = await this.manager.ensure(target, dataDir);
@@ -34083,6 +34139,10 @@ function createMarginsHostEntry(transport) {
     contract: marginsHostContract,
     experimental_signals: hostSignals,
     handlers: {
+      listWorkspaceMeetings(input2, context) {
+        retain(context);
+        return transport.listWorkspaceMeetings(input2.target, context.experimental_paths.dataDir);
+      },
       readWorkspaceMeeting(input2, context) {
         retain(context);
         return transport.readWorkspaceMeeting(input2.target, context.experimental_paths.dataDir, input2.sessionId);

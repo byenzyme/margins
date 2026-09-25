@@ -40,6 +40,13 @@ export const workspaceMeetingResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), meeting: workspaceMeetingSchema.nullable(), candidates: z.array(z.string()) }).strict(),
   z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
 ]);
+export const workspaceMeetingSummarySchema = workspaceMeetingSchema.omit({ notepad: true }).extend({
+  notePath: z.string().nullable(),
+}).strict();
+export const workspaceMeetingsResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), meetings: z.array(workspaceMeetingSummarySchema) }).strict(),
+  z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
+]);
 export const hostResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), snapshot: hostCaptureSnapshotSchema.nullable() }).strict(),
   z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
@@ -69,6 +76,10 @@ const ownedCaptureInputSchema = z.object({ target: projectTargetSchema }).extend
   recordingId: z.string().min(1), ownerId: z.string().min(1),
 }).strict();
 export const marginsHostContract = defineRpcContract({
+  listWorkspaceMeetings: {
+    input: z.object({ target: projectTargetSchema }).strict(),
+    output: workspaceMeetingsResultSchema,
+  },
   readWorkspaceMeeting: {
     input: z.object({ target: projectTargetSchema, sessionId: z.string().min(1).optional() }).strict(),
     output: workspaceMeetingResultSchema,
@@ -151,28 +162,44 @@ const captureClientInputSchema = z.object({
   operationId: z.string().min(1),
 }).strict();
 export const marginsRpcContract = defineRpcContract({
+  availableProjects: {
+    input: z.object({}).strict(),
+    output: z.object({ projects: z.array(z.object({ id: z.string(), name: z.string() }).strict()) }).strict(),
+  },
+  getProjectPanelState: {
+    input: z.object({ projectId: z.string().min(1), client: clientCapabilitiesSchema }).strict(),
+    output: panelStateSchema,
+  },
+  beginProjectCapture: {
+    input: z.object({ projectId: z.string().min(1), client: clientCapabilitiesSchema,
+      ownerId: z.string().min(1), title: z.string().trim().max(160).optional() }).strict(),
+    output: panelStateSchema,
+  },
+  listWorkspaceMeetings: {
+    input: z.object({ projectId: z.string().min(1) }).strict(), output: workspaceMeetingsResultSchema,
+  },
   projectWorkspace: {
-    input: z.object({ threadId: z.string().min(1), workspaceId: z.string().optional() }).strict(),
+    input: z.object({ threadId: z.string().min(1).optional(), projectId: z.string().min(1).optional(), workspaceId: z.string().optional() }).strict(),
     output: z.object({ workspaceId: z.string().nullable() }).strict(),
   },
   readWorkspaceMeeting: {
-    input: z.object({ threadId: z.string().min(1), sessionId: z.string().min(1).optional() }).strict(),
+    input: z.object({ threadId: z.string().min(1).optional(), projectId: z.string().min(1).optional(), sessionId: z.string().min(1).optional() }).strict(),
     output: workspaceMeetingResultSchema,
   },
   saveWorkspaceMemo: {
-    input: z.object({ threadId: z.string().min(1), sessionId: z.string().min(1),
+    input: z.object({ threadId: z.string().min(1).optional(), projectId: z.string().min(1).optional(), sessionId: z.string().min(1),
       expectedRevision: z.string().min(1), text: z.string().max(100_000),
     }).strict(), output: workspaceMeetingResultSchema,
   },
   captureAuthority: {
-    input: z.object({ threadId: z.string().min(1) }).strict(),
+    input: z.object({ threadId: z.string().min(1).optional(), projectId: z.string().min(1).optional() }).strict(),
     output: z.discriminatedUnion("ok", [
       z.object({ ok: z.literal(true), instanceId: z.string().min(1), workspaceId: z.string().min(1) }).strict(),
       z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
     ]),
   },
   pinNativeSession: {
-    input: z.object({ threadId: z.string().min(1), sessionId: z.string().min(1), instanceId: z.string().min(1), workspaceId: z.string().min(1) }).strict(),
+    input: z.object({ threadId: z.string().min(1).optional(), projectId: z.string().min(1).optional(), sessionId: z.string().min(1), instanceId: z.string().min(1), workspaceId: z.string().min(1) }).strict(),
     output: z.discriminatedUnion("ok", [
       z.object({ ok: z.literal(true) }).strict(),
       z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
@@ -214,3 +241,4 @@ export type TranscriptionRequestResult = z.infer<typeof transcriptionRequestResu
 export type CaptureRecord = z.infer<typeof captureRecordSchema>;
 export type PanelState = z.infer<typeof panelStateSchema>;
 export type WorkspaceMeeting = z.infer<typeof workspaceMeetingSchema>;
+export type WorkspaceMeetingSummary = z.infer<typeof workspaceMeetingSummarySchema>;
