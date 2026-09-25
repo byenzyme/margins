@@ -20,13 +20,9 @@ const marginsBin = required("MARGINS_E2E_BIN");
 const serverBin = required("MARGINS_E2E_SERVER_BIN");
 const bbApp = required("MARGINS_E2E_BB_APP");
 const chromeBin = required("MARGINS_E2E_CHROME_BIN");
-const asrValues = ["MARGINS_E2E_SPOKEN_WAV", "MARGINS_E2E_ASR_MODEL_DIR", "MARGINS_E2E_ORT_LIBRARY"]
-  .map((name) => process.env[name]);
-if (asrValues.some(Boolean) && !asrValues.every(Boolean)) {
-  throw new Error("Set MARGINS_E2E_SPOKEN_WAV, MARGINS_E2E_ASR_MODEL_DIR, and MARGINS_E2E_ORT_LIBRARY together");
-}
-const asrEnabled = asrValues.every(Boolean);
-if (asrEnabled) for (const name of ["MARGINS_E2E_SPOKEN_WAV", "MARGINS_E2E_ASR_MODEL_DIR", "MARGINS_E2E_ORT_LIBRARY"]) required(name);
+const spokenWav = required("MARGINS_E2E_SPOKEN_WAV");
+const asrModelDir = required("MARGINS_E2E_ASR_MODEL_DIR");
+const ortLibrary = required("MARGINS_E2E_ORT_LIBRARY");
 const image = process.env.MARGINS_E2E_CHROME_IMAGE || "margins-bb-e2e-chrome:local";
 const artifacts = path.resolve(process.env.MARGINS_E2E_ARTIFACTS || path.join(plugin, "e2e-artifacts", new Date().toISOString().replace(/[:.]/g, "-")));
 const temporary = mkdtempSync(path.join(os.tmpdir(), "margins-bb-meetings-"));
@@ -61,22 +57,6 @@ function findId(value, prefix) {
     if (found) return found;
   }
   return null;
-}
-function makeWav(file) {
-  const sampleRate = 16_000;
-  const samples = sampleRate * 8;
-  const buffer = Buffer.alloc(44 + samples * 2);
-  buffer.write("RIFF", 0); buffer.writeUInt32LE(buffer.length - 8, 4);
-  buffer.write("WAVEfmt ", 8); buffer.writeUInt32LE(16, 16);
-  buffer.writeUInt16LE(1, 20); buffer.writeUInt16LE(1, 22);
-  buffer.writeUInt32LE(sampleRate, 24); buffer.writeUInt32LE(sampleRate * 2, 28);
-  buffer.writeUInt16LE(2, 32); buffer.writeUInt16LE(16, 34);
-  buffer.write("data", 36); buffer.writeUInt32LE(samples * 2, 40);
-  for (let i = 0; i < samples; i++) {
-    const envelope = [0.05, 0.5, 0.12, 0.85][Math.floor(i / sampleRate) % 4];
-    buffer.writeInt16LE(Math.round(25_000 * envelope * Math.sin(2 * Math.PI * 310 * i / sampleRate)), 44 + 2 * i);
-  }
-  writeFileSync(file, buffer);
 }
 function makeSpokenWav(file, source) {
   // Repeat the short spoken fixture so the browser capture spans the whole journey.
@@ -122,8 +102,7 @@ let bbEnv;
 try {
   assert(!home.startsWith(path.join(os.homedir(), ".margins")));
   assert(!vault.startsWith("/workspace/obsidian"));
-  if (asrEnabled) makeSpokenWav(wav, process.env.MARGINS_E2E_SPOKEN_WAV);
-  else makeWav(wav);
+  makeSpokenWav(wav, spokenWav);
   const marginsEnv = { ...process.env, MARGINS_HOME: home };
   command(marginsBin, ["workspace", "new", "e2e", "--home", vault], { env: marginsEnv });
   const config = path.join(home, "workspaces/e2e/config.toml");
@@ -146,12 +125,10 @@ try {
   const daemonPort = await freePort();
   cdpPort = await freePort();
   bbEnv = { ...process.env, BB_SERVER_URL: `http://127.0.0.1:${serverPort}`, BB_DATA_DIR: bbData };
-  if (asrEnabled) {
-    const hostData = path.join(bbData, "plugins/margins/host-data");
-    mkdirSync(hostData, { recursive: true });
-    writeFileSync(path.join(hostData, "asr-runtime.json"), `${JSON.stringify({ serverPath: serverBin,
-      modelDir: process.env.MARGINS_E2E_ASR_MODEL_DIR, ortLibraryPath: process.env.MARGINS_E2E_ORT_LIBRARY })}\n`);
-  }
+  const hostData = path.join(bbData, "plugins/margins/host-data");
+  mkdirSync(hostData, { recursive: true });
+  writeFileSync(path.join(hostData, "asr-runtime.json"), `${JSON.stringify({ serverPath: serverBin,
+    modelDir: asrModelDir, ortLibraryPath: ortLibrary })}\n`);
   const bbOut = openSync(path.join(artifacts, "bb.log"), "w");
   const bbErr = openSync(path.join(artifacts, "bb-errors.log"), "w");
   bbProcess = spawn(bbApp, ["--data-dir", bbData, "--server-bind-host", "0.0.0.0", "--server-port", String(serverPort), "--host-daemon-port", String(daemonPort), "start"], {
@@ -186,7 +163,7 @@ try {
   shot("01-workspace.png");
 
   browser(["find", "role", "button", "click", "--name", "Start meeting", "--exact"]);
-  const startState = await until("Recording", () => browserEval(`document.querySelector('button[aria-label="Pause recording"]') ? 'recording' : document.querySelector('.margins-meetings-empty [role="alert"]')?.textContent || null`), asrEnabled ? 60_000 : 20_000);
+  const startState = await until("Recording", () => browserEval(`document.querySelector('button[aria-label="Pause recording"]') ? 'recording' : document.querySelector('.margins-meetings-empty [role="alert"]')?.textContent || null`), 60_000);
   assert.equal(startState, "recording", `Start failed: ${startState}`);
   const levels = [];
   for (let i = 0; i < 6; i++) {
@@ -230,21 +207,26 @@ try {
   shot("06-revised.png");
 
   browser(["find", "role", "button", "click", "--name", "Make note in new thread →", "--exact"]);
-  await until("Composer", () => browserEval(`document.querySelector('[role="textbox"]')?.textContent?.includes('Distill memo revision')`), asrEnabled ? 120_000 : 20_000);
-  const prompt = browserEval(`document.querySelector('[role="textbox"]')?.textContent || ''`);
-  assert(prompt.includes("Workspace e2e"));
-  assert(prompt.includes("session meeting"));
-  assert(prompt.includes(projectId));
-  let transcript = null;
-  if (asrEnabled) {
-    transcript = await until("Parakeet transcript", () => {
-      const result = jsonCommand(marginsBin, ["--workspace", "e2e", "transcript", "latest", "--format", "json"], { env: marginsEnv });
-      const utterances = String(result.body || "").split("\n").filter((line) => /^\[\d{2}:\d{2}(?::\d{2})?\]/.test(line) && !/\] memo:/.test(line));
-      return result.view === "aligned" && String(result.body).includes("Source: Headless parakeet-onnx transcript")
-        && utterances.length > 0 ? result : null;
-    }, 120_000);
-    writeFileSync(path.join(artifacts, "transcript.json"), `${JSON.stringify(transcript, null, 2)}\n`);
-  }
+  await until("Composer", () => browserEval(`document.querySelector('[role="textbox"]')?.textContent?.includes('<margins-context-v1>')`), 120_000);
+  const prompt = browserEval(`document.querySelector('[role="textbox"]')?.innerText || ''`);
+  const plainPrompt = prompt.split("<margins-context-v1>")[0].trim();
+  assert.match(plainPrompt, /^Make a connected note from my meeting on [A-Za-z]+ \d+, \d{4}\.$/);
+  const contextMatch = prompt.match(/<margins-context-v1>\s*(\{[^\n]+\})\s*<\/margins-context-v1>/);
+  assert(contextMatch, "Composer lacks a delimited Margins context block");
+  const composerContext = JSON.parse(contextMatch[1]);
+  assert.deepEqual({ workspaceId: composerContext.workspaceId, sessionId: composerContext.sessionId,
+    bbProjectId: composerContext.bbProjectId, note: composerContext.note },
+  { workspaceId: "e2e", sessionId: "meeting", bbProjectId: projectId, note: "create" });
+  assert.match(composerContext.memoRevision, /^v\d+-/);
+  assert.equal(composerContext.transcript, "ready");
+  assert(!/\(\d{3}\)/.test(prompt), "Composer draft includes a raw HTTP error");
+  const transcript = await until("Parakeet transcript", () => {
+    const result = jsonCommand(marginsBin, ["--workspace", "e2e", "transcript", "latest", "--format", "json"], { env: marginsEnv });
+    const utterances = String(result.body || "").split("\n").filter((line) => /^\[\d{2}:\d{2}(?::\d{2})?\]/.test(line) && !/\] memo:/.test(line));
+    return result.view === "aligned" && String(result.body).includes("Source: Headless parakeet-onnx transcript")
+      && utterances.length > 0 ? result : null;
+  }, 120_000);
+  writeFileSync(path.join(artifacts, "transcript.json"), `${JSON.stringify(transcript, null, 2)}\n`);
   // The SDK's toCompose has no project argument. Select the fixture project
   // through bb's composer picker without submitting the prompt.
   browser(["find", "role", "button", "click", "--name", "Project: Work in a project", "--exact"]);
@@ -255,7 +237,7 @@ try {
   assert.deepEqual(threadIds(afterThreads), threadIds(beforeThreads), "Distill must not spawn or send a thread");
   assert(!existsSync(path.join(code, ".margins")), "Capture must not fall back to the bb project folder");
   shot("07-composer.png");
-  writeFileSync(path.join(artifacts, "assertions.json"), `${JSON.stringify({ projectId, threadOne, threadTwo, levels, memoSavedAfterStop: true, projectCaptureFallbackAbsent: true, composerPrompt: prompt, threadsUnchanged: true, transcription: asrEnabled ? "parakeet-asr" : "not-requested", transcriptObserved: Boolean(transcript), noLlm: true }, null, 2)}\n`);
+  writeFileSync(path.join(artifacts, "assertions.json"), `${JSON.stringify({ projectId, threadOne, threadTwo, levels, memoSavedAfterStop: true, projectCaptureFallbackAbsent: true, composerPrompt: prompt, composerPlainPrompt: plainPrompt, composerContext, threadsUnchanged: true, transcription: "parakeet-asr", transcriptObserved: true, noLlm: true }, null, 2)}\n`);
   console.log(`PASS: no-LLM steps 1-6; evidence ${artifacts}`);
 } catch (error) {
   if (videoStarted) {

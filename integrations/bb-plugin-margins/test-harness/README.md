@@ -40,7 +40,7 @@ save, and a seeded composer with no new thread. bb's SDK currently cannot pass
 a project to `navigate.toCompose`, so the runner selects the fixture project
 through the composer picker without sending.
 
-For the spoken-audio lane, also set `MARGINS_E2E_SPOKEN_WAV` to an existing
+Set `MARGINS_E2E_SPOKEN_WAV` to an existing
 speech WAV, `MARGINS_E2E_ASR_MODEL_DIR` to the pinned Parakeet TDT v2 ONNX
 directory, and `MARGINS_E2E_ORT_LIBRARY` to the ONNX Runtime library. Set all
 three together, and build the server with
@@ -50,9 +50,9 @@ margins-server`. The runner repeats the WAV for Chrome's fake microphone and
 creates `asr-runtime.json` under the disposable bb plugin host data directory,
 selecting the `hosted-web` server built above. It requests transcription of
 the same browser session after Finish and requires at least one spoken timeline
-line; a memo-only live checkpoint is a failure. The no-LLM lane remains
-available without those assets, with `transcription: not-requested` recorded in
-`assertions.json`.
+line; a memo-only live checkpoint is a failure. This lane makes no LLM call,
+but it requires ASR assets to prove that the meeting has real speech for the
+later distillation run.
 
 Video, step screenshots, destination and plan evidence, bb logs, and assertion
 results are written under gitignored `../e2e-artifacts/<timestamp>/`. Set

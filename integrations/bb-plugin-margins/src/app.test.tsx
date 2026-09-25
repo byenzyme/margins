@@ -90,10 +90,11 @@ describe("Margins recording panel", () => {
     await waitFor(() => expect(slot.inspection.navigateCalls.some((call) => call.method === "toCompose")).toBe(true));
     const compose = slot.inspection.navigateCalls.find((call) => call.method === "toCompose");
     expect(compose).toMatchObject({ options: { focusPrompt: true } });
-    expect(JSON.stringify(compose)).toContain("ended-2");
-    expect(JSON.stringify(compose)).toContain("vault");
-    expect(JSON.stringify(compose)).toContain("memo-v3");
-    expect(JSON.stringify(compose)).toContain("project-1");
+    const prompt = (compose as { options: { initialPrompt: string } }).options.initialPrompt;
+    expect(prompt).toMatch(/^Make a connected note from my Review meeting on [A-Za-z]+ \d+, \d{4}\.\n\n<margins-context-v1>\n/);
+    const context = JSON.parse(prompt.match(/<margins-context-v1>\n(.+)\n<\/margins-context-v1>/)?.[1] || "null");
+    expect(context).toEqual({ workspaceId: "vault", sessionId: "ended-2", memoRevision: "memo-v3",
+      bbProjectId: "project-1", transcript: "pending", note: "create" });
     expect(slot.inspection.rpcCalls.some((call) => call.method === "transcribePinnedSession")).toBe(true);
     expect(slot.inspection.rpcCalls.some((call) => call.method === "threads.spawn")).toBe(false);
     slot.lifecycle.unmount();
@@ -125,7 +126,30 @@ describe("Margins recording panel", () => {
     expect(slot.inspection.rpcCalls).toContainEqual(expect.objectContaining({ method: "saveWorkspaceMemo",
       input: expect.objectContaining({ expectedRevision: "memo-v1", text: "Revised decision" }) }));
     expect(JSON.stringify(slot.inspection.navigateCalls)).toContain("memo-v2");
-    expect(JSON.stringify(slot.inspection.navigateCalls)).toContain("update it with the revised memo");
+    expect(JSON.stringify(slot.inspection.navigateCalls)).toContain("Update the connected note from my Review meeting");
+    expect(JSON.stringify(slot.inspection.navigateCalls)).toContain('\\"note\\":\\"update\\"');
+    slot.lifecycle.unmount();
+  });
+
+  it("keeps a transcription failure on Meetings instead of putting its error in a composer draft", async () => {
+    const ended = { sessionId: "ended-error", title: null, startedAt: "2026-09-24T01:00:00Z", inputFinalized: true,
+      notepad: { text: "Decision", revision: "memo-v1" }, notePath: null, threadIds: [], distilledMemoRevision: null };
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "project-1/ended-error" }, { context: { projectId: "project-1" }, rpc: {
+      availableProjects: () => ({ projects: [{ id: "project-1", name: "Project" }] }),
+      getProjectPanelState: () => panel({ state: "ready", recordingId: null }),
+      listWorkspaceMeetings: () => ({ ok: true, meetings: [ended] }),
+      readWorkspaceMeeting: () => ({ ok: true, candidates: [], meeting: ended }),
+      connectedNoteContext: () => ({ ok: true, context: {
+        schema: "margins.bb.connected-note-context.v1", instanceId: "instance", workspaceId: "vault", sessionId: ended.sessionId, title: null,
+        transcript: { available: false, terminal: false, live: false, updatedAtUnixMs: 0 },
+        memo: { revision: "memo-v1", lineCount: 1 }, artifacts: [], noteAssociation: null, instructions: "",
+      } }),
+      transcribePinnedSession: () => ({ ok: false, error: { code: "transcription_unavailable", message: "upstream (503)", retryable: true } }),
+    } });
+    const screen = within(slot.container);
+    fireEvent.click(await screen.findByRole("button", { name: "Make note in new thread →" }));
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("upstream (503)"));
+    expect(slot.inspection.navigateCalls.some((call) => call.method === "toCompose")).toBe(false);
     slot.lifecycle.unmount();
   });
 

@@ -181,16 +181,21 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
       const result = await rpc.call("connectedNoteContext", { projectId, sessionId: selected.sessionId });
       if (!result.ok) throw new Error(result.error.message);
       const { sessionId, workspaceId, memo } = result.context;
-      let transcriptRequest = "";
+      let transcript = "ready";
       if (!result.context.transcript.available) {
         const requested = await rpc.call("transcribePinnedSession", { projectId, sessionId });
-        transcriptRequest = requested.ok ? "Transcription has been requested; wait for it before writing. "
-          : `Transcription could not be requested (${requested.error.message}); arrange transcription before writing. `;
+        if (!requested.ok) throw new Error(requested.error.message);
+        transcript = requested.status === "complete" ? "ready" : "pending";
       }
-      const noteTask = result.context.noteAssociation
-        ? "Review the note already associated with this session and update it with the revised memo."
-        : "Create a connected note for this session.";
-      navigate.toCompose({ initialPrompt: `Work in bb project ${projectId}. Use the Margins distillation skill for Margins session ${sessionId} in Workspace ${workspaceId}. ${noteTask} Distill memo revision ${memo.revision}. Read that exact session's memo and transcript, then write the note through the Workspace Source. ${transcriptRequest}After writing, associate the note with the session and record this bb thread id and distilled memo revision on the session.`, focusPrompt: true });
+      const date = new Date(meeting?.startedAt || selected.startedAt).toLocaleDateString("en-US", {
+        month: "long", day: "numeric", year: "numeric",
+      });
+      const title = (selected.title || "").replace(/\s+/g, " ").trim().slice(0, 100);
+      const label = title ? `${title}${/meeting$/i.test(title) ? "" : " meeting"} on ${date}` : `meeting on ${date}`;
+      const action = result.context.noteAssociation ? "Update the connected note from" : "Make a connected note from";
+      const contextBlock = JSON.stringify({ workspaceId, sessionId, memoRevision: memo.revision,
+        bbProjectId: projectId, transcript, note: result.context.noteAssociation ? "update" : "create" });
+      navigate.toCompose({ initialPrompt: `${action} my ${label}.\n\n<margins-context-v1>\n${contextBlock}\n</margins-context-v1>`, focusPrompt: true });
     } catch (error) { setMessage(String(error)); }
   }
 

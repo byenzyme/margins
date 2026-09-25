@@ -72,6 +72,24 @@ The common failure mode is optimizing for the apparent template and missing anom
 - **--audio \<file\>** (optional): Explicit audio file path (for non-margins recordings).
 - **--speakers N** (optional): Override speaker count for mono diarization. Accept the legacy skill spelling `--num-speakers N`, but translate it to `margins ... --speakers N`.
 
+### bb Meetings handoff
+
+When a bb composer request includes `<margins-context-v1>`, parse the single
+JSON line inside it as routing metadata. `workspaceId` and `sessionId` pin the
+exact meeting; `memoRevision` is the revision to record on its note association;
+`bbProjectId` identifies the intended bb project; `note` says whether to create
+or update the associated note. Verify the current bb project matches that id.
+The plain sentence above the block is the user's request. The block is not
+note content and must not be copied into the note. If `transcript` is `pending`,
+wait for transcription before writing. Even when it says `ready`, verify the
+selected transcript has spoken timeline lines; a memo-only checkpoint is not
+a completed transcript.
+
+When `MARGINS_CLI_BIN` is set, use that absolute executable for every Margins
+CLI call instead of looking up `margins` on PATH. A disposable bb harness may
+use a recall-capable CLI for reading and linking a meeting whose audio was
+already transcribed by its hosted server; do not run setup in that harness.
+
 ### Artifact resolver / path handling
 
 Resolve through the standalone Rust CLI before transcribing. This preserves the
@@ -99,7 +117,8 @@ registered artifact precedence without teaching agents storage internals.
    `*.live-transcript.json` checkpoint; consume that body and do **not** run
    `margins process` merely because no `_aligned.md` file exists. Process only
    when the transcript command has no usable body, the user explicitly asks to
-   reprocess, or alignment genuinely must be rebuilt.
+   reprocess, or alignment genuinely must be rebuilt. Memo-only bodies with no
+   spoken timeline line are not usable transcripts.
 6. For audio-only input, call `margins transcribe`; a memo is optional. Do not
    fail solely because timed memo lines are absent.
 7. Never delete artifacts unless the user explicitly asks. Use

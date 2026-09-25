@@ -103,7 +103,9 @@ memo revision changes: **Update note in new thread →**.
   prefilled composer keeps the user's on-screen provider/model/permission
   settings.
 - The prompt carries the `sessionId`, the Workspace id, and the memo revision
-  being distilled. It carries no destination path.
+  being distilled in a compact `<margins-context-v1>` JSON block beneath one
+  plain sentence asking for the note. It also carries the bb project id and
+  transcription status, but no destination path or raw server error text.
 - Opening a composer does not freeze or mark the memo distilled. The new thread
   uses a saved memo revision as its input; the memo remains editable. Once a
   note is associated, a later memo edit offers "Update note in new thread".
