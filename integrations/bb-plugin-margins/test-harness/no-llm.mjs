@@ -37,6 +37,8 @@ const chromeName = `margins-bb-e2e-${process.pid}`;
 const browserSession = `margins-bb-e2e-${process.pid}`;
 let bbProcess;
 let videoStarted = false;
+let videoStartedAt = 0;
+let otherThreadAt = 0;
 
 mkdirSync(artifacts, { recursive: true });
 mkdirSync(home, { recursive: true });
@@ -117,6 +119,9 @@ try {
   mkdirSync(path.dirname(skillTarget), { recursive: true });
   cpSync(path.join(repo, "skills/margins"), skillTarget, { recursive: true });
   writeFileSync(path.join(code, "AGENTS.md"), `# Disposable Margins meeting fixture\n\nUse ${marginsBin} by absolute path for every Margins CLI call, with MARGINS_HOME=${home}. Do not invoke a margins binary from PATH. This project's notes are in the disposable Workspace Home ${vault}; write the connected note inside its inbox/ folder. The note must reflect distinct evidence from both the memo and the spoken transcript. Do not read or write /workspace/obsidian or ~/.margins.\n`);
+  command("git", ["init", "-q", "-b", "main", code]);
+  command("git", ["-C", code, "add", "AGENTS.md", ".bb/skills/margins"]);
+  command("git", ["-C", code, "-c", "user.name=Meetings E2E", "-c", "user.email=meetings-e2e@example.invalid", "commit", "-qm", "Seed disposable project"]);
   makeSpokenWav(wav, spokenWav);
   const marginsEnv = { ...process.env, MARGINS_HOME: home };
   command(marginsBin, ["workspace", "new", "e2e", "--home", vault], { env: marginsEnv });
@@ -176,6 +181,7 @@ try {
   await until("Chrome CDP", async () => (await fetch(`http://127.0.0.1:${cdpPort}/json/version`)).ok);
   browser(["record", "start", path.join(artifacts, "journey.webm"), `${bbEnv.BB_SERVER_URL}/plugins/margins/meetings`]);
   videoStarted = true;
+  videoStartedAt = Date.now();
   browser(["set", "viewport", "1440", "900"]);
   await until("Meetings page", () => browserEval('!!document.querySelector(".margins-meetings-page")'));
   shot("01-workspace.png");
@@ -190,15 +196,23 @@ try {
   }
   assert(levels.some((level) => level > 0));
   assert(new Set(levels).size > 1);
+  assert(browserEval(`document.activeElement === document.querySelector('textarea[aria-label="Meeting memo pad"]')`));
+  assert.equal(browserEval(`document.querySelector('textarea[aria-label="Meeting memo pad"]')?.getAttribute('placeholder')`), "Write notes...");
+  assert(browserEval(`document.querySelector('.margins-meeting-kicker')?.innerText.includes('Recording')`));
+  assert(browserEval(`[...document.querySelectorAll('.margins-meeting-list section button small')].every((small) => small.textContent !== 'Live')`));
   assert(browserEval(`!!document.querySelector('button[aria-label="Stop and save recording"]')`));
   assert.equal(browserEval(`document.querySelectorAll('.margins-meeting-pad button[aria-label="Pause"], .margins-meeting-pad button[aria-label="Stop and save"]').length`), 0);
-  assert.equal(browserEval(`document.querySelectorAll('.margins-meetings-top button').length`), 0);
+  assert(browserEval(`document.querySelector('.margins-meetings-top button')?.classList.contains('is-reserved')`));
   shot("02-recording.png");
   const liveMemo = "Decision: ship the quiet Meetings view. Owner: Maya.";
   browser(["fill", 'textarea[aria-label="Meeting memo pad"]', liveMemo]);
-  await until("Live memo saved", () => browserEval('document.querySelector(".margins-meeting-pad footer")?.innerText.includes("Saved")'));
+  await until("Live memo saved", () => browserEval('document.querySelector(".margins-meeting-status")?.innerText.includes("Saved")'));
+  assert(!browserEval(`document.querySelector('.margins-meeting-pad footer')?.innerText.includes('Saved')`));
   browser(["click", `a[aria-label="Open E2E thread two"]`]);
   assert(browserEval(`!!document.querySelector('button[aria-label="Pause recording"]')`));
+  assert(browserEval(`document.querySelector('.margins-overlay')?.innerText.includes('Recording')`));
+  shot("03-overlay-other-thread.png");
+  otherThreadAt = Date.now();
   browser(["click", `a[aria-label="Open E2E thread one"]`]);
   browser(["find", "role", "button", "click", "--name", "Meetings", "--exact"]);
   await until("Live memo after thread switch", () => browserEval(`!!document.querySelector('textarea[aria-label="Meeting memo pad"]')`));
@@ -206,17 +220,23 @@ try {
   shot("03-thread-switch.png");
   browser(["click", 'button[aria-label="Pause recording"]']);
   await until("Paused", () => browserEval(`!!document.querySelector('button[aria-label="Resume recording"]')`));
+  assert.match(browserEval(`document.querySelector('.margins-overlay')?.innerText || ''`), /^Paused · \d+:\d{2}/);
+  assert(browserEval(`document.querySelector('.margins-level-dot.paused') !== null`));
+  assert(browserEval(`document.querySelector('.margins-meeting-kicker')?.innerText.includes('Paused')`));
+  assert(browserEval(`document.querySelector('.margins-meeting-list')?.innerText.includes('Paused')`));
   shot("04-paused.png");
   browser(["click", 'button[aria-label="Resume recording"]']);
   await until("Resumed", () => browserEval(`!!document.querySelector('button[aria-label="Pause recording"]')`));
   browser(["click", 'button[aria-label="Stop and save recording"]']);
   await until("Ready to refine", () => browserEval(`document.querySelector('.margins-meeting-list')?.innerText.toLowerCase().includes('ready to refine') && !document.querySelector('button[aria-label="Stop and save recording"]')`));
+  await until("Stop acknowledgment", () => browserEval(`/^Saved · [0-9]+:[0-9]{2} recorded$/.test(document.querySelector('.margins-meeting-kicker')?.innerText || '')`), 4_000);
   assertMemo(liveMemo);
-  assert(browserEval(`document.querySelector('.margins-meeting-next')?.innerText.includes('Memo stays editable.')`));
+  assert.equal(browserEval(`document.querySelectorAll('.margins-meeting-pad .margins-meeting-kicker').length`), 1);
+  assert(browserEval(`document.querySelector('.margins-meeting-next')?.innerText.includes('Make note →')`));
   shot("05-ready.png");
   const revisedMemo = `${liveMemo} Post-stop correction: include accessibility pass.`;
   browser(["fill", 'textarea[aria-label="Meeting memo pad"]', revisedMemo]);
-  await until("Revised memo saved", () => browserEval('document.querySelector(".margins-meeting-pad footer")?.innerText.includes("Saved")'));
+  await until("Revised memo saved", () => browserEval('document.querySelector(".margins-meeting-status")?.innerText.includes("Saved")'));
   browser(["find", "role", "button", "click", "--name", "Meetings", "--exact"]);
   assertMemo(revisedMemo);
   const captureDir = path.join(home, "workspaces/e2e/captures/.margins");
@@ -224,7 +244,7 @@ try {
   assert(memos.some((name) => readFileSync(path.join(captureDir, name), "utf8").includes(revisedMemo)));
   shot("06-revised.png");
 
-  browser(["find", "role", "button", "click", "--name", "Make note in new thread →", "--exact"]);
+  browser(["find", "role", "button", "click", "--name", "Make note →", "--exact"]);
   await until("Composer", () => browserEval(`document.querySelector('[role="textbox"]')?.textContent?.includes('<margins-context-v1>')`), 120_000);
   const prompt = browserEval(`document.querySelector('[role="textbox"]')?.innerText || ''`);
   const plainPrompt = prompt.split("<margins-context-v1>")[0].trim();
@@ -250,12 +270,20 @@ try {
   browser(["find", "role", "button", "click", "--name", "Project: Work in a project", "--exact"]);
   browser(["find", "role", "option", "click", "--name", "Meetings E2E code", "--exact"]);
   assert(browserEval(`!!document.querySelector('button[aria-label="Project: Meetings E2E code"]')`));
+  assert(!browserEval(`document.body.innerText.includes('Unknown checkout')`), "Disposable bb project is missing its Git checkout");
   const afterThreads = bb(["thread", "list", "--project", projectId]);
   const threadIds = (value) => [...JSON.stringify(value).matchAll(/thr_[a-z0-9]+/g)].map((match) => match[0]).sort();
   assert.deepEqual(threadIds(afterThreads), threadIds(beforeThreads), "Distill must not spawn or send a thread");
   assert(!existsSync(path.join(code, ".margins")), "Capture must not fall back to the bb project folder");
   shot("07-composer.png");
-  const assertions = { projectId, threadOne, threadTwo, levels, memoSavedAfterStop: true,
+  if (!realLlm) {
+    browser(["find", "role", "button", "click", "--name", "Meetings", "--exact"]);
+    await until("handoff trail", () => browserEval(`document.querySelector('.margins-meeting-trail')?.innerText.includes('Note draft opened — press Enter to start')`));
+    assert(browserEval(`document.querySelector('.margins-meeting-trail')?.innerText.includes('Transcript ready')`));
+    shot("08-handoff-ready.png");
+  }
+  const assertions = { projectId, threadOne, threadTwo, levels, memoSavedAfterStop: true, stopAcknowledged: true,
+    overlayVisibleOnOtherThread: true,
     projectCaptureFallbackAbsent: true, composerPrompt: prompt, composerPlainPrompt: plainPrompt,
     composerContext, threadsUnchanged: true, transcription: "parakeet-asr", transcriptObserved: true, noLlm: !realLlm };
   writeFileSync(path.join(artifacts, "assertions.json"), `${JSON.stringify(assertions, null, 2)}\n`);
@@ -312,7 +340,15 @@ try {
     cpSync(vault, path.join(artifacts, "vault"), { recursive: true });
     writeFileSync(path.join(artifacts, "assertions.json"), `${JSON.stringify(assertions, null, 2)}\n`);
     console.log(`PASS: real-LLM step 7; note ${path.join(artifacts, "vault/inbox", noteName)}; evidence ${artifacts}`);
-  } else console.log(`PASS: no-LLM steps 1-6; evidence ${artifacts}`);
+  } else {
+    browser(["record", "stop"]);
+    videoStarted = false;
+    const clipStart = Math.max(0, (otherThreadAt - videoStartedAt) / 1_000 - 2);
+    command("ffmpeg", ["-nostdin", "-loglevel", "error", "-ss", String(clipStart), "-i", path.join(artifacts, "journey.webm"),
+      "-t", "4", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-n", path.join(artifacts, "03-overlay-other-thread.mp4")]);
+    assert(existsSync(path.join(artifacts, "03-overlay-other-thread.mp4")));
+    console.log(`PASS: no-LLM steps 1-6; evidence ${artifacts}`);
+  }
 } catch (error) {
   if (videoStarted) {
     try { shot("failure.png"); } catch { /* browser may be gone */ }

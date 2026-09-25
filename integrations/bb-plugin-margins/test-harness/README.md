@@ -31,7 +31,8 @@ MARGINS_E2E_CHROME_BIN=/absolute/.agent-browser/browsers/chrome-version/chrome \
 node integrations/bb-plugin-margins/test-harness/no-llm.mjs
 ```
 
-The runner creates a fixture vault copy with `inbox`, adds `note_folder` to a
+The runner creates a fixture vault copy with `inbox`, initializes the disposable
+bb project as a Git checkout, adds `note_folder` to a
 desired Workspace TOML, preserves the exact reviewed plan JSON, applies that
 plan, and sets the disposable home's global default to that Workspace. It
 generates an amplitude-varying WAV and mounts it into headless Chrome as the
@@ -55,7 +56,8 @@ line; a memo-only live checkpoint is a failure. This lane makes no LLM call,
 but it requires ASR assets to prove that the meeting has real speech for the
 later distillation run.
 
-Video, step screenshots, destination and plan evidence, bb logs, and assertion
+Video, step screenshots, a four-second clip with another thread open while the
+recording overlay persists, destination and plan evidence, bb logs, and assertion
 results are written under gitignored `../e2e-artifacts/<timestamp>/`. Set
 `MARGINS_E2E_ARTIFACTS` to an absolute path to choose another artifact folder.
 The runner removes only its own temporary home, bb data, and Chrome container.

@@ -25,7 +25,8 @@
 .margins-overlay button:hover { background:var(--muted); }
 .margins-overlay button:disabled { cursor:default; opacity:.45; }
 .margins-overlay .margins-overlay-open { justify-content:flex-start; gap:6px; padding:0 8px; font-size:12px; font-weight:600; }
-.margins-overlay-dot { width:7px; height:7px; border-radius:50%; background:var(--destructive); }
+.margins-level-dot { display:inline-block; width:7px; height:7px; flex:none; border-radius:50%; background:var(--destructive); transition:opacity 120ms ease,transform 120ms ease; }
+.margins-level-dot.paused { background:var(--muted-foreground); opacity:.55; }
 .margins-overlay-error { max-width:160px; color:var(--destructive); font-size:11px; line-height:1.2; }
 .margins-native { display:flex; flex-direction:column; gap:8px; padding:10px; border:1px solid var(--border); border-radius:10px; background:color-mix(in srgb,var(--muted) 35%,transparent); font-size:12px; }
 .margins-native-manual { display:block; padding:0; border:0; background:transparent; }
@@ -45,28 +46,36 @@
 .margins-settings label,.margins-workspace-setting { display:flex; flex-wrap:wrap; align-items:center; gap:8px; font-size:12px; }
 .margins-settings select,.margins-workspace-setting input { border:1px solid var(--border); border-radius:7px; padding:7px 9px; background:var(--background); color:var(--foreground); }
 .margins-workspace-setting button { border:1px solid var(--border); border-radius:7px; padding:7px 10px; background:var(--background); color:var(--foreground); cursor:pointer; }
-.margins-sidebar-level { display:flex; height:18px; align-items:center; gap:2px; }
-.margins-sidebar-level i { display:block; width:2px; border-radius:2px; background:var(--destructive); }
 .margins-meetings-page { display:grid; grid-template-columns:minmax(180px,240px) minmax(0,1fr); min-height:100%; color:var(--foreground); }
 .margins-meeting-list { display:flex; flex-direction:column; gap:13px; padding:18px 12px; border-right:1px solid var(--border); }
-.margins-meetings-top { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0 6px; }
+.margins-meetings-top { display:flex; min-height:34px; align-items:center; justify-content:space-between; gap:8px; padding:0 6px; }
 .margins-meetings-top strong { font-size:15px; }
 .margins-meetings-top button,.margins-meetings-empty button { border:1px solid var(--border); border-radius:7px; padding:6px 10px; background:transparent; color:var(--foreground); cursor:pointer; }
+.margins-meetings-top button.is-reserved { visibility:hidden; }
 .margins-meeting-list select { width:100%; border:0; padding:5px; background:transparent; color:var(--muted-foreground); font-size:11px; }
+.margins-meeting-list select:disabled { opacity:.5; }
 .margins-meeting-list section { display:flex; flex-direction:column; gap:2px; }
 .margins-meeting-list h3 { margin:5px 6px; color:var(--muted-foreground); font-size:10px; font-weight:650; letter-spacing:.04em; text-transform:uppercase; }
 .margins-meeting-list section button { display:flex; width:100%; flex-direction:column; align-items:flex-start; gap:3px; overflow:hidden; border:0; border-radius:8px; padding:9px 10px; background:transparent; color:var(--foreground); text-align:left; cursor:pointer; }
 .margins-meeting-list section button:hover,.margins-meeting-list section button.selected { background:var(--muted); }
 .margins-meeting-list section button span { max-width:100%; overflow:hidden; font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
-.margins-meeting-list section button small { color:var(--destructive); font-size:10px; }
+.margins-meeting-list section button small { color:var(--muted-foreground); font-size:10px; }
 .margins-meeting-pad { display:flex; min-width:0; min-height:70vh; flex-direction:column; padding:24px clamp(20px,5vw,64px); }
 .margins-meeting-pad header { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; }
 .margins-meeting-kicker { color:var(--muted-foreground); font-size:11px; }
+.margins-meeting-meta { display:flex; min-height:16px; align-items:center; gap:10px; }
+.margins-meeting-kicker { display:inline-flex; align-items:center; gap:6px; }
+.margins-meeting-state-dot { width:7px; height:7px; border-radius:50%; background:var(--destructive); }
+.margins-meeting-state-dot.paused { background:var(--muted-foreground); }
+.margins-meeting-status { max-width:360px; overflow:hidden; color:var(--destructive); font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
+.margins-meeting-status.saved { color:var(--muted-foreground); }
 .margins-meeting-pad h2 { margin:5px 0 0; font-size:20px; font-weight:620; letter-spacing:-.02em; }
-.margins-meeting-next { display:flex; flex-direction:column; align-items:flex-end; gap:4px; }
+.margins-meeting-next { display:flex; align-items:flex-end; }
 .margins-meeting-next button { border:1px solid var(--border); border-radius:8px; padding:7px 10px; background:transparent; color:var(--foreground); font:inherit; font-size:12px; cursor:pointer; }
-.margins-meeting-next small { color:var(--muted-foreground); font-size:11px; }
+.margins-meeting-trail { display:flex; flex-wrap:wrap; align-items:center; gap:5px 12px; margin-top:14px; color:var(--muted-foreground); font-size:11px; }
+.margins-meeting-trail button { border:0; padding:0; background:transparent; color:var(--foreground); font:inherit; text-decoration:underline; cursor:pointer; }
 .margins-meeting-pad textarea { width:100%; min-height:350px; flex:1; resize:none; border:0; outline:0; margin-top:22px; background:transparent; color:var(--foreground); font:inherit; font-size:15px; line-height:1.7; }
+.margins-meeting-pad textarea::placeholder { color:color-mix(in srgb,var(--muted-foreground) 62%,transparent); }
 .margins-meeting-pad footer { display:flex; justify-content:space-between; gap:12px; color:var(--muted-foreground); font-size:11px; }
 .margins-meetings-empty { display:flex; min-height:50vh; flex-direction:column; align-items:flex-start; justify-content:center; gap:12px; }
 .margins-meetings-empty p { max-width:460px; margin:0; color:var(--muted-foreground); font-size:13px; }

@@ -86,7 +86,7 @@ describe("Margins recording panel", () => {
       transcribePinnedSession: () => ({ ok: true, status: "queued", attempt: 1 }),
     } });
     const screen = within(slot.container);
-    fireEvent.click(await screen.findByRole("button", { name: "Make note in new thread →" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Make note →" }));
     await waitFor(() => expect(slot.inspection.navigateCalls.some((call) => call.method === "toCompose")).toBe(true));
     const compose = slot.inspection.navigateCalls.find((call) => call.method === "toCompose");
     expect(compose).toMatchObject({ options: { focusPrompt: true } });
@@ -119,9 +119,9 @@ describe("Margins recording panel", () => {
     const screen = within(slot.container);
     const pad = await screen.findByRole("textbox", { name: "Meeting memo pad" }) as HTMLTextAreaElement;
     expect(pad.readOnly).toBe(false);
-    expect(screen.queryByRole("button", { name: "Update note in new thread →" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Update note →" })).toBeNull();
     fireEvent.change(pad, { target: { value: "Revised decision" } });
-    fireEvent.click(await screen.findByRole("button", { name: "Update note in new thread →" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Update note →" }));
     await waitFor(() => expect(slot.inspection.navigateCalls.some((call) => call.method === "toCompose")).toBe(true));
     expect(slot.inspection.rpcCalls).toContainEqual(expect.objectContaining({ method: "saveWorkspaceMemo",
       input: expect.objectContaining({ expectedRevision: "memo-v1", text: "Revised decision" }) }));
@@ -147,8 +147,10 @@ describe("Margins recording panel", () => {
       transcribePinnedSession: () => ({ ok: false, error: { code: "transcription_unavailable", message: "upstream (503)", retryable: true } }),
     } });
     const screen = within(slot.container);
-    fireEvent.click(await screen.findByRole("button", { name: "Make note in new thread →" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Make note →" }));
     await waitFor(() => expect(screen.getByRole("status").textContent).toContain("upstream (503)"));
+    expect(screen.getByText("Transcript unavailable")).toBeDefined();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeDefined();
     expect(slot.inspection.navigateCalls.some((call) => call.method === "toCompose")).toBe(false);
     slot.lifecycle.unmount();
   });

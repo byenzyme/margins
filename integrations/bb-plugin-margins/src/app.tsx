@@ -5,7 +5,7 @@ import type { marginsRpcContract } from "../server.js";
 import { browserCaptureOwner, detectClientCapabilities } from "./browser-capture.js";
 import { nativeBridgeOwner, type CaptureAuthority, type NativeStatus } from "./native-bridge-client.js";
 import type { PanelState, WorkspaceMeeting } from "./contracts.js";
-import { MeetingsAccessory, MeetingsPage } from "./meetings-page.js";
+import { MeetingLevelDot, MeetingsAccessory, MeetingsPage, rememberStopAck } from "./meetings-page.js";
 import { MarginsThreadTab } from "./thread-tab.js";
 
 function paramsTitle(params: JsonValue | null) {
@@ -69,6 +69,7 @@ function RecordingOverlay() {
         const next = await browserCaptureOwner[action]();
         if (next) browserCaptureOwner.acceptPanel(sessionId, next);
       }
+      if (action === "stop") rememberStopAck(sessionId, elapsed);
       setFailure(false);
     } catch { setFailure(true); }
     finally { setBusy(false); }
@@ -77,7 +78,8 @@ function RecordingOverlay() {
     <button className="margins-overlay-open" onClick={() => {
       const projectId = (() => { try { return sessionStorage.getItem("margins.bb.meetings-project") || context.projectId || ""; } catch { return context.projectId || ""; } })();
       navigate.toPluginPanel("meetings", { subPath: projectId ? `${projectId}/${sessionId}` : "" });
-    }}><i className="margins-overlay-dot" aria-hidden="true" /><span>{failure ? "Needs attention" : paused ? "Paused" : recording ? `Recording ${elapsed}` : "Saving"}</span></button>
+    }}><MeetingLevelDot level={recording && !nativeLive ? browserCaptureOwner.level : null} paused={paused} />
+      <span>{failure ? "Needs attention" : paused ? `Paused · ${elapsed}` : recording ? `Recording · ${elapsed}` : "Saving"}</span></button>
     {(recording || paused) && <>
       <button onClick={() => void control(paused ? "resume" : "pause")} disabled={busy} aria-label={paused ? "Resume recording" : "Pause recording"}>{paused ? <Play size={13} /> : <Pause size={13} />}</button>
       <button onClick={() => void control("stop")} disabled={busy} aria-label="Stop and save recording"><Square size={12} /></button>
