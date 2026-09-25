@@ -1192,6 +1192,7 @@ fn browser_snapshot_value(
             .map_err(anyhow::Error::msg)?;
     Ok(json!({
         "recordingId": recording,
+        "sessionId": status.session_name,
         "status": if status.capture_phase == "finalizing" { "saving" } else if status.paused { "paused" } else { "recording" },
         "notepad": notepad,
     }))

@@ -1539,6 +1539,12 @@ where
 
     // Commit the final memo through the same revisioned authority used while
     // capture was live; it owns the Markdown projection.
+    let authority = retain_on_error!(margins::session::SqliteWorkspaceAuthorityStorage::open(
+        work_dir.join(".margins")
+    )
+    .map_err(|error| error.to_string()));
+    let latest_memo = retain_on_error!(authority.memo(name).map_err(|error| error.to_string()));
+    ws.memo_lines = latest_memo.lines;
     let memo_content = crate::recording::export_memo(&ws.memo_lines);
     retain_on_error!(crate::persist_live_memo(work_dir, name, &ws.memo_lines));
     let notes_path = crate::session_memo_path(work_dir, name);

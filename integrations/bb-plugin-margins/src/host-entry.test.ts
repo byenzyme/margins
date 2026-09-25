@@ -4,7 +4,7 @@ import { createMarginsHostEntry } from "./host-entry.js";
 import type { ProjectMarginsTransport } from "./project-server.js";
 
 const target = { projectId: "proj-1", hostId: "host-1", projectRoot: "/srv/project" };
-const snapshot = { recordingId: "rec-1", status: "recording" as const, notepad: { text: "", revision: "v1" } };
+const snapshot = { recordingId: "rec-1", sessionId: "rec-1", status: "recording" as const, notepad: { text: "", revision: "v1" } };
 
 describe("Margins project host entry", () => {
   it("routes capture to the explicit project root and emits project invalidations", async () => {

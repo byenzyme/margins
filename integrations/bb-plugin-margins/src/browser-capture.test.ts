@@ -9,7 +9,7 @@ describe("browser capture ownership", () => {
     schema: "margins.bb.recording.panel.v2",
     state: "recording", title: "Recording", detail: "Microphone only", sourceLabel: "Microphone only",
     storageLabel: "Saved to this bb project", primaryAction: "pause", primaryLabel: "Pause",
-    canStop: true, canEditNotepad: true, ownsRecording: true, recordingId: "rec-1",
+    canStop: true, canEditNotepad: true, ownsRecording: true, recordingId: "rec-1", sessionId: "rec-1",
     notepad: null, lastSessionId: null, error: null, ...value,
   });
 
@@ -97,6 +97,14 @@ describe("browser capture ownership", () => {
     owner.acceptPanel("thr-2", state({ state: "ready", recordingId: null, ownsRecording: false }));
     expect(owner.panel()).toMatchObject({ state: "recording", recordingId: "rec-1" });
     expect(owner.panel("thr-2")).toMatchObject({ state: "ready" });
+  });
+
+  it("replaces the overlay state when Stop returns a saved panel without a recording id", async () => {
+    const { owner } = controllerFixture(async () => state({}) as never);
+    await owner.start("thr-1");
+    owner.acceptPanel("rec-1", state({ state: "saving" }));
+    owner.acceptPanel("rec-1", state({ state: "saved", recordingId: null, ownsRecording: false, canStop: false }));
+    expect(owner.panel()).toMatchObject({ state: "saved" });
   });
 
   it("releases tracks immediately when Stop transport and recorder stop event both hang", async () => {

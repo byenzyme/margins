@@ -246,7 +246,7 @@ export class BrowserCaptureOwner {
   }
   acceptPanel(routeOrSessionId: string, state: PanelState) {
     this.routePanels.set(routeOrSessionId, state);
-    const sessionId = state.recordingId;
+    const sessionId = state.recordingId || (routeOrSessionId === this.recordingId ? routeOrSessionId : null);
     if (sessionId) {
       this.panels.set(sessionId, state);
       for (const [route, panel] of this.routePanels) {
@@ -415,6 +415,7 @@ export class BrowserCaptureOwner {
       });
       if (!state.recordingId || !state.ownsRecording) throw new Error(state.detail);
       await this.createLocal({ sessionId: state.recordingId, startedAtMs: Date.now(), nextSequence: 0, paused: false }, stream);
+      this.acceptPanel(state.recordingId, state);
       return state;
     } catch (cause) {
       stream.getTracks().forEach((track) => track.stop());
@@ -440,6 +441,7 @@ export class BrowserCaptureOwner {
     if (this.capture === current && state.error === null && state.state === "paused") {
       current.pendingControl = undefined;
       writeStored(current);
+      this.acceptPanel(current.sessionId, state);
     }
     return state;
   }
@@ -461,6 +463,7 @@ export class BrowserCaptureOwner {
     if (this.capture === current && state.error === null && state.state === "recording") {
       current.pendingControl = undefined;
       writeStored(current);
+      this.acceptPanel(current.sessionId, state);
     }
     return state;
   }

@@ -170,6 +170,7 @@ export class ProjectServerManager {
         MARGINS_PORT: String(port),
         MARGINS_DATA_DIR: instanceDir,
         MARGINS_WORK_DIR: target.projectRoot,
+        MARGINS_BB_CAPTURE_WORKSPACE: "1",
         MARGINS_HOME: marginsHome(),
         MARGINS_INSTANCE_ID: `bb-host-${target.hostId}`,
         MARGINS_WORKSPACE: workspaceId,

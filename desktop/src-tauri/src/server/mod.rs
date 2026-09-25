@@ -99,7 +99,7 @@ async fn run_async() -> anyhow::Result<()> {
 
     // --- Load settings (same logic as desktop lib.rs startup) ---
     let explicit_work_dir = std::env::var("MARGINS_WORK_DIR").ok().map(PathBuf::from);
-    let work_dir = explicit_work_dir
+    let mut work_dir = explicit_work_dir
         .clone()
         .unwrap_or_else(crate::settings::default_work_dir);
     let mut settings = crate::settings::load_settings();
@@ -131,6 +131,11 @@ async fn run_async() -> anyhow::Result<()> {
     } else {
         workspace::resolve_workspace(&margins_home, Some(&workspace_id), &work_dir)?
     };
+    if std::env::var_os("MARGINS_BB_CAPTURE_WORKSPACE").is_some() {
+        work_dir = workspace.capture_store_dir()?;
+        std::fs::create_dir_all(&work_dir)?;
+        settings.vault_path = Some(work_dir.to_string_lossy().into_owned());
+    }
     let workspace_service = Arc::new(WorkspaceService::open_with_capabilities(
         std::env::var("MARGINS_INSTANCE_ID").unwrap_or_else(|_| "local".to_string()),
         workspace,

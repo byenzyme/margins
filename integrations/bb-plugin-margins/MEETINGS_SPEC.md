@@ -1,7 +1,8 @@
 # Margins for bb: Meetings, memo pads, and distill-to-thread
 
-Status: agreed design (2026-09-25), not yet implemented. Builds on the
-panel/overlay/notepad already on this branch.
+Status: implemented through the no-LLM E2E lane (2026-09-25). The real-LLM
+distillation and independent review steps require separate authorization.
+Builds on the panel/overlay/notepad already on this branch.
 
 ## Goal
 
@@ -164,3 +165,18 @@ Steps 1–6 run without model spend and should be the CI-able lane.
 4. Distill to note via `toCompose`; session ↔ thread link and distilled revision;
    repurposed thread tab.
 5. E2E harness lanes (no-LLM lane, then approved LLM lane).
+
+## Implementation notes
+
+- This bb SDK does not expose project-scoped plugin settings. The optional
+  project Workspace choice is stored in plugin KV under the bb project id and
+  edited from the Meetings page and plugin settings.
+- `navigate.toCompose` has no project argument. The draft names the bb project;
+  users select that project in bb's composer before sending. The no-LLM runner
+  verifies this picker step without submitting the prompt.
+- Browser microphone recording drives the changing sidebar input meter. The
+  native bridge currently exposes sample counts but no audio amplitude; its
+  accessory uses a static activity indication until the bridge reports a
+  measured level.
+- `test-harness/no-llm.mjs` covers steps 1–6 in an isolated bb instance. Step 7
+  and the independent step 8 review were not run.

@@ -30,7 +30,7 @@ export const workspaceMeetingSchema = z.object({
   startedAt: z.string().min(1), inputFinalized: z.boolean(), notepad: notepadSchema,
 }).strict();
 export const hostCaptureSnapshotSchema = z.object({
-  recordingId: z.string().min(1), status: z.enum(["recording", "paused", "saving"]),
+  recordingId: z.string().min(1), sessionId: z.string().min(1), status: z.enum(["recording", "paused", "saving"]),
   notepad: notepadSchema,
 }).strict();
 export const hostErrorSchema = z.object({
@@ -142,7 +142,7 @@ export const hostSignals = {
 export const captureRecordSchema = z.object({
   projectId: z.string().min(1), hostId: z.string().min(1), projectRoot: z.string().min(1),
   workspaceId: z.string().min(1),
-  recordingId: z.string().min(1), clientId: z.string().min(1), ownerId: z.string().min(1),
+  sessionId: z.string().min(1), recordingId: z.string().min(1), clientId: z.string().min(1), ownerId: z.string().min(1),
   lastHeartbeatUnixMs: z.number().int().nonnegative(),
 });
 export const panelStateSchema = z.object({
@@ -151,7 +151,7 @@ export const panelStateSchema = z.object({
   sourceLabel: z.string().nullable(), storageLabel: z.string().nullable(),
   primaryAction: primaryActionSchema, primaryLabel: z.string().min(1),
   canStop: z.boolean(), canEditNotepad: z.boolean(), ownsRecording: z.boolean(),
-  recordingId: z.string().nullable(), notepad: notepadSchema.nullable(),
+  recordingId: z.string().nullable(), sessionId: z.string().nullable(), notepad: notepadSchema.nullable(),
   lastSessionId: z.string().nullable(),
   error: hostErrorSchema.nullable(),
 }).strict();

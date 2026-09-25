@@ -125,6 +125,13 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
         else await browserCaptureOwner[action]();
       } else throw new Error("Open the bb window with this recorder to control its microphone.");
       await refresh();
+      if (action === "stop" && sessionId) {
+        const latest = await rpc.call("readWorkspaceMeeting", { projectId, sessionId });
+        if (latest.ok && latest.meeting && !dirty.current) {
+          setMeeting(latest.meeting); setDraft(latest.meeting.notepad.text);
+          revision.current = latest.meeting.notepad.revision;
+        }
+      }
       return true;
     } catch (error) { setMessage(String(error)); return false; }
   }
@@ -137,7 +144,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
       const next = await browserCaptureOwner.startFromProject(projectId);
       if (next.error) throw new Error(next.error.message);
       await refresh();
-      if (next.recordingId) setSelectedId(next.recordingId);
+      if (next.sessionId) setSelectedId(next.sessionId);
     } catch (error) { setMessage(String(error)); }
   }
   async function chooseWorkspace() {
@@ -150,23 +157,18 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   }
   async function distill() {
     if (!selected || !projectId) return;
-    if (context.projectId !== projectId) {
-      setMessage("Open this bb project before distilling its meeting.");
-      navigate.toProject(projectId);
-      return;
-    }
     try {
       await saveMemo();
       const result = await rpc.call("connectedNoteContext", { projectId, sessionId: selected.sessionId });
       if (!result.ok) throw new Error(result.error.message);
-      if (!result.context.transcript.available) {
-        const requested = await rpc.call("transcribePinnedSession", { projectId, sessionId: selected.sessionId });
-        if (!requested.ok) throw new Error(requested.error.message);
-        setMessage("Transcribing this meeting. Distill when its transcript is ready.");
-        return;
-      }
       const { sessionId, workspaceId, memo } = result.context;
-      navigate.toCompose({ initialPrompt: `Use the Margins distillation skill to create a connected note for Margins session ${sessionId} in Workspace ${workspaceId}. Distill memo revision ${memo.revision}. Read that exact session's memo and transcript, then write the note in the Workspace destination. After writing, associate the note with the session and record this bb thread id and distilled memo revision on the session.`, focusPrompt: true });
+      let transcriptRequest = "";
+      if (!result.context.transcript.available) {
+        const requested = await rpc.call("transcribePinnedSession", { projectId, sessionId });
+        transcriptRequest = requested.ok ? "Transcription has been requested; wait for it before writing. "
+          : `Transcription could not be requested (${requested.error.message}); arrange transcription before writing. `;
+      }
+      navigate.toCompose({ initialPrompt: `Work in bb project ${projectId}. Use the Margins distillation skill to create a connected note for Margins session ${sessionId} in Workspace ${workspaceId}. Distill memo revision ${memo.revision}. Read that exact session's memo and transcript, then write the note in the Workspace destination. ${transcriptRequest}After writing, associate the note with the session and record this bb thread id and distilled memo revision on the session.`, focusPrompt: true });
     } catch (error) { setMessage(String(error)); }
   }
 

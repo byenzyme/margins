@@ -15,7 +15,7 @@ function panel(changes: Partial<PanelState> = {}): PanelState {
     state: "recording", title: "Recording", detail: "Microphone only. Audio and notes are being saved to this bb project.",
     sourceLabel: "Microphone only", storageLabel: "Saved to your Workspace",
     primaryAction: "pause", primaryLabel: "Pause", canStop: true, canEditNotepad: true,
-    ownsRecording: true, recordingId: "rec-1", notepad: { text: "Pricing", revision: "v1" },
+    ownsRecording: true, recordingId: "rec-1", sessionId: "rec-1", notepad: { text: "Pricing", revision: "v1" },
     lastSessionId: null, error: null, ...changes,
   };
 }
@@ -77,9 +77,10 @@ describe("Margins recording panel", () => {
       readWorkspaceMeeting: () => ({ ok: true, candidates: [], meeting: ended }),
       connectedNoteContext: () => ({ ok: true, context: {
         schema: "margins.bb.connected-note-context.v1", instanceId: "instance", workspaceId: "vault", sessionId: "ended-2", title: "Review",
-        transcript: { available: true, terminal: true, live: false, updatedAtUnixMs: 2 },
+        transcript: { available: false, terminal: false, live: false, updatedAtUnixMs: 0 },
         memo: { revision: "memo-v3", lineCount: 1 }, artifacts: [], noteAssociation: null, instructions: "",
       } }),
+      transcribePinnedSession: () => ({ ok: true, status: "queued", attempt: 1 }),
     } });
     const screen = within(slot.container);
     fireEvent.click(await screen.findByRole("button", { name: "Distill to note →" }));
@@ -89,6 +90,8 @@ describe("Margins recording panel", () => {
     expect(JSON.stringify(compose)).toContain("ended-2");
     expect(JSON.stringify(compose)).toContain("vault");
     expect(JSON.stringify(compose)).toContain("memo-v3");
+    expect(JSON.stringify(compose)).toContain("project-1");
+    expect(slot.inspection.rpcCalls.some((call) => call.method === "transcribePinnedSession")).toBe(true);
     expect(slot.inspection.rpcCalls.some((call) => call.method === "threads.spawn")).toBe(false);
     slot.lifecycle.unmount();
   });

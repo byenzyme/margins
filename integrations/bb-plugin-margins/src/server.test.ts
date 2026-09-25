@@ -4,9 +4,9 @@ import plugin from "./server.js";
 
 const browser = { clientId: "client-1", platform: "other" as const, secureContext: true, browserMicrophone: true, nativeMacCapture: false };
 const mac = { ...browser, platform: "macos" as const };
-const snapshot = { recordingId: "rec-1", status: "recording" as const, notepad: { text: "", revision: "v1" } };
+const snapshot = { recordingId: "rec-1", sessionId: "rec-1", status: "recording" as const, notepad: { text: "", revision: "v1" } };
 
-function harness(options: { heartbeatFails?: boolean } = {}) {
+function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: string } = {}) {
   let stopped = false;
   let captureStatus: "recording" | "paused" = "recording";
   const host = createFakePluginHost({
@@ -34,7 +34,7 @@ function harness(options: { heartbeatFails?: boolean } = {}) {
       } };
       if (method === "requestTranscription") return { ok: true, status: "queued", attempt: 1 };
       if (method === "heartbeat" && options.heartbeatFails) return { ok: false, error: { code: "offline", message: "offline", retryable: true } };
-      return { ok: true, snapshot: stopped ? null : { ...snapshot, status: captureStatus } };
+      return { ok: true, snapshot: stopped ? null : { ...snapshot, sessionId: options.canonicalSessionId || snapshot.sessionId, status: captureStatus } };
     },
   });
   plugin(host.bb);
@@ -42,6 +42,19 @@ function harness(options: { heartbeatFails?: boolean } = {}) {
 }
 
 describe("Margins project recording server", () => {
+  it("keys ownership by the Workspace session while routing audio by browser recording id", async () => {
+    const host = harness({ canonicalSessionId: "meeting-2" });
+    const started = await host.harness.behavior.callRpc("beginBrowserCapture", { threadId: "thr-1", client: browser, ownerId: "owner" });
+    expect(started).toMatchObject({ recordingId: "rec-1", sessionId: "meeting-2" });
+    await expect(host.bb.storage.kv.get("session:meeting-2")).resolves.toMatchObject({ sessionId: "meeting-2", recordingId: "rec-1" });
+    await expect(host.bb.storage.kv.get("live:workspace-1")).resolves.toBe("meeting-2");
+    await expect(host.bb.storage.kv.get("recording:rec-1")).resolves.toBe("meeting-2");
+    await host.harness.behavior.callRpc("stop", { sessionId: "rec-1", client: browser, operationId: "stop-canonical" });
+    await expect(host.bb.storage.kv.get("last-session:workspace-1")).resolves.toBe("meeting-2");
+    expect(host.harness.inspection.experimental_hostRpcCalls).toEqual(expect.arrayContaining([
+      expect.objectContaining({ method: "stop", input: expect.objectContaining({ recordingId: "rec-1" }) }),
+    ]));
+  });
   it("routes controls by session across thread changes", async () => {
     const host = harness();
     await host.harness.behavior.callRpc("beginBrowserCapture", { threadId: "thr-1", client: browser, ownerId: "owner" });

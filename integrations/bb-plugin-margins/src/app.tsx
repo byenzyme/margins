@@ -55,7 +55,7 @@ function RecordingOverlay() {
   const state = browserCaptureOwner.panel();
   const browserLive = browserCaptureOwner.recordingId && state && ["recording", "paused", "saving", "recovering", "needs_attention"].includes(state.state);
   if (!nativeLive && !browserLive) return null;
-  const sessionId = nativeLive ? native!.sessionId! : browserCaptureOwner.recordingId!;
+  const sessionId = nativeLive ? native!.sessionId! : state!.sessionId || browserCaptureOwner.recordingId!;
   const status = nativeLive ? native!.state : state!.state;
   const paused = status === "paused";
   const recording = status === "recording";
