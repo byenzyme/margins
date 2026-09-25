@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ProjectMarginsTransport, ProjectServerManager, readAsrRuntimeConfig, resolveWorkspaceId } from "./project-server.js";
+import { marginsHome, ProjectMarginsTransport, ProjectServerManager, readAsrRuntimeConfig, resolveWorkspaceId } from "./project-server.js";
 
 const saved = {
   url: process.env.MARGINS_BB_REMOTE_URL,
@@ -59,11 +59,23 @@ describe("ProjectServerManager remote adapter", () => {
     const home = await mkdtemp(join(tmpdir(), "margins-bb-workspace-"));
     try {
       process.env.MARGINS_HOME = home;
-      await expect(resolveWorkspaceId({ projectId: "p", projectRoot: "/code", hostId: "h" })).rejects.toThrow("Choose a Margins Workspace");
+      await expect(resolveWorkspaceId({ projectId: "p", projectRoot: "/code", hostId: "h" }, home)).rejects.toThrow("Choose a Margins Workspace");
       await writeFile(join(home, "config.toml"), '[llm]\nmode = "local"\n[workspace]\ndefault = "vault"\n');
-      await expect(resolveWorkspaceId({ projectId: "p", projectRoot: "/code", hostId: "h" })).resolves.toBe("vault");
-      await expect(resolveWorkspaceId({ projectId: "p", projectRoot: "/code", hostId: "h", workspaceId: "other" })).resolves.toBe("other");
+      await expect(resolveWorkspaceId({ projectId: "p", projectRoot: "/code", hostId: "h" }, home)).resolves.toBe("vault");
+      await expect(resolveWorkspaceId({ projectId: "p", projectRoot: "/code", hostId: "h", workspaceId: "other" }, home)).resolves.toBe("other");
     } finally { await rm(home, { recursive: true, force: true }); }
+  });
+  it("uses the bb project Margins home when the host worker has no MARGINS_HOME", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "margins-bb-host-data-"));
+    const target = { projectId: "p", projectRoot: "/code", hostId: "h" };
+    try {
+      delete process.env.MARGINS_HOME;
+      const home = marginsHome(dataDir, target);
+      expect(home).toMatch(/^.*\/projects\/[a-f0-9]{20}\/margins-home$/);
+      await mkdir(home, { recursive: true });
+      await writeFile(join(home, "config.toml"), '[workspace]\ndefault = "vault"\n');
+      await expect(resolveWorkspaceId(target, dataDir)).resolves.toBe("vault");
+    } finally { await rm(dataDir, { recursive: true, force: true }); }
   });
   it("reopens the newest saved Workspace meeting after recording ends", async () => {
     const manager = { ensure: vi.fn(async () => ({

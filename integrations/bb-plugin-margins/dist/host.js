@@ -33541,7 +33541,6 @@ import { createHash as createHash2, randomUUID } from "node:crypto";
 import { execFile as execFileCallback2, spawn } from "node:child_process";
 import { lstat as lstat2, mkdir as mkdir2, readFile as readFile2, realpath } from "node:fs/promises";
 import { createServer } from "node:net";
-import { homedir as homedir2 } from "node:os";
 import { isAbsolute, join as join2, relative, resolve } from "node:path";
 import { promisify as promisify2 } from "node:util";
 
@@ -33769,14 +33768,14 @@ function hostError(code, message, retryable = true) {
 function projectKey(target) {
   return createHash2("sha256").update(`${target.projectId}\0${target.projectRoot}`).digest("hex").slice(0, 20);
 }
-async function localHomeRoot(dataDir, workspaceId) {
+async function localHomeRoot(dataDir, target, workspaceId) {
   const configured = process.env.MARGINS_CLI_BIN?.trim();
   const binary = configured && isAbsolute(configured) ? configured : join2(dataDir, "runtime", `v${RUNTIME_RELEASE_VERSION}`, "margins");
   const executable = await lstat2(binary).catch(() => null);
   if (!executable?.isFile() || (executable.mode & 73) === 0) return null;
   try {
     const { stdout } = await execFile2(binary, ["--workspace", workspaceId, "workspace", "destination", "--json"], {
-      env: { ...process.env, MARGINS_HOME: marginsHome() },
+      env: { ...process.env, MARGINS_HOME: marginsHome(dataDir, target) },
       timeout: 5e3,
       maxBuffer: 65536
     });
@@ -33796,15 +33795,15 @@ async function associatedNoteFile(homeRoot, relativePath) {
     return null;
   }
 }
-function marginsHome() {
-  return process.env.MARGINS_HOME?.trim() || join2(homedir2(), ".margins");
+function marginsHome(dataDir, target) {
+  return process.env.MARGINS_HOME?.trim() || join2(dataDir, "projects", projectKey(target), "margins-home");
 }
-async function resolveWorkspaceId(target) {
+async function resolveWorkspaceId(target, dataDir) {
   if (target.workspaceId) {
     if (!/^[a-z0-9][a-z0-9-]*$/.test(target.workspaceId)) throw new Error("Invalid Margins Workspace id");
     return target.workspaceId;
   }
-  const raw = await readFile2(join2(marginsHome(), "config.toml"), "utf8").catch((error108) => {
+  const raw = await readFile2(join2(marginsHome(dataDir, target), "config.toml"), "utf8").catch((error108) => {
     if (error108.code === "ENOENT") return "";
     throw error108;
   });
@@ -33846,7 +33845,7 @@ var ProjectServerManager = class {
   handles = /* @__PURE__ */ new Map();
   runtime = createRuntimeManager();
   async ensure(target, dataDir, signal) {
-    const workspaceId = await resolveWorkspaceId(target);
+    const workspaceId = await resolveWorkspaceId(target, dataDir);
     const key = `${projectKey(target)}:${workspaceId}`;
     const existing = this.handles.get(key);
     if (existing) return existing;
@@ -33898,7 +33897,7 @@ var ProjectServerManager = class {
         MARGINS_DATA_DIR: instanceDir,
         MARGINS_WORK_DIR: target.projectRoot,
         MARGINS_BB_CAPTURE_WORKSPACE: "1",
-        MARGINS_HOME: marginsHome(),
+        MARGINS_HOME: marginsHome(dataDir, target),
         MARGINS_INSTANCE_ID: `bb-host-${target.hostId}`,
         MARGINS_WORKSPACE: workspaceId,
         ...asrRuntime ? {
@@ -33945,7 +33944,7 @@ var ProjectMarginsTransport = class {
         ]);
         return { summary, note };
       }));
-      const homeRoot = handle.child && rows.some(({ note }) => note?.relative_path) ? await localHomeRoot(dataDir, handle.workspaceId) : null;
+      const homeRoot = handle.child && rows.some(({ note }) => note?.relative_path) ? await localHomeRoot(dataDir, target, handle.workspaceId) : null;
       const meetings = await Promise.all(rows.map(async ({ summary, note }) => {
         const noteFilePath = await associatedNoteFile(homeRoot, note?.relative_path);
         return {

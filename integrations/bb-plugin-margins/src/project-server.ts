@@ -2,7 +2,6 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFile as execFileCallback, spawn, type ChildProcess } from "node:child_process";
 import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
 import { createServer } from "node:net";
-import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { ConnectedNoteResult, HostCaptureSnapshot, HostError, HostResult, ProjectTarget, TranscriptionRequestResult } from "./contracts.js";
@@ -61,14 +60,14 @@ function projectKey(target: ProjectTarget) {
   return createHash("sha256").update(`${target.projectId}\0${target.projectRoot}`).digest("hex").slice(0, 20);
 }
 
-async function localHomeRoot(dataDir: string, workspaceId: string): Promise<string | null> {
+async function localHomeRoot(dataDir: string, target: ProjectTarget, workspaceId: string): Promise<string | null> {
   const configured = process.env.MARGINS_CLI_BIN?.trim();
   const binary = configured && isAbsolute(configured) ? configured : join(dataDir, "runtime", `v${RUNTIME_RELEASE_VERSION}`, "margins");
   const executable = await lstat(binary).catch(() => null);
   if (!executable?.isFile() || (executable.mode & 0o111) === 0) return null;
   try {
     const { stdout } = await execFile(binary, ["--workspace", workspaceId, "workspace", "destination", "--json"], {
-      env: { ...process.env, MARGINS_HOME: marginsHome() }, timeout: 5_000, maxBuffer: 65_536,
+      env: { ...process.env, MARGINS_HOME: marginsHome(dataDir, target) }, timeout: 5_000, maxBuffer: 65_536,
     });
     const destination = JSON.parse(stdout) as { home_root?: unknown };
     return typeof destination.home_root === "string" && isAbsolute(destination.home_root)
@@ -86,16 +85,16 @@ async function associatedNoteFile(homeRoot: string | null, relativePath: string 
   } catch { return null; }
 }
 
-export function marginsHome(): string {
-  return process.env.MARGINS_HOME?.trim() || join(homedir(), ".margins");
+export function marginsHome(dataDir: string, target: ProjectTarget): string {
+  return process.env.MARGINS_HOME?.trim() || join(dataDir, "projects", projectKey(target), "margins-home");
 }
 
-export async function resolveWorkspaceId(target: ProjectTarget): Promise<string> {
+export async function resolveWorkspaceId(target: ProjectTarget, dataDir: string): Promise<string> {
   if (target.workspaceId) {
     if (!/^[a-z0-9][a-z0-9-]*$/.test(target.workspaceId)) throw new Error("Invalid Margins Workspace id");
     return target.workspaceId;
   }
-  const raw = await readFile(join(marginsHome(), "config.toml"), "utf8").catch((error: NodeJS.ErrnoException) => {
+  const raw = await readFile(join(marginsHome(dataDir, target), "config.toml"), "utf8").catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return "";
     throw error;
   });
@@ -141,7 +140,7 @@ export class ProjectServerManager {
   private readonly runtime = createRuntimeManager();
 
   async ensure(target: ProjectTarget, dataDir: string, signal?: AbortSignal): Promise<ServerHandle> {
-    const workspaceId = await resolveWorkspaceId(target);
+    const workspaceId = await resolveWorkspaceId(target, dataDir);
     const key = `${projectKey(target)}:${workspaceId}`;
     const existing = this.handles.get(key);
     if (existing) return existing;
@@ -199,7 +198,7 @@ export class ProjectServerManager {
         MARGINS_DATA_DIR: instanceDir,
         MARGINS_WORK_DIR: target.projectRoot,
         MARGINS_BB_CAPTURE_WORKSPACE: "1",
-        MARGINS_HOME: marginsHome(),
+        MARGINS_HOME: marginsHome(dataDir, target),
         MARGINS_INSTANCE_ID: `bb-host-${target.hostId}`,
         MARGINS_WORKSPACE: workspaceId,
         ...(asrRuntime ? {
@@ -248,7 +247,7 @@ export class ProjectMarginsTransport {
         return { summary, note };
       }));
       const homeRoot = handle.child && rows.some(({ note }) => note?.relative_path)
-        ? await localHomeRoot(dataDir, handle.workspaceId) : null;
+        ? await localHomeRoot(dataDir, target, handle.workspaceId) : null;
       const meetings = await Promise.all(rows.map(async ({ summary, note }) => {
         const noteFilePath = await associatedNoteFile(homeRoot, note?.relative_path);
         return { sessionId: summary.session_id, title: summary.title, startedAt: summary.started_at,
