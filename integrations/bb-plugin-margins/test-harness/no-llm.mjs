@@ -39,6 +39,10 @@ let bbProcess;
 let videoStarted = false;
 let videoStartedAt = 0;
 let otherThreadAt = 0;
+let browserUsed = false;
+let browserCloseResult = null;
+let interruptedSignal = null;
+let passMessage = null;
 
 mkdirSync(artifacts, { recursive: true });
 mkdirSync(home, { recursive: true });
@@ -77,6 +81,7 @@ async function until(label, probe, timeoutMs = 20_000) {
   const deadline = Date.now() + timeoutMs;
   let last;
   while (Date.now() < deadline) {
+    if (interruptedSignal) throw new Error(`Interrupted by ${interruptedSignal}`);
     try { const result = await probe(); if (result) return result; }
     catch (error) { last = error; }
     await new Promise((resolve) => setTimeout(resolve, 400));
@@ -85,11 +90,15 @@ async function until(label, probe, timeoutMs = 20_000) {
 }
 
 function browser(args) {
+  if (interruptedSignal) throw new Error(`Interrupted by ${interruptedSignal}`);
+  browserUsed = true;
   return command("agent-browser", ["--session", browserSession, "--cdp", String(cdpPort), ...args], {
     env: { ...process.env, AGENT_BROWSER_CONFIG: browserConfig },
   });
 }
 function browserEval(source) {
+  if (interruptedSignal) throw new Error(`Interrupted by ${interruptedSignal}`);
+  browserUsed = true;
   return jsonCommand("agent-browser", ["--session", browserSession, "--cdp", String(cdpPort), "--json", "eval", source], {
     env: { ...process.env, AGENT_BROWSER_CONFIG: browserConfig },
   }).data.result;
@@ -99,6 +108,62 @@ function bb(args) { return jsonCommand("bb", [...args, "--json"], { env: bbEnv }
 function assertMemo(text) {
   assert.equal(browserEval(`document.querySelector('textarea[aria-label="Meeting memo pad"]')?.value`), text);
 }
+
+function browserDaemonPids() {
+  const pids = [];
+  for (const entry of readdirSync("/proc")) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      const processRoot = `/proc/${entry}`;
+      if (!readFileSync(path.join(processRoot, "cmdline"), "utf8").includes("agent-browser")) continue;
+      const environment = new Set(readFileSync(path.join(processRoot, "environ"), "utf8").split("\0"));
+      if (environment.has("AGENT_BROWSER_DAEMON=1") && environment.has(`AGENT_BROWSER_SESSION=${browserSession}`)) pids.push(Number(entry));
+    } catch { /* process exited while /proc was read */ }
+  }
+  return pids;
+}
+function closeBrowserSession() {
+  const daemonPidsBefore = browserDaemonPids();
+  if (browserCloseResult && daemonPidsBefore.length === 0) return browserCloseResult;
+  const result = browserUsed && daemonPidsBefore.length
+    ? spawnSync("agent-browser", ["--session", browserSession, "--cdp", String(cdpPort), "close"], {
+      env: { ...process.env, AGENT_BROWSER_CONFIG: browserConfig }, encoding: "utf8", timeout: 10_000,
+    }) : null;
+  browserCloseResult = { session: browserSession,
+    daemonPidsBefore: [...new Set([...(browserCloseResult?.daemonPidsBefore || []), ...daemonPidsBefore])],
+    closeAttempts: (browserCloseResult?.closeAttempts || 0) + (result ? 1 : 0),
+    closeStatus: result?.status ?? browserCloseResult?.closeStatus ?? null,
+    closeError: result?.error?.message || (result?.status ? (result.stderr || result.stdout || "").trim() : null) };
+  return browserCloseResult;
+}
+async function verifyBrowserClosed() {
+  const closed = closeBrowserSession();
+  let remaining = browserDaemonPids();
+  const deadline = Date.now() + 5_000;
+  while (remaining.length && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    remaining = browserDaemonPids();
+  }
+  const forcedPids = [...remaining];
+  for (const pid of forcedPids) try { process.kill(pid, "SIGTERM"); } catch { /* already exited */ }
+  const forceDeadline = Date.now() + 2_000;
+  while (remaining.length && Date.now() < forceDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    remaining = browserDaemonPids();
+  }
+  for (const pid of remaining) try { process.kill(pid, "SIGKILL"); } catch { /* already exited */ }
+  if (remaining.length) await new Promise((resolve) => setTimeout(resolve, 100));
+  remaining = browserDaemonPids();
+  return { ...closed, forcedPids, daemonPidsAfter: remaining,
+    verified: remaining.length === 0 && (!closed.daemonPidsBefore.length || closed.closeStatus === 0 || forcedPids.length > 0) };
+}
+
+for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => {
+  if (interruptedSignal) return;
+  interruptedSignal = signal;
+  process.exitCode = signal === "SIGINT" ? 130 : 143;
+  try { closeBrowserSession(); } catch (error) { process.stderr.write(`Browser signal cleanup failed: ${error}\n`); }
+});
 
 let cdpPort;
 let bbEnv;
@@ -354,7 +419,7 @@ try {
     shot("11-thread-margins.png");
     cpSync(vault, path.join(artifacts, "vault"), { recursive: true });
     writeFileSync(path.join(artifacts, "assertions.json"), `${JSON.stringify(assertions, null, 2)}\n`);
-    console.log(`PASS: real-LLM step 7; note ${path.join(artifacts, "vault/inbox", noteName)}; evidence ${artifacts}`);
+    passMessage = `PASS: real-LLM step 7; note ${path.join(artifacts, "vault/inbox", noteName)}; evidence ${artifacts}`;
   } else {
     browser(["record", "stop"]);
     videoStarted = false;
@@ -362,10 +427,10 @@ try {
     command("ffmpeg", ["-nostdin", "-loglevel", "error", "-ss", String(clipStart), "-i", path.join(artifacts, "journey.webm"),
       "-t", "4", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-n", path.join(artifacts, "03-overlay-other-thread.mp4")]);
     assert(existsSync(path.join(artifacts, "03-overlay-other-thread.mp4")));
-    console.log(`PASS: no-LLM steps 1-6; evidence ${artifacts}`);
+    passMessage = `PASS: no-LLM steps 1-6; evidence ${artifacts}`;
   }
 } catch (error) {
-  if (videoStarted) {
+  if (videoStarted && !interruptedSignal) {
     try { shot("failure.png"); } catch { /* browser may be gone */ }
     try { writeFileSync(path.join(artifacts, "failure-snapshot.txt"), browser(["snapshot", "-i"])); } catch { /* browser may be gone */ }
     try { writeFileSync(path.join(artifacts, "failure-state.json"), `${JSON.stringify(browserEval(`({url:location.href,text:document.body.innerText})`), null, 2)}\n`); } catch { /* browser may be gone */ }
@@ -373,11 +438,22 @@ try {
   }
   if (existsSync(path.join(bbData, "logs"))) cpSync(path.join(bbData, "logs"), path.join(artifacts, "bb-diagnostic-logs"), { recursive: true });
   if (realLlm && existsSync(vault)) cpSync(vault, path.join(artifacts, "vault"), { recursive: true });
-  throw error;
+  if (interruptedSignal) process.stderr.write(`Harness interrupted by ${interruptedSignal}; cleaning up.\n`);
+  else throw error;
 } finally {
-  if (videoStarted) try { browser(["record", "stop"]); } catch { /* keep prior evidence */ }
+  if (videoStarted && !browserCloseResult) try { browser(["record", "stop"]); } catch { /* keep prior evidence */ }
+  const browserCleanup = await verifyBrowserClosed();
+  writeFileSync(path.join(artifacts, "browser-cleanup.json"), `${JSON.stringify(browserCleanup, null, 2)}\n`);
+  const assertionsPath = path.join(artifacts, "assertions.json");
+  if (existsSync(assertionsPath)) {
+    const assertions = JSON.parse(readFileSync(assertionsPath, "utf8"));
+    assertions.browserDaemonReaped = browserCleanup.verified;
+    writeFileSync(assertionsPath, `${JSON.stringify(assertions, null, 2)}\n`);
+  }
   try { command("docker", ["rm", "-f", chromeName]); } catch { /* already stopped */ }
   if (bbProcess) { bbProcess.kill("SIGINT"); await new Promise((resolve) => setTimeout(resolve, 1200)); if (bbProcess.exitCode === null) bbProcess.kill("SIGKILL"); }
   if (process.env.MARGINS_E2E_KEEP_TEMP === "1") console.log(`Diagnostic temp kept: ${temporary}`);
   else rmSync(temporary, { recursive: true, force: true });
+  assert(browserCleanup.verified, `agent-browser daemon remained for ${browserSession}: ${JSON.stringify(browserCleanup)}`);
 }
+if (passMessage) console.log(`${passMessage}; browser daemon reaped`);

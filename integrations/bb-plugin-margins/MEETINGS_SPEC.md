@@ -93,6 +93,27 @@ audio where channel separation does not identify speakers. If automatic labels
 need correction, offer that choice during transcript refinement rather than
 before recording.
 
+## Runaway capture guards
+
+Review evidence from the Mac: Margins Menu left `meeting-7` recording for about
+23 hours unattended, consuming 233% CPU and 17.7 GiB in temporary `.f32` audio
+lanes while the disk reached 99% full. A second orphaned `margins-live` runtime
+used about 55% CPU without a session. Capture needs these guards:
+
+- Warn before an automatic stop for prolonged silence and before a hard maximum
+  recording duration. If the user does not resume or extend capture, stop and
+  finalize the session through the normal recording lifecycle.
+- Check free disk space before starting and periodically during capture,
+  including the growth of temporary audio lanes. Refuse a start with too little
+  space and stop an active capture with enough reserve to finalize safely,
+  before the disk is exhausted.
+- Margins Menu must reap any previous capture runtime, including an orphan with
+  no live session, before spawning a new runtime. A recorder must not retain two
+  competing runtimes after restart or recovery.
+- A stale session marked active whose audio files are missing must have an
+  explicit recovery or discard path. It must not remain permanently live in
+  the UI or block a new capture; preserve the reason for the discard.
+
 ## Distill to note
 
 On an ended meeting: **Make note in new thread →**. After a linked note's

@@ -61,7 +61,9 @@ Video, step screenshots, a four-second clip with another thread open while the
 recording overlay persists, destination and plan evidence, bb logs, and assertion
 results are written under gitignored `../e2e-artifacts/<timestamp>/`. Set
 `MARGINS_E2E_ARTIFACTS` to an absolute path to choose another artifact folder.
-The runner removes only its own temporary home, bb data, and Chrome container.
+The runner closes its named agent-browser session, verifies that its daemon
+exited, and records the result in `browser-cleanup.json` and `assertions.json`.
+It removes only its own temporary home, bb data, and Chrome container.
 
 ## Approved real-LLM step 7
 
