@@ -209,8 +209,21 @@ try {
   await until("Live memo saved", () => browserEval('document.querySelector(".margins-meeting-status")?.innerText.includes("Saved")'));
   assert(!browserEval(`document.querySelector('.margins-meeting-pad footer')?.innerText.includes('Saved')`));
   browser(["click", `a[aria-label="Open E2E thread two"]`]);
+  await until("thread composer submit", () => browserEval(`!!document.querySelector('button[aria-label="Submit (Enter)"]')`));
   assert(browserEval(`!!document.querySelector('button[aria-label="Pause recording"]')`));
   assert(browserEval(`document.querySelector('.margins-overlay')?.innerText.includes('Recording')`));
+  const composerClearance = browserEval(`(() => {
+    const pill = document.querySelector('.margins-overlay')?.getBoundingClientRect();
+    const submit = document.querySelector('button[aria-label="Submit (Enter)"]')?.getBoundingClientRect();
+    if (!pill || !submit) return { pillFound: !!pill, submitFound: !!submit, clear: false };
+    const gap = 8;
+    return { pillFound: true, submitFound: true,
+      clear: pill.right + gap <= submit.left || pill.left >= submit.right + gap
+        || pill.bottom + gap <= submit.top || pill.top >= submit.bottom + gap,
+      pill: { left: pill.left, top: pill.top, right: pill.right, bottom: pill.bottom },
+      submit: { left: submit.left, top: submit.top, right: submit.right, bottom: submit.bottom } };
+  })()`);
+  assert(composerClearance.clear, `Recording pill overlaps thread composer submit: ${JSON.stringify(composerClearance)}`);
   shot("03-overlay-other-thread.png");
   otherThreadAt = Date.now();
   browser(["click", `a[aria-label="Open E2E thread one"]`]);
@@ -283,7 +296,7 @@ try {
     shot("08-handoff-ready.png");
   }
   const assertions = { projectId, threadOne, threadTwo, levels, memoSavedAfterStop: true, stopAcknowledged: true,
-    overlayVisibleOnOtherThread: true,
+    overlayVisibleOnOtherThread: true, overlayClearOfComposerSubmit: composerClearance,
     projectCaptureFallbackAbsent: true, composerPrompt: prompt, composerPlainPrompt: plainPrompt,
     composerContext, threadsUnchanged: true, transcription: "parakeet-asr", transcriptObserved: true, noLlm: !realLlm };
   writeFileSync(path.join(artifacts, "assertions.json"), `${JSON.stringify(assertions, null, 2)}\n`);

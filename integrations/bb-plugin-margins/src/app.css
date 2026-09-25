@@ -20,7 +20,7 @@
 .margins-connected-note { border:0; border-radius:7px; padding:7px 10px; background:var(--foreground); color:var(--background); font-size:12px; cursor:pointer; }
 .margins-quiet { border:0; padding:7px; background:transparent; color:var(--muted-foreground); font-size:12px; cursor:pointer; }
 .margins-seam,.margins-empty { margin:auto 0; color:var(--muted-foreground); font-size:12px; line-height:1.5; }
-.margins-overlay { position:fixed; z-index:50; right:16px; bottom:16px; display:flex; align-items:center; gap:5px; max-width:min(92vw,400px); padding:6px; border:1px solid var(--border); border-radius:12px; background:var(--background); color:var(--foreground); box-shadow:0 8px 30px color-mix(in srgb,var(--foreground) 14%,transparent); }
+.margins-overlay { position:fixed; z-index:50; top:calc(64px + env(safe-area-inset-top)); right:16px; display:flex; align-items:center; gap:5px; max-width:min(92vw,400px); padding:6px; border:1px solid var(--border); border-radius:12px; background:var(--background); color:var(--foreground); box-shadow:0 8px 30px color-mix(in srgb,var(--foreground) 14%,transparent); }
 .margins-overlay button { display:flex; align-items:center; justify-content:center; min-width:32px; min-height:32px; border:0; border-radius:8px; background:transparent; color:inherit; cursor:pointer; }
 .margins-overlay button:hover { background:var(--muted); }
 .margins-overlay button:disabled { cursor:default; opacity:.45; }
