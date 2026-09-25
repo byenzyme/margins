@@ -35,7 +35,7 @@ The runner creates a fixture vault copy with `inbox`, initializes the disposable
 bb project as a Git checkout, adds `note_folder` to a
 desired Workspace TOML, preserves the exact reviewed plan JSON, applies that
 plan, and sets the disposable home's global default to that Workspace. It
-generates an amplitude-varying WAV and mounts it into headless Chrome as the
+prepares a single-utterance WAV and mounts it into headless Chrome as the
 fake microphone. The browser journey checks recording, changing sidebar level,
 memo persistence across thread switches, pause/resume, Stop, post-stop memo
 save, and a seeded composer with no new thread. bb's SDK currently cannot pass
@@ -48,8 +48,9 @@ directory, and `MARGINS_E2E_ORT_LIBRARY` to the ONNX Runtime library. Set all
 three together, and build the server with
 `scripts/cargo-lane shared -- cargo build -p margins-desktop --manifest-path
 desktop/src-tauri/Cargo.toml --no-default-features --features hosted-web --bin
-margins-server`. The runner repeats the WAV for Chrome's fake microphone and
-creates `asr-runtime.json` under the disposable bb plugin host data directory,
+margins-server`. The runner plays the WAV once, pads the rest with silence for
+Chrome's fake microphone, and creates `asr-runtime.json` under the disposable
+bb plugin host data directory,
 selecting the `hosted-web` server built above. It requests transcription of
 the same browser session after Finish and requires at least one spoken timeline
 line; a memo-only live checkpoint is a failure. This lane makes no LLM call,

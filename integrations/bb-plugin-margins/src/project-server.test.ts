@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ProjectMarginsTransport, ProjectServerManager, readAsrRuntimeConfig, resolveWorkspaceId } from "./project-server.js";
@@ -9,6 +9,7 @@ const saved = {
   token: process.env.MARGINS_BB_REMOTE_TOKEN,
   workspace: process.env.MARGINS_BB_REMOTE_WORKSPACE,
   home: process.env.MARGINS_HOME,
+  cli: process.env.MARGINS_CLI_BIN,
 };
 
 afterEach(() => {
@@ -18,6 +19,7 @@ afterEach(() => {
     MARGINS_BB_REMOTE_TOKEN: saved.token,
     MARGINS_BB_REMOTE_WORKSPACE: saved.workspace,
     MARGINS_HOME: saved.home,
+    MARGINS_CLI_BIN: saved.cli,
   })) {
     if (value === undefined) delete process.env[name];
     else process.env[name] = value;
@@ -25,6 +27,34 @@ afterEach(() => {
 });
 
 describe("ProjectServerManager remote adapter", () => {
+  it("previews only existing notes confined to the selected Workspace Home", async () => {
+    const root = await mkdtemp(join(tmpdir(), "margins-bb-note-preview-"));
+    try {
+      const vault = join(root, "vault");
+      await mkdir(join(vault, "inbox"), { recursive: true });
+      await writeFile(join(vault, "inbox/note.md"), "# Linked note\n");
+      await writeFile(join(root, "outside.md"), "# Outside\n");
+      await symlink(join(root, "outside.md"), join(vault, "inbox/outside.md"));
+      const cli = join(root, "margins-test-cli");
+      await writeFile(cli, `#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({home_root:${JSON.stringify(vault)}}));\n`);
+      await chmod(cli, 0o755);
+      process.env.MARGINS_CLI_BIN = cli;
+      const manager = { ensure: vi.fn(async () => ({ baseUrl: "http://127.0.0.1:8787", token: "token", workspaceId: "practice", instanceId: "local", child: {} })) } as unknown as ProjectServerManager;
+      vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+        const url = String(input);
+        const id = url.includes("/sessions/inside") ? "inside" : "outside";
+        const result = url.endsWith("sessions?limit=50") ? { sessions: [{ session_id: "inside" }, { session_id: "outside" }] }
+          : url.endsWith("/note-association") ? { relative_path: `inbox/${id === "inside" ? "note" : "outside"}.md`, bb_thread_ids: [] }
+            : { session_id: id, title: null, started_at: "2026-09-25T01:00:00Z", input_finalized: true };
+        return new Response(JSON.stringify({ ok: true, result }));
+      }));
+      const listed = await new ProjectMarginsTransport(manager).listWorkspaceMeetings({ projectId: "project", projectRoot: root, hostId: "host" }, root);
+      expect(listed).toMatchObject({ ok: true, meetings: [
+        { sessionId: "inside", noteFile: { hostId: "host", path: join(vault, "inbox/note.md") } },
+        { sessionId: "outside", noteFile: null },
+      ] });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
   it("resolves project override, then machine default, without a project-folder fallback", async () => {
     const home = await mkdtemp(join(tmpdir(), "margins-bb-workspace-"));
     try {

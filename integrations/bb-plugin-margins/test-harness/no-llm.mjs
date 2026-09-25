@@ -62,8 +62,8 @@ function findId(value, prefix) {
   return null;
 }
 function makeSpokenWav(file, source) {
-  // Repeat the short spoken fixture so the browser capture spans the whole journey.
-  command("ffmpeg", ["-nostdin", "-loglevel", "error", "-stream_loop", "9", "-i", source,
+  // Give Chrome one spoken utterance, then silence for the rest of the journey.
+  command("ffmpeg", ["-nostdin", "-loglevel", "error", "-i", source, "-af", "apad",
     "-t", "40", "-ac", "1", "-ar", "16000", "-acodec", "pcm_s16le", "-y", file]);
 }
 async function freePort() {
@@ -324,11 +324,13 @@ try {
     await until("Distilled meeting", () => browserEval(`(() => {
       const list = document.querySelector('.margins-meeting-list');
       return !!list && [...list.querySelectorAll('h3')].some((h) => h.textContent === 'Distilled')
-        && document.querySelector('.margins-meeting-pad footer')?.innerText.includes('Note: inbox/')
-        && document.querySelector('.margins-meeting-pad footer')?.innerText.includes('Thread ${newThreadId}');
+        && !!document.querySelector('.margins-meeting-links a')
+        && !!document.querySelector('.margins-meeting-links button');
     })()`), 45_000);
+    assert(!browserEval(`document.querySelector('.margins-meeting-links')?.innerText.includes('inbox/')`));
+    assert(!browserEval(`document.querySelector('.margins-meeting-links')?.innerText.includes('${newThreadId}')`));
     shot("10-distilled.png");
-    browser(["find", "role", "button", "click", "--name", `Thread ${newThreadId}`, "--exact"]);
+    browser(["click", ".margins-meeting-links button"]);
     await until("distillation thread", () => browserEval(`location.pathname.includes('${newThreadId}')`));
     browser(["find", "role", "button", "click", "--name", "Show right panel (Ctrl + J)", "--exact"]);
     browser(["find", "role", "button", "click", "--name", "Open new tab (Ctrl + T)", "--exact"]);

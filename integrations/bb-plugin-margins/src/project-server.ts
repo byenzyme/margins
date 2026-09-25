@@ -1,11 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
-import { spawn, type ChildProcess } from "node:child_process";
-import { lstat, mkdir, readFile } from "node:fs/promises";
+import { execFile as execFileCallback, spawn, type ChildProcess } from "node:child_process";
+import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
 import { createServer } from "node:net";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
+import { promisify } from "node:util";
 import type { ConnectedNoteResult, HostCaptureSnapshot, HostError, HostResult, ProjectTarget, TranscriptionRequestResult } from "./contracts.js";
-import { createRuntimeManager } from "./runtime-manager.js";
+import { createRuntimeManager, RUNTIME_RELEASE_VERSION } from "./runtime-manager.js";
+
+const execFile = promisify(execFileCallback);
 
 interface ServerHandle {
   baseUrl: string;
@@ -56,6 +59,31 @@ function hostError(code: string, message: string, retryable = true): HostError {
 
 function projectKey(target: ProjectTarget) {
   return createHash("sha256").update(`${target.projectId}\0${target.projectRoot}`).digest("hex").slice(0, 20);
+}
+
+async function localHomeRoot(dataDir: string, workspaceId: string): Promise<string | null> {
+  const configured = process.env.MARGINS_CLI_BIN?.trim();
+  const binary = configured && isAbsolute(configured) ? configured : join(dataDir, "runtime", `v${RUNTIME_RELEASE_VERSION}`, "margins");
+  const executable = await lstat(binary).catch(() => null);
+  if (!executable?.isFile() || (executable.mode & 0o111) === 0) return null;
+  try {
+    const { stdout } = await execFile(binary, ["--workspace", workspaceId, "workspace", "destination", "--json"], {
+      env: { ...process.env, MARGINS_HOME: marginsHome() }, timeout: 5_000, maxBuffer: 65_536,
+    });
+    const destination = JSON.parse(stdout) as { home_root?: unknown };
+    return typeof destination.home_root === "string" && isAbsolute(destination.home_root)
+      ? await realpath(destination.home_root) : null;
+  } catch { return null; }
+}
+
+async function associatedNoteFile(homeRoot: string | null, relativePath: string | undefined): Promise<string | null> {
+  if (!homeRoot || !relativePath || isAbsolute(relativePath)) return null;
+  try {
+    const file = await realpath(resolve(homeRoot, relativePath));
+    const within = relative(homeRoot, file);
+    return within && within !== ".." && !within.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) && !isAbsolute(within)
+      && (await lstat(file)).isFile() ? file : null;
+  } catch { return null; }
 }
 
 export function marginsHome(): string {
@@ -211,14 +239,21 @@ export class ProjectMarginsTransport {
     try {
       const handle = await this.manager.ensure(target, dataDir);
       const listed = await this.request<{ sessions: Array<{ session_id: string }> }>(handle, "sessions?limit=50", "GET");
-      const meetings = await Promise.all(listed.sessions.map(async ({ session_id }) => {
+      const rows = await Promise.all(listed.sessions.map(async ({ session_id }) => {
         const id = encodeURIComponent(session_id);
         const [summary, note] = await Promise.all([
           this.request<{ session_id: string; title: string | null; started_at: string; input_finalized: boolean }>(handle, `sessions/${id}`, "GET"),
           this.request<{ relative_path: string; bb_thread_ids?: string[]; distilled_memo_revision?: string | null } | null>(handle, `sessions/${id}/note-association`, "GET"),
         ]);
+        return { summary, note };
+      }));
+      const homeRoot = handle.child && rows.some(({ note }) => note?.relative_path)
+        ? await localHomeRoot(dataDir, handle.workspaceId) : null;
+      const meetings = await Promise.all(rows.map(async ({ summary, note }) => {
+        const noteFilePath = await associatedNoteFile(homeRoot, note?.relative_path);
         return { sessionId: summary.session_id, title: summary.title, startedAt: summary.started_at,
           inputFinalized: summary.input_finalized, notePath: note?.relative_path || null,
+          noteFile: noteFilePath ? { hostId: target.hostId, path: noteFilePath } : null,
           threadIds: note?.bb_thread_ids || [], distilledMemoRevision: note?.distilled_memo_revision || null };
       }));
       return { ok: true as const, meetings };

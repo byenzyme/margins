@@ -6,13 +6,14 @@ const browser = { clientId: "client-1", platform: "other" as const, secureContex
 const mac = { ...browser, platform: "macos" as const };
 const snapshot = { recordingId: "rec-1", sessionId: "rec-1", status: "recording" as const, notepad: { text: "", revision: "v1" } };
 
-function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: string } = {}) {
+function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: string; meetingList?: boolean } = {}) {
   let stopped = false;
   let captureStatus: "recording" | "paused" = "recording";
   const host = createFakePluginHost({
     pluginId: "margins", agentSkillIds: ["watermark", "workspace-setup"],
     sdk: {
-      threads: { get: async ({ threadId }: { threadId: string }) => ({ id: threadId, projectId: threadId === "thr-other-project" ? "proj-2" : "proj-1" }) as never },
+      threads: { get: async ({ threadId }: { threadId: string }) => ({ id: threadId, title: threadId === "thr-note" ? "Create connected meeting note" : null,
+        projectId: threadId === "thr-other-project" ? "proj-2" : "proj-1" }) as never },
       projects: { get: async ({ projectId }: { projectId: string }) => ({
         id: projectId, kind: "standard", name: "Project",
         sources: [
@@ -22,6 +23,11 @@ function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: strin
       }) as never },
     },
     experimental_callHostRpc: ({ method }) => {
+      if (method === "listWorkspaceMeetings" && options.meetingList) return { ok: true, meetings: [{
+        sessionId: "meeting-1", title: null, startedAt: "2026-09-25T01:00:00Z", inputFinalized: true,
+        notePath: "inbox/note.md", noteFile: { hostId: "project-host", path: "/tmp/vault/inbox/note.md" },
+        threadIds: ["thr-note"], distilledMemoRevision: "memo-v1",
+      }] };
       if (method === "captureAuthority") return { ok: true, instanceId: "instance-1", workspaceId: "workspace-1" };
       if (method === "sessionExists") return { ok: true, found: true };
       if (method === "stop") { stopped = true; return { ok: true, snapshot: null }; }
@@ -42,6 +48,13 @@ function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: strin
 }
 
 describe("Margins project recording server", () => {
+  it("resolves linked thread titles while retaining the host note preview target", async () => {
+    const host = harness({ meetingList: true });
+    await expect(host.harness.behavior.callRpc("listWorkspaceMeetings", { projectId: "proj-1" })).resolves.toMatchObject({ ok: true,
+      meetings: [{ noteFile: { hostId: "project-host", path: "/tmp/vault/inbox/note.md" },
+        threadLinks: [{ id: "thr-note", title: "Create connected meeting note" }] }],
+    });
+  });
   it("keys ownership by the Workspace session while routing audio by browser recording id", async () => {
     const host = harness({ canonicalSessionId: "meeting-2" });
     const started = await host.harness.behavior.callRpc("beginBrowserCapture", { threadId: "thr-1", client: browser, ownerId: "owner" });

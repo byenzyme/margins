@@ -42,7 +42,9 @@ export const workspaceMeetingResultSchema = z.discriminatedUnion("ok", [
 ]);
 export const workspaceMeetingSummarySchema = workspaceMeetingSchema.omit({ notepad: true }).extend({
   notePath: z.string().nullable(),
+  noteFile: z.object({ hostId: z.string().min(1), path: z.string().min(1) }).strict().nullable().default(null),
   threadIds: z.array(z.string()).default([]),
+  threadLinks: z.array(z.object({ id: z.string(), title: z.string() }).strict()).default([]),
   distilledMemoRevision: z.string().nullable().default(null),
 }).strict();
 export const workspaceMeetingsResultSchema = z.discriminatedUnion("ok", [

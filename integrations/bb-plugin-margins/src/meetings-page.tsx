@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useBbContext, useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
+import { experimental_FileLink as FileLink, useBbContext, useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import { Pause } from "lucide-react";
 import type { marginsRpcContract } from "../server.js";
 import { browserCaptureOwner, detectClientCapabilities } from "./browser-capture.js";
@@ -19,6 +19,11 @@ function meetingListTitle(value: string) {
   const date = new Date(value);
   const today = date.toDateString() === new Date().toDateString();
   return `${today ? "Today" : date.toLocaleDateString("en-US", { month: "short", day: "numeric" })} ${meetingTime(value)}`;
+}
+function noteTitle(relativePath: string) {
+  const title = relativePath.split(/[\\/]/).at(-1)?.replace(/\.md$/i, "")
+    .replace(/^\d{4}-\d{2}-\d{2}[\s_-]+/, "").replace(/[-_]+/g, " ").trim();
+  return title ? title[0]!.toUpperCase() + title.slice(1) : "Connected note";
 }
 function elapsedLabel(milliseconds: number) {
   const seconds = Math.max(0, Math.floor(milliseconds / 1_000));
@@ -320,6 +325,8 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   const memoChangedSinceNote = Boolean(selected?.notePath && meeting &&
     (selected.distilledMemoRevision !== meeting.notepad.revision || dirty.current));
   const noteAction = selected?.inputFinalized && (!selected.notePath || memoChangedSinceNote);
+  const threadLinks = selected?.threadLinks?.length ? selected.threadLinks
+    : (selected?.threadIds || []).map((id) => ({ id, title: "Meeting note thread" }));
   const shownTranscript = transcriptStatus?.sessionId === selectedId ? transcriptStatus.state : "checking";
   const groups = [["Live", live], ["Ready to refine", ready], ["Distilled", distilled]] as const;
   return <main className="margins-meetings-page">
@@ -347,6 +354,11 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
           {!selected.inputFinalized ? <><i className={`margins-meeting-state-dot${pausedSession(selected.sessionId) ? " paused" : ""}`} aria-hidden="true" />{pausedSession(selected.sessionId) ? "Paused" : "Recording"}</>
             : stopAck?.sessionId === selected.sessionId ? `Saved · ${stopAck.elapsed} recorded`
               : memoChangedSinceNote ? "Memo updated since note" : selected.notePath ? "Note created" : "Ready"}</span>
+          {selected.notePath && <nav className="margins-meeting-links" aria-label="Meeting links">
+            {selected.noteFile ? <FileLink title="Open note preview" target={{ kind: "host", ...selected.noteFile }} location={null}>{noteTitle(selected.notePath)}</FileLink>
+              : <span title="File preview is unavailable on this host">{noteTitle(selected.notePath)}</span>}
+            {threadLinks.map(({ id, title }) => <button key={id} onClick={() => navigate.toThread(id)}>{title}</button>)}
+          </nav>}
           {message && <span className={`margins-meeting-status${message === "Saved" ? " saved" : " error"}`} role="status">{message}</span>}</div>
           <h2>{meeting.title || `Meeting · ${meetingTime(meeting.startedAt)}`}</h2></div>
           {noteAction && <div className="margins-meeting-next"><button onClick={() => void distill()}>{selected.notePath ? "Update note" : "Make note"} →</button></div>}
@@ -355,10 +367,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
           {(shownTranscript === "failed" || shownTranscript === "not_ready") && <button onClick={() => void retryTranscription()}>{shownTranscript === "failed" ? "Retry" : "Transcribe"}</button>}
           {handoff && <span>Note draft opened — press Enter to start</span>}</div>}
         <textarea ref={memoRef} aria-label="Meeting memo pad" placeholder="Write notes..." value={draft} onChange={(event) => { dirty.current = true; latestDraft.current = event.target.value; setDraft(event.target.value); setMessage(""); }} onBlur={() => void saveMemo().catch((error) => setMessage(String(error)))} />
-        <footer>
-          {selected.notePath && <span>Note: {selected.notePath}</span>}
-          {(selected.threadIds || []).map((threadId) => <button key={threadId} onClick={() => navigate.toThread(threadId)}>Thread {threadId}</button>)}
-          {memoChangedSinceNote && <span>Note uses an earlier memo revision</span>}</footer>
+        <footer>{memoChangedSinceNote && <span>Note uses an earlier memo revision</span>}</footer>
       </> : panel?.state !== "unavailable" && <div className="margins-meetings-empty"><h2>No meetings yet</h2><button onClick={() => void start()}>Start meeting</button>
         {message && <p role="alert">{message}</p>}</div>}
     </section>

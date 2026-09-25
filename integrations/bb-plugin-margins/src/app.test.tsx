@@ -131,6 +131,35 @@ describe("Margins recording panel", () => {
     slot.lifecycle.unmount();
   });
 
+  it("opens distilled note and thread links by title beside the status", async () => {
+    const notePath = "inbox/2026-09-25-quiet-meetings-with-accessibility.md";
+    const noteFile = { hostId: "host-1", path: "/tmp/vault/inbox/2026-09-25-quiet-meetings-with-accessibility.md" };
+    const linked = { sessionId: "ended-linked", title: null, startedAt: "2026-09-25T01:00:00Z", inputFinalized: true,
+      notepad: { text: "Decision", revision: "memo-v1" }, notePath, noteFile,
+      threadIds: ["thr-distilled"], threadLinks: [{ id: "thr-distilled", title: "Create connected meeting note" }], distilledMemoRevision: "memo-v1" };
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "project-1/ended-linked" }, { context: { projectId: "project-1" }, openFilePreview: () => true, rpc: {
+      availableProjects: () => ({ projects: [{ id: "project-1", name: "Project" }] }),
+      getProjectPanelState: () => panel({ state: "ready", recordingId: null }),
+      listWorkspaceMeetings: () => ({ ok: true, meetings: [linked] }),
+      readWorkspaceMeeting: () => ({ ok: true, candidates: [], meeting: linked }),
+      connectedNoteContext: () => ({ ok: true, context: {
+        schema: "margins.bb.connected-note-context.v1", instanceId: "instance", workspaceId: "vault", sessionId: linked.sessionId, title: null,
+        transcript: { available: true, terminal: true, live: false, updatedAtUnixMs: 1 }, memo: { revision: "memo-v1", lineCount: 1 },
+        artifacts: [], noteAssociation: { sourceId: "home", relativePath: notePath, revision: 1 }, instructions: "",
+      } }),
+    } });
+    const screen = within(slot.container);
+    const links = await screen.findByRole("navigation", { name: "Meeting links" });
+    fireEvent.click(within(links).getByRole("link", { name: "Quiet meetings with accessibility" }));
+    fireEvent.click(within(links).getByRole("button", { name: "Create connected meeting note" }));
+    expect(slot.inspection.navigateCalls).toContainEqual({ method: "experimental_openFilePreview",
+      options: { target: { kind: "host", ...noteFile }, location: null } });
+    expect(slot.inspection.navigateCalls).toContainEqual({ method: "toThread", threadId: "thr-distilled" });
+    expect(slot.container.textContent).not.toContain("inbox/");
+    expect(slot.container.textContent).not.toContain("thr-distilled");
+    slot.lifecycle.unmount();
+  });
+
   it("keeps a transcription failure on Meetings instead of putting its error in a composer draft", async () => {
     const ended = { sessionId: "ended-error", title: null, startedAt: "2026-09-24T01:00:00Z", inputFinalized: true,
       notepad: { text: "Decision", revision: "memo-v1" }, notePath: null, threadIds: [], distilledMemoRevision: null };

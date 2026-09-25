@@ -18934,7 +18934,9 @@ var workspaceMeetingResultSchema = external_exports.discriminatedUnion("ok", [
 ]);
 var workspaceMeetingSummarySchema = workspaceMeetingSchema.omit({ notepad: true }).extend({
   notePath: external_exports.string().nullable(),
+  noteFile: external_exports.object({ hostId: external_exports.string().min(1), path: external_exports.string().min(1) }).strict().nullable().default(null),
   threadIds: external_exports.array(external_exports.string()).default([]),
+  threadLinks: external_exports.array(external_exports.object({ id: external_exports.string(), title: external_exports.string() }).strict()).default([]),
   distilledMemoRevision: external_exports.string().nullable().default(null)
 }).strict();
 var workspaceMeetingsResultSchema = external_exports.discriminatedUnion("ok", [
@@ -19498,7 +19500,19 @@ function marginsPlugin(bb) {
     },
     async listWorkspaceMeetings({ projectId }) {
       const target = await targetForProject(projectId);
-      return callHost(target, "listWorkspaceMeetings", { target });
+      const listed = await callHost(target, "listWorkspaceMeetings", { target });
+      if (!listed.ok) return listed;
+      return { ok: true, meetings: await Promise.all(listed.meetings.map(async (meeting) => ({
+        ...meeting,
+        threadLinks: await Promise.all((meeting.threadIds || []).map(async (id) => {
+          try {
+            const thread = await bb.sdk.threads.get({ threadId: id });
+            return { id, title: thread.title?.trim().slice(0, 100) || "Meeting note thread" };
+          } catch {
+            return { id, title: "Meeting note thread" };
+          }
+        }))
+      }))) };
     },
     async projectWorkspace({ threadId, projectId, workspaceId }) {
       const target = await targetForSelection({ threadId, projectId });

@@ -309,7 +309,17 @@ export default function marginsPlugin(bb: BbPluginApi) {
     },
     async listWorkspaceMeetings({ projectId }) {
       const target = await targetForProject(projectId);
-      return callHost(target, "listWorkspaceMeetings", { target });
+      const listed = await callHost(target, "listWorkspaceMeetings", { target });
+      if (!listed.ok) return listed;
+      return { ok: true as const, meetings: await Promise.all(listed.meetings.map(async (meeting: { threadIds?: string[] }) => ({
+        ...meeting,
+        threadLinks: await Promise.all((meeting.threadIds || []).map(async (id) => {
+          try {
+            const thread = await bb.sdk.threads.get({ threadId: id }) as { title?: string | null };
+            return { id, title: thread.title?.trim().slice(0, 100) || "Meeting note thread" };
+          } catch { return { id, title: "Meeting note thread" }; }
+        })),
+      }))) };
     },
     async projectWorkspace({ threadId, projectId, workspaceId }) {
       const target = await targetForSelection({ threadId, projectId });

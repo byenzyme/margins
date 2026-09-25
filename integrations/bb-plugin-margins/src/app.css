@@ -63,8 +63,11 @@
 .margins-meeting-pad { display:flex; min-width:0; min-height:70vh; flex-direction:column; padding:24px clamp(20px,5vw,64px); }
 .margins-meeting-pad header { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; }
 .margins-meeting-kicker { color:var(--muted-foreground); font-size:11px; }
-.margins-meeting-meta { display:flex; min-height:16px; align-items:center; gap:10px; }
+.margins-meeting-meta { display:flex; min-height:16px; flex-wrap:wrap; align-items:center; gap:6px 12px; }
 .margins-meeting-kicker { display:inline-flex; align-items:center; gap:6px; }
+.margins-meeting-links { display:inline-flex; min-width:0; flex-wrap:wrap; align-items:center; gap:5px 12px; }
+.margins-meeting-links button,.margins-meeting-links a,.margins-meeting-links span { display:inline-block; overflow:hidden; max-width:210px; padding:0; border:0; background:transparent; color:var(--muted-foreground); font:inherit; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
+.margins-meeting-links button,.margins-meeting-links a { color:var(--foreground); text-decoration:underline; text-underline-offset:2px; cursor:pointer; }
 .margins-meeting-state-dot { width:7px; height:7px; border-radius:50%; background:var(--destructive); }
 .margins-meeting-state-dot.paused { background:var(--muted-foreground); }
 .margins-meeting-status { max-width:360px; overflow:hidden; color:var(--destructive); font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
