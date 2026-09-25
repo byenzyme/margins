@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useBbContext, useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
-import { Pause, Play, Square } from "lucide-react";
+import { Pause } from "lucide-react";
 import type { marginsRpcContract } from "../server.js";
 import { browserCaptureOwner, detectClientCapabilities } from "./browser-capture.js";
 import { nativeBridgeOwner } from "./native-bridge-client.js";
@@ -46,7 +46,9 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   const [draft, setDraft] = useState("");
   const [message, setMessage] = useState("");
   const dirty = useRef(false);
+  const latestDraft = useRef("");
   const revision = useRef("");
+  const saveLoop = useRef<Promise<void> | null>(null);
   const client = useRef(detectClientCapabilities()).current;
 
   useEffect(() => {
@@ -88,6 +90,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
       setMeeting(result.meeting);
       if (!dirty.current) {
         setDraft(result.meeting.notepad.text);
+        latestDraft.current = result.meeting.notepad.text;
         revision.current = result.meeting.notepad.revision;
       }
     }).catch((error) => { if (!cancelled) setMessage(String(error)); });
@@ -95,14 +98,23 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   }, [projectId, selectedId, rpc]);
 
   async function saveMemo() {
+    if (saveLoop.current) return saveLoop.current;
     if (!dirty.current || !meeting || !projectId || !revision.current) return;
-    const result = await rpc.call("saveWorkspaceMemo", { projectId, sessionId: meeting.sessionId,
-      expectedRevision: revision.current, text: draft });
-    if (!result.ok || !result.meeting) throw new Error(result.ok ? "Meeting unavailable" : result.error.message);
-    revision.current = result.meeting.notepad.revision;
-    setMeeting(result.meeting);
-    dirty.current = false;
-    setMessage("Saved");
+    const sessionId = meeting.sessionId;
+    const loop = (async () => {
+      while (dirty.current) {
+        const text = latestDraft.current;
+        const result = await rpc.call("saveWorkspaceMemo", { projectId, sessionId,
+          expectedRevision: revision.current, text });
+        if (!result.ok || !result.meeting) throw new Error(result.ok ? "Meeting unavailable" : result.error.message);
+        revision.current = result.meeting.notepad.revision;
+        setMeeting(result.meeting);
+        dirty.current = latestDraft.current !== text;
+      }
+      setMessage("Saved");
+    })().finally(() => { saveLoop.current = null; });
+    saveLoop.current = loop;
+    return loop;
   }
   useEffect(() => {
     if (!dirty.current) return;
@@ -115,6 +127,12 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     setMeeting(null);
     setSelectedId(sessionId);
     navigate.toPluginPanel("meetings", { subPath: `${projectId}/${sessionId}` });
+  }
+  async function chooseProject(nextProjectId: string) {
+    try { await saveMemo(); } catch (error) { setMessage(String(error)); return; }
+    dirty.current = false; latestDraft.current = ""; revision.current = "";
+    setProjectId(nextProjectId); setSelectedId(null); setMeeting(null); setDraft(""); setMessage("");
+    navigate.toPluginPanel("meetings", { subPath: nextProjectId });
   }
   async function control(action: "pause" | "resume" | "stop", sessionId = selectedId): Promise<boolean> {
     try {
@@ -129,6 +147,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
         const latest = await rpc.call("readWorkspaceMeeting", { projectId, sessionId });
         if (latest.ok && latest.meeting && !dirty.current) {
           setMeeting(latest.meeting); setDraft(latest.meeting.notepad.text);
+          latestDraft.current = latest.meeting.notepad.text;
           revision.current = latest.meeting.notepad.revision;
         }
       }
@@ -168,7 +187,10 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
         transcriptRequest = requested.ok ? "Transcription has been requested; wait for it before writing. "
           : `Transcription could not be requested (${requested.error.message}); arrange transcription before writing. `;
       }
-      navigate.toCompose({ initialPrompt: `Work in bb project ${projectId}. Use the Margins distillation skill to create a connected note for Margins session ${sessionId} in Workspace ${workspaceId}. Distill memo revision ${memo.revision}. Read that exact session's memo and transcript, then write the note in the Workspace destination. ${transcriptRequest}After writing, associate the note with the session and record this bb thread id and distilled memo revision on the session.`, focusPrompt: true });
+      const noteTask = result.context.noteAssociation
+        ? "Review the note already associated with this session and update it with the revised memo."
+        : "Create a connected note for this session.";
+      navigate.toCompose({ initialPrompt: `Work in bb project ${projectId}. Use the Margins distillation skill for Margins session ${sessionId} in Workspace ${workspaceId}. ${noteTask} Distill memo revision ${memo.revision}. Read that exact session's memo and transcript, then write the note through the Workspace Source. ${transcriptRequest}After writing, associate the note with the session and record this bb thread id and distilled memo revision on the session.`, focusPrompt: true });
     } catch (error) { setMessage(String(error)); }
   }
 
@@ -176,14 +198,15 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   const ready = meetings.filter((item) => item.inputFinalized && !item.notePath);
   const distilled = meetings.filter((item) => item.inputFinalized && item.notePath);
   const selected = meetings.find((item) => item.sessionId === selectedId);
+  const memoChangedSinceNote = Boolean(selected?.notePath && meeting &&
+    (selected.distilledMemoRevision !== meeting.notepad.revision || dirty.current));
+  const noteAction = selected?.inputFinalized && (!selected.notePath || memoChangedSinceNote);
   const groups = [["Live", live], ["Ready to refine", ready], ["Distilled", distilled]] as const;
   return <main className="margins-meetings-page">
     <aside className="margins-meeting-list">
-      <div className="margins-meetings-top"><strong>Meetings</strong><button onClick={() => void start()} disabled={panel?.state === "unavailable"}>Start</button></div>
-      <select aria-label="bb project for Meetings" value={projectId} onChange={(event) => {
-        setProjectId(event.target.value); setSelectedId(null); setMeeting(null);
-        navigate.toPluginPanel("meetings", { subPath: event.target.value });
-      }}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select>
+      <div className="margins-meetings-top"><strong>Meetings</strong>{meetings.length > 0 && live.length === 0 &&
+        <button onClick={() => void start()} disabled={panel?.state === "unavailable"}>Start</button>}</div>
+      <select aria-label="bb project for Meetings" value={projectId} onChange={(event) => void chooseProject(event.target.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select>
       {groups.map(([label, items]) => items.length > 0 && <section key={label}>
         <h3>{label}</h3>{items.map((item) => <button key={item.sessionId} className={item.sessionId === selectedId ? "selected" : ""}
           onClick={() => void choose(item.sessionId)}><span>{item.title || new Date(item.startedAt).toLocaleString()}</span>
@@ -198,18 +221,16 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
         <p>To create one, use the Margins workspace-setup skill.</p>
       </div>}
       {panel?.state !== "unavailable" && selected && meeting ? <>
-        <header><div><span className="margins-meeting-kicker">{!selected.inputFinalized ? "Live" : selected.notePath ? "Distilled" : "Ready to refine"}</span>
+        <header><div><span className="margins-meeting-kicker">{!selected.inputFinalized ? "Live" : memoChangedSinceNote ? "Memo updated since note" : selected.notePath ? "Note created" : "Ready to refine"}</span>
           <h2>{meeting.title || new Date(meeting.startedAt).toLocaleString()}</h2></div>
-          {!selected.inputFinalized && <div className="margins-meeting-controls">
-            <button aria-label={panel?.state === "paused" ? "Resume" : "Pause"} onClick={() => void control(panel?.state === "paused" ? "resume" : "pause")}>{panel?.state === "paused" ? <Play size={15} /> : <Pause size={15} />}</button>
-            <button aria-label="Stop and save" onClick={() => void control("stop")}><Square size={14} /></button>
-          </div>}
+          {noteAction && <div className="margins-meeting-next"><button onClick={() => void distill()}>{selected.notePath ? "Update note in new thread" : "Make note in new thread"} →</button>
+            <small>Memo stays editable.</small></div>}
         </header>
-        <textarea aria-label="Meeting memo pad" placeholder="" value={draft} onChange={(event) => { dirty.current = true; setDraft(event.target.value); setMessage(""); }} onBlur={() => void saveMemo().catch((error) => setMessage(String(error)))} />
-        <footer><span role="status">{message}</span>{selected.inputFinalized && <button onClick={() => void distill()}>Distill to note →</button>}
+        <textarea aria-label="Meeting memo pad" placeholder="" value={draft} onChange={(event) => { dirty.current = true; latestDraft.current = event.target.value; setDraft(event.target.value); setMessage(""); }} onBlur={() => void saveMemo().catch((error) => setMessage(String(error)))} />
+        <footer><span role="status">{message}</span>
           {selected.notePath && <span>Note: {selected.notePath}</span>}
           {(selected.threadIds || []).map((threadId) => <button key={threadId} onClick={() => navigate.toThread(threadId)}>Thread {threadId}</button>)}
-          {selected.distilledMemoRevision && selected.distilledMemoRevision !== meeting.notepad.revision && <span>Edited since distillation</span>}</footer>
+          {memoChangedSinceNote && <span>Note uses an earlier memo revision</span>}</footer>
       </> : panel?.state !== "unavailable" && <div className="margins-meetings-empty"><h2>No meetings yet</h2><button onClick={() => void start()}>Start meeting</button></div>}
     </section>
   </main>;

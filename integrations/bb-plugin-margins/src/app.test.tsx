@@ -61,6 +61,9 @@ describe("Margins recording panel", () => {
     const screen = within(slot.container);
     expect((await screen.findByRole("textbox", { name: "Meeting memo pad" }) as HTMLTextAreaElement).value).toBe("Live memo");
     expect(screen.getByText("Ready to refine")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Pause" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Stop and save" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Start" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Review" }));
     await waitFor(() => expect((screen.getByRole("textbox", { name: "Meeting memo pad" }) as HTMLTextAreaElement).value).toBe("Ended memo"));
     expect(slot.inspection.rpcCalls.some((call) => ["pauseBrowserCapture", "stopBrowserCapture"].includes(call.method))).toBe(false);
@@ -83,7 +86,7 @@ describe("Margins recording panel", () => {
       transcribePinnedSession: () => ({ ok: true, status: "queued", attempt: 1 }),
     } });
     const screen = within(slot.container);
-    fireEvent.click(await screen.findByRole("button", { name: "Distill to note →" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Make note in new thread →" }));
     await waitFor(() => expect(slot.inspection.navigateCalls.some((call) => call.method === "toCompose")).toBe(true));
     const compose = slot.inspection.navigateCalls.find((call) => call.method === "toCompose");
     expect(compose).toMatchObject({ options: { focusPrompt: true } });
@@ -93,6 +96,64 @@ describe("Margins recording panel", () => {
     expect(JSON.stringify(compose)).toContain("project-1");
     expect(slot.inspection.rpcCalls.some((call) => call.method === "transcribePinnedSession")).toBe(true);
     expect(slot.inspection.rpcCalls.some((call) => call.method === "threads.spawn")).toBe(false);
+    slot.lifecycle.unmount();
+  });
+
+  it("keeps a distilled memo editable and offers a new thread for a changed revision", async () => {
+    const linked = { sessionId: "ended-linked", title: "Review", startedAt: "2026-09-24T01:00:00Z", inputFinalized: true,
+      notepad: { text: "Original decision", revision: "memo-v1" }, notePath: "inbox/review.md", threadIds: ["thr-original"], distilledMemoRevision: "memo-v1" };
+    const revised = { ...linked, notepad: { text: "Revised decision", revision: "memo-v2" } };
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "project-1/ended-linked" }, { context: { projectId: "project-1" }, rpc: {
+      availableProjects: () => ({ projects: [{ id: "project-1", name: "Project" }] }),
+      getProjectPanelState: () => panel({ state: "ready", recordingId: null }),
+      listWorkspaceMeetings: () => ({ ok: true, meetings: [linked] }),
+      readWorkspaceMeeting: () => ({ ok: true, candidates: [], meeting: linked }),
+      saveWorkspaceMemo: () => ({ ok: true, candidates: [], meeting: revised }),
+      connectedNoteContext: () => ({ ok: true, context: {
+        schema: "margins.bb.connected-note-context.v1", instanceId: "instance", workspaceId: "vault", sessionId: linked.sessionId, title: linked.title,
+        transcript: { available: true, terminal: true, live: false, updatedAtUnixMs: 1 }, memo: { revision: "memo-v2", lineCount: 1 },
+        artifacts: [], noteAssociation: { sourceId: "home", relativePath: linked.notePath, revision: 1 }, instructions: "",
+      } }),
+    } });
+    const screen = within(slot.container);
+    const pad = await screen.findByRole("textbox", { name: "Meeting memo pad" }) as HTMLTextAreaElement;
+    expect(pad.readOnly).toBe(false);
+    expect(screen.queryByRole("button", { name: "Update note in new thread →" })).toBeNull();
+    fireEvent.change(pad, { target: { value: "Revised decision" } });
+    fireEvent.click(await screen.findByRole("button", { name: "Update note in new thread →" }));
+    await waitFor(() => expect(slot.inspection.navigateCalls.some((call) => call.method === "toCompose")).toBe(true));
+    expect(slot.inspection.rpcCalls).toContainEqual(expect.objectContaining({ method: "saveWorkspaceMemo",
+      input: expect.objectContaining({ expectedRevision: "memo-v1", text: "Revised decision" }) }));
+    expect(JSON.stringify(slot.inspection.navigateCalls)).toContain("memo-v2");
+    expect(JSON.stringify(slot.inspection.navigateCalls)).toContain("update it with the revised memo");
+    slot.lifecycle.unmount();
+  });
+
+  it("saves a later memo edit made while an earlier revision is in flight", async () => {
+    const meeting = { sessionId: "ended-editing", title: "Review", startedAt: "2026-09-24T01:00:00Z", inputFinalized: true,
+      notepad: { text: "Original", revision: "memo-v1" }, notePath: null, threadIds: [], distilledMemoRevision: null };
+    let resolveFirst!: (result: unknown) => void;
+    const firstSave = new Promise((resolve) => { resolveFirst = resolve; });
+    const saveWorkspaceMemo = vi.fn().mockImplementationOnce(() => firstSave).mockImplementationOnce(() => ({
+      ok: true, candidates: [], meeting: { ...meeting, notepad: { text: "Second edit", revision: "memo-v3" } },
+    }));
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "project-1/ended-editing" }, { rpc: {
+      availableProjects: () => ({ projects: [{ id: "project-1", name: "Project" }] }),
+      getProjectPanelState: () => panel({ state: "ready", recordingId: null }),
+      listWorkspaceMeetings: () => ({ ok: true, meetings: [meeting] }),
+      readWorkspaceMeeting: () => ({ ok: true, candidates: [], meeting }),
+      saveWorkspaceMemo,
+    } });
+    const screen = within(slot.container);
+    const pad = await screen.findByRole("textbox", { name: "Meeting memo pad" }) as HTMLTextAreaElement;
+    fireEvent.change(pad, { target: { value: "First edit" } });
+    fireEvent.blur(pad);
+    await waitFor(() => expect(saveWorkspaceMemo).toHaveBeenCalledTimes(1));
+    fireEvent.change(pad, { target: { value: "Second edit" } });
+    resolveFirst({ ok: true, candidates: [], meeting: { ...meeting, notepad: { text: "First edit", revision: "memo-v2" } } });
+    await waitFor(() => expect(saveWorkspaceMemo).toHaveBeenCalledTimes(2));
+    expect(saveWorkspaceMemo).toHaveBeenLastCalledWith(expect.objectContaining({ expectedRevision: "memo-v2", text: "Second edit" }));
+    await waitFor(() => expect((pad as HTMLTextAreaElement).value).toBe("Second edit"));
     slot.lifecycle.unmount();
   });
 

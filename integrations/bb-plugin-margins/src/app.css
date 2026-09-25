@@ -63,8 +63,9 @@
 .margins-meeting-pad header { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; }
 .margins-meeting-kicker { color:var(--muted-foreground); font-size:11px; }
 .margins-meeting-pad h2 { margin:5px 0 0; font-size:20px; font-weight:620; letter-spacing:-.02em; }
-.margins-meeting-controls { display:flex; gap:5px; }
-.margins-meeting-controls button { display:grid; width:32px; height:32px; place-items:center; border:1px solid var(--border); border-radius:50%; background:transparent; color:var(--foreground); cursor:pointer; }
+.margins-meeting-next { display:flex; flex-direction:column; align-items:flex-end; gap:4px; }
+.margins-meeting-next button { border:1px solid var(--border); border-radius:8px; padding:7px 10px; background:transparent; color:var(--foreground); font:inherit; font-size:12px; cursor:pointer; }
+.margins-meeting-next small { color:var(--muted-foreground); font-size:11px; }
 .margins-meeting-pad textarea { width:100%; min-height:350px; flex:1; resize:none; border:0; outline:0; margin-top:22px; background:transparent; color:var(--foreground); font:inherit; font-size:15px; line-height:1.7; }
 .margins-meeting-pad footer { display:flex; justify-content:space-between; gap:12px; color:var(--muted-foreground); font-size:11px; }
 .margins-meetings-empty { display:flex; min-height:50vh; flex-direction:column; align-items:flex-start; justify-content:center; gap:12px; }

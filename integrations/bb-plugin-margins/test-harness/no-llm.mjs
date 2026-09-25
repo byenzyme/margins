@@ -166,7 +166,7 @@ try {
   await until("Meetings page", () => browserEval('!!document.querySelector(".margins-meetings-page")'));
   shot("01-workspace.png");
 
-  browser(["find", "role", "button", "click", "--name", "Start", "--exact"]);
+  browser(["find", "role", "button", "click", "--name", "Start meeting", "--exact"]);
   await until("Recording", () => browserEval(`!!document.querySelector('button[aria-label="Pause recording"]')`));
   const levels = [];
   for (let i = 0; i < 6; i++) {
@@ -176,6 +176,8 @@ try {
   assert(levels.some((level) => level > 0));
   assert(new Set(levels).size > 1);
   assert(browserEval(`!!document.querySelector('button[aria-label="Stop and save recording"]')`));
+  assert.equal(browserEval(`document.querySelectorAll('.margins-meeting-pad button[aria-label="Pause"], .margins-meeting-pad button[aria-label="Stop and save"]').length`), 0);
+  assert.equal(browserEval(`document.querySelectorAll('.margins-meetings-top button').length`), 0);
   shot("02-recording.png");
   const liveMemo = "Decision: ship the quiet Meetings view. Owner: Maya.";
   browser(["fill", 'textarea[aria-label="Meeting memo pad"]', liveMemo]);
@@ -187,14 +189,15 @@ try {
   await until("Live memo after thread switch", () => browserEval(`!!document.querySelector('textarea[aria-label="Meeting memo pad"]')`));
   assertMemo(liveMemo);
   shot("03-thread-switch.png");
-  browser(["click", 'button[aria-label="Pause"]']);
+  browser(["click", 'button[aria-label="Pause recording"]']);
   await until("Paused", () => browserEval(`!!document.querySelector('button[aria-label="Resume recording"]')`));
   shot("04-paused.png");
-  browser(["click", 'button[aria-label="Resume"]']);
+  browser(["click", 'button[aria-label="Resume recording"]']);
   await until("Resumed", () => browserEval(`!!document.querySelector('button[aria-label="Pause recording"]')`));
-  browser(["click", 'button[aria-label="Stop and save"]']);
+  browser(["click", 'button[aria-label="Stop and save recording"]']);
   await until("Ready to refine", () => browserEval(`document.querySelector('.margins-meeting-list')?.innerText.toLowerCase().includes('ready to refine') && !document.querySelector('button[aria-label="Stop and save recording"]')`));
   assertMemo(liveMemo);
+  assert(browserEval(`document.querySelector('.margins-meeting-next')?.innerText.includes('Memo stays editable.')`));
   shot("05-ready.png");
   const revisedMemo = `${liveMemo} Post-stop correction: include accessibility pass.`;
   browser(["fill", 'textarea[aria-label="Meeting memo pad"]', revisedMemo]);
@@ -206,7 +209,7 @@ try {
   assert(memos.some((name) => readFileSync(path.join(captureDir, name), "utf8").includes(revisedMemo)));
   shot("06-revised.png");
 
-  browser(["find", "role", "button", "click", "--name", "Distill to note →", "--exact"]);
+  browser(["find", "role", "button", "click", "--name", "Make note in new thread →", "--exact"]);
   await until("Composer", () => browserEval(`document.querySelector('[role="textbox"]')?.textContent?.includes('Distill memo revision')`));
   const prompt = browserEval(`document.querySelector('[role="textbox"]')?.textContent || ''`);
   assert(prompt.includes("Workspace e2e"));

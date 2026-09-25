@@ -59,6 +59,10 @@ Consequences:
   which pad they are typing into.
 - Memo pads stay editable after the meeting ends (refinement). Writes stay
   revisioned as today.
+- The persistent recording overlay is the only Pause/Stop control set. The
+  Meetings page shows the live status and memo without duplicating those
+  buttons. Start is hidden while a meeting is live and the empty state has its
+  own single Start action.
 - Manual Mac pairing and recording diagnostics move to plugin settings.
 
 ### Overlay (`experimental_appOverlay`, exists)
@@ -80,9 +84,19 @@ device. Multiple *ended* meetings awaiting refinement/distillation are normal
 and each has its own memo pad and threads. Concurrent live capture from two
 devices is out of scope.
 
+## Capture choices
+
+Keep channel count, downmixing, and speaker count out of the meeting controls.
+Browser capture has one microphone stream; native capture retains separate mic
+and computer-audio channels. Speaker labeling is a transcription decision for
+audio where channel separation does not identify speakers. If automatic labels
+need correction, offer that choice during transcript refinement rather than
+before recording.
+
 ## Distill to note
 
-On an ended meeting: **Distill to note →**.
+On an ended meeting: **Make note in new thread →**. After a linked note's
+memo revision changes: **Update note in new thread →**.
 
 - Calls `navigate.toCompose({ initialPrompt, focusPrompt: true })` in the
   current bb project. The user presses Enter. No backend `threads.spawn`: the
@@ -90,6 +104,10 @@ On an ended meeting: **Distill to note →**.
   settings.
 - The prompt carries the `sessionId`, the Workspace id, and the memo revision
   being distilled. It carries no destination path.
+- Opening a composer does not freeze or mark the memo distilled. The new thread
+  uses a saved memo revision as its input; the memo remains editable. Once a
+  note is associated, a later memo edit offers "Update note in new thread".
+  The note and thread appear in the Distilled meeting's links.
 - The distill skill resolves the destination from the Workspace (below), writes
   the note, and records the thread ↔ meeting link and the distilled memo
   revision on the Margins session so the Meetings list can show
