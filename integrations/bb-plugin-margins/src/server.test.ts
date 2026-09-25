@@ -39,11 +39,18 @@ function harness(options: { heartbeatFails?: boolean } = {}) {
 }
 
 describe("Margins project recording server", () => {
+  it("stores a project Workspace override and can return to the machine default", async () => {
+    const host = harness();
+    await expect(host.harness.behavior.callRpc("projectWorkspace", { threadId: "thr-1" })).resolves.toEqual({ workspaceId: null });
+    await expect(host.harness.behavior.callRpc("projectWorkspace", { threadId: "thr-1", workspaceId: "practice" })).resolves.toEqual({ workspaceId: "practice" });
+    await expect(host.bb.storage.kv.get("project-workspace:proj-1")).resolves.toBe("practice");
+    await expect(host.harness.behavior.callRpc("projectWorkspace", { threadId: "thr-1", workspaceId: "" })).resolves.toEqual({ workspaceId: null });
+  });
   it("offers microphone-only recording on a Mac until native capture is available", async () => {
     const host = harness();
     await expect(host.harness.behavior.callRpc("getPanelState", { threadId: "thr-1", client: mac })).resolves.toMatchObject({ state: "ready", sourceLabel: "Microphone only", primaryAction: "start" });
     await expect(host.harness.behavior.callRpc("getPanelState", { threadId: "thr-1", client: { ...mac, browserMicrophone: false } })).resolves.toMatchObject({ state: "needs_setup", sourceLabel: null });
-    await expect(host.harness.behavior.callRpc("getPanelState", { threadId: "thr-1", client: browser })).resolves.toMatchObject({ state: "ready", sourceLabel: "Microphone only", storageLabel: "Saves to this bb project", primaryLabel: "Use browser microphone", detail: expect.stringContaining("choose Connected Workspace") });
+    await expect(host.harness.behavior.callRpc("getPanelState", { threadId: "thr-1", client: browser })).resolves.toMatchObject({ state: "ready", sourceLabel: "Microphone only", storageLabel: "Saves to your Workspace", primaryLabel: "Use browser microphone", detail: expect.stringContaining("choose Connected Workspace") });
     await expect(host.harness.behavior.callRpc("beginBrowserCapture", { threadId: "thr-1", client: mac, ownerId: "mac-owner" })).resolves.toMatchObject({ state: "recording", sourceLabel: "Microphone only" });
   });
 

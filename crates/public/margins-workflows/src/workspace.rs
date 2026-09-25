@@ -194,6 +194,8 @@ pub enum WorkspaceBinding {
     NativeMarkdown {
         path: PathBuf,
         role: SourceRole,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note_folder: Option<PathBuf>,
     },
     Captures {
         path: PathBuf,
@@ -550,6 +552,49 @@ pub struct ResolvedWorkspace {
     pub home_dir: PathBuf,
 }
 
+impl ResolvedWorkspace {
+    /// The reviewed Home destination. The folder is never inferred from cwd.
+    pub fn note_destination(&self) -> Result<PathBuf> {
+        let folder = self
+            .config
+            .bindings
+            .values()
+            .find_map(|binding| match binding {
+                WorkspaceBinding::NativeMarkdown {
+                    role: SourceRole::Home,
+                    note_folder,
+                    ..
+                } => Some(note_folder),
+                _ => None,
+            })
+            .context("workspace has no Home binding")?;
+        folder.as_ref().map_or_else(
+            || Ok(self.home_dir.clone()),
+            |relative| safe_note_destination(&self.home_dir, relative),
+        )
+    }
+}
+
+fn safe_note_destination(home: &Path, folder: &Path) -> Result<PathBuf> {
+    let canonical_home = home
+        .canonicalize()
+        .with_context(|| format!("reading Home root {}", home.display()))?;
+    let mut destination = canonical_home.clone();
+    for part in folder.components() {
+        if !matches!(part, std::path::Component::Normal(_)) {
+            bail!("note_folder must stay within the Home root");
+        }
+        destination.push(part);
+        if destination.exists() {
+            destination = destination.canonicalize()?;
+            if !destination.starts_with(&canonical_home) {
+                bail!("note_folder resolves outside the Home root");
+            }
+        }
+    }
+    Ok(destination)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceResolution {
     pub workspace: ResolvedWorkspace,
@@ -669,12 +714,14 @@ impl ResolvedWorkspace {
     /// Workspace. Capture routing is declaration-owned: callers must not fall
     /// back to their cwd or silently choose between multiple stores.
     pub fn capture_store_dir(&self) -> Result<PathBuf> {
-        let mut captures = self.config.bindings.iter().filter_map(|(name, binding)| {
-            match binding {
-                WorkspaceBinding::Captures { path } => Some((name.as_str(), path)),
-                _ => None,
-            }
-        });
+        let mut captures =
+            self.config
+                .bindings
+                .iter()
+                .filter_map(|(name, binding)| match binding {
+                    WorkspaceBinding::Captures { path } => Some((name.as_str(), path)),
+                    _ => None,
+                });
         let Some((name, path)) = captures.next() else {
             bail!(
                 "workspace '{}' has no declared captures source",
@@ -708,6 +755,59 @@ impl ResolvedWorkspace {
             .context("workspace state directory has no Margins home")?;
         google_account_dir(margins_home, account)
     }
+}
+
+/// Machine preference used by clients outside any declared Source folder.
+pub fn default_workspace(margins_home: &Path) -> Result<Option<String>> {
+    let path = margins_home.join("config.toml");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    let config: toml::Value = toml::from_str(&raw).context("invalid machine config")?;
+    let selected = config
+        .get("workspace")
+        .and_then(|value| value.get("default"));
+    match selected {
+        None => Ok(None),
+        Some(toml::Value::String(id)) => {
+            validate_id(id)?;
+            Ok(Some(id.clone()))
+        }
+        Some(_) => bail!("workspace.default must be a Workspace id"),
+    }
+}
+
+pub fn set_default_workspace(margins_home: &Path, id: &str) -> Result<()> {
+    resolve_at(margins_home, id)?;
+    std::fs::create_dir_all(margins_home)?;
+    let config_path = margins_home.join("config.toml");
+    let lock_path = margins_home.join("config.lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(lock_path)?;
+    lock.lock_exclusive()?;
+    let raw = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let mut config: toml::Value = if raw.trim().is_empty() {
+        toml::Value::Table(Default::default())
+    } else {
+        toml::from_str(&raw).context("invalid machine config")?
+    };
+    let table = config
+        .as_table_mut()
+        .context("machine config must be a table")?;
+    let workspace = table
+        .entry("workspace")
+        .or_insert_with(|| toml::Value::Table(Default::default()));
+    workspace
+        .as_table_mut()
+        .context("machine workspace config must be a table")?
+        .insert("default".to_string(), toml::Value::String(id.to_string()));
+    let rendered = toml::to_string_pretty(&config)?;
+    atomic_write(&config_path, rendered.as_bytes())?;
+    Ok(())
 }
 
 pub fn margins_home() -> Result<PathBuf> {
@@ -805,6 +905,7 @@ pub fn create_workspace(
         WorkspaceBinding::NativeMarkdown {
             path: home_notes.clone(),
             role: SourceRole::Home,
+            note_folder: None,
         },
     );
     bindings.insert(
@@ -842,12 +943,15 @@ pub fn ensure_service_workspace(
         .canonicalize()
         .with_context(|| format!("notes folder does not exist: {}", home_notes.display()))?;
     let capture_store = if capture_store.exists() {
-        capture_store.canonicalize().with_context(|| {
-            format!("capture store does not exist: {}", capture_store.display())
-        })?
+        capture_store
+            .canonicalize()
+            .with_context(|| format!("capture store does not exist: {}", capture_store.display()))?
     } else {
         if !capture_store.is_absolute() {
-            bail!("capture store must be absolute: {}", capture_store.display());
+            bail!(
+                "capture store must be absolute: {}",
+                capture_store.display()
+            );
         }
         std::fs::create_dir_all(capture_store)?;
         capture_store.canonicalize()?
@@ -875,6 +979,7 @@ pub fn ensure_service_workspace(
             WorkspaceBinding::NativeMarkdown {
                 path: home_notes.clone(),
                 role: SourceRole::Home,
+                note_folder: None,
             },
         ),
         (
@@ -1159,6 +1264,7 @@ pub fn resolve_at(margins_home: &Path, id: &str) -> Result<ResolvedWorkspace> {
             WorkspaceBinding::NativeMarkdown {
                 path,
                 role: SourceRole::Home,
+                ..
             } => Some(path.clone()),
             _ => None,
         })
@@ -1556,9 +1662,24 @@ fn native_roots_overlap(left: &Path, right: &Path) -> bool {
 
 fn validate_binding(binding: &WorkspaceBinding) -> Result<()> {
     match binding {
-        WorkspaceBinding::NativeMarkdown { path, role: _ } => {
+        WorkspaceBinding::NativeMarkdown {
+            path,
+            role,
+            note_folder,
+        } => {
             if !path.is_absolute() {
                 bail!("source paths must be absolute: {}", path.display());
+            }
+            if let Some(folder) = note_folder {
+                if *role != SourceRole::Home
+                    || folder.as_os_str().is_empty()
+                    || folder
+                        .components()
+                        .any(|part| !matches!(part, std::path::Component::Normal(_)))
+                {
+                    bail!("note_folder must be a nonempty relative path on the Home binding");
+                }
+                safe_note_destination(path, folder)?;
             }
         }
         WorkspaceBinding::Captures { path } => {
@@ -2250,6 +2371,7 @@ mod tests {
             WorkspaceBinding::NativeMarkdown {
                 path: notes.clone(),
                 role: SourceRole::Reference,
+                note_folder: None,
             },
         );
         assert!(overlap.unwrap_err().to_string().contains("overlap"));
@@ -2450,6 +2572,7 @@ account = "owner@example.com"
             WorkspaceBinding::NativeMarkdown {
                 path: nested,
                 role: SourceRole::Reference,
+                note_folder: None,
             },
         );
         assert!(failed_add.unwrap_err().to_string().contains("overlap"));
@@ -2743,6 +2866,7 @@ account = "owner@example.com"
                         WorkspaceBinding::NativeMarkdown {
                             path,
                             role: SourceRole::Reference,
+                            note_folder: None,
                         },
                     )
                     .unwrap();
@@ -2756,5 +2880,60 @@ account = "owner@example.com"
         let workspace = resolve_at(&margins_home, "practice").unwrap();
         assert!(workspace.config.bindings.contains_key("first"));
         assert!(workspace.config.bindings.contains_key("second"));
+    }
+
+    #[test]
+    fn reviewed_home_note_folder_and_machine_default_resolve_without_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let machine = temp.path().join("machine");
+        let home = temp.path().join("vault");
+        std::fs::create_dir_all(&home).unwrap();
+        let mut workspace = create_workspace(&machine, "practice", None, &home).unwrap();
+        assert_eq!(workspace.note_destination().unwrap(), home);
+        assert_eq!(default_workspace(&machine).unwrap(), None);
+        set_default_workspace(&machine, "practice").unwrap();
+        assert_eq!(
+            default_workspace(&machine).unwrap().as_deref(),
+            Some("practice")
+        );
+        let mut desired = workspace.config.clone();
+        let WorkspaceBinding::NativeMarkdown { note_folder, .. } =
+            desired.bindings.get_mut("home").unwrap()
+        else {
+            panic!("home binding changed")
+        };
+        *note_folder = Some(PathBuf::from("inbox"));
+        let plan = plan_workspace_config(&workspace.config, desired).unwrap();
+        apply_workspace_plan(&mut workspace, &plan).unwrap();
+        assert_eq!(
+            resolve_at(&machine, "practice")
+                .unwrap()
+                .note_destination()
+                .unwrap(),
+            home.join("inbox")
+        );
+        assert!(plan_workspace_config(&workspace.config, {
+            let mut invalid = workspace.config.clone();
+            let WorkspaceBinding::NativeMarkdown { note_folder, .. } =
+                invalid.bindings.get_mut("home").unwrap()
+            else {
+                panic!()
+            };
+            *note_folder = Some(PathBuf::from("../outside"));
+            invalid
+        })
+        .is_err());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(temp.path(), home.join("outside-link")).unwrap();
+            let mut invalid = workspace.config.clone();
+            let WorkspaceBinding::NativeMarkdown { note_folder, .. } =
+                invalid.bindings.get_mut("home").unwrap()
+            else {
+                panic!()
+            };
+            *note_folder = Some(PathBuf::from("outside-link"));
+            assert!(plan_workspace_config(&workspace.config, invalid).is_err());
+        }
     }
 }

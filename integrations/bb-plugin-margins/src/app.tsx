@@ -16,6 +16,22 @@ function Signal({ state }: { state: PanelState["state"] }) {
   </div>;
 }
 
+function ProjectWorkspaceSetting({ threadId, onSaved }: { threadId: string; onSaved: () => void }) {
+  const rpc = useRpc<typeof marginsRpcContract>();
+  const [value, setValue] = useState("");
+  const [message, setMessage] = useState("");
+  useEffect(() => {
+    void rpc.call("projectWorkspace", { threadId }).then((result) => setValue(result.workspaceId || "")).catch(() => setMessage("Workspace setting unavailable"));
+  }, [rpc, threadId]);
+  return <div className="margins-workspace-setting">
+    <label htmlFor="margins-project-workspace">Margins Workspace for this project</label>
+    <input id="margins-project-workspace" aria-label="Margins Workspace for this project" value={value}
+      onChange={(event) => setValue(event.target.value)} placeholder="Use machine default" />
+    <button onClick={() => void rpc.call("projectWorkspace", { threadId, workspaceId: value }).then(() => { setMessage("Workspace preference saved"); onSaved(); }).catch((error) => setMessage(String(error)))}>Save</button>
+    {message && <span role="status">{message}</span>}
+  </div>;
+}
+
 function RecordingOverlay() {
   const navigate = useBbNavigate();
   const context = useBbContext();
@@ -398,6 +414,7 @@ function MarginsPanel({ threadId, params }: { threadId: string; params: JsonValu
   const disabled = busy !== null || disconnectedLocal;
 
   return <section className="margins-panel" data-state={visibleState}>
+    <ProjectWorkspaceSetting threadId={threadId} onSaved={() => { void refresh(); }} />
     {client.platform === "macos" && (!externalMeeting || nativeBridgeOwner.threadId) && <NativeCapturePanel threadId={threadId} title={paramsTitle(params)} />}
     {!state.ownsRecording && <WorkspaceMeetingNotes threadId={threadId} onMeetingChange={setExternalMeeting} />}
     {!externalMeeting && <>

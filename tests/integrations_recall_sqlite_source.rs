@@ -719,6 +719,7 @@ fn native_markdown_hashes_survive_binding_rename_and_additional_root() {
         WorkspaceBinding::NativeMarkdown {
             path: reference.clone(),
             role: SourceRole::Reference,
+            note_folder: None,
         },
     )
     .unwrap();
@@ -752,6 +753,7 @@ fn native_markdown_hashes_survive_binding_rename_and_additional_root() {
         WorkspaceBinding::NativeMarkdown {
             path: additional,
             role: SourceRole::Reference,
+            note_folder: None,
         },
     )
     .unwrap();

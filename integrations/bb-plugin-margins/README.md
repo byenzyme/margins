@@ -2,8 +2,9 @@
 
 Margins adds a recording panel and an editable meeting notepad to bb. The
 browser can supply microphone audio, or Margins Menu on a Mac can record both
-microphone and computer audio. Meetings connected to this bb Workspace are
-saved in the project’s primary folder under its existing `.margins` store.
+microphone and computer audio. Meetings are saved in the selected Margins
+Workspace's capture store. A project's Workspace override takes precedence over
+the machine default; without either, the panel asks for a Workspace.
 Meetings saved **On this Mac** use a separate local store and do not appear in
 this bb project automatically.
 
@@ -46,9 +47,10 @@ digest-verified Margins release when needed. That release contains:
 - `margins`, the normal CLI;
 - `margins-server`, the project-side recording service.
 
-The service is launched with the bb project’s default source path as
-`MARGINS_WORK_DIR`, so it writes to `<project>/.margins`, never an environment
-worktree or the recording device’s personal Margins store. For local development,
+The service is launched with the bb project's default source path as
+`MARGINS_WORK_DIR` and an explicit `MARGINS_WORKSPACE`. It uses that Workspace's
+capture store. Set the machine default with `margins workspace default --set
+<id>`, or enter a project override in the panel. For local development,
 `MARGINS_PROJECT_SERVER_PATH` may point at an already-built `margins-server`.
 
 For an explicitly provisioned project host, `asr-runtime.json` in the plugin's
@@ -65,7 +67,7 @@ local Parakeet model and ONNX Runtime library. It contains absolute paths:
 
 The project-host worker validates those paths before launch. Without this
 configuration, it uses the version-pinned installation as before. The service
-stores transcripts alongside the project's sessions, not in plugin storage.
+stores transcripts alongside the Workspace's sessions, not in plugin storage.
 
 ## Mac PWA recording
 
@@ -91,8 +93,8 @@ Enter the one-time code printed by the bridge in the Margins panel. The plugin
 compares the bridge's instance and Workspace identity with the BB project's
 recording service before enabling Start. Configure the project host and Mac
 bridge to use the same provisioned Linux service when using a separate authority:
-`MARGINS_BB_REMOTE_URL`, `MARGINS_BB_REMOTE_TOKEN`, and
-`MARGINS_BB_REMOTE_WORKSPACE` select it on the project host. The Mac bridge uses
+`MARGINS_BB_REMOTE_URL` and `MARGINS_BB_REMOTE_TOKEN` select its endpoint on the
+project host; the project or machine Workspace setting selects its Workspace. The Mac bridge uses
 the normal `ssh://` alias or HTTPS credentials from `MARGINS_REMOTE_TOKEN`.
 The bridge only accepts requests from the exact BB origin on loopback and never
 lets browser requests change its remote destination. The token stays in the

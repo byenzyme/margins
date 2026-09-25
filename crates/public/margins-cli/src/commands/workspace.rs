@@ -69,6 +69,70 @@ pub fn new(
     render_workspace(&resolved, json, &BTreeMap::new(), stdout)
 }
 
+pub fn default(set: Option<&str>, json: bool, stdout: &mut dyn Write) -> Result<(), CliError> {
+    let home = workspace::margins_home().map_err(CliError::from_anyhow)?;
+    if let Some(id) = set {
+        workspace::set_default_workspace(&home, id).map_err(CliError::from_anyhow)?;
+    }
+    let selected = workspace::default_workspace(&home).map_err(CliError::from_anyhow)?;
+    if json {
+        serde_json::to_writer(
+            &mut *stdout,
+            &serde_json::json!({ "default_workspace": selected }),
+        )
+        .map_err(|error| CliError::from_anyhow(error.into()))?;
+        writeln!(stdout).map_err(|error| CliError::from_anyhow(error.into()))
+    } else {
+        writeln!(
+            stdout,
+            "Default Workspace: {}",
+            selected.as_deref().unwrap_or("none")
+        )
+        .map_err(|error| CliError::from_anyhow(error.into()))
+    }
+}
+
+pub fn destination(
+    selector: Option<&str>,
+    cwd: &Path,
+    stdout: &mut dyn Write,
+) -> Result<(), CliError> {
+    let home = workspace::margins_home().map_err(CliError::from_anyhow)?;
+    let selected = selector
+        .map(str::to_string)
+        .or(workspace::default_workspace(&home).map_err(CliError::from_anyhow)?)
+        .ok_or_else(|| {
+            CliError::new(
+                "workspace_required",
+                "choose a Workspace with --workspace or set a machine default",
+            )
+        })?;
+    let resolved = resolve_existing(Some(&selected), cwd)?;
+    let folder = resolved
+        .config
+        .bindings
+        .values()
+        .find_map(|binding| match binding {
+            WorkspaceBinding::NativeMarkdown {
+                role: SourceRole::Home,
+                note_folder,
+                ..
+            } => Some(note_folder),
+            _ => None,
+        })
+        .ok_or_else(|| CliError::new("workspace_invalid", "Workspace has no Home binding"))?;
+    let destination = resolved.note_destination().map_err(CliError::from_anyhow)?;
+    serde_json::to_writer(
+        &mut *stdout,
+        &serde_json::json!({
+            "workspace_id": resolved.config.id, "home_root": resolved.home_dir,
+            "note_folder": folder, "destination": destination,
+        }),
+    )
+    .map_err(|error| CliError::from_anyhow(error.into()))?;
+    writeln!(stdout).map_err(|error| CliError::from_anyhow(error.into()))
+}
+
 pub fn status(
     selector: Option<&str>,
     cwd: &Path,
@@ -119,6 +183,7 @@ fn validate_desired_home_folder_entities(desired: &WorkspaceConfig) -> Result<()
             WorkspaceBinding::NativeMarkdown {
                 path,
                 role: SourceRole::Home,
+                ..
             } => Some(path.as_path()),
             _ => None,
         })
@@ -364,6 +429,7 @@ pub fn add_source(
                 .map(source_role)
                 .with_context(|| "notes sources require --role home or reference")
                 .map_err(CliError::from_anyhow)?,
+            note_folder: None,
         },
         SourceKind::Captures => WorkspaceBinding::Captures {
             path: path
@@ -605,6 +671,7 @@ mod tests {
                 WorkspaceBinding::NativeMarkdown {
                     path: home.to_path_buf(),
                     role: SourceRole::Home,
+                    note_folder: None,
                 },
             )]),
         }
@@ -630,6 +697,7 @@ mod tests {
             WorkspaceBinding::NativeMarkdown {
                 path: reference.path().to_path_buf(),
                 role: SourceRole::Reference,
+                note_folder: None,
             },
         );
 

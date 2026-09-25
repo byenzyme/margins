@@ -2,12 +2,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ProjectMarginsTransport, ProjectServerManager, readAsrRuntimeConfig } from "./project-server.js";
+import { ProjectMarginsTransport, ProjectServerManager, readAsrRuntimeConfig, resolveWorkspaceId } from "./project-server.js";
 
 const saved = {
   url: process.env.MARGINS_BB_REMOTE_URL,
   token: process.env.MARGINS_BB_REMOTE_TOKEN,
   workspace: process.env.MARGINS_BB_REMOTE_WORKSPACE,
+  home: process.env.MARGINS_HOME,
 };
 
 afterEach(() => {
@@ -16,6 +17,7 @@ afterEach(() => {
     MARGINS_BB_REMOTE_URL: saved.url,
     MARGINS_BB_REMOTE_TOKEN: saved.token,
     MARGINS_BB_REMOTE_WORKSPACE: saved.workspace,
+    MARGINS_HOME: saved.home,
   })) {
     if (value === undefined) delete process.env[name];
     else process.env[name] = value;
@@ -23,6 +25,16 @@ afterEach(() => {
 });
 
 describe("ProjectServerManager remote adapter", () => {
+  it("resolves project override, then machine default, without a project-folder fallback", async () => {
+    const home = await mkdtemp(join(tmpdir(), "margins-bb-workspace-"));
+    try {
+      process.env.MARGINS_HOME = home;
+      await expect(resolveWorkspaceId({ projectId: "p", projectRoot: "/code", hostId: "h" })).rejects.toThrow("Choose a Margins Workspace");
+      await writeFile(join(home, "config.toml"), '[llm]\nmode = "local"\n[workspace]\ndefault = "vault"\n');
+      await expect(resolveWorkspaceId({ projectId: "p", projectRoot: "/code", hostId: "h" })).resolves.toBe("vault");
+      await expect(resolveWorkspaceId({ projectId: "p", projectRoot: "/code", hostId: "h", workspaceId: "other" })).resolves.toBe("other");
+    } finally { await rm(home, { recursive: true, force: true }); }
+  });
   it("reopens the newest saved Workspace meeting after recording ends", async () => {
     const manager = { ensure: vi.fn(async () => ({
       baseUrl: "https://margins.example.test", token: "scoped-token", workspaceId: "practice", instanceId: "instance-remote",
@@ -92,6 +104,7 @@ describe("ProjectServerManager remote adapter", () => {
       projectId: "project",
       projectRoot: "/tmp/project",
       hostId: "host",
+      workspaceId: "practice",
     }, "/tmp/plugin-data");
 
     expect(handle.baseUrl).toBe("https://margins.example.test");
@@ -194,6 +207,7 @@ describe("ProjectServerManager remote adapter", () => {
       projectId: "project",
       projectRoot: "/tmp/project",
       hostId: "host",
+      workspaceId: "practice",
     }, "/tmp/plugin-data")).rejects.toThrow("HTTPS or loopback");
   });
 });

@@ -18906,7 +18906,8 @@ var primaryActionSchema = external_exports.enum(["start", "pause", "resume", "re
 var projectTargetSchema = external_exports.object({
   projectId: external_exports.string().min(1),
   hostId: external_exports.string().min(1),
-  projectRoot: external_exports.string().min(1)
+  projectRoot: external_exports.string().min(1),
+  workspaceId: external_exports.string().min(1).optional()
 }).strict();
 var notepadSchema = external_exports.object({ text: external_exports.string(), revision: external_exports.string().min(1) }).strict();
 var workspaceMeetingSchema = external_exports.object({
@@ -19053,6 +19054,10 @@ var captureClientInputSchema = threadClientInputSchema.extend({
   operationId: external_exports.string().min(1)
 }).strict();
 var marginsRpcContract = defineRpcContract({
+  projectWorkspace: {
+    input: external_exports.object({ threadId: external_exports.string().min(1), workspaceId: external_exports.string().optional() }).strict(),
+    output: external_exports.object({ workspaceId: external_exports.string().nullable() }).strict()
+  },
   readWorkspaceMeeting: {
     input: external_exports.object({ threadId: external_exports.string().min(1), sessionId: external_exports.string().min(1).optional() }).strict(),
     output: workspaceMeetingResultSchema
@@ -19106,6 +19111,7 @@ var marginsRpcContract = defineRpcContract({
 // src/server.ts
 var CAPTURE_PREFIX = "capture:";
 var LAST_SESSION_PREFIX = "last-session:";
+var PROJECT_WORKSPACE_PREFIX = "project-workspace:";
 var REALTIME_CHANNEL = "margins-recording";
 var DISCONNECT_GRACE_MS = CAPTURE_DISCONNECT_GRACE_MS;
 function captureKey(projectId) {
@@ -19144,14 +19150,14 @@ function stateCopy(state, sourceLabel, error61) {
     case "recording":
       return {
         title: "Recording",
-        detail: `${sourceLabel}. Audio and notes are being saved to this bb project.`,
+        detail: `${sourceLabel}. Audio and notes are being saved to your Workspace.`,
         primaryAction: "pause",
         primaryLabel: "Pause"
       };
     case "paused":
       return {
         title: "Paused",
-        detail: "Audio is paused. Your recording and notes received so far are safe in this bb project.",
+        detail: "Audio is paused. Your recording and notes received so far are safe in your Workspace.",
         primaryAction: "resume",
         primaryLabel: "Resume"
       };
@@ -19165,14 +19171,14 @@ function stateCopy(state, sourceLabel, error61) {
     case "saving":
       return {
         title: "Saving",
-        detail: "Capture has stopped. Margins is finishing the audio already received by this bb project.",
+        detail: "Capture has stopped. Margins is finishing the audio already received by your Workspace.",
         primaryAction: "none",
         primaryLabel: "Saving"
       };
     case "saved":
       return {
         title: "Meeting saved",
-        detail: "Your recording and notes are safe in this bb project. A transcript may take a little longer.",
+        detail: "Your recording and notes are safe in your Workspace. A transcript may take a little longer.",
         primaryAction: "none",
         primaryLabel: "Meeting saved"
       };
@@ -19214,7 +19220,13 @@ function marginsPlugin(bb) {
     if (project.kind === "personal") throw new Error("Choose a project with a stable folder before recording.");
     const source = project.sources.find((candidate) => candidate.isDefault);
     if (!source) throw new Error("This project does not have a primary folder for recordings.");
-    return { projectId: project.id, hostId: source.hostId, projectRoot: source.path };
+    const workspaceId = await bb.storage.kv.get(`${PROJECT_WORKSPACE_PREFIX}${project.id}`);
+    return {
+      projectId: project.id,
+      hostId: source.hostId,
+      projectRoot: source.path,
+      ...typeof workspaceId === "string" && workspaceId ? { workspaceId } : {}
+    };
   }
   async function readCapture(projectId) {
     const parsed = captureRecordSchema.safeParse(await bb.storage.kv.get(captureKey(projectId)));
@@ -19246,7 +19258,7 @@ function marginsPlugin(bb) {
       state,
       ...copy,
       sourceLabel,
-      storageLabel: projectId ? state === "saved" ? "Saved to this bb project" : "Saves to this bb project" : null,
+      storageLabel: projectId ? state === "saved" ? "Saved to your Workspace" : "Saves to your Workspace" : null,
       canStop: owns && ["recording", "paused", "recovering"].includes(state),
       canEditNotepad: owns && ["recording", "paused", "recovering"].includes(state),
       ownsRecording: owns,
@@ -19278,6 +19290,8 @@ function marginsPlugin(bb) {
       const state = result.snapshot.status === "paused" ? "paused" : result.snapshot.status === "saving" ? "saving" : "recording";
       return basePanel(target.projectId, state, client, { capture, lastSessionId, notepad: result.snapshot.notepad });
     }
+    const authority = await callHost(target, "captureAuthority", { target });
+    if (!authority.ok) return basePanel(target.projectId, "unavailable", client, { error: authority.error, lastSessionId });
     if (client.platform === "macos" && !sourceFor(client)) return basePanel(target.projectId, "needs_setup", client);
     if (!sourceFor(client)) return basePanel(target.projectId, "unavailable", client);
     return basePanel(target.projectId, "ready", client, { lastSessionId });
@@ -19338,6 +19352,17 @@ function marginsPlugin(bb) {
     return getPanelState(threadId, client);
   }
   bb.rpc.register(marginsRpcContract, {
+    async projectWorkspace({ threadId, workspaceId }) {
+      const target = await targetForThread(threadId);
+      if (workspaceId !== void 0) {
+        const selected = workspaceId.trim();
+        if (selected && !/^[a-z0-9][a-z0-9-]*$/.test(selected)) throw new Error("Invalid Workspace id");
+        if (selected) await bb.storage.kv.set(`${PROJECT_WORKSPACE_PREFIX}${target.projectId}`, selected);
+        else await bb.storage.kv.delete(`${PROJECT_WORKSPACE_PREFIX}${target.projectId}`);
+      }
+      const value = await bb.storage.kv.get(`${PROJECT_WORKSPACE_PREFIX}${target.projectId}`);
+      return { workspaceId: typeof value === "string" && value ? value : null };
+    },
     async readWorkspaceMeeting({ threadId, sessionId }) {
       const target = await targetForThread(threadId);
       const result = await callHost(target, "readWorkspaceMeeting", { target, sessionId });
@@ -19464,7 +19489,7 @@ function marginsPlugin(bb) {
   bb.agents.configure((context) => context.project.kind === "personal" ? { tools: [], skills: [] } : {
     tools: [],
     skills: ["watermark", "workspace-setup"],
-    instructions: "Margins recordings and notes live in the project's .margins folder. Use the Margins skills when the user asks about a recorded meeting; do not treat raw notes as settled knowledge."
+    instructions: "Margins recordings live in the resolved Margins Workspace. Use the Margins skills and the Workspace destination read for notes; do not infer a project .margins folder or treat raw notes as settled knowledge."
   });
 }
 export {

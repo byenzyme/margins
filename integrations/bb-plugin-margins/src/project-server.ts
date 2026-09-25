@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { lstat, mkdir, readFile } from "node:fs/promises";
 import { createServer } from "node:net";
+import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { ConnectedNoteResult, HostCaptureSnapshot, HostError, HostResult, ProjectTarget, TranscriptionRequestResult } from "./contracts.js";
 import { createRuntimeManager } from "./runtime-manager.js";
@@ -57,6 +58,25 @@ function projectKey(target: ProjectTarget) {
   return createHash("sha256").update(`${target.projectId}\0${target.projectRoot}`).digest("hex").slice(0, 20);
 }
 
+export function marginsHome(): string {
+  return process.env.MARGINS_HOME?.trim() || join(homedir(), ".margins");
+}
+
+export async function resolveWorkspaceId(target: ProjectTarget): Promise<string> {
+  if (target.workspaceId) {
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(target.workspaceId)) throw new Error("Invalid Margins Workspace id");
+    return target.workspaceId;
+  }
+  const raw = await readFile(join(marginsHome(), "config.toml"), "utf8").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return "";
+    throw error;
+  });
+  const section = raw.match(/(?:^|\n)\s*\[workspace\]\s*\n([\s\S]*?)(?=\n\s*\[|$)/)?.[1] || "";
+  const id = section.match(/(?:^|\n)\s*default\s*=\s*"([a-z0-9][a-z0-9-]*)"\s*(?:#.*)?(?:\n|$)/)?.[1];
+  if (!id) throw new Error("Choose a Margins Workspace for this project or set a machine default with margins workspace default --set <id>.");
+  return id;
+}
+
 async function availablePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const server = createServer();
@@ -93,10 +113,11 @@ export class ProjectServerManager {
   private readonly runtime = createRuntimeManager();
 
   async ensure(target: ProjectTarget, dataDir: string, signal?: AbortSignal): Promise<ServerHandle> {
-    const key = projectKey(target);
+    const workspaceId = await resolveWorkspaceId(target);
+    const key = `${projectKey(target)}:${workspaceId}`;
     const existing = this.handles.get(key);
     if (existing) return existing;
-    const pending = this.start(target, dataDir, key, signal).catch((error) => {
+    const pending = this.start(target, dataDir, key, workspaceId, signal).catch((error) => {
       this.handles.delete(key);
       throw error;
     });
@@ -104,13 +125,12 @@ export class ProjectServerManager {
     return pending;
   }
 
-  private async start(target: ProjectTarget, dataDir: string, key: string, signal?: AbortSignal) {
+  private async start(target: ProjectTarget, dataDir: string, key: string, workspaceId: string, signal?: AbortSignal) {
     const remoteUrl = process.env.MARGINS_BB_REMOTE_URL?.trim();
     const remoteToken = process.env.MARGINS_BB_REMOTE_TOKEN?.trim();
-    const remoteWorkspace = process.env.MARGINS_BB_REMOTE_WORKSPACE?.trim();
-    if (remoteUrl || remoteToken || remoteWorkspace) {
-      if (!remoteUrl || !remoteToken || !remoteWorkspace) {
-        throw new Error("remote Margins selection requires URL, token, and Workspace together");
+    if (remoteUrl || remoteToken) {
+      if (!remoteUrl || !remoteToken) {
+        throw new Error("remote Margins selection requires URL and token together");
       }
       const parsed = new URL(remoteUrl);
       const loopback = parsed.protocol === "http:"
@@ -131,15 +151,15 @@ export class ProjectServerManager {
       if (!response.ok || !envelope.ok) {
         throw new Error(envelope.error?.message || `remote Margins capability check failed (${response.status})`);
       }
-      if (envelope.result?.workspace_id !== remoteWorkspace) {
+      if (envelope.result?.workspace_id !== workspaceId) {
         throw new Error("remote Margins capability Workspace does not match configured Workspace");
       }
       if (!envelope.result.instance_id) throw new Error("remote Margins capability response lacks an instance identity");
-      return { baseUrl, token: remoteToken, workspaceId: remoteWorkspace, instanceId: envelope.result.instance_id };
+      return { baseUrl, token: remoteToken, workspaceId, instanceId: envelope.result.instance_id };
     }
     const asrRuntime = await readAsrRuntimeConfig(dataDir);
     const binary = asrRuntime?.serverPath ?? await this.runtime.ensureProjectServer({ dataDir, signal });
-    const instanceDir = join(dataDir, "projects", key);
+    const instanceDir = join(dataDir, "projects", projectKey(target), workspaceId);
     await mkdir(instanceDir, { recursive: true });
     const port = await availablePort();
     const child = spawn(binary, [], {
@@ -150,10 +170,9 @@ export class ProjectServerManager {
         MARGINS_PORT: String(port),
         MARGINS_DATA_DIR: instanceDir,
         MARGINS_WORK_DIR: target.projectRoot,
-        MARGINS_HOME: join(instanceDir, "margins-home"),
+        MARGINS_HOME: marginsHome(),
         MARGINS_INSTANCE_ID: `bb-host-${target.hostId}`,
-        MARGINS_WORKSPACE: `bb-${key}`,
-        MARGINS_SERVICE_PROVISION: "1",
+        MARGINS_WORKSPACE: workspaceId,
         ...(asrRuntime ? {
           MARGINS_PARAKEET_MODEL_DIR: asrRuntime.modelDir,
           MARGINS_PARAKEET_MODEL_KIND: "tdt-v2",
@@ -168,7 +187,7 @@ export class ProjectServerManager {
       throw error;
     });
     child.once("exit", () => this.handles.delete(key));
-    return { baseUrl, token, workspaceId: `bb-${key}`, instanceId: `bb-host-${target.hostId}`, child };
+    return { baseUrl, token, workspaceId, instanceId: `bb-host-${target.hostId}`, child };
   }
 
   async dispose() {

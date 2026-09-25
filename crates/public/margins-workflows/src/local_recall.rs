@@ -363,6 +363,7 @@ mod tests {
             WorkspaceBinding::NativeMarkdown {
                 path: reference,
                 role: SourceRole::Reference,
+                note_folder: None,
             },
         )
         .unwrap();

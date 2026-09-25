@@ -22,6 +22,7 @@ export const recordingStateSchema = z.enum([
 export const primaryActionSchema = z.enum(["start", "pause", "resume", "retry", "none"]);
 export const projectTargetSchema = z.object({
   projectId: z.string().min(1), hostId: z.string().min(1), projectRoot: z.string().min(1),
+  workspaceId: z.string().min(1).optional(),
 }).strict();
 export const notepadSchema = z.object({ text: z.string(), revision: z.string().min(1) }).strict();
 export const workspaceMeetingSchema = z.object({
@@ -149,6 +150,10 @@ const captureClientInputSchema = threadClientInputSchema.extend({
   operationId: z.string().min(1),
 }).strict();
 export const marginsRpcContract = defineRpcContract({
+  projectWorkspace: {
+    input: z.object({ threadId: z.string().min(1), workspaceId: z.string().optional() }).strict(),
+    output: z.object({ workspaceId: z.string().nullable() }).strict(),
+  },
   readWorkspaceMeeting: {
     input: z.object({ threadId: z.string().min(1), sessionId: z.string().min(1).optional() }).strict(),
     output: workspaceMeetingResultSchema,

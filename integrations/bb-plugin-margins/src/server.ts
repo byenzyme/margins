@@ -20,6 +20,7 @@ import {
 
 const CAPTURE_PREFIX = "capture:";
 const LAST_SESSION_PREFIX = "last-session:";
+const PROJECT_WORKSPACE_PREFIX = "project-workspace:";
 const REALTIME_CHANNEL = "margins-recording";
 export const DISCONNECT_GRACE_MS = CAPTURE_DISCONNECT_GRACE_MS;
 
@@ -46,11 +47,11 @@ function stateCopy(state: PanelState["state"], sourceLabel: string | null, error
       primaryAction: "none" as const, primaryLabel: "Getting ready",
     };
     case "recording": return {
-      title: "Recording", detail: `${sourceLabel}. Audio and notes are being saved to this bb project.`,
+      title: "Recording", detail: `${sourceLabel}. Audio and notes are being saved to your Workspace.`,
       primaryAction: "pause" as const, primaryLabel: "Pause",
     };
     case "paused": return {
-      title: "Paused", detail: "Audio is paused. Your recording and notes received so far are safe in this bb project.",
+      title: "Paused", detail: "Audio is paused. Your recording and notes received so far are safe in your Workspace.",
       primaryAction: "resume" as const, primaryLabel: "Resume",
     };
     case "recovering": return {
@@ -58,11 +59,11 @@ function stateCopy(state: PanelState["state"], sourceLabel: string | null, error
       primaryAction: "retry" as const, primaryLabel: "Reconnect",
     };
     case "saving": return {
-      title: "Saving", detail: "Capture has stopped. Margins is finishing the audio already received by this bb project.",
+      title: "Saving", detail: "Capture has stopped. Margins is finishing the audio already received by your Workspace.",
       primaryAction: "none" as const, primaryLabel: "Saving",
     };
     case "saved": return {
-      title: "Meeting saved", detail: "Your recording and notes are safe in this bb project. A transcript may take a little longer.",
+      title: "Meeting saved", detail: "Your recording and notes are safe in your Workspace. A transcript may take a little longer.",
       primaryAction: "none" as const, primaryLabel: "Meeting saved",
     };
     case "recording_elsewhere": return {
@@ -99,7 +100,9 @@ export default function marginsPlugin(bb: BbPluginApi) {
     if (project.kind === "personal") throw new Error("Choose a project with a stable folder before recording.");
     const source = project.sources.find((candidate) => candidate.isDefault);
     if (!source) throw new Error("This project does not have a primary folder for recordings.");
-    return { projectId: project.id, hostId: source.hostId, projectRoot: source.path };
+    const workspaceId = await bb.storage.kv.get(`${PROJECT_WORKSPACE_PREFIX}${project.id}`);
+    return { projectId: project.id, hostId: source.hostId, projectRoot: source.path,
+      ...(typeof workspaceId === "string" && workspaceId ? { workspaceId } : {}) };
   }
 
   async function readCapture(projectId: string): Promise<CaptureRecord | null> {
@@ -129,7 +132,7 @@ export default function marginsPlugin(bb: BbPluginApi) {
     const owns = Boolean(options.capture && options.capture.clientId === client.clientId);
     return {
       schema: PANEL_STATE_SCHEMA, state, ...copy,
-      sourceLabel, storageLabel: projectId ? (state === "saved" ? "Saved to this bb project" : "Saves to this bb project") : null,
+      sourceLabel, storageLabel: projectId ? (state === "saved" ? "Saved to your Workspace" : "Saves to your Workspace") : null,
       canStop: owns && ["recording", "paused", "recovering"].includes(state),
       canEditNotepad: owns && ["recording", "paused", "recovering"].includes(state),
       ownsRecording: owns, recordingId: options.capture?.recordingId || null,
@@ -160,6 +163,8 @@ export default function marginsPlugin(bb: BbPluginApi) {
       const state = result.snapshot.status === "paused" ? "paused" : result.snapshot.status === "saving" ? "saving" : "recording";
       return basePanel(target.projectId, state, client, { capture, lastSessionId, notepad: result.snapshot.notepad });
     }
+    const authority = await callHost(target, "captureAuthority", { target });
+    if (!authority.ok) return basePanel(target.projectId, "unavailable", client, { error: authority.error, lastSessionId });
     if (client.platform === "macos" && !sourceFor(client)) return basePanel(target.projectId, "needs_setup", client);
     if (!sourceFor(client)) return basePanel(target.projectId, "unavailable", client);
     return basePanel(target.projectId, "ready", client, { lastSessionId });
@@ -219,6 +224,17 @@ export default function marginsPlugin(bb: BbPluginApi) {
   }
 
   bb.rpc.register(marginsRpcContract, {
+    async projectWorkspace({ threadId, workspaceId }) {
+      const target = await targetForThread(threadId);
+      if (workspaceId !== undefined) {
+        const selected = workspaceId.trim();
+        if (selected && !/^[a-z0-9][a-z0-9-]*$/.test(selected)) throw new Error("Invalid Workspace id");
+        if (selected) await bb.storage.kv.set(`${PROJECT_WORKSPACE_PREFIX}${target.projectId}`, selected);
+        else await bb.storage.kv.delete(`${PROJECT_WORKSPACE_PREFIX}${target.projectId}`);
+      }
+      const value = await bb.storage.kv.get(`${PROJECT_WORKSPACE_PREFIX}${target.projectId}`);
+      return { workspaceId: typeof value === "string" && value ? value : null };
+    },
     async readWorkspaceMeeting({ threadId, sessionId }) {
       const target = await targetForThread(threadId);
       const result = await callHost(target, "readWorkspaceMeeting", { target, sessionId });
@@ -330,6 +346,6 @@ export default function marginsPlugin(bb: BbPluginApi) {
   });
   bb.agents.configure((context) => context.project.kind === "personal" ? { tools: [], skills: [] } : {
     tools: [], skills: ["watermark", "workspace-setup"],
-    instructions: "Margins recordings and notes live in the project's .margins folder. Use the Margins skills when the user asks about a recorded meeting; do not treat raw notes as settled knowledge.",
+    instructions: "Margins recordings live in the resolved Margins Workspace. Use the Margins skills and the Workspace destination read for notes; do not infer a project .margins folder or treat raw notes as settled knowledge.",
   });
 }

@@ -27,6 +27,66 @@ use std::time::Duration;
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn workspace_default_and_destination_are_explicit_json_reads() {
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let machine = temp.path().join("machine");
+    let vault = temp.path().join("vault");
+    let code = temp.path().join("code");
+    std::fs::create_dir_all(&vault).unwrap();
+    std::fs::create_dir_all(&code).unwrap();
+    let old = std::env::var_os("MARGINS_HOME");
+    std::env::set_var("MARGINS_HOME", &machine);
+    let service = services(&code);
+    let (missing, _, _) = invoke(
+        &service,
+        &code,
+        &["margins", "workspace", "destination", "--json"],
+    );
+    assert!(missing.is_err());
+    let workspace = workspace::create_workspace(&machine, "practice", None, &vault).unwrap();
+    let mut desired = workspace.config.clone();
+    let WorkspaceBinding::NativeMarkdown { note_folder, .. } =
+        desired.bindings.get_mut("home").unwrap()
+    else {
+        panic!()
+    };
+    *note_folder = Some(PathBuf::from("inbox"));
+    let plan = workspace::plan_workspace_config(&workspace.config, desired).unwrap();
+    let mut workspace = workspace;
+    workspace::apply_workspace_plan(&mut workspace, &plan).unwrap();
+    let (set, output, _) = invoke(
+        &service,
+        &code,
+        &[
+            "margins",
+            "workspace",
+            "default",
+            "--set",
+            "practice",
+            "--json",
+        ],
+    );
+    assert!(set.is_ok(), "{output}");
+    let (read, output, _) = invoke(
+        &service,
+        &code,
+        &["margins", "workspace", "destination", "--json"],
+    );
+    assert!(read.is_ok(), "{output}");
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(json["workspace_id"], "practice");
+    assert_eq!(json["note_folder"], "inbox");
+    assert_eq!(
+        json["destination"],
+        vault.join("inbox").to_string_lossy().as_ref()
+    );
+    restore_env("MARGINS_HOME", old.as_ref());
+}
+
+#[test]
 fn embedded_build_commit_matches_checkout_head_when_git_is_available() {
     let output = match std::process::Command::new("git")
         .args(["-C", env!("CARGO_MANIFEST_DIR"), "rev-parse", "HEAD"])
@@ -191,7 +251,14 @@ fn unsupported_remote_flags_fail_before_transport_or_file_intake() {
             "usage",
         ),
         (
-            vec!["note-association", "session-a", "--source", "notes", "--path", "meeting.md"],
+            vec![
+                "note-association",
+                "session-a",
+                "--source",
+                "notes",
+                "--path",
+                "meeting.md",
+            ],
             "usage",
         ),
         (
@@ -647,6 +714,7 @@ fn source_list_json_serializes_typed_bindings_without_irrelevant_nulls() {
         WorkspaceBinding::NativeMarkdown {
             path: reference,
             role: SourceRole::Reference,
+            note_folder: None,
         },
     )
     .unwrap();
@@ -1243,6 +1311,7 @@ fn forget_leaves_notes_source_named_google_mail_untouched() {
         WorkspaceBinding::NativeMarkdown {
             path: temp.path().join("reference"),
             role: SourceRole::Reference,
+            note_folder: None,
         },
     )
     .unwrap();
@@ -3022,15 +3091,16 @@ fn workspace_transcribe_keeps_generated_artifacts_out_of_notes_sources() {
         &invocation,
         &["margins", "--workspace", "practice", "recent"],
     );
-    let resolved = workspace::resolve_workspace(&margins_home, Some("practice"), &invocation)
-        .unwrap();
+    let resolved =
+        workspace::resolve_workspace(&margins_home, Some("practice"), &invocation).unwrap();
     let service = WorkspaceService::open("same-process-service", resolved).unwrap();
     let principal = ServicePrincipal::full("service-reader", "practice");
     let service_sessions = service.sessions(&principal, None, 10).unwrap();
-    assert_eq!(service_sessions.sessions[0].session_id.as_ref(), "public-input");
-    let service_artifacts = service
-        .artifacts(&principal, "public-input")
-        .unwrap();
+    assert_eq!(
+        service_sessions.sessions[0].session_id.as_ref(),
+        "public-input"
+    );
+    let service_artifacts = service.artifacts(&principal, "public-input").unwrap();
     assert!(service_artifacts
         .iter()
         .any(|artifact| artifact.kind == "transcript"));
@@ -3075,9 +3145,11 @@ fn workspace_transcribe_keeps_generated_artifacts_out_of_notes_sources() {
     assert!(artifacts_stdout.contains(capture_store.to_string_lossy().as_ref()));
     assert!(recent_result.is_ok(), "{recent_stderr}");
     assert!(recent_stdout.contains("id=\"public-input\""));
-    assert!(std::fs::read_to_string(capture_store.join("public-input.md"))
-        .unwrap()
-        .contains("service-visible edit"));
+    assert!(
+        std::fs::read_to_string(capture_store.join("public-input.md"))
+            .unwrap()
+            .contains("service-visible edit")
+    );
     assert!(capture_store.join("public-input.md").is_file());
     assert!(capture_store.join("public-input_transcript.json").is_file());
     assert!(!notes.join(".margins").exists());

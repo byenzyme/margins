@@ -11,7 +11,7 @@ function panel(changes: Partial<PanelState> = {}): PanelState {
   return {
     schema: "margins.bb.recording.panel.v2",
     state: "recording", title: "Recording", detail: "Microphone only. Audio and notes are being saved to this bb project.",
-    sourceLabel: "Microphone only", storageLabel: "Saved to this bb project",
+    sourceLabel: "Microphone only", storageLabel: "Saved to your Workspace",
     primaryAction: "pause", primaryLabel: "Pause", canStop: true, canEditNotepad: true,
     ownsRecording: true, recordingId: "rec-1", notepad: { text: "Pricing", revision: "v1" },
     lastSessionId: null, error: null, ...changes,
@@ -50,7 +50,7 @@ describe("Margins recording panel", () => {
     const screen = within(slot.container);
     await screen.findByText("Recording");
     expect(screen.getByText("Microphone only")).toBeDefined();
-    expect(screen.getByText("Saved to this bb project")).toBeDefined();
+    expect(screen.getByText("Saved to your Workspace")).toBeDefined();
     expect(screen.queryByText(/live transcript/i)).toBeNull();
     const note = screen.getByRole("textbox", { name: "Meeting notepad" });
     fireEvent.change(note, { target: { value: "Pricing\nNext" } });

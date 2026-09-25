@@ -69,7 +69,8 @@ fn run_inner(
         .filter(|value| !value.trim().is_empty());
     let workspace_selected = workspace_selector.is_some() || env_workspace.is_some();
     if workspace_selected && project_selector.is_some() {
-        return Err(CliError::usage(
+        return Err(CliError::new(
+            "invalid_arguments",
             "`--project` cannot be combined with an explicit Workspace selection",
         ));
     }
@@ -181,6 +182,20 @@ fn run_inner(
                     commands::integrations::status(&workspace.state_dir, json, stdout)
                 }
             };
+        }
+        Some(Command::Workspace {
+            command: WorkspaceCommand::Default { set, json },
+        }) => {
+            return commands::workspace::default(set.as_deref(), json, stdout);
+        }
+        Some(Command::Workspace {
+            command: WorkspaceCommand::Destination { .. },
+        }) => {
+            return commands::workspace::destination(
+                workspace_selector.as_deref(),
+                invocation_dir,
+                stdout,
+            );
         }
         Some(Command::Workspace {
             command:

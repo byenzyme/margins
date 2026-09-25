@@ -292,6 +292,19 @@ pub enum SetupLocalModelPolicyArg {
 
 #[derive(Debug, Subcommand)]
 pub enum WorkspaceCommand {
+    /// Read or set the machine's default Workspace
+    Default {
+        /// Set the default to an existing Workspace id
+        #[arg(long)]
+        set: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read the selected Workspace's reviewed Home note destination
+    Destination {
+        #[arg(long, required = true)]
+        json: bool,
+    },
     /// Create a workspace with one writable home notes source
     New {
         /// Stable lowercase workspace id

@@ -308,10 +308,13 @@ Apply revisions if requested. Iterate until the user is satisfied.
 
 Once approved:
 
-**Where the note lands.** Margins uses a git-style folder model: the vault root
-is the folder that *contains* the `.margins/` directory for this session (walk
-up from the session's `.margins/` path) — this is the folder where the user ran
-`margins new`. The distilled note lands in that vault root, next to the session.
+**Where the note lands.** Read `margins --workspace <workspace-id> workspace
+destination --json` before choosing a path. Its `home_root` is the writable
+Home Source, `note_folder` is the optional reviewed subfolder, and `destination`
+is their resolved path. Use the Workspace id carried by the meeting prompt;
+without one, the command uses the machine's default Workspace. If no Workspace
+is selected, ask the user to choose or set one up. The distilled note lands in
+`destination`. A missing `note_folder` means the Home root itself.
 Never leave a note stranded inside `.margins/` — that directory is Margins'
 internal store, not a note destination. Never create `meetings/`, `people/`, or
 any other folder; if a `people/` (or similar) folder already exists, read it for
@@ -322,11 +325,10 @@ context only.
    distillation section; do not discard user edits unless the user explicitly
    approved full replacement. Update frontmatter `tags`/`people` fields from
    recall results.
-2. If `saved_note_path` is absent, create the note in the vault root
-   (`<vault>/[timestamp] [descriptive name].md`) with the Edit tool. If — and
-   only if — you cannot resolve a vault root at all (no `.margins/` or
-   `.obsidian/` parent folder is discoverable), ask the user once for the
-   destination instead of writing into `.margins/`.
+2. If `saved_note_path` is absent, create the note in the resolved `destination`
+   (`<destination>/[timestamp] [descriptive name].md`) with the Edit tool. If the
+   command cannot resolve a Workspace, ask the user once for the Workspace
+   instead of inferring a destination from `.margins/` or `.obsidian/`.
 3. For a newly created, unregistered note, rename with a descriptive suffix
    following vault naming conventions:
    - Keep timestamp prefix
