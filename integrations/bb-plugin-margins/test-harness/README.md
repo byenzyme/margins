@@ -1,10 +1,11 @@
-# Meetings no-LLM browser lane
+# Meetings browser E2E
 
 `no-llm.mjs` runs steps 1–6 of `../MEETINGS_SPEC.md` against a disposable
 Margins home and an isolated bb server. It installs this plugin only into that
 temporary bb instance. The two fixture threads are scheduled seven days out
 and the temporary server and data are removed before the script exits. The
-composer prompt is never submitted. Step 7 is intentionally absent.
+composer prompt is never submitted by default. Step 7 requires the explicit
+`MARGINS_E2E_REAL_LLM=1` opt-in described below.
 
 Build from **this worktree** first. Keep Rust commands on the repo's guarded
 lane and build the frontend before the server binary:
@@ -58,3 +59,16 @@ Video, step screenshots, destination and plan evidence, bb logs, and assertion
 results are written under gitignored `../e2e-artifacts/<timestamp>/`. Set
 `MARGINS_E2E_ARTIFACTS` to an absolute path to choose another artifact folder.
 The runner removes only its own temporary home, bb data, and Chrome container.
+
+## Approved real-LLM step 7
+
+Set `MARGINS_E2E_REAL_LLM=1` with the same required absolute paths and hosted
+ASR assets. This disables bb's automatic provider retry in the isolated server,
+selects Full Access for the throwaway project, and physically submits the
+prefilled draft exactly once. The runner waits for a note in the fixture
+`inbox/`, checks that it reflects both the revised memo and spoken transcript,
+then checks the Distilled list, note and thread links, and the thread Margins
+tab. It copies the throwaway vault into the run's artifact directory before
+cleanup. A failed run must be inspected through its `llm-send.marker` before
+any retry: a marker means the draft was submitted and another run would send
+another LLM request.

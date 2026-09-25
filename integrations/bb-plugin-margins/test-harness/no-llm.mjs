@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Isolated bb + Chrome journey for MEETINGS_SPEC steps 1-6. No composer submit.
+// Isolated bb + Chrome journey. Steps 1-6 never submit; step 7 requires an explicit opt-in.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { closeSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -23,6 +23,7 @@ const chromeBin = required("MARGINS_E2E_CHROME_BIN");
 const spokenWav = required("MARGINS_E2E_SPOKEN_WAV");
 const asrModelDir = required("MARGINS_E2E_ASR_MODEL_DIR");
 const ortLibrary = required("MARGINS_E2E_ORT_LIBRARY");
+const realLlm = process.env.MARGINS_E2E_REAL_LLM === "1";
 const image = process.env.MARGINS_E2E_CHROME_IMAGE || "margins-bb-e2e-chrome:local";
 const artifacts = path.resolve(process.env.MARGINS_E2E_ARTIFACTS || path.join(plugin, "e2e-artifacts", new Date().toISOString().replace(/[:.]/g, "-")));
 const temporary = mkdtempSync(path.join(os.tmpdir(), "margins-bb-meetings-"));
@@ -99,9 +100,23 @@ function assertMemo(text) {
 
 let cdpPort;
 let bbEnv;
+let currentProjectId;
+async function holdAtComposer() {
+  const marker = path.join(artifacts, "continue-preflight");
+  writeFileSync(path.join(artifacts, "preflight-ready.json"), `${JSON.stringify({
+    bbServerUrl: bbEnv.BB_SERVER_URL, bbData, cdpPort, browserSession, browserConfig, temporary,
+    projectId: currentProjectId,
+  }, null, 2)}\n`);
+  console.log(`Preflight paused at composer; inspect ${artifacts}/preflight-ready.json, then create ${marker}`);
+  await until("preflight release", () => existsSync(marker), 10 * 60_000);
+}
 try {
   assert(!home.startsWith(path.join(os.homedir(), ".margins")));
   assert(!vault.startsWith("/workspace/obsidian"));
+  const skillTarget = path.join(code, ".bb/skills/margins");
+  mkdirSync(path.dirname(skillTarget), { recursive: true });
+  cpSync(path.join(repo, "skills/margins"), skillTarget, { recursive: true });
+  writeFileSync(path.join(code, "AGENTS.md"), `# Disposable Margins meeting fixture\n\nUse ${marginsBin} by absolute path for every Margins CLI call, with MARGINS_HOME=${home}. Do not invoke a margins binary from PATH. This project's notes are in the disposable Workspace Home ${vault}; write the connected note inside its inbox/ folder. The note must reflect distinct evidence from both the memo and the spoken transcript. Do not read or write /workspace/obsidian or ~/.margins.\n`);
   makeSpokenWav(wav, spokenWav);
   const marginsEnv = { ...process.env, MARGINS_HOME: home };
   command(marginsBin, ["workspace", "new", "e2e", "--home", vault], { env: marginsEnv });
@@ -124,7 +139,8 @@ try {
   const serverPort = await freePort();
   const daemonPort = await freePort();
   cdpPort = await freePort();
-  bbEnv = { ...process.env, BB_SERVER_URL: `http://127.0.0.1:${serverPort}`, BB_DATA_DIR: bbData };
+  bbEnv = { ...process.env, BB_SERVER_URL: `http://127.0.0.1:${serverPort}`, BB_DATA_DIR: bbData,
+    MARGINS_HOME: home, MARGINS_CLI_BIN: marginsBin };
   const hostData = path.join(bbData, "plugins/margins/host-data");
   mkdirSync(hostData, { recursive: true });
   writeFileSync(path.join(hostData, "asr-runtime.json"), `${JSON.stringify({ serverPath: serverBin,
@@ -141,9 +157,11 @@ try {
     try { return bb(["machine", "list"]).find((host) => host.status === "connected"); }
     catch { return null; }
   }, 30_000);
+  if (realLlm) command("bb", ["plugin", "disable", "provider-retry"], { env: bbEnv });
   command("bb", ["plugin", "install", plugin, "--yes"], { env: bbEnv });
   const projectId = findId(bb(["project", "create", "--name", "Meetings E2E code", "--root", code, "--machine", machine.id]), "proj_");
   assert(projectId, "Project creation did not return an id");
+  currentProjectId = projectId;
   const threadOne = findId(bb(["thread", "spawn", "--project", projectId, "--title", "E2E thread one", "--prompt", "Fixture only; do not run", "--send-at", "7d"]), "thr_");
   const threadTwo = findId(bb(["thread", "spawn", "--project", projectId, "--title", "E2E thread two", "--prompt", "Fixture only; do not run", "--send-at", "7d"]), "thr_");
   assert(threadOne && threadTwo, "Fixture threads did not return ids");
@@ -237,8 +255,64 @@ try {
   assert.deepEqual(threadIds(afterThreads), threadIds(beforeThreads), "Distill must not spawn or send a thread");
   assert(!existsSync(path.join(code, ".margins")), "Capture must not fall back to the bb project folder");
   shot("07-composer.png");
-  writeFileSync(path.join(artifacts, "assertions.json"), `${JSON.stringify({ projectId, threadOne, threadTwo, levels, memoSavedAfterStop: true, projectCaptureFallbackAbsent: true, composerPrompt: prompt, composerPlainPrompt: plainPrompt, composerContext, threadsUnchanged: true, transcription: "parakeet-asr", transcriptObserved: true, noLlm: true }, null, 2)}\n`);
-  console.log(`PASS: no-LLM steps 1-6; evidence ${artifacts}`);
+  const assertions = { projectId, threadOne, threadTwo, levels, memoSavedAfterStop: true,
+    projectCaptureFallbackAbsent: true, composerPrompt: prompt, composerPlainPrompt: plainPrompt,
+    composerContext, threadsUnchanged: true, transcription: "parakeet-asr", transcriptObserved: true, noLlm: !realLlm };
+  writeFileSync(path.join(artifacts, "assertions.json"), `${JSON.stringify(assertions, null, 2)}\n`);
+  if (process.env.MARGINS_E2E_HOLD_AT_COMPOSER === "1") await holdAtComposer();
+  if (realLlm) {
+    // This is the one authorized send. The isolated bb has retries disabled above.
+    browser(["find", "role", "button", "click", "--name", "Permission mode", "--exact"]);
+    browser(["find", "role", "menuitem", "click", "--name", "Full Access"]);
+    assert(browserEval(`!!document.querySelector('button[aria-label="Submit (Enter)"]:not(:disabled)')`));
+    shot("08-before-send.png");
+    browser(["click", 'button[aria-label="Submit (Enter)"]']);
+    writeFileSync(path.join(artifacts, "llm-send.marker"), `${new Date().toISOString()}\n`);
+    const newThreadId = await until("new composer thread", () => {
+      const ids = threadIds(bb(["thread", "list", "--project", projectId]));
+      return ids.find((id) => !threadIds(beforeThreads).includes(id)) || null;
+    }, 60_000);
+    assertions.distillationThreadId = newThreadId;
+    shot("09-thread-running.png");
+    const noteName = await until("connected note in throwaway inbox", () => {
+      const names = readdirSync(path.join(vault, "inbox")).filter((name) => name.endsWith(".md"));
+      return names.find((name) => {
+        const content = readFileSync(path.join(vault, "inbox", name), "utf8");
+        return content.length > 100 ? name : false;
+      });
+    }, 8 * 60_000);
+    const notePath = path.join(vault, "inbox", noteName);
+    const noteText = readFileSync(notePath, "utf8");
+    assert.match(noteText, /accessibility|quiet meetings/i, "Note omits the revised memo");
+    assert.match(noteText, /curiosity/i, "Note omits the spoken transcript");
+    assertions.noteRelativePath = `inbox/${noteName}`;
+    assertions.memoReflected = true;
+    assertions.transcriptReflected = true;
+    await until("note association", () => {
+      const result = command(marginsBin, ["--workspace", "e2e", "note-association", composerContext.sessionId], { env: marginsEnv });
+      return result.includes(newThreadId) && result.includes(noteName);
+    }, 90_000);
+    browser(["find", "role", "button", "click", "--name", "Meetings", "--exact"]);
+    await until("Distilled meeting", () => browserEval(`(() => {
+      const list = document.querySelector('.margins-meeting-list');
+      return !!list && [...list.querySelectorAll('h3')].some((h) => h.textContent === 'Distilled')
+        && document.querySelector('.margins-meeting-pad footer')?.innerText.includes('Note: inbox/')
+        && document.querySelector('.margins-meeting-pad footer')?.innerText.includes('Thread ${newThreadId}');
+    })()`), 45_000);
+    shot("10-distilled.png");
+    browser(["find", "role", "button", "click", "--name", `Thread ${newThreadId}`, "--exact"]);
+    await until("distillation thread", () => browserEval(`location.pathname.includes('${newThreadId}')`));
+    browser(["find", "role", "button", "click", "--name", "Show right panel (Ctrl + J)", "--exact"]);
+    browser(["find", "role", "button", "click", "--name", "Open new tab (Ctrl + T)", "--exact"]);
+    browser(["find", "role", "button", "click", "--name", "Margins", "--exact"]);
+    await until("thread Margins source memo", () => browserEval(`document.querySelector('textarea[aria-label="Source meeting memo pad"]')?.value.includes('Post-stop correction: include accessibility pass.')`), 45_000);
+    assertions.meetingsDistilled = true;
+    assertions.threadMarginsMemo = true;
+    shot("11-thread-margins.png");
+    cpSync(vault, path.join(artifacts, "vault"), { recursive: true });
+    writeFileSync(path.join(artifacts, "assertions.json"), `${JSON.stringify(assertions, null, 2)}\n`);
+    console.log(`PASS: real-LLM step 7; note ${path.join(artifacts, "vault/inbox", noteName)}; evidence ${artifacts}`);
+  } else console.log(`PASS: no-LLM steps 1-6; evidence ${artifacts}`);
 } catch (error) {
   if (videoStarted) {
     try { shot("failure.png"); } catch { /* browser may be gone */ }
@@ -247,6 +321,7 @@ try {
     try { writeFileSync(path.join(artifacts, "failure-browser-console.txt"), browser(["console"])); } catch { /* browser may be gone */ }
   }
   if (existsSync(path.join(bbData, "logs"))) cpSync(path.join(bbData, "logs"), path.join(artifacts, "bb-diagnostic-logs"), { recursive: true });
+  if (realLlm && existsSync(vault)) cpSync(vault, path.join(artifacts, "vault"), { recursive: true });
   throw error;
 } finally {
   if (videoStarted) try { browser(["record", "stop"]); } catch { /* keep prior evidence */ }
