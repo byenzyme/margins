@@ -1656,6 +1656,10 @@ pub struct WorkspaceNoteAssociationV1 {
     pub relative_path: String,
     pub observed_content_hash: Option<String>,
     pub revision: u64,
+    #[serde(default)]
+    pub bb_thread_ids: Vec<String>,
+    #[serde(default)]
+    pub distilled_memo_revision: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1665,6 +1669,10 @@ pub struct WorkspaceNoteAssociationUpdateV1 {
     pub relative_path: String,
     pub observed_content_hash: Option<String>,
     pub expected_revision: u64,
+    #[serde(default)]
+    pub bb_thread_id: Option<String>,
+    #[serde(default)]
+    pub distilled_memo_revision: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

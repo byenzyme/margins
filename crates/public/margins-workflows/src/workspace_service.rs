@@ -907,8 +907,12 @@ impl WorkspaceService {
         // Remote producers publish provisional checkpoints without writing the
         // CLI's process-local `current` file. The Workspace authority owns the
         // active reservation, including across reader/producer principals.
-        let live = view.live || (!view.terminal
-            && self.authority.active_session_ids()?.contains(&view.session_name));
+        let live = view.live
+            || (!view.terminal
+                && self
+                    .authority
+                    .active_session_ids()?
+                    .contains(&view.session_name));
         Ok(WorkspaceTranscriptV1 {
             session_id: SessionId(view.session_name),
             body: view.body,
@@ -1086,6 +1090,8 @@ impl WorkspaceService {
                 &request.relative_path,
                 request.observed_content_hash.as_deref(),
                 request.expected_revision,
+                request.bb_thread_id.as_deref(),
+                request.distilled_memo_revision.as_deref(),
             )
             .map(note_association)
     }
@@ -1364,6 +1370,8 @@ fn note_association(value: canonical::NoteAssociation) -> WorkspaceNoteAssociati
         relative_path: value.relative_path,
         observed_content_hash: value.observed_content_hash,
         revision: value.revision,
+        bb_thread_ids: value.bb_thread_ids,
+        distilled_memo_revision: value.distilled_memo_revision,
     }
 }
 

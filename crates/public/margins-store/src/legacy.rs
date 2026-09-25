@@ -99,6 +99,10 @@ pub struct NoteAssociation {
     pub relative_path: String,
     pub observed_content_hash: Option<String>,
     pub revision: u64,
+    #[serde(default)]
+    pub bb_thread_ids: Vec<String>,
+    #[serde(default)]
+    pub distilled_memo_revision: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -224,6 +228,8 @@ fn init_schema(conn: &Connection) -> Result<()> {
             observed_content_hash TEXT,
             revision INTEGER NOT NULL,
             linked_at TEXT NOT NULL,
+            bb_thread_ids TEXT NOT NULL DEFAULT '[]',
+            distilled_memo_revision TEXT,
             FOREIGN KEY (session_name) REFERENCES sessions(name) ON DELETE CASCADE,
             UNIQUE (source_id, relative_path)
         );
@@ -275,6 +281,18 @@ fn init_schema(conn: &Connection) -> Result<()> {
         "TEXT NOT NULL DEFAULT 'active'",
     )?;
     ensure_column(conn, "sessions", "lifecycle_updated_at", "TEXT")?;
+    ensure_column(
+        conn,
+        "session_note_associations",
+        "bb_thread_ids",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    ensure_column(
+        conn,
+        "session_note_associations",
+        "distilled_memo_revision",
+        "TEXT",
+    )?;
     Ok(())
 }
 
@@ -1103,7 +1121,7 @@ fn validate_note_reference(source_id: &str, relative_path: &str) -> Result<()> {
 pub fn get_note_association(dir: &Path, name: &str) -> Result<Option<NoteAssociation>> {
     let conn = open_db(dir)?;
     conn.query_row(
-        "SELECT session_name, source_id, relative_path, observed_content_hash, revision FROM session_note_associations WHERE session_name = ?1",
+        "SELECT session_name, source_id, relative_path, observed_content_hash, revision, bb_thread_ids, distilled_memo_revision FROM session_note_associations WHERE session_name = ?1",
         params![name],
         |row| {
             let revision: i64 = row.get(4)?;
@@ -1113,6 +1131,8 @@ pub fn get_note_association(dir: &Path, name: &str) -> Result<Option<NoteAssocia
                 relative_path: row.get(2)?,
                 observed_content_hash: row.get(3)?,
                 revision: revision.max(0) as u64,
+                bb_thread_ids: serde_json::from_str(&row.get::<_, String>(5)?).unwrap_or_default(),
+                distilled_memo_revision: row.get(6)?,
             })
         },
     ).optional().map_err(Into::into)
@@ -1126,7 +1146,37 @@ pub fn link_note(
     observed_content_hash: Option<&str>,
     expected_revision: u64,
 ) -> Result<NoteAssociation> {
+    link_note_with_distillation(
+        dir,
+        name,
+        source_id,
+        relative_path,
+        observed_content_hash,
+        expected_revision,
+        None,
+        None,
+    )
+}
+
+pub fn link_note_with_distillation(
+    dir: &Path,
+    name: &str,
+    source_id: &str,
+    relative_path: &str,
+    observed_content_hash: Option<&str>,
+    expected_revision: u64,
+    bb_thread_id: Option<&str>,
+    distilled_memo_revision: Option<&str>,
+) -> Result<NoteAssociation> {
     validate_note_reference(source_id, relative_path)?;
+    if bb_thread_id.is_some() != distilled_memo_revision.is_some() {
+        anyhow::bail!("bb thread id and distilled memo revision must be supplied together");
+    }
+    if bb_thread_id.is_some_and(|value| value.trim().is_empty())
+        || distilled_memo_revision.is_some_and(|value| value.trim().is_empty())
+    {
+        anyhow::bail!("distillation link values cannot be empty");
+    }
     let mut conn = open_db(dir)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if session_tombstone_exists_tx(&tx, name)? {
@@ -1142,15 +1192,30 @@ pub fn link_note(
     if exists.is_none() {
         anyhow::bail!("session '{name}' not found");
     }
-    let current: Option<(String, String, Option<String>, i64)> = tx.query_row(
-        "SELECT source_id, relative_path, observed_content_hash, revision FROM session_note_associations WHERE session_name = ?1",
+    let current: Option<(String, String, Option<String>, i64, String, Option<String>)> = tx.query_row(
+        "SELECT source_id, relative_path, observed_content_hash, revision, bb_thread_ids, distilled_memo_revision FROM session_note_associations WHERE session_name = ?1",
         params![name],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
     ).optional()?;
-    if let Some((current_source, current_path, current_hash, revision)) = &current {
+    let mut thread_ids: Vec<String> = current
+        .as_ref()
+        .map(|value| serde_json::from_str(&value.4).unwrap_or_default())
+        .unwrap_or_default();
+    if let Some(thread_id) = bb_thread_id {
+        if !thread_ids.iter().any(|value| value == thread_id) {
+            thread_ids.push(thread_id.to_string());
+        }
+    }
+    let memo_revision = distilled_memo_revision
+        .map(str::to_owned)
+        .or_else(|| current.as_ref().and_then(|value| value.5.clone()));
+    if let Some((current_source, current_path, current_hash, revision, _, _)) = &current {
         if current_source == source_id
             && current_path == relative_path
             && current_hash.as_deref() == observed_content_hash
+            && serde_json::from_str::<Vec<String>>(&current.as_ref().unwrap().4).unwrap_or_default()
+                == thread_ids
+            && current.as_ref().unwrap().5 == memo_revision
         {
             return Ok(NoteAssociation {
                 session_name: name.to_string(),
@@ -1158,6 +1223,8 @@ pub fn link_note(
                 relative_path: current_path.clone(),
                 observed_content_hash: current_hash.clone(),
                 revision: (*revision).max(0) as u64,
+                bb_thread_ids: thread_ids,
+                distilled_memo_revision: memo_revision,
             });
         }
     }
@@ -1167,8 +1234,8 @@ pub fn link_note(
     }
     let revision = current_revision + 1;
     tx.execute(
-        "INSERT INTO session_note_associations (session_name, source_id, relative_path, observed_content_hash, revision, linked_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(session_name) DO UPDATE SET source_id = excluded.source_id, relative_path = excluded.relative_path, observed_content_hash = excluded.observed_content_hash, revision = excluded.revision, linked_at = excluded.linked_at",
-        params![name, source_id, relative_path, observed_content_hash, revision as i64, Local::now().to_rfc3339()],
+        "INSERT INTO session_note_associations (session_name, source_id, relative_path, observed_content_hash, revision, linked_at, bb_thread_ids, distilled_memo_revision) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(session_name) DO UPDATE SET source_id = excluded.source_id, relative_path = excluded.relative_path, observed_content_hash = excluded.observed_content_hash, revision = excluded.revision, linked_at = excluded.linked_at, bb_thread_ids = excluded.bb_thread_ids, distilled_memo_revision = excluded.distilled_memo_revision",
+        params![name, source_id, relative_path, observed_content_hash, revision as i64, Local::now().to_rfc3339(), serde_json::to_string(&thread_ids)?, memo_revision],
     )?;
     tx.commit()?;
     Ok(NoteAssociation {
@@ -1177,6 +1244,8 @@ pub fn link_note(
         relative_path: relative_path.to_string(),
         observed_content_hash: observed_content_hash.map(ToOwned::to_owned),
         revision,
+        bb_thread_ids: thread_ids,
+        distilled_memo_revision: memo_revision,
     })
 }
 
@@ -1454,29 +1523,30 @@ pub fn complete_processing_job_with_note(
         anyhow::bail!("session '{}' has been deleted", current.session_name);
     }
 
-    let association: Option<(String, String, Option<String>, i64)> = tx
+    let association: Option<(String, String, Option<String>, i64, String, Option<String>)> = tx
         .query_row(
-            "SELECT source_id, relative_path, observed_content_hash, revision FROM session_note_associations WHERE session_name = ?1",
+            "SELECT source_id, relative_path, observed_content_hash, revision, bb_thread_ids, distilled_memo_revision FROM session_note_associations WHERE session_name = ?1",
             params![current.session_name],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
         )
         .optional()?;
-    let exact_association =
-        association
-            .as_ref()
-            .is_some_and(|(current_source, current_path, current_hash, _)| {
-                current_source == source_id
-                    && current_path == relative_path
-                    && current_hash.as_deref() == observed_content_hash
-            });
+    let exact_association = association.as_ref().is_some_and(
+        |(current_source, current_path, current_hash, _, _, _)| {
+            current_source == source_id
+                && current_path == relative_path
+                && current_hash.as_deref() == observed_content_hash
+        },
+    );
     if current.status == "complete" && exact_association {
-        let (_, _, _, revision) = association.expect("checked above");
+        let (_, _, _, revision, thread_ids, memo_revision) = association.expect("checked above");
         return Ok(NoteAssociation {
             session_name: current.session_name,
             source_id: source_id.to_string(),
             relative_path: relative_path.to_string(),
             observed_content_hash: observed_content_hash.map(ToOwned::to_owned),
             revision: revision.max(0) as u64,
+            bb_thread_ids: serde_json::from_str(&thread_ids).unwrap_or_default(),
+            distilled_memo_revision: memo_revision,
         });
     }
     if !matches!(current.status.as_str(), "queued" | "running") {
@@ -1512,6 +1582,11 @@ pub fn complete_processing_job_with_note(
         relative_path: relative_path.to_string(),
         observed_content_hash: observed_content_hash.map(ToOwned::to_owned),
         revision,
+        bb_thread_ids: association
+            .as_ref()
+            .map(|value| serde_json::from_str(&value.4).unwrap_or_default())
+            .unwrap_or_default(),
+        distilled_memo_revision: association.as_ref().and_then(|value| value.5.clone()),
     })
 }
 

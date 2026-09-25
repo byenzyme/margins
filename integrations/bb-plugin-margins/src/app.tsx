@@ -6,6 +6,7 @@ import { browserCaptureOwner, detectClientCapabilities } from "./browser-capture
 import { nativeBridgeOwner, type CaptureAuthority, type NativeStatus } from "./native-bridge-client.js";
 import type { PanelState, WorkspaceMeeting } from "./contracts.js";
 import { MeetingsAccessory, MeetingsPage } from "./meetings-page.js";
+import { MarginsThreadTab } from "./thread-tab.js";
 
 function paramsTitle(params: JsonValue | null) {
   return params && typeof params === "object" && !Array.isArray(params) && typeof params.title === "string" ? params.title : undefined;
@@ -254,7 +255,7 @@ function WorkspaceMeetingNotes({ threadId, onMeetingChange }: { threadId: string
   </div>;
 }
 
-function MarginsPanel({ threadId, params }: { threadId: string; params: JsonValue | null }) {
+export function MarginsPanel({ threadId, params }: { threadId: string; params: JsonValue | null }) {
   const rpc = useRpc<typeof marginsRpcContract>();
   const context = useBbContext();
   const composer = useComposer();
@@ -445,6 +446,6 @@ export default definePluginApp((app) => {
   app.slots.settingsSection({ id: "recording", title: "Margins recording", component: MarginsSettings });
   app.slots.threadPanelAction({
     id: "live", title: "Margins", icon: "Mic", layout: "flush",
-    component: ({ threadId, params }) => <MarginsPanel threadId={threadId} params={params} />,
+    component: ({ threadId }) => <MarginsThreadTab threadId={threadId} />,
   });
 });

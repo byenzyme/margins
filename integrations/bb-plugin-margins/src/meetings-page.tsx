@@ -148,6 +148,27 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
       await refresh();
     } catch (error) { setMessage(String(error)); }
   }
+  async function distill() {
+    if (!selected || !projectId) return;
+    if (context.projectId !== projectId) {
+      setMessage("Open this bb project before distilling its meeting.");
+      navigate.toProject(projectId);
+      return;
+    }
+    try {
+      await saveMemo();
+      const result = await rpc.call("connectedNoteContext", { projectId, sessionId: selected.sessionId });
+      if (!result.ok) throw new Error(result.error.message);
+      if (!result.context.transcript.available) {
+        const requested = await rpc.call("transcribePinnedSession", { projectId, sessionId: selected.sessionId });
+        if (!requested.ok) throw new Error(requested.error.message);
+        setMessage("Transcribing this meeting. Distill when its transcript is ready.");
+        return;
+      }
+      const { sessionId, workspaceId, memo } = result.context;
+      navigate.toCompose({ initialPrompt: `Use the Margins distillation skill to create a connected note for Margins session ${sessionId} in Workspace ${workspaceId}. Distill memo revision ${memo.revision}. Read that exact session's memo and transcript, then write the note in the Workspace destination. After writing, associate the note with the session and record this bb thread id and distilled memo revision on the session.`, focusPrompt: true });
+    } catch (error) { setMessage(String(error)); }
+  }
 
   const live = meetings.filter((item) => !item.inputFinalized);
   const ready = meetings.filter((item) => item.inputFinalized && !item.notePath);
@@ -183,7 +204,10 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
           </div>}
         </header>
         <textarea aria-label="Meeting memo pad" placeholder="" value={draft} onChange={(event) => { dirty.current = true; setDraft(event.target.value); setMessage(""); }} onBlur={() => void saveMemo().catch((error) => setMessage(String(error)))} />
-        <footer><span role="status">{message}</span>{selected.notePath && <span>Note: {selected.notePath}</span>}</footer>
+        <footer><span role="status">{message}</span>{selected.inputFinalized && <button onClick={() => void distill()}>Distill to note →</button>}
+          {selected.notePath && <span>Note: {selected.notePath}</span>}
+          {(selected.threadIds || []).map((threadId) => <button key={threadId} onClick={() => navigate.toThread(threadId)}>Thread {threadId}</button>)}
+          {selected.distilledMemoRevision && selected.distilledMemoRevision !== meeting.notepad.revision && <span>Edited since distillation</span>}</footer>
       </> : panel?.state !== "unavailable" && <div className="margins-meetings-empty"><h2>No meetings yet</h2><button onClick={() => void start()}>Start meeting</button></div>}
     </section>
   </main>;

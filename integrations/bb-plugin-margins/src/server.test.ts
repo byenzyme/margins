@@ -117,16 +117,16 @@ describe("Margins project recording server", () => {
     expect(host.harness.inspection.experimental_hostRpcCalls.filter(call => call.method === "stop")).toHaveLength(1);
   });
 
-  it("pins connected-note context to the exact last session across remounts", async () => {
+  it("resolves connected-note context for an explicitly selected ended session", async () => {
     const host = harness();
     await host.harness.behavior.callRpc("beginBrowserCapture", { threadId: "thr-1", client: browser, ownerId: "owner-secret" });
     await host.harness.behavior.callRpc("stop", { sessionId: "rec-1", client: browser, operationId: "stop-pinned" });
     await expect(host.harness.behavior.callRpc("connectedNoteContext", { threadId: "thr-1", sessionId: "rec-1" })).resolves.toMatchObject({ ok: true, context: { sessionId: "rec-1" } });
-    await expect(host.harness.behavior.callRpc("connectedNoteContext", { threadId: "thr-1", sessionId: "stale" })).resolves.toMatchObject({ ok: false, error: { code: "session_pin_stale" } });
-    expect(host.harness.inspection.experimental_hostRpcCalls.filter(call => call.method === "connectedNoteContext")).toHaveLength(1);
-    await expect(host.harness.behavior.callRpc("transcribePinnedSession", { threadId: "thr-1", sessionId: "stale" })).resolves.toMatchObject({ ok: false, error: { code: "session_pin_stale" } });
+    await expect(host.harness.behavior.callRpc("connectedNoteContext", { threadId: "thr-1", sessionId: "older-session" })).resolves.toMatchObject({ ok: true });
+    expect(host.harness.inspection.experimental_hostRpcCalls.filter(call => call.method === "connectedNoteContext")).toHaveLength(2);
+    await expect(host.harness.behavior.callRpc("transcribePinnedSession", { threadId: "thr-1", sessionId: "older-session" })).resolves.toMatchObject({ ok: true, status: "queued", attempt: 1 });
     await expect(host.harness.behavior.callRpc("transcribePinnedSession", { threadId: "thr-1", sessionId: "rec-1" })).resolves.toMatchObject({ ok: true, status: "queued", attempt: 1 });
-    expect(host.harness.inspection.experimental_hostRpcCalls.filter(call => call.method === "requestTranscription")).toHaveLength(1);
+    expect(host.harness.inspection.experimental_hostRpcCalls.filter(call => call.method === "requestTranscription")).toHaveLength(2);
   });
 
   it("pins a saved Mac session only in the project's verified destination", async () => {

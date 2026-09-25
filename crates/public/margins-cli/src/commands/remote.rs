@@ -269,6 +269,8 @@ pub fn run(
             unlink,
             expected_revision,
             request_id,
+            bb_thread_id,
+            memo_revision,
         } => {
             let session = resolve_session(&connection.client, meeting_id.as_deref())?;
             if unlink {
@@ -297,6 +299,8 @@ pub fn run(
                             relative_path: relative_path.to_string(),
                             observed_content_hash: hash,
                             expected_revision: revision,
+                            bb_thread_id,
+                            distilled_memo_revision: memo_revision,
                         },
                     ).map_err(CliError::from_anyhow)?,
                 )

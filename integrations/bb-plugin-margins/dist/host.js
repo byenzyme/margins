@@ -33318,7 +33318,9 @@ var workspaceMeetingResultSchema = external_exports2.discriminatedUnion("ok", [
   external_exports2.object({ ok: external_exports2.literal(false), error: hostErrorSchema }).strict()
 ]);
 var workspaceMeetingSummarySchema = workspaceMeetingSchema.omit({ notepad: true }).extend({
-  notePath: external_exports2.string().nullable()
+  notePath: external_exports2.string().nullable(),
+  threadIds: external_exports2.array(external_exports2.string()).default([]),
+  distilledMemoRevision: external_exports2.string().nullable().default(null)
 }).strict();
 var workspaceMeetingsResultSchema = external_exports2.discriminatedUnion("ok", [
   external_exports2.object({ ok: external_exports2.literal(true), meetings: external_exports2.array(workspaceMeetingSummarySchema) }).strict(),
@@ -33520,11 +33522,11 @@ var marginsRpcContract = defineRpcContract2({
     output: panelStateSchema
   },
   connectedNoteContext: {
-    input: external_exports2.object({ threadId: external_exports2.string().min(1), sessionId: external_exports2.string().min(1) }).strict(),
+    input: external_exports2.object({ threadId: external_exports2.string().min(1).optional(), projectId: external_exports2.string().min(1).optional(), sessionId: external_exports2.string().min(1) }).strict(),
     output: connectedNoteResultSchema
   },
   transcribePinnedSession: {
-    input: external_exports2.object({ threadId: external_exports2.string().min(1), sessionId: external_exports2.string().min(1) }).strict(),
+    input: external_exports2.object({ threadId: external_exports2.string().min(1).optional(), projectId: external_exports2.string().min(1).optional(), sessionId: external_exports2.string().min(1) }).strict(),
     output: transcriptionRequestResultSchema
   }
 });
@@ -33907,7 +33909,9 @@ var ProjectMarginsTransport = class {
           title: summary.title,
           startedAt: summary.started_at,
           inputFinalized: summary.input_finalized,
-          notePath: note?.relative_path || null
+          notePath: note?.relative_path || null,
+          threadIds: note?.bb_thread_ids || [],
+          distilledMemoRevision: note?.distilled_memo_revision || null
         };
       }));
       return { ok: true, meetings };

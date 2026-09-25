@@ -209,10 +209,11 @@ export class ProjectMarginsTransport {
         const id = encodeURIComponent(session_id);
         const [summary, note] = await Promise.all([
           this.request<{ session_id: string; title: string | null; started_at: string; input_finalized: boolean }>(handle, `sessions/${id}`, "GET"),
-          this.request<{ relative_path: string } | null>(handle, `sessions/${id}/note-association`, "GET"),
+          this.request<{ relative_path: string; bb_thread_ids?: string[]; distilled_memo_revision?: string | null } | null>(handle, `sessions/${id}/note-association`, "GET"),
         ]);
         return { sessionId: summary.session_id, title: summary.title, startedAt: summary.started_at,
-          inputFinalized: summary.input_finalized, notePath: note?.relative_path || null };
+          inputFinalized: summary.input_finalized, notePath: note?.relative_path || null,
+          threadIds: note?.bb_thread_ids || [], distilledMemoRevision: note?.distilled_memo_revision || null };
       }));
       return { ok: true as const, meetings };
     } catch (cause) {

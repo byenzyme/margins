@@ -372,24 +372,12 @@ export default function marginsPlugin(bb: BbPluginApi) {
       if (!result.ok) return basePanel(target.projectId, "needs_attention", client, { capture, error: result.error });
       return panelForCapture(capture, client);
     },
-    async connectedNoteContext({ threadId, sessionId }): Promise<ConnectedNoteResult> {
-      const target = await targetForThread(threadId);
-      const authority = await callHost(target, "captureAuthority", { target });
-      if (!authority.ok) return authority;
-      const pinned = await readLastSession(authority.workspaceId);
-      if (pinned !== sessionId) {
-        return { ok: false as const, error: { code: "session_pin_stale", message: "The selected meeting is no longer this project's pinned latest session. Refresh before creating the note.", retryable: true } };
-      }
+    async connectedNoteContext({ threadId, projectId, sessionId }): Promise<ConnectedNoteResult> {
+      const target = await targetForSelection({ threadId, projectId });
       return callHost(target, "connectedNoteContext", { target, recordingId: sessionId }) as Promise<ConnectedNoteResult>;
     },
-    async transcribePinnedSession({ threadId, sessionId }): Promise<TranscriptionRequestResult> {
-      const target = await targetForThread(threadId);
-      const authority = await callHost(target, "captureAuthority", { target });
-      if (!authority.ok) return authority;
-      const pinned = await readLastSession(authority.workspaceId);
-      if (pinned !== sessionId) {
-        return { ok: false, error: { code: "session_pin_stale", message: "Refresh before transcribing this meeting.", retryable: true } };
-      }
+    async transcribePinnedSession({ threadId, projectId, sessionId }): Promise<TranscriptionRequestResult> {
+      const target = await targetForSelection({ threadId, projectId });
       return callHost(target, "requestTranscription", { target, recordingId: sessionId }) as Promise<TranscriptionRequestResult>;
     },
   });

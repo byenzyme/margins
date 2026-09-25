@@ -74,6 +74,42 @@ fn note_association_is_revisioned_source_relative_and_has_no_job_side_effects() 
     )
     .unwrap();
     assert_eq!(replay.revision, 1, "exact retry is idempotent");
+    let distilled = canonical::link_note_with_distillation(
+        &margins,
+        "session",
+        "workspace",
+        "inbox/session.md",
+        Some("sha256:abc"),
+        1,
+        Some("thr-first"),
+        Some("memo-v1"),
+    )
+    .unwrap();
+    assert_eq!(distilled.bb_thread_ids, vec!["thr-first"]);
+    assert_eq!(
+        distilled.distilled_memo_revision.as_deref(),
+        Some("memo-v1")
+    );
+    let refined = canonical::link_note_with_distillation(
+        &margins,
+        "session",
+        "workspace",
+        "inbox/session.md",
+        Some("sha256:abc"),
+        2,
+        Some("thr-second"),
+        Some("memo-v2"),
+    )
+    .unwrap();
+    assert_eq!(refined.bb_thread_ids, vec!["thr-first", "thr-second"]);
+    assert_eq!(
+        canonical::get_note_association(&margins, "session")
+            .unwrap()
+            .unwrap()
+            .distilled_memo_revision
+            .as_deref(),
+        Some("memo-v2")
+    );
     assert!(canonical::link_note(
         &margins,
         "session",
@@ -85,7 +121,9 @@ fn note_association_is_revisioned_source_relative_and_has_no_job_side_effects() 
     .unwrap_err()
     .to_string()
     .contains("revision conflict"));
-    assert!(canonical::link_note(&margins, "session", "workspace", "../escape.md", None, 1,).is_err());
+    assert!(
+        canonical::link_note(&margins, "session", "workspace", "../escape.md", None, 1,).is_err()
+    );
 }
 
 #[test]

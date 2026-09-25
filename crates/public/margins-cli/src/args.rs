@@ -123,6 +123,12 @@ pub enum Command {
         /// Stable retry identity for a link operation
         #[arg(long)]
         request_id: Option<String>,
+        /// bb distillation thread id recorded with a linked note
+        #[arg(long, requires_all = ["memo_revision", "source", "path"], conflicts_with = "unlink")]
+        bb_thread_id: Option<String>,
+        /// Memo revision used to produce the linked note
+        #[arg(long, requires = "bb_thread_id", conflicts_with = "unlink")]
+        memo_revision: Option<String>,
     },
     /// Show the latest Margins processing job independently of note links
     ProcessingStatus {

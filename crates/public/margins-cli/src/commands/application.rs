@@ -67,6 +67,8 @@ pub fn run(
             unlink,
             expected_revision,
             request_id,
+            bb_thread_id,
+            memo_revision,
         } => {
             let session = resolve_session(&service, &principal, meeting_id.as_deref())?;
             if unlink {
@@ -98,6 +100,8 @@ pub fn run(
                                 expected_revision: expected_revision.ok_or_else(|| {
                                     CliError::usage("linking a note requires --expected-revision")
                                 })?,
+                                bb_thread_id,
+                                distilled_memo_revision: memo_revision,
                             },
                         )
                         .map_err(CliError::from_anyhow)?,

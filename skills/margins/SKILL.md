@@ -311,7 +311,8 @@ Once approved:
 **Where the note lands.** Read `margins --workspace <workspace-id> workspace
 destination --json` before choosing a path. Its `home_root` is the writable
 Home Source, `note_folder` is the optional reviewed subfolder, and `destination`
-is their resolved path. Use the Workspace id carried by the meeting prompt;
+is their resolved path. `home_source_id` identifies the Source for registering
+the note association. Use the Workspace id carried by the meeting prompt;
 without one, the command uses the machine's default Workspace. If no Workspace
 is selected, ask the user to choose or set one up. The distilled note lands in
 `destination`. A missing `note_folder` means the Home root itself.
@@ -341,6 +342,20 @@ mv "<vault>/[old-filename].md" "<vault>/[old-filename-prefix] [descriptive name]
 
 4. Do not rename an already registered saved note or update Margins storage by
    hand. Preserve its path so the stable session pointer remains valid.
+
+For a note requested from bb Meetings, finish by linking its Home Source-relative
+path to the exact session with `margins --workspace <workspace-id>
+note-association <session-id> --source <home-source-id> --path
+<source-relative-path> --expected-revision <current-association-revision>
+--bb-thread-id <current-bb-thread-id> --memo-revision <prompt-memo-revision>`.
+Read `note-association <session-id>` first; use revision `0` when it is null.
+The path includes `note_folder` when one is configured. Get the current bb
+thread id from `bb status --json`; do not guess it from the meeting id. Record
+the revision carried by the prompt even if the memo was edited during the
+conversation, so later edits can be recognized. This link stores references
+only, never note content. If the note already has an association, preserve its
+source-relative path and use its current association revision when recording
+another distillation thread.
 
 ---
 

@@ -18932,7 +18932,9 @@ var workspaceMeetingResultSchema = external_exports.discriminatedUnion("ok", [
   external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
 ]);
 var workspaceMeetingSummarySchema = workspaceMeetingSchema.omit({ notepad: true }).extend({
-  notePath: external_exports.string().nullable()
+  notePath: external_exports.string().nullable(),
+  threadIds: external_exports.array(external_exports.string()).default([]),
+  distilledMemoRevision: external_exports.string().nullable().default(null)
 }).strict();
 var workspaceMeetingsResultSchema = external_exports.discriminatedUnion("ok", [
   external_exports.object({ ok: external_exports.literal(true), meetings: external_exports.array(workspaceMeetingSummarySchema) }).strict(),
@@ -19134,11 +19136,11 @@ var marginsRpcContract = defineRpcContract({
     output: panelStateSchema
   },
   connectedNoteContext: {
-    input: external_exports.object({ threadId: external_exports.string().min(1), sessionId: external_exports.string().min(1) }).strict(),
+    input: external_exports.object({ threadId: external_exports.string().min(1).optional(), projectId: external_exports.string().min(1).optional(), sessionId: external_exports.string().min(1) }).strict(),
     output: connectedNoteResultSchema
   },
   transcribePinnedSession: {
-    input: external_exports.object({ threadId: external_exports.string().min(1), sessionId: external_exports.string().min(1) }).strict(),
+    input: external_exports.object({ threadId: external_exports.string().min(1).optional(), projectId: external_exports.string().min(1).optional(), sessionId: external_exports.string().min(1) }).strict(),
     output: transcriptionRequestResultSchema
   }
 });
@@ -19556,24 +19558,12 @@ function marginsPlugin(bb) {
       if (!result.ok) return basePanel(target.projectId, "needs_attention", client, { capture, error: result.error });
       return panelForCapture(capture, client);
     },
-    async connectedNoteContext({ threadId, sessionId }) {
-      const target = await targetForThread(threadId);
-      const authority = await callHost(target, "captureAuthority", { target });
-      if (!authority.ok) return authority;
-      const pinned = await readLastSession(authority.workspaceId);
-      if (pinned !== sessionId) {
-        return { ok: false, error: { code: "session_pin_stale", message: "The selected meeting is no longer this project's pinned latest session. Refresh before creating the note.", retryable: true } };
-      }
+    async connectedNoteContext({ threadId, projectId, sessionId }) {
+      const target = await targetForSelection({ threadId, projectId });
       return callHost(target, "connectedNoteContext", { target, recordingId: sessionId });
     },
-    async transcribePinnedSession({ threadId, sessionId }) {
-      const target = await targetForThread(threadId);
-      const authority = await callHost(target, "captureAuthority", { target });
-      if (!authority.ok) return authority;
-      const pinned = await readLastSession(authority.workspaceId);
-      if (pinned !== sessionId) {
-        return { ok: false, error: { code: "session_pin_stale", message: "Refresh before transcribing this meeting.", retryable: true } };
-      }
+    async transcribePinnedSession({ threadId, projectId, sessionId }) {
+      const target = await targetForSelection({ threadId, projectId });
       return callHost(target, "requestTranscription", { target, recordingId: sessionId });
     }
   });

@@ -42,6 +42,8 @@ export const workspaceMeetingResultSchema = z.discriminatedUnion("ok", [
 ]);
 export const workspaceMeetingSummarySchema = workspaceMeetingSchema.omit({ notepad: true }).extend({
   notePath: z.string().nullable(),
+  threadIds: z.array(z.string()).default([]),
+  distilledMemoRevision: z.string().nullable().default(null),
 }).strict();
 export const workspaceMeetingsResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), meetings: z.array(workspaceMeetingSummarySchema) }).strict(),
@@ -219,11 +221,11 @@ export const marginsRpcContract = defineRpcContract({
     output: panelStateSchema,
   },
   connectedNoteContext: {
-    input: z.object({ threadId: z.string().min(1), sessionId: z.string().min(1) }).strict(),
+    input: z.object({ threadId: z.string().min(1).optional(), projectId: z.string().min(1).optional(), sessionId: z.string().min(1) }).strict(),
     output: connectedNoteResultSchema,
   },
   transcribePinnedSession: {
-    input: z.object({ threadId: z.string().min(1), sessionId: z.string().min(1) }).strict(),
+    input: z.object({ threadId: z.string().min(1).optional(), projectId: z.string().min(1).optional(), sessionId: z.string().min(1) }).strict(),
     output: transcriptionRequestResultSchema,
   },
 });

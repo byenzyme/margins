@@ -6,6 +6,8 @@ import { browserCaptureOwner } from "./browser-capture.js";
 import type { PanelState } from "./contracts.js";
 
 const app = await loadPluginApp(() => import("../app.js"));
+const { MarginsPanel } = await import("./app.js");
+const legacyPanel = { ...app.threadPanelActions[0]!, component: MarginsPanel };
 const noWorkspaceMeeting = () => ({ ok: true as const, meeting: null, candidates: [] });
 function panel(changes: Partial<PanelState> = {}): PanelState {
   return {
@@ -65,8 +67,47 @@ describe("Margins recording panel", () => {
     slot.lifecycle.unmount();
   });
 
+  it("prefills a new-thread composer for an ended meeting without sending", async () => {
+    const ended = { sessionId: "ended-2", title: "Review", startedAt: "2026-09-24T01:00:00Z", inputFinalized: true,
+      notepad: { text: "Decision", revision: "memo-v3" }, notePath: null, threadIds: [], distilledMemoRevision: null };
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "project-1/ended-2" }, { context: { projectId: "project-1" }, rpc: {
+      availableProjects: () => ({ projects: [{ id: "project-1", name: "Project" }] }),
+      getProjectPanelState: () => panel({ state: "ready", recordingId: null }),
+      listWorkspaceMeetings: () => ({ ok: true, meetings: [ended] }),
+      readWorkspaceMeeting: () => ({ ok: true, candidates: [], meeting: ended }),
+      connectedNoteContext: () => ({ ok: true, context: {
+        schema: "margins.bb.connected-note-context.v1", instanceId: "instance", workspaceId: "vault", sessionId: "ended-2", title: "Review",
+        transcript: { available: true, terminal: true, live: false, updatedAtUnixMs: 2 },
+        memo: { revision: "memo-v3", lineCount: 1 }, artifacts: [], noteAssociation: null, instructions: "",
+      } }),
+    } });
+    const screen = within(slot.container);
+    fireEvent.click(await screen.findByRole("button", { name: "Distill to note →" }));
+    await waitFor(() => expect(slot.inspection.navigateCalls.some((call) => call.method === "toCompose")).toBe(true));
+    const compose = slot.inspection.navigateCalls.find((call) => call.method === "toCompose");
+    expect(compose).toMatchObject({ options: { focusPrompt: true } });
+    expect(JSON.stringify(compose)).toContain("ended-2");
+    expect(JSON.stringify(compose)).toContain("vault");
+    expect(JSON.stringify(compose)).toContain("memo-v3");
+    expect(slot.inspection.rpcCalls.some((call) => call.method === "threads.spawn")).toBe(false);
+    slot.lifecycle.unmount();
+  });
+
+  it("shows the linked source memo in its distillation thread tab", async () => {
+    const summary = { sessionId: "ended-2", title: "Review", startedAt: "2026-09-24T01:00:00Z", inputFinalized: true,
+      notePath: "inbox/review.md", threadIds: ["thr-distill"], distilledMemoRevision: "memo-v3" };
+    const slot = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-distill", params: null }, { context: { projectId: "project-1" }, rpc: {
+      listWorkspaceMeetings: () => ({ ok: true, meetings: [summary] }),
+      readWorkspaceMeeting: () => ({ ok: true, candidates: [], meeting: { ...summary, notepad: { text: "Decision", revision: "memo-v3" } } }),
+    } });
+    const screen = within(slot.container);
+    expect((await screen.findByRole("textbox", { name: "Source meeting memo pad" }) as HTMLTextAreaElement).value).toBe("Decision");
+    expect(screen.getByText("Note: inbox/review.md")).toBeDefined();
+    slot.lifecycle.unmount();
+  });
+
   it("shows the truthful microphone source, project storage, and one editable notepad", async () => {
-    const slot = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-1", params: null }, {
+    const slot = renderSlot(legacyPanel, { threadId: "thr-1", params: null }, {
       rpc: { getPanelState: () => panel(), updateNotepad: () => panel({ notepad: { text: "Pricing\nNext", revision: "v2" } }) },
     });
     const screen = within(slot.container);
@@ -83,7 +124,7 @@ describe("Margins recording panel", () => {
   it("asks for microphone before Start resolves and never exposes setup internals", async () => {
     vi.spyOn(browserCaptureOwner, "start").mockResolvedValue(panel());
     const ready = panel({ state: "ready", title: "Ready to record", primaryAction: "start", primaryLabel: "Start recording", canStop: false, canEditNotepad: false, ownsRecording: false, recordingId: null, notepad: null });
-    const slot = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-1", params: null }, { rpc: { getPanelState: () => ready, readWorkspaceMeeting: noWorkspaceMeeting } });
+    const slot = renderSlot(legacyPanel, { threadId: "thr-1", params: null }, { rpc: { getPanelState: () => ready, readWorkspaceMeeting: noWorkspaceMeeting } });
     const screen = within(slot.container);
     fireEvent.click(await screen.findByRole("button", { name: "Start recording" }));
     expect(screen.getByRole("button", { name: "Start recording" }).textContent).toContain("Start recording");
@@ -98,7 +139,7 @@ describe("Margins recording panel", () => {
     const ready = panel({ state: "ready", title: "Record with your browser", primaryAction: "start",
       primaryLabel: "Use browser microphone", canStop: false, canEditNotepad: false,
       ownsRecording: false, recordingId: null, notepad: null });
-    const slot = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-1", params: null }, {
+    const slot = renderSlot(legacyPanel, { threadId: "thr-1", params: null }, {
       rpc: { getPanelState: () => ready, readWorkspaceMeeting: noWorkspaceMeeting },
     });
     const screen = within(slot.container);
@@ -119,7 +160,7 @@ describe("Margins recording panel", () => {
       ownsRecording: false, recordingId: null, notepad: null, lastSessionId: "older-session" });
     const meeting = { sessionId: "newest-session", title: "Planning", startedAt: "2026-09-24T03:00:00Z",
       inputFinalized: true, notepad: { text: "Saved BB note", revision: "rev-new" } };
-    const slot = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-1", params: null }, { rpc: {
+    const slot = renderSlot(legacyPanel, { threadId: "thr-1", params: null }, { rpc: {
       getPanelState: () => ready,
       readWorkspaceMeeting: () => ({ ok: true, candidates: [], meeting }),
     } });
@@ -134,7 +175,7 @@ describe("Margins recording panel", () => {
 
   it("puts a natural connected-note request in the composer without sending", async () => {
     const saved = panel({ state: "saved", title: "Meeting saved", primaryAction: "none", primaryLabel: "Meeting saved", canStop: false, canEditNotepad: false, ownsRecording: false, recordingId: null, notepad: null, lastSessionId: "rec-pinned" });
-    const slot = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-1", params: null }, { rpc: {
+    const slot = renderSlot(legacyPanel, { threadId: "thr-1", params: null }, { rpc: {
       getPanelState: () => saved,
       readWorkspaceMeeting: noWorkspaceMeeting,
       connectedNoteContext: () => ({ ok: true, context: {
@@ -153,7 +194,7 @@ describe("Margins recording panel", () => {
 
   it("requests remote transcription before drafting a note for an audio-only session", async () => {
     const saved = panel({ state: "saved", title: "Meeting saved", primaryAction: "none", primaryLabel: "Meeting saved", canStop: false, canEditNotepad: false, ownsRecording: false, recordingId: null, notepad: null, lastSessionId: "rec-pinned" });
-    const slot = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-1", params: null }, { rpc: {
+    const slot = renderSlot(legacyPanel, { threadId: "thr-1", params: null }, { rpc: {
       getPanelState: () => saved,
       readWorkspaceMeeting: noWorkspaceMeeting,
       connectedNoteContext: () => ({ ok: true, context: {
@@ -172,7 +213,7 @@ describe("Margins recording panel", () => {
 
   it("keeps an unsaved notepad edit when the panel is collapsed and reopened", async () => {
     const failedUpdate = vi.fn(async () => { throw new Error("offline"); });
-    const first = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-1", params: null }, {
+    const first = renderSlot(legacyPanel, { threadId: "thr-1", params: null }, {
       rpc: { getPanelState: () => panel(), updateNotepad: failedUpdate },
     });
     const firstScreen = within(first.container);
@@ -181,7 +222,7 @@ describe("Margins recording panel", () => {
     await waitFor(() => expect(failedUpdate).toHaveBeenCalled());
     first.lifecycle.unmount();
 
-    const reopened = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-1", params: null }, {
+    const reopened = renderSlot(legacyPanel, { threadId: "thr-1", params: null }, {
       rpc: { getPanelState: () => panel(), updateNotepad: () => panel() },
     });
     expect((await within(reopened.container).findByRole("textbox", { name: "Meeting notepad" }) as HTMLTextAreaElement).value).toBe("Pricing\nKeep this locally");
@@ -196,7 +237,7 @@ describe("Margins recording panel", () => {
       inputFinalized: false, notepad: { text: "First point", revision: "rev-1" } };
     const saveWorkspaceMemo = vi.fn(async () => ({ ok: true as const, candidates: [meeting.sessionId],
       meeting: { ...meeting, notepad: { text: "First point\nSecond point", revision: "rev-2" } } }));
-    const slot = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-1", params: null }, { rpc: {
+    const slot = renderSlot(legacyPanel, { threadId: "thr-1", params: null }, { rpc: {
       getPanelState: () => ready,
       readWorkspaceMeeting: () => ({ ok: true, candidates: [meeting.sessionId], meeting }),
       saveWorkspaceMemo,
@@ -219,7 +260,7 @@ describe("Margins recording panel", () => {
       canStop: false, canEditNotepad: false, ownsRecording: false, recordingId: null, notepad: null });
     const meeting = { sessionId: "remote-menu-2", title: "Planning", startedAt: "2026-09-24T03:00:00Z",
       inputFinalized: true, notepad: { text: "Follow-up", revision: "rev-2" } };
-    const slot = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-1", params: null }, { rpc: {
+    const slot = renderSlot(legacyPanel, { threadId: "thr-1", params: null }, { rpc: {
       getPanelState: () => ready,
       readWorkspaceMeeting: () => ({ ok: true, candidates: [meeting.sessionId], meeting }),
       captureAuthority: () => ({ ok: true, instanceId: "instance", workspaceId: "workspace" }),
@@ -242,7 +283,7 @@ describe("Margins recording panel", () => {
 
   it("does not put Pause behind a stalled notepad save", async () => {
     const pause = vi.spyOn(browserCaptureOwner, "pause").mockResolvedValue(panel({ state: "paused" }));
-    const slot = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-pause", params: null }, {
+    const slot = renderSlot(legacyPanel, { threadId: "thr-pause", params: null }, {
       rpc: { getPanelState: () => panel({ recordingId: "rec-pause" }), updateNotepad: () => new Promise(() => {}) },
     });
     const screen = within(slot.container);
@@ -254,7 +295,7 @@ describe("Margins recording panel", () => {
 
   it("does not put Stop behind a stalled notepad save", async () => {
     const stop = vi.spyOn(browserCaptureOwner, "stop").mockResolvedValue(panel({ state: "saved" }));
-    const slot = renderSlot(app.threadPanelActions[0]!, { threadId: "thr-stop", params: null }, {
+    const slot = renderSlot(legacyPanel, { threadId: "thr-stop", params: null }, {
       rpc: { getPanelState: () => panel({ recordingId: "rec-stop" }), updateNotepad: () => new Promise(() => {}) },
     });
     const screen = within(slot.container);

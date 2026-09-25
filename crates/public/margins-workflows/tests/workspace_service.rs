@@ -332,6 +332,8 @@ fn composed_service_is_the_same_canonical_store_across_retry_and_restart() {
         relative_path: "meetings/capture-a.md".into(),
         observed_content_hash: Some("observed-hash".into()),
         expected_revision: 0,
+        bb_thread_id: Some("thr-distill".into()),
+        distilled_memo_revision: Some("memo-v1".into()),
     };
     let associated = service
         .link_note(&owner, &SessionId("capture-a".into()), &link)
@@ -343,6 +345,8 @@ fn composed_service_is_the_same_canonical_store_across_retry_and_restart() {
         associated
     );
     assert_eq!(associated.relative_path, "meetings/capture-a.md");
+    assert_eq!(associated.bb_thread_ids, vec!["thr-distill"]);
+    assert_eq!(associated.distilled_memo_revision.as_deref(), Some("memo-v1"));
     assert!(service
         .latest_job(&owner, &SessionId("capture-a".into()))
         .unwrap()
@@ -904,6 +908,8 @@ fn memo_source_and_import_authorization_are_independent_and_retry_safe() {
                 relative_path: "../escape.md".into(),
                 observed_content_hash: None,
                 expected_revision: 0,
+                bb_thread_id: None,
+                distilled_memo_revision: None,
             },
         )
         .is_err());

@@ -242,12 +242,16 @@ impl SqliteWorkspaceAuthorityStorage {
         relative_path: &str,
         observed_hash: Option<&str>,
         expected_revision: u64,
+        bb_thread_id: Option<&str>,
+        distilled_memo_revision: Option<&str>,
     ) -> Result<canonical::NoteAssociation> {
         validate_request_id(request_id)?;
         let fingerprint = digest(
             format!(
-                "{source_id}\0{relative_path}\0{}\0{expected_revision}",
-                observed_hash.unwrap_or_default()
+                "{source_id}\0{relative_path}\0{}\0{expected_revision}\0{}\0{}",
+                observed_hash.unwrap_or_default(),
+                bb_thread_id.unwrap_or_default(),
+                distilled_memo_revision.unwrap_or_default()
             )
             .as_bytes(),
         );
@@ -260,13 +264,15 @@ impl SqliteWorkspaceAuthorityStorage {
         )? {
             return Ok(serde_json::from_str(&response)?);
         }
-        let association = canonical::link_note(
+        let association = canonical::link_note_with_distillation(
             &self.directory,
             session_id,
             source_id,
             relative_path,
             observed_hash,
             expected_revision,
+            bb_thread_id,
+            distilled_memo_revision,
         )?;
         self.record_mutation_receipt(
             session_id,

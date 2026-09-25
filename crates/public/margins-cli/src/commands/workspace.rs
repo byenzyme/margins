@@ -108,16 +108,16 @@ pub fn destination(
             )
         })?;
     let resolved = resolve_existing(Some(&selected), cwd)?;
-    let folder = resolved
+    let (source_id, folder) = resolved
         .config
         .bindings
-        .values()
-        .find_map(|binding| match binding {
+        .iter()
+        .find_map(|(source_id, binding)| match binding {
             WorkspaceBinding::NativeMarkdown {
                 role: SourceRole::Home,
                 note_folder,
                 ..
-            } => Some(note_folder),
+            } => Some((source_id, note_folder)),
             _ => None,
         })
         .ok_or_else(|| CliError::new("workspace_invalid", "Workspace has no Home binding"))?;
@@ -126,7 +126,7 @@ pub fn destination(
         &mut *stdout,
         &serde_json::json!({
             "workspace_id": resolved.config.id, "home_root": resolved.home_dir,
-            "note_folder": folder, "destination": destination,
+            "home_source_id": source_id, "note_folder": folder, "destination": destination,
         }),
     )
     .map_err(|error| CliError::from_anyhow(error.into()))?;

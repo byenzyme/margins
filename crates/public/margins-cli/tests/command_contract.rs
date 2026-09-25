@@ -78,6 +78,7 @@ fn workspace_default_and_destination_are_explicit_json_reads() {
     assert!(read.is_ok(), "{output}");
     let json: serde_json::Value = serde_json::from_str(&output).unwrap();
     assert_eq!(json["workspace_id"], "practice");
+    assert_eq!(json["home_source_id"], "home");
     assert_eq!(json["note_folder"], "inbox");
     assert_eq!(
         json["destination"],
