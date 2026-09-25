@@ -33872,7 +33872,7 @@ var ProjectServerManager = class {
         MARGINS_WORKSPACE: workspaceId,
         ...asrRuntime ? {
           MARGINS_PARAKEET_MODEL_DIR: asrRuntime.modelDir,
-          MARGINS_PARAKEET_MODEL_KIND: "tdt-v2",
+          MARGINS_PARAKEET_MODEL_KIND: "tdt",
           ORT_DYLIB_PATH: asrRuntime.ortLibraryPath
         } : {}
       },
@@ -33898,6 +33898,10 @@ var ProjectMarginsTransport = class {
     this.manager = manager;
   }
   manager;
+  browserSessions = /* @__PURE__ */ new Set();
+  browserSessionKey(handle, sessionId) {
+    return `${handle.instanceId}:${handle.workspaceId}:${sessionId}`;
+  }
   async listWorkspaceMeetings(target, dataDir) {
     try {
       const handle = await this.manager.ensure(target, dataDir);
@@ -34015,9 +34019,10 @@ var ProjectMarginsTransport = class {
       },
       body: body === void 0 ? void 0 : JSON.stringify(body)
     });
-    if (!response.ok) throw new Error(`Margins could not save on the project machine (${response.status})`);
     const value = await response.json();
-    if (!value.ok) throw new Error(value.error || "Margins could not complete the recording action");
+    const detail = typeof value.error === "string" ? value.error : value.error?.message;
+    if (!response.ok) throw new Error(detail || `Margins could not save on the project machine (${response.status})`);
+    if (!value.ok) throw new Error(detail || "Margins could not complete the recording action");
     return value.result;
   }
   async transcriptSummary(handle, recordingId) {
@@ -34031,6 +34036,8 @@ var ProjectMarginsTransport = class {
     if (!response.ok || !envelope.ok || !envelope.result) {
       throw new Error(envelope.error?.message || `Margins transcript lookup failed (${response.status})`);
     }
+    const speechLine = String(envelope.result.body || "").split("\n").some((line) => /^\[\d{2}:\d{2}(?::\d{2})?\]\s+(?!memo:)/.test(line));
+    if (envelope.result.decoded_until_ms === 0 && !speechLine) return null;
     return envelope.result;
   }
   async snapshot(handle, recordingId, ownerId, signal) {
@@ -34045,7 +34052,9 @@ var ProjectMarginsTransport = class {
   }
   start(target, dataDir, ownerId, name) {
     return this.withHandle(target, dataDir, async (handle) => {
-      return this.request(handle, "browser/sessions", "POST", { name, ownerId });
+      const snapshot = await this.request(handle, "browser/sessions", "POST", { name, ownerId });
+      this.browserSessions.add(this.browserSessionKey(handle, snapshot.sessionId));
+      return snapshot;
     });
   }
   read(target, dataDir, recordingId, ownerId) {
@@ -34119,15 +34128,31 @@ var ProjectMarginsTransport = class {
   async requestTranscription(target, dataDir, recordingId) {
     try {
       const handle = await this.manager.ensure(target, dataDir);
-      const job = await this.request(
-        handle,
-        `sessions/${recordingId}/jobs/transcribe`,
-        "POST"
-      );
+      if (handle.child && this.browserSessions.has(this.browserSessionKey(handle, recordingId))) {
+        await this.transcribeHostedBrowserSession(handle, recordingId);
+        return { ok: true, status: "complete", attempt: 1 };
+      }
+      let job;
+      try {
+        job = await this.request(handle, `sessions/${recordingId}/jobs/transcribe`, "POST");
+      } catch (error108) {
+        if (!handle.child || !(error108 instanceof Error) || !error108.message.includes("session has no capture authority state")) throw error108;
+        await this.transcribeHostedBrowserSession(handle, recordingId);
+        return { ok: true, status: "complete", attempt: 1 };
+      }
       return { ok: true, status: job.status, attempt: job.attempt };
     } catch (cause) {
       return { ok: false, error: hostError("transcription_unavailable", cause instanceof Error ? cause.message : String(cause)) };
     }
+  }
+  async transcribeHostedBrowserSession(handle, sessionId) {
+    const response = await fetch(`${handle.baseUrl}/api/invoke/transcribe_hosted_browser_session`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${handle.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ name: sessionId })
+    });
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || `Hosted browser transcription failed (${response.status})`);
   }
   dispose() {
     return this.manager.dispose();

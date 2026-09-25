@@ -125,7 +125,7 @@ describe("ProjectServerManager remote adapter", () => {
       const url = String(input);
       let result: unknown;
       if (url.includes("/sessions?")) result = { sessions: [{ session_id: "rec-1", title: "Pinned" }], next_cursor: null };
-      else if (url.endsWith("/transcript")) result = { terminal: true, live: false, updated_at_unix_ms: 12, body: "must not cross host contract" };
+      else if (url.endsWith("/transcript")) result = { terminal: true, live: false, updated_at_unix_ms: 12, decoded_until_ms: 1000, body: "must not cross host contract" };
       else if (url.endsWith("/memo")) result = { revision: "memo-2", lines: [{ text: "private memo" }] };
       else if (url.endsWith("/artifacts")) result = [{ artifact_id: "artifact-1", kind: "transcript", retention_class: "session" }];
       else if (url.endsWith("/note-association")) result = { source_id: "notes", relative_path: "Meetings/pinned.md", revision: 3 };
@@ -138,6 +138,28 @@ describe("ProjectServerManager remote adapter", () => {
     expect(JSON.stringify(result)).not.toContain("private memo");
     expect(JSON.stringify(result)).not.toContain("must not cross host contract");
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/artifacts/artifact-1/content"))).toBe(false);
+  });
+
+  it("requests durable transcription when a terminal live checkpoint contains no decoded audio", async () => {
+    const manager = { ensure: vi.fn(async () => ({
+      baseUrl: "https://margins.example.test", token: "scoped-token", workspaceId: "practice", instanceId: "instance-remote",
+    })) } as unknown as ProjectServerManager;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      let result: unknown;
+      if (url.includes("/sessions?")) result = { sessions: [{ session_id: "rec-1", title: "Saved capture" }] };
+      else if (url.endsWith("/transcript")) result = { terminal: true, live: false, updated_at_unix_ms: 12,
+        decoded_until_ms: 0, body: "# Capture Context\n## Timeline\n[00:05] memo: Decision" };
+      else if (url.endsWith("/memo")) result = { revision: "memo-1", lines: [{ text: "Decision" }] };
+      else if (url.endsWith("/artifacts")) result = [];
+      else if (url.endsWith("/note-association")) result = null;
+      else throw new Error(`unexpected URL ${url}`);
+      return new Response(JSON.stringify({ ok: true, result }), { status: 200 });
+    }));
+    const result = await new ProjectMarginsTransport(manager).connectedNoteContext(
+      { projectId: "project", projectRoot: "/tmp/project", hostId: "host" }, "/tmp/data", "rec-1",
+    );
+    expect(result).toMatchObject({ ok: true, context: { transcript: { available: false } } });
   });
 
   it("reports a saved capture awaiting transcription without exposing note bytes", async () => {
@@ -197,6 +219,27 @@ describe("ProjectServerManager remote adapter", () => {
       "https://margins.example.test/v1/workspaces/practice/sessions/rec-1/jobs/transcribe",
       expect.objectContaining({ method: "POST", headers: expect.objectContaining({ authorization: "Bearer scoped-token" }) }),
     );
+  });
+
+  it("transcribes a local browser capture from its finalized WAV without a remote producer job", async () => {
+    const manager = { ensure: vi.fn(async () => ({
+      baseUrl: "http://127.0.0.1:8787", token: "scoped-token", workspaceId: "practice", instanceId: "instance-local", child: {},
+    })) } as unknown as ProjectServerManager;
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith("/browser/sessions")) return new Response(JSON.stringify({ ok: true, result: {
+        recordingId: "browser-1", sessionId: "meeting-1", status: "recording", notepad: { text: "", revision: "memo-1" },
+      } }));
+      if (url.endsWith("/api/invoke/transcribe_hosted_browser_session")) return new Response(JSON.stringify({ ok: true, result: "1 transcript entry" }));
+      throw new Error(`unexpected URL ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const transport = new ProjectMarginsTransport(manager);
+    const target = { projectId: "project", projectRoot: "/tmp/project", hostId: "host" };
+    expect(await transport.start(target, "/tmp/data", "owner-1", "meeting-1")).toMatchObject({ ok: true });
+    expect(await transport.requestTranscription(target, "/tmp/data", "meeting-1"))
+      .toMatchObject({ ok: true, status: "complete" });
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/jobs/transcribe"))).toBe(false);
   });
 
   it("rejects incomplete or non-TLS remote configuration before transport", async () => {

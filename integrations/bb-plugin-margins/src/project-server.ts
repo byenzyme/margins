@@ -176,7 +176,7 @@ export class ProjectServerManager {
         MARGINS_WORKSPACE: workspaceId,
         ...(asrRuntime ? {
           MARGINS_PARAKEET_MODEL_DIR: asrRuntime.modelDir,
-          MARGINS_PARAKEET_MODEL_KIND: "tdt-v2",
+          MARGINS_PARAKEET_MODEL_KIND: "tdt",
           ORT_DYLIB_PATH: asrRuntime.ortLibraryPath,
         } : {}),
       },
@@ -200,7 +200,12 @@ export class ProjectServerManager {
 }
 
 export class ProjectMarginsTransport {
+  private readonly browserSessions = new Set<string>();
   constructor(private readonly manager = new ProjectServerManager()) {}
+
+  private browserSessionKey(handle: ServerHandle, sessionId: string) {
+    return `${handle.instanceId}:${handle.workspaceId}:${sessionId}`;
+  }
 
   async listWorkspaceMeetings(target: ProjectTarget, dataDir: string) {
     try {
@@ -314,9 +319,10 @@ export class ProjectMarginsTransport {
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
-    if (!response.ok) throw new Error(`Margins could not save on the project machine (${response.status})`);
-    const value = await response.json() as { ok: boolean; result?: T; error?: string };
-    if (!value.ok) throw new Error(value.error || "Margins could not complete the recording action");
+    const value = await response.json() as { ok: boolean; result?: T; error?: string | { message?: string } };
+    const detail = typeof value.error === "string" ? value.error : value.error?.message;
+    if (!response.ok) throw new Error(detail || `Margins could not save on the project machine (${response.status})`);
+    if (!value.ok) throw new Error(detail || "Margins could not complete the recording action");
     return value.result as T;
   }
 
@@ -326,7 +332,7 @@ export class ProjectMarginsTransport {
     });
     const envelope = await response.json() as {
       ok?: boolean;
-      result?: { terminal: boolean; live: boolean; updated_at_unix_ms: number };
+      result?: { terminal: boolean; live: boolean; updated_at_unix_ms: number; decoded_until_ms: number; body: string };
       error?: { code?: string; message?: string };
     };
     if (response.status === 422 && envelope.error?.code === "invalid_request"
@@ -336,6 +342,12 @@ export class ProjectMarginsTransport {
     if (!response.ok || !envelope.ok || !envelope.result) {
       throw new Error(envelope.error?.message || `Margins transcript lookup failed (${response.status})`);
     }
+    // A finalized browser capture can publish a terminal, memo-only live
+    // checkpoint when Chrome did not deliver live PCM. Request durable-audio
+    // transcription instead of treating that empty checkpoint as speech.
+    const speechLine = String(envelope.result.body || "").split("\n")
+      .some((line) => /^\[\d{2}:\d{2}(?::\d{2})?\]\s+(?!memo:)/.test(line));
+    if (envelope.result.decoded_until_ms === 0 && !speechLine) return null;
     return envelope.result;
   }
 
@@ -353,7 +365,9 @@ export class ProjectMarginsTransport {
 
   start(target: ProjectTarget, dataDir: string, ownerId: string, name: string) {
     return this.withHandle(target, dataDir, async (handle) => {
-      return this.request<HostCaptureSnapshot>(handle, "browser/sessions", "POST", { name, ownerId });
+      const snapshot = await this.request<HostCaptureSnapshot>(handle, "browser/sessions", "POST", { name, ownerId });
+      this.browserSessions.add(this.browserSessionKey(handle, snapshot.sessionId));
+      return snapshot;
     });
   }
 
@@ -436,13 +450,33 @@ export class ProjectMarginsTransport {
   async requestTranscription(target: ProjectTarget, dataDir: string, recordingId: string): Promise<TranscriptionRequestResult> {
     try {
       const handle = await this.manager.ensure(target, dataDir);
-      const job = await this.request<{ status: "queued" | "running" | "complete" | "failed"; attempt: number }>(
-        handle, `sessions/${recordingId}/jobs/transcribe`, "POST",
-      );
+      if (handle.child && this.browserSessions.has(this.browserSessionKey(handle, recordingId))) {
+        await this.transcribeHostedBrowserSession(handle, recordingId);
+        return { ok: true, status: "complete", attempt: 1 };
+      }
+      let job: { status: "queued" | "running" | "complete" | "failed"; attempt: number };
+      try {
+        job = await this.request(handle, `sessions/${recordingId}/jobs/transcribe`, "POST");
+      } catch (error) {
+        // A browser session reopened after a worker restart is absent from the
+        // in-memory set, but still has finalized local WAV segments.
+        if (!handle.child || !(error instanceof Error) || !error.message.includes("session has no capture authority state")) throw error;
+        await this.transcribeHostedBrowserSession(handle, recordingId);
+        return { ok: true, status: "complete", attempt: 1 };
+      }
       return { ok: true, status: job.status, attempt: job.attempt };
     } catch (cause) {
       return { ok: false, error: hostError("transcription_unavailable", cause instanceof Error ? cause.message : String(cause)) };
     }
+  }
+
+  private async transcribeHostedBrowserSession(handle: ServerHandle, sessionId: string) {
+    const response = await fetch(`${handle.baseUrl}/api/invoke/transcribe_hosted_browser_session`, {
+      method: "POST", headers: { authorization: `Bearer ${handle.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ name: sessionId }),
+    });
+    const result = await response.json() as { ok?: boolean; error?: string };
+    if (!response.ok || !result.ok) throw new Error(result.error || `Hosted browser transcription failed (${response.status})`);
   }
 
   dispose() { return this.manager.dispose(); }

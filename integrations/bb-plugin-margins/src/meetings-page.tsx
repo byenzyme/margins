@@ -231,7 +231,8 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
           {selected.notePath && <span>Note: {selected.notePath}</span>}
           {(selected.threadIds || []).map((threadId) => <button key={threadId} onClick={() => navigate.toThread(threadId)}>Thread {threadId}</button>)}
           {memoChangedSinceNote && <span>Note uses an earlier memo revision</span>}</footer>
-      </> : panel?.state !== "unavailable" && <div className="margins-meetings-empty"><h2>No meetings yet</h2><button onClick={() => void start()}>Start meeting</button></div>}
+      </> : panel?.state !== "unavailable" && <div className="margins-meetings-empty"><h2>No meetings yet</h2><button onClick={() => void start()}>Start meeting</button>
+        {message && <p role="alert">{message}</p>}</div>}
     </section>
   </main>;
 }

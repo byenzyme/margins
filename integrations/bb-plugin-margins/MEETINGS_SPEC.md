@@ -196,5 +196,9 @@ Steps 1–6 run without model spend and should be the CI-able lane.
   native bridge currently exposes sample counts but no audio amplitude; its
   accessory uses a static activity indication until the bridge reports a
   measured level.
+- Hosted browser capture finalizes a local WAV without a remote producer
+  authority record. Its transcription request uses the headless WAV ASR path;
+  a memo-only terminal live checkpoint does not count as a transcript. The
+  spoken-audio harness requires an actual Parakeet timeline line.
 - `test-harness/no-llm.mjs` covers steps 1–6 in an isolated bb instance. Step 7
   and the independent step 8 review were not run.

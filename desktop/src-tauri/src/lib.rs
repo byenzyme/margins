@@ -464,10 +464,7 @@ fn session_artifact_dir(margins_dir: &Path, session_name: &str) -> PathBuf {
     margins_dir.join("artifacts").join(session_name)
 }
 
-pub(crate) fn session_transcript_artifact_path(
-    margins_dir: &Path,
-    session_name: &str,
-) -> PathBuf {
+pub(crate) fn session_transcript_artifact_path(margins_dir: &Path, session_name: &str) -> PathBuf {
     session_artifact_dir(margins_dir, session_name).join("transcript.md")
 }
 
@@ -587,10 +584,7 @@ fn is_valid_session_transcript_checkpoint(content: &str, session_name: &str) -> 
 /// record. We therefore validate only genuineness: non-empty content whose
 /// `Session:` header names this session. This is the fix for the
 /// silent / memo-only / capture-without-model finish flow.
-pub(crate) fn is_valid_terminal_transcript_checkpoint(
-    content: &str,
-    session_name: &str,
-) -> bool {
+pub(crate) fn is_valid_terminal_transcript_checkpoint(content: &str, session_name: &str) -> bool {
     !content.trim().is_empty()
         && session_transcript_checkpoint_session_name(content) == Some(session_name)
 }
@@ -626,7 +620,12 @@ pub(crate) fn write_atomic_utf8(path: &Path, content: &str) -> Result<(), String
         .create_new(true)
         .write(true)
         .open(&temp)
-        .map_err(|e| format!("failed to create temporary artifact {}: {e}", temp.display()))?;
+        .map_err(|e| {
+            format!(
+                "failed to create temporary artifact {}: {e}",
+                temp.display()
+            )
+        })?;
     use std::io::Write as _;
     file.write_all(content.as_bytes())
         .map_err(|e| format!("failed to write temporary artifact {}: {e}", temp.display()))?;
@@ -644,7 +643,12 @@ pub(crate) fn write_atomic_utf8(path: &Path, content: &str) -> Result<(), String
     #[cfg(unix)]
     std::fs::File::open(parent)
         .and_then(|directory| directory.sync_all())
-        .map_err(|e| format!("failed to sync artifact directory {}: {e}", parent.display()))?;
+        .map_err(|e| {
+            format!(
+                "failed to sync artifact directory {}: {e}",
+                parent.display()
+            )
+        })?;
     Ok(())
 }
 
@@ -7316,6 +7320,63 @@ fn write_aligned_sidecar_headless(
     }
     register_transcript_artifact(margins_dir, name)?;
     Ok(summary)
+}
+
+/// Prepare speech for an ended hosted browser capture without starting note
+/// generation. Browser WebM capture has a finalized local WAV but no remote
+/// producer authority record, so the remote-lane ASR job cannot read it.
+pub(crate) async fn transcribe_hosted_browser_session(
+    ctx: &ctx::Ctx,
+    name: String,
+) -> Result<String, String> {
+    #[cfg(feature = "parakeet-asr")]
+    {
+        let work_dir = ctx.state.work_dir.lock().unwrap().clone();
+        return tokio::task::spawn_blocking(move || {
+            validate_session_name(&name)?;
+            let margins_dir = work_dir.join(".margins");
+            let meta = session::get_session_meta(&margins_dir, &name)
+                .map_err(|error| error.to_string())?;
+            verify_capture_ready_for_processing(&work_dir, &margins_dir, &meta)?;
+            let memo_path = session_memo_path(&work_dir, &name);
+            let summary =
+                write_aligned_sidecar_headless(&work_dir, &margins_dir, &name, &memo_path)?;
+            let aligned = read_session_transcript_artifact(&margins_dir, &name)
+                .ok_or_else(|| "Prepared transcript could not be read".to_string())?;
+            if transcript_count_in_markdown(&aligned) == 0 {
+                return Err("No speech was detected in the captured audio".to_string());
+            }
+            let job_id = format!("transcribe-browser:{name}");
+            let input_revision = note_job_input_revision(&work_dir, &margins_dir, &meta);
+            let job = session::begin_processing_job(
+                &margins_dir,
+                &name,
+                &job_id,
+                "transcribe_session",
+                &input_revision,
+            )
+            .map_err(|error| error.to_string())?;
+            session::update_processing_job(
+                &margins_dir,
+                &job_id,
+                job.attempt,
+                "complete",
+                Some(1.0),
+                Some(&format!(".margins/artifacts/{name}/transcript.md")),
+                None,
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(summary)
+        })
+        .await
+        .map_err(|error| format!("Transcription worker stopped: {error}"))?;
+    }
+    #[cfg(not(feature = "parakeet-asr"))]
+    {
+        let _ = (ctx, name);
+        Err("Headless transcription is not enabled in this server build".to_string())
+    }
 }
 
 /// Parse the /tmp transcript JSON paths returned by `transcribe_segments` into

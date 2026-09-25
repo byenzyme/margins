@@ -20,6 +20,13 @@ const marginsBin = required("MARGINS_E2E_BIN");
 const serverBin = required("MARGINS_E2E_SERVER_BIN");
 const bbApp = required("MARGINS_E2E_BB_APP");
 const chromeBin = required("MARGINS_E2E_CHROME_BIN");
+const asrValues = ["MARGINS_E2E_SPOKEN_WAV", "MARGINS_E2E_ASR_MODEL_DIR", "MARGINS_E2E_ORT_LIBRARY"]
+  .map((name) => process.env[name]);
+if (asrValues.some(Boolean) && !asrValues.every(Boolean)) {
+  throw new Error("Set MARGINS_E2E_SPOKEN_WAV, MARGINS_E2E_ASR_MODEL_DIR, and MARGINS_E2E_ORT_LIBRARY together");
+}
+const asrEnabled = asrValues.every(Boolean);
+if (asrEnabled) for (const name of ["MARGINS_E2E_SPOKEN_WAV", "MARGINS_E2E_ASR_MODEL_DIR", "MARGINS_E2E_ORT_LIBRARY"]) required(name);
 const image = process.env.MARGINS_E2E_CHROME_IMAGE || "margins-bb-e2e-chrome:local";
 const artifacts = path.resolve(process.env.MARGINS_E2E_ARTIFACTS || path.join(plugin, "e2e-artifacts", new Date().toISOString().replace(/[:.]/g, "-")));
 const temporary = mkdtempSync(path.join(os.tmpdir(), "margins-bb-meetings-"));
@@ -71,6 +78,11 @@ function makeWav(file) {
   }
   writeFileSync(file, buffer);
 }
+function makeSpokenWav(file, source) {
+  // Repeat the short spoken fixture so the browser capture spans the whole journey.
+  command("ffmpeg", ["-nostdin", "-loglevel", "error", "-stream_loop", "9", "-i", source,
+    "-t", "40", "-ac", "1", "-ar", "16000", "-acodec", "pcm_s16le", "-y", file]);
+}
 async function freePort() {
   const server = net.createServer();
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -110,7 +122,8 @@ let bbEnv;
 try {
   assert(!home.startsWith(path.join(os.homedir(), ".margins")));
   assert(!vault.startsWith("/workspace/obsidian"));
-  makeWav(wav);
+  if (asrEnabled) makeSpokenWav(wav, process.env.MARGINS_E2E_SPOKEN_WAV);
+  else makeWav(wav);
   const marginsEnv = { ...process.env, MARGINS_HOME: home };
   command(marginsBin, ["workspace", "new", "e2e", "--home", vault], { env: marginsEnv });
   const config = path.join(home, "workspaces/e2e/config.toml");
@@ -133,6 +146,12 @@ try {
   const daemonPort = await freePort();
   cdpPort = await freePort();
   bbEnv = { ...process.env, BB_SERVER_URL: `http://127.0.0.1:${serverPort}`, BB_DATA_DIR: bbData };
+  if (asrEnabled) {
+    const hostData = path.join(bbData, "plugins/margins/host-data");
+    mkdirSync(hostData, { recursive: true });
+    writeFileSync(path.join(hostData, "asr-runtime.json"), `${JSON.stringify({ serverPath: serverBin,
+      modelDir: process.env.MARGINS_E2E_ASR_MODEL_DIR, ortLibraryPath: process.env.MARGINS_E2E_ORT_LIBRARY })}\n`);
+  }
   const bbOut = openSync(path.join(artifacts, "bb.log"), "w");
   const bbErr = openSync(path.join(artifacts, "bb-errors.log"), "w");
   bbProcess = spawn(bbApp, ["--data-dir", bbData, "--server-bind-host", "0.0.0.0", "--server-port", String(serverPort), "--host-daemon-port", String(daemonPort), "start"], {
@@ -167,7 +186,8 @@ try {
   shot("01-workspace.png");
 
   browser(["find", "role", "button", "click", "--name", "Start meeting", "--exact"]);
-  await until("Recording", () => browserEval(`!!document.querySelector('button[aria-label="Pause recording"]')`));
+  const startState = await until("Recording", () => browserEval(`document.querySelector('button[aria-label="Pause recording"]') ? 'recording' : document.querySelector('.margins-meetings-empty [role="alert"]')?.textContent || null`), asrEnabled ? 60_000 : 20_000);
+  assert.equal(startState, "recording", `Start failed: ${startState}`);
   const levels = [];
   for (let i = 0; i < 6; i++) {
     levels.push(Number(browserEval(`document.querySelector('[aria-label="Live audio level"]')?.getAttribute('data-level') || 0`)));
@@ -210,11 +230,21 @@ try {
   shot("06-revised.png");
 
   browser(["find", "role", "button", "click", "--name", "Make note in new thread →", "--exact"]);
-  await until("Composer", () => browserEval(`document.querySelector('[role="textbox"]')?.textContent?.includes('Distill memo revision')`));
+  await until("Composer", () => browserEval(`document.querySelector('[role="textbox"]')?.textContent?.includes('Distill memo revision')`), asrEnabled ? 120_000 : 20_000);
   const prompt = browserEval(`document.querySelector('[role="textbox"]')?.textContent || ''`);
   assert(prompt.includes("Workspace e2e"));
   assert(prompt.includes("session meeting"));
   assert(prompt.includes(projectId));
+  let transcript = null;
+  if (asrEnabled) {
+    transcript = await until("Parakeet transcript", () => {
+      const result = jsonCommand(marginsBin, ["--workspace", "e2e", "transcript", "latest", "--format", "json"], { env: marginsEnv });
+      const utterances = String(result.body || "").split("\n").filter((line) => /^\[\d{2}:\d{2}(?::\d{2})?\]/.test(line) && !/\] memo:/.test(line));
+      return result.view === "aligned" && String(result.body).includes("Source: Headless parakeet-onnx transcript")
+        && utterances.length > 0 ? result : null;
+    }, 120_000);
+    writeFileSync(path.join(artifacts, "transcript.json"), `${JSON.stringify(transcript, null, 2)}\n`);
+  }
   // The SDK's toCompose has no project argument. Select the fixture project
   // through bb's composer picker without submitting the prompt.
   browser(["find", "role", "button", "click", "--name", "Project: Work in a project", "--exact"]);
@@ -225,18 +255,21 @@ try {
   assert.deepEqual(threadIds(afterThreads), threadIds(beforeThreads), "Distill must not spawn or send a thread");
   assert(!existsSync(path.join(code, ".margins")), "Capture must not fall back to the bb project folder");
   shot("07-composer.png");
-  writeFileSync(path.join(artifacts, "assertions.json"), `${JSON.stringify({ projectId, threadOne, threadTwo, levels, memoSavedAfterStop: true, projectCaptureFallbackAbsent: true, composerPrompt: prompt, threadsUnchanged: true, noLlm: true }, null, 2)}\n`);
+  writeFileSync(path.join(artifacts, "assertions.json"), `${JSON.stringify({ projectId, threadOne, threadTwo, levels, memoSavedAfterStop: true, projectCaptureFallbackAbsent: true, composerPrompt: prompt, threadsUnchanged: true, transcription: asrEnabled ? "parakeet-asr" : "not-requested", transcriptObserved: Boolean(transcript), noLlm: true }, null, 2)}\n`);
   console.log(`PASS: no-LLM steps 1-6; evidence ${artifacts}`);
 } catch (error) {
   if (videoStarted) {
     try { shot("failure.png"); } catch { /* browser may be gone */ }
     try { writeFileSync(path.join(artifacts, "failure-snapshot.txt"), browser(["snapshot", "-i"])); } catch { /* browser may be gone */ }
     try { writeFileSync(path.join(artifacts, "failure-state.json"), `${JSON.stringify(browserEval(`({url:location.href,text:document.body.innerText})`), null, 2)}\n`); } catch { /* browser may be gone */ }
+    try { writeFileSync(path.join(artifacts, "failure-browser-console.txt"), browser(["console"])); } catch { /* browser may be gone */ }
   }
+  if (existsSync(path.join(bbData, "logs"))) cpSync(path.join(bbData, "logs"), path.join(artifacts, "bb-diagnostic-logs"), { recursive: true });
   throw error;
 } finally {
   if (videoStarted) try { browser(["record", "stop"]); } catch { /* keep prior evidence */ }
   try { command("docker", ["rm", "-f", chromeName]); } catch { /* already stopped */ }
   if (bbProcess) { bbProcess.kill("SIGINT"); await new Promise((resolve) => setTimeout(resolve, 1200)); if (bbProcess.exitCode === null) bbProcess.kill("SIGKILL"); }
-  rmSync(temporary, { recursive: true, force: true });
+  if (process.env.MARGINS_E2E_KEEP_TEMP === "1") console.log(`Diagnostic temp kept: ${temporary}`);
+  else rmSync(temporary, { recursive: true, force: true });
 }

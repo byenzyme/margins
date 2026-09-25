@@ -275,6 +275,11 @@ struct ProcessSessionArgs {
 }
 
 #[derive(Deserialize)]
+struct TranscribeHostedBrowserSessionArgs {
+    name: String,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RetrySessionArgs {
     name: String,
@@ -964,6 +969,13 @@ pub(crate) async fn dispatch(ctx: &Ctx, command: &str, args: Value) -> Result<Va
             )?)
         }
         // ---- Processing pipeline ----
+        "transcribe_hosted_browser_session" => {
+            let a = de!(TranscribeHostedBrowserSessionArgs);
+            if !ctx.sink.is_web() {
+                return Err("Hosted browser transcription requires the server".into());
+            }
+            ok!(crate::transcribe_hosted_browser_session(ctx, a.name).await?)
+        }
         "process_session" => {
             let a = de!(ProcessSessionArgs);
             ok!(crate::process_session_impl(
