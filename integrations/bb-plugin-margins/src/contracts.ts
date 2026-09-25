@@ -128,6 +128,7 @@ export const hostSignals = {
 
 export const captureRecordSchema = z.object({
   projectId: z.string().min(1), hostId: z.string().min(1), projectRoot: z.string().min(1),
+  workspaceId: z.string().min(1),
   recordingId: z.string().min(1), clientId: z.string().min(1), ownerId: z.string().min(1),
   lastHeartbeatUnixMs: z.number().int().nonnegative(),
 });
@@ -145,8 +146,8 @@ export const panelStateSchema = z.object({
 const threadClientInputSchema = z.object({
   threadId: z.string().min(1), client: clientCapabilitiesSchema,
 }).strict();
-const captureClientInputSchema = threadClientInputSchema.extend({
-  recordingId: z.string().min(1),
+const captureClientInputSchema = z.object({
+  sessionId: z.string().min(1), client: clientCapabilitiesSchema,
   operationId: z.string().min(1),
 }).strict();
 export const marginsRpcContract = defineRpcContract({

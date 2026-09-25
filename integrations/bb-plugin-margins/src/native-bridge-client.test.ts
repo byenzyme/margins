@@ -16,7 +16,7 @@ describe("Mac PWA bridge destination", () => {
       token: "local-secret", instanceId: "linux-one", workspaceId: "other", status: { ...ready, workspaceId: "other" },
     }), { status: 200 })));
     const owner = new NativeBridgeOwner();
-    await expect(owner.pair("thread-1", "one-time-code", { instanceId: "linux-one", workspaceId: "practice" })).rejects.toThrow("Configure both for the same Margins destination");
+    await expect(owner.pair("one-time-code", { instanceId: "linux-one", workspaceId: "practice" })).rejects.toThrow("Configure both for the same Margins destination");
     expect(owner.paired).toBe(false);
     expect(sessionStorage.length).toBe(0);
   });
@@ -30,7 +30,8 @@ describe("Mac PWA bridge destination", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     const owner = new NativeBridgeOwner();
-    await owner.pair("thread-1", "one-time-code", { instanceId: "linux-one", workspaceId: "practice" });
+    await owner.pair("one-time-code", { instanceId: "linux-one", workspaceId: "practice" });
+    expect(sessionStorage.getItem("margins.bb.native-bridge.v1")).not.toContain("threadId");
     await expect(owner.verify({ instanceId: "linux-one", workspaceId: "practice" })).rejects.toThrow("destination changed");
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/v1/start"))).toBe(false);
     owner.forget();

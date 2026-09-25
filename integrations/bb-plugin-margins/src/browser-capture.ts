@@ -8,8 +8,7 @@ const CLIENT_KEY = "margins.bb.client.v1";
 const CAPTURE_KEY = "margins.bb.capture.v1";
 
 interface StoredCapture {
-  threadId: string;
-  recordingId: string;
+  sessionId: string;
   nextSequence: number;
   paused: boolean;
   pendingControl?: { kind: "pause" | "resume" | "stop"; operationId: string };
@@ -119,15 +118,19 @@ export function applyRecorderTransition(
 
 function id() { return crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`; }
 function readStored(): StoredCapture | null {
-  try { return JSON.parse(sessionStorage.getItem(CAPTURE_KEY) || "null") as StoredCapture | null; }
+  try {
+    const value = JSON.parse(sessionStorage.getItem(CAPTURE_KEY) || "null") as (Partial<StoredCapture> & { recordingId?: string }) | null;
+    const sessionId = value?.sessionId || value?.recordingId;
+    return value && typeof sessionId === "string" && Number.isInteger(value.nextSequence)
+      ? { ...value, sessionId, paused: value.paused === true, nextSequence: value.nextSequence! } : null;
+  }
   catch { return null; }
 }
 function writeStored(value: StoredCapture | null) {
   try {
     if (value) {
       const stored: StoredCapture = {
-        threadId: value.threadId,
-        recordingId: value.recordingId,
+        sessionId: value.sessionId,
         nextSequence: value.nextSequence,
         paused: value.paused,
         ...(value.pendingControl ? { pendingControl: value.pendingControl } : {}),
@@ -210,6 +213,8 @@ export class BrowserCaptureOwner {
   private refreshGeneration = 0;
   private refreshInFlight: Promise<PanelState> | null = null;
   private readonly panels = new Map<string, PanelState>();
+  private readonly routePanels = new Map<string, PanelState>();
+  private latestPanel: PanelState | null = null;
   private readonly drafts = new Map<string, string>();
 
   constructor(private readonly dependencies: BrowserCaptureDependencies = defaultDependencies) {}
@@ -226,11 +231,22 @@ export class BrowserCaptureOwner {
   get active() { return this.capture !== null; }
   get recovering() { return this.heartbeatRecovering; }
   get hasPendingStop() { return readStored()?.pendingControl?.kind === "stop"; }
-  get recordingId() { return this.capture?.recordingId ?? readStored()?.recordingId ?? this.endedRecordingId; }
-  get threadId() { return this.capture?.threadId ?? readStored()?.threadId ?? null; }
-  panel(threadId: string) { return this.panels.get(threadId) ?? null; }
-  acceptPanel(threadId: string, state: PanelState) {
-    this.panels.set(threadId, state);
+  get recordingId() { return this.capture?.sessionId ?? readStored()?.sessionId ?? this.endedRecordingId; }
+  panel(threadId?: string) {
+    if (threadId && this.routePanels.has(threadId)) return this.routePanels.get(threadId)!;
+    const sessionId = this.recordingId;
+    return sessionId ? this.panels.get(sessionId) ?? this.latestPanel : this.latestPanel;
+  }
+  acceptPanel(routeOrSessionId: string, state: PanelState) {
+    this.routePanels.set(routeOrSessionId, state);
+    const sessionId = state.recordingId;
+    if (sessionId) {
+      this.panels.set(sessionId, state);
+      for (const [route, panel] of this.routePanels) {
+        if (panel.recordingId === sessionId) this.routePanels.set(route, state);
+      }
+    }
+    if (!this.recordingId || sessionId === this.recordingId) this.latestPanel = state;
     this.emit();
     return state;
   }
@@ -269,7 +285,7 @@ export class BrowserCaptureOwner {
         {
         method: "POST", signal, headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          threadId: stored.threadId, client: detectClientCapabilities(), recordingId: stored.recordingId,
+          sessionId: stored.sessionId, client: detectClientCapabilities(),
           sequence, bytesBase64: base64(bytes),
         }),
         },
@@ -278,32 +294,32 @@ export class BrowserCaptureOwner {
       const nextSequence = sequence + 1;
       stored.nextSequence = nextSequence;
       const current = this.capture;
-      if (current?.recordingId === stored.recordingId) current.nextSequence = nextSequence;
+      if (current?.sessionId === stored.sessionId) current.nextSequence = nextSequence;
       // A final upload can settle after local Stop has persisted its operation
       // identity. Advance only the sequence cursor; never replace that pending
       // control or its incomplete-drain evidence with the pre-Stop object.
       const persisted = readStored();
-      writeStored(persisted?.recordingId === stored.recordingId
+      writeStored(persisted?.sessionId === stored.sessionId
         ? { ...persisted, nextSequence }
         : stored);
     }, (error) => {
       uploadErrors.push(error);
       this.emit();
       const current = this.capture;
-      if (current?.recordingId === stored.recordingId) void this.stopAfterDisconnect(current);
+      if (current?.sessionId === stored.sessionId) void this.stopAfterDisconnect(current);
     }, { initialSequence: stored.nextSequence });
     bindDurableMediaRecorder(recorder, uploads);
     const generation = ++this.generation;
     const reachability = new ReachabilityDeadline(this.dependencies.disconnectGraceMs, () => {
       const current = this.capture;
-      if (current?.recordingId === stored.recordingId) void this.stopAfterDisconnect(current);
+      if (current?.sessionId === stored.sessionId) void this.stopAfterDisconnect(current);
     });
     const heartbeat = setInterval(() => {
       const current = this.capture;
       if (!this.pluginId || !current || current.generation !== generation || current.heartbeatInFlight) return;
       current.heartbeatInFlight = true;
       void this.dependencies.rpc<PanelState>(this.pluginId, "heartbeat", {
-        threadId: stored.threadId, client: detectClientCapabilities(), recordingId: stored.recordingId,
+        sessionId: stored.sessionId, client: detectClientCapabilities(),
         operationId: id(),
       }).then((state) => {
         if (this.capture?.generation !== generation) return;
@@ -359,7 +375,7 @@ export class BrowserCaptureOwner {
         threadId, client: detectClientCapabilities(), ownerId, ...(title ? { title } : {}),
       });
       if (!state.recordingId || !state.ownsRecording) throw new Error(state.detail);
-      await this.createLocal({ threadId, recordingId: state.recordingId, nextSequence: 0, paused: false }, stream);
+      await this.createLocal({ sessionId: state.recordingId, nextSequence: 0, paused: false }, stream);
       return state;
     } catch (cause) {
       stream.getTracks().forEach((track) => track.stop());
@@ -379,7 +395,7 @@ export class BrowserCaptureOwner {
     this.emit();
     this.fenceRefreshes();
     const state = await this.dependencies.rpc<PanelState>(this.pluginId, "pause", {
-      threadId: current.threadId, client: detectClientCapabilities(), recordingId: current.recordingId,
+      sessionId: current.sessionId, client: detectClientCapabilities(),
       operationId: pendingControl.operationId,
     });
     if (this.capture === current && state.error === null && state.state === "paused") {
@@ -400,7 +416,7 @@ export class BrowserCaptureOwner {
     this.emit();
     this.fenceRefreshes();
     const state = await this.dependencies.rpc<PanelState>(this.pluginId, "resume", {
-      threadId: current.threadId, client: detectClientCapabilities(), recordingId: current.recordingId,
+      sessionId: current.sessionId, client: detectClientCapabilities(),
       operationId: pendingControl.operationId,
     });
     if (this.capture === current && state.error === null && state.state === "recording") {
@@ -452,11 +468,11 @@ export class BrowserCaptureOwner {
   private async reconcileStop(stored: StoredCapture): Promise<PanelState> {
     if (!this.pluginId || stored.pendingControl?.kind !== "stop") throw new Error("No pending Stop to reconcile");
     const state = await this.dependencies.rpc<PanelState>(this.pluginId, "stop", {
-      threadId: stored.threadId, client: detectClientCapabilities(), recordingId: stored.recordingId,
+      sessionId: stored.sessionId, client: detectClientCapabilities(),
       operationId: stored.pendingControl.operationId,
     });
     const latest = readStored();
-    const recovery = latest?.recordingId === stored.recordingId
+    const recovery = latest?.sessionId === stored.sessionId
       && latest.pendingControl?.kind === "stop"
       && latest.pendingControl.operationId === stored.pendingControl.operationId
       ? {
@@ -466,9 +482,9 @@ export class BrowserCaptureOwner {
         }
       : stored;
     if (state.error === null && state.state === "saved" && !recovery.stopDrainError) {
-      this.endedRecordingId = recovery.recordingId;
+      this.endedRecordingId = recovery.sessionId;
       writeStored(null);
-      this.acceptPanel(recovery.threadId, state);
+      this.acceptPanel(recovery.sessionId, state);
       return state;
     }
     const error = recovery.stopDrainError ?? state.error ?? {
@@ -486,18 +502,18 @@ export class BrowserCaptureOwner {
       canStop: false,
       canEditNotepad: false,
       ownsRecording: true,
-      recordingId: recovery.recordingId,
+      recordingId: recovery.sessionId,
       error,
     };
     writeStored(recovery);
-    this.acceptPanel(recovery.threadId, incomplete);
+    this.acceptPanel(recovery.sessionId, incomplete);
     return incomplete;
   }
 
   private showStopping(stored: StoredCapture) {
-    const prior = this.panels.get(stored.threadId);
+    const prior = this.panels.get(stored.sessionId);
     if (!prior) { this.emit(); return; }
-    this.acceptPanel(stored.threadId, {
+    this.acceptPanel(stored.sessionId, {
       ...prior,
       state: "saving",
       title: "Saving",
@@ -507,7 +523,7 @@ export class BrowserCaptureOwner {
       canStop: false,
       canEditNotepad: false,
       ownsRecording: true,
-      recordingId: stored.recordingId,
+      recordingId: stored.sessionId,
       error: null,
     });
   }
@@ -517,7 +533,7 @@ export class BrowserCaptureOwner {
     this.capture = null;
     ++this.generation;
     this.heartbeatRecovering = true;
-    this.endedRecordingId = current.recordingId;
+    this.endedRecordingId = current.sessionId;
     current.reachability.dispose();
     clearInterval(current.heartbeat);
     current.pendingControl = current.pendingControl?.kind === "stop"

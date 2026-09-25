@@ -88,6 +88,17 @@ describe("browser capture ownership", () => {
     expect(recorder.pause).toHaveBeenCalledOnce();
   });
 
+  it("keeps the session overlay live while another thread shows a ready panel", async () => {
+    const rpc: BrowserCaptureDependencies["rpc"] = async (_plugin, method) =>
+      method === "beginBrowserCapture" ? state({}) as never : state({}) as never;
+    const { owner } = controllerFixture(rpc);
+    await owner.start("thr-1");
+    owner.acceptPanel("thr-1", state({}));
+    owner.acceptPanel("thr-2", state({ state: "ready", recordingId: null, ownsRecording: false }));
+    expect(owner.panel()).toMatchObject({ state: "recording", recordingId: "rec-1" });
+    expect(owner.panel("thr-2")).toMatchObject({ state: "ready" });
+  });
+
   it("releases tracks immediately when Stop transport and recorder stop event both hang", async () => {
     const rpc: BrowserCaptureDependencies["rpc"] = async (_plugin, method) => {
       if (method === "beginBrowserCapture") return state({}) as never;
@@ -130,10 +141,11 @@ describe("browser capture ownership", () => {
     let resolveUpload!: (response: Response) => void;
     const upload = new Promise<Response>((resolve) => { resolveUpload = resolve; });
     const order: string[] = [];
-    vi.stubGlobal("fetch", vi.fn(async () => upload.then((response) => {
+    const uploadFetch = vi.fn(async (_url: string, _options: RequestInit) => upload.then((response) => {
       order.push("upload-durable");
       return response;
-    })));
+    }));
+    vi.stubGlobal("fetch", uploadFetch);
     const stopInputs: object[] = [];
     const rpc: BrowserCaptureDependencies["rpc"] = async (_plugin, method, input) => {
       if (method === "beginBrowserCapture") return state({}) as never;
@@ -156,6 +168,9 @@ describe("browser capture ownership", () => {
     expect(owner.active).toBe(false);
     expect(owner.panel("thr-1")).toMatchObject({ state: "saving", recordingId: "rec-1" });
     await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    const uploadBody = JSON.parse(String(uploadFetch.mock.calls[0]?.[1]?.body));
+    expect(uploadBody).toMatchObject({ sessionId: "rec-1" });
+    expect(uploadBody).not.toHaveProperty("threadId");
     expect(stopInputs).toHaveLength(0);
 
     resolveUpload(new Response(JSON.stringify({ ok: true }), {
@@ -197,10 +212,11 @@ describe("browser capture ownership", () => {
     });
     const retained = JSON.parse(sessionStorage.getItem("margins.bb.capture.v1") || "null");
     expect(retained).toMatchObject({
-      recordingId: "rec-1",
+      sessionId: "rec-1",
       nextSequence: 1,
       pendingControl: { kind: "stop", operationId: expect.any(String) },
     });
+    expect(retained).not.toHaveProperty("threadId");
     await expect(owner.retryPendingStop()).resolves.toMatchObject({ state: "saved", error: null });
     expect(stopInputs[1]).toMatchObject({ operationId: (stopInputs[0] as { operationId: string }).operationId });
     expect(sessionStorage.getItem("margins.bb.capture.v1")).toBeNull();
@@ -235,7 +251,7 @@ describe("browser capture ownership", () => {
     expect(stopInputs).toHaveLength(1);
     const retained = JSON.parse(sessionStorage.getItem("margins.bb.capture.v1") || "null");
     expect(retained).toMatchObject({
-      recordingId: "rec-1",
+      sessionId: "rec-1",
       pendingControl: { kind: "stop", operationId: (stopInputs[0] as { operationId: string }).operationId },
       stopDrainError: { code: "browser_audio_drain_incomplete" },
     });

@@ -13,13 +13,13 @@ export interface NativeStatus extends CaptureAuthority {
   systemSilentSamples: number;
   error: string | null;
 }
-interface Pairing extends CaptureAuthority { token: string; threadId: string; port: number }
+interface Pairing extends CaptureAuthority { token: string; port: number }
 type Listener = () => void;
 
 function storedPairing(): Pairing | null {
   try {
     const value = JSON.parse(sessionStorage.getItem(STORAGE_KEY) || "null") as Partial<Pairing> | null;
-    return value && typeof value.token === "string" && typeof value.threadId === "string"
+    return value && typeof value.token === "string"
       && typeof value.instanceId === "string" && typeof value.workspaceId === "string"
       && Number.isInteger(value.port) && Number(value.port) > 0 && Number(value.port) <= 65535 ? value as Pairing : null;
   } catch { return null; }
@@ -53,7 +53,7 @@ export class NativeBridgeOwner {
   private timer: ReturnType<typeof setInterval> | null = null;
   private subscribers = new Set<Listener>();
 
-  get threadId() { return this.pairing?.threadId || null; }
+  get sessionId() { return this.currentStatus?.sessionId || null; }
   get status() { return this.currentStatus; }
   get connectionError() { return this.currentError; }
   get paired() { return Boolean(this.pairing); }
@@ -68,13 +68,13 @@ export class NativeBridgeOwner {
     this.timer = setInterval(() => void this.refresh().catch(() => undefined), 2_000);
     void this.refresh().catch(() => undefined);
   }
-  async pair(threadId: string, code: string, expected: CaptureAuthority, port = 18765) {
+  async pair(code: string, expected: CaptureAuthority, port = 18765) {
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Enter a valid Mac recorder port.");
     const value = await bridgeRequest<{ token: string; instanceId: string; workspaceId: string; status: NativeStatus }>(port, "/v1/pair", { code });
     if (value.instanceId !== expected.instanceId || value.workspaceId !== expected.workspaceId) {
       throw new Error(`Mac recorder points to ${value.instanceId}/${value.workspaceId}; this BB project uses ${expected.instanceId}/${expected.workspaceId}. Configure both for the same Margins destination.`);
     }
-    this.pairing = { token: value.token, threadId, instanceId: value.instanceId, workspaceId: value.workspaceId, port };
+    this.pairing = { token: value.token, instanceId: value.instanceId, workspaceId: value.workspaceId, port };
     this.currentStatus = value.status;
     this.currentError = null;
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(this.pairing));

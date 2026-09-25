@@ -33409,6 +33409,7 @@ var captureRecordSchema = external_exports2.object({
   projectId: external_exports2.string().min(1),
   hostId: external_exports2.string().min(1),
   projectRoot: external_exports2.string().min(1),
+  workspaceId: external_exports2.string().min(1),
   recordingId: external_exports2.string().min(1),
   clientId: external_exports2.string().min(1),
   ownerId: external_exports2.string().min(1),
@@ -33435,8 +33436,9 @@ var threadClientInputSchema = external_exports2.object({
   threadId: external_exports2.string().min(1),
   client: clientCapabilitiesSchema
 }).strict();
-var captureClientInputSchema = threadClientInputSchema.extend({
-  recordingId: external_exports2.string().min(1),
+var captureClientInputSchema = external_exports2.object({
+  sessionId: external_exports2.string().min(1),
+  client: clientCapabilitiesSchema,
   operationId: external_exports2.string().min(1)
 }).strict();
 var marginsRpcContract = defineRpcContract2({

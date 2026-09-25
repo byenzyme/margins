@@ -30,7 +30,7 @@ describe("Margins recording panel", () => {
   });
 
   it("keeps Pause and Stop reachable after the recording panel unmounts", async () => {
-    vi.spyOn(browserCaptureOwner, "threadId", "get").mockReturnValue("thr-owner");
+    vi.spyOn(browserCaptureOwner, "recordingId", "get").mockReturnValue("rec-owner");
     vi.spyOn(browserCaptureOwner, "active", "get").mockReturnValue(true);
     vi.spyOn(browserCaptureOwner, "panel").mockReturnValue(panel());
     const pause = vi.spyOn(browserCaptureOwner, "pause").mockResolvedValue(panel({ state: "paused", primaryAction: "resume" }));
@@ -39,7 +39,7 @@ describe("Margins recording panel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Pause recording" }));
     await waitFor(() => expect(pause).toHaveBeenCalledOnce());
     fireEvent.click(screen.getByRole("button", { name: /Recording/ }));
-    expect(overlay.inspection.navigateCalls).toContainEqual({ method: "toThread", threadId: "thr-owner" });
+    expect(overlay.inspection.navigateCalls).toContainEqual({ method: "openThreadPanel", options: { actionId: "live" } });
     overlay.lifecycle.unmount();
   });
 

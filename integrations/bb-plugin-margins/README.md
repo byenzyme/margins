@@ -20,6 +20,8 @@ this bb project automatically.
 - Recording ownership survives panel close and thread navigation because a bb
   content script owns the browser stream. An app overlay provides persistent
   controls for browser and paired Mac recordings.
+- Capture controls and heartbeat route by meeting session id. Switching threads
+  or bb projects that select the same Workspace does not change the live meeting.
 - A 25-second reconnect grace. After it expires, the project machine stops and
   saves the audio it received.
 - A menu-recorded meeting in the same Workspace can be joined from the bb
