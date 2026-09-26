@@ -1311,6 +1311,40 @@ pub fn list_workspaces(margins_home: &Path) -> Result<Vec<ResolvedWorkspace>> {
         .collect()
 }
 
+/// Remove an unused Workspace declaration without touching any declared Source.
+/// A Workspace with state beyond its config needs an explicit migration first.
+pub fn remove_empty_workspace(margins_home: &Path, id: &str) -> Result<()> {
+    let state_dir = workspace_state_dir(margins_home, id)?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(margins_home.join("config.lock"))?;
+    lock.lock_exclusive()?;
+    if default_workspace(margins_home)?.as_deref() == Some(id) {
+        bail!("cannot remove the machine's default Workspace");
+    }
+    let metadata = std::fs::symlink_metadata(&state_dir)
+        .with_context(|| format!("Workspace {id} does not exist"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        bail!("Workspace state directory is not a plain directory");
+    }
+    resolve_at(margins_home, id)?;
+    let config_path = state_dir.join(WORKSPACE_CONFIG);
+    let config_metadata = std::fs::symlink_metadata(&config_path)?;
+    if !config_metadata.is_file() || config_metadata.file_type().is_symlink() {
+        bail!("Workspace config is not a plain file");
+    }
+    for entry in std::fs::read_dir(&state_dir)? {
+        let entry = entry?;
+        if entry.file_name() != WORKSPACE_CONFIG {
+            bail!("Workspace has stored data; migrate or retain it before removal");
+        }
+    }
+    std::fs::remove_file(&config_path)?;
+    std::fs::remove_dir(&state_dir)?;
+    Ok(())
+}
+
 pub fn add_source(
     workspace: &mut ResolvedWorkspace,
     name: &str,

@@ -184,6 +184,11 @@ fn run_inner(
             };
         }
         Some(Command::Workspace {
+            command: WorkspaceCommand::Remove { id, json },
+        }) => {
+            return commands::workspace::remove(&id, json, stdout);
+        }
+        Some(Command::Workspace {
             command: WorkspaceCommand::List { json },
         }) => {
             return commands::workspace::list(json, stdout);

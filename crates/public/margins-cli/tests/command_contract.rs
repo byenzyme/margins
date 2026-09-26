@@ -93,6 +93,65 @@ fn workspace_default_and_destination_are_explicit_json_reads() {
 }
 
 #[test]
+fn workspace_remove_only_accepts_a_non_default_config_only_workspace() {
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let machine = temp.path().join("machine");
+    let vault = temp.path().join("vault");
+    let code = temp.path().join("code");
+    std::fs::create_dir_all(&vault).unwrap();
+    std::fs::create_dir_all(&code).unwrap();
+    let source_note = vault.join("keep.md");
+    std::fs::write(&source_note, "source stays").unwrap();
+    let old = std::env::var_os("MARGINS_HOME");
+    std::env::set_var("MARGINS_HOME", &machine);
+    let service = services(&code);
+    workspace::create_workspace(&machine, "default", None, &vault).unwrap();
+    workspace::set_default_workspace(&machine, "default").unwrap();
+    let candidate = workspace::create_workspace(&machine, "unused", None, &vault).unwrap();
+
+    let (default_result, _, _) = invoke(
+        &service,
+        &code,
+        &["margins", "workspace", "remove", "default", "--json"],
+    );
+    assert!(default_result.is_err());
+    assert!(machine.join("workspaces/default/config.toml").exists());
+
+    let (data_result, _, _) = invoke(
+        &service,
+        &code,
+        &["margins", "workspace", "remove", "unused", "--json"],
+    );
+    assert!(data_result.is_err());
+    assert!(candidate.config_path.exists());
+
+    std::fs::remove_dir(candidate.state_dir.join("captures")).unwrap();
+    let (removed, output, _) = invoke(
+        &service,
+        &code,
+        &["margins", "workspace", "remove", "unused", "--json"],
+    );
+    assert!(removed.is_ok(), "{output}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&output).unwrap()["removed_workspace"],
+        "unused"
+    );
+    assert!(!candidate.state_dir.exists());
+    assert_eq!(
+        std::fs::read_to_string(source_note).unwrap(),
+        "source stays"
+    );
+    assert_eq!(
+        workspace::default_workspace(&machine).unwrap().as_deref(),
+        Some("default")
+    );
+    restore_env("MARGINS_HOME", old.as_ref());
+}
+
+#[test]
 fn embedded_build_commit_matches_checkout_head_when_git_is_available() {
     let output = match std::process::Command::new("git")
         .args(["-C", env!("CARGO_MANIFEST_DIR"), "rev-parse", "HEAD"])

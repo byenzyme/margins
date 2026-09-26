@@ -298,6 +298,13 @@ pub enum SetupLocalModelPolicyArg {
 
 #[derive(Debug, Subcommand)]
 pub enum WorkspaceCommand {
+    /// Remove a Workspace declaration only when it has no stored data
+    Remove {
+        /// Workspace id to remove; declared Source folders are preserved
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// List Workspaces and the machine default
     List {
         #[arg(long)]

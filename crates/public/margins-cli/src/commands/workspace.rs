@@ -104,6 +104,25 @@ pub fn list(json: bool, stdout: &mut dyn Write) -> Result<(), CliError> {
     }
 }
 
+pub fn remove(id: &str, json: bool, stdout: &mut dyn Write) -> Result<(), CliError> {
+    let home = workspace::margins_home().map_err(CliError::from_anyhow)?;
+    workspace::remove_empty_workspace(&home, id).map_err(CliError::from_anyhow)?;
+    if json {
+        serde_json::to_writer(
+            &mut *stdout,
+            &serde_json::json!({ "removed_workspace": id }),
+        )
+        .map_err(|error| CliError::from_anyhow(error.into()))?;
+        writeln!(stdout).map_err(|error| CliError::from_anyhow(error.into()))
+    } else {
+        writeln!(
+            stdout,
+            "Removed Workspace {id}; Source folders were preserved."
+        )
+        .map_err(|error| CliError::from_anyhow(error.into()))
+    }
+}
+
 pub fn default(set: Option<&str>, json: bool, stdout: &mut dyn Write) -> Result<(), CliError> {
     let home = workspace::margins_home().map_err(CliError::from_anyhow)?;
     if let Some(id) = set {
