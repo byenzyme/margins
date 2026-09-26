@@ -45,6 +45,18 @@ function ProjectWorkspaceSetting({ threadId, projectId, onSaved }: { threadId?: 
   </div>;
 }
 
+function MenuAccessSetting({ projectId }: { projectId: string }) {
+  const rpc = useRpc<typeof marginsRpcContract>();
+  const [message, setMessage] = useState("");
+  return <div className="margins-workspace-setting">
+    <span>Margins Menu access to this Workspace</span>
+    <button onClick={() => void rpc.call("revokeMenuGrants", { projectId })
+      .then(() => setMessage("Mac capture access revoked. Reconnect from Meetings to record again."))
+      .catch((error) => setMessage(String(error)))}>Revoke access</button>
+    {message && <span role="status">{message}</span>}
+  </div>;
+}
+
 function RecordingOverlay() {
   const navigate = useBbNavigate();
   const context = useBbContext();
@@ -70,6 +82,7 @@ function RecordingOverlay() {
   const status = nativeLive ? native!.state : state!.state;
   const paused = status === "paused";
   const recording = status === "recording";
+  const noAudio = recording && (nativeLive ? nativeBridgeOwner.noAudioWarning : browserCaptureOwner.noAudioWarning);
   const seconds = nativeLive ? Math.floor((native!.microphoneSamples || 0) / 16_000) : Math.floor(browserCaptureOwner.elapsedMs / 1_000);
   const elapsed = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
   async function control(action: "pause" | "resume" | "stop") {
@@ -89,8 +102,10 @@ function RecordingOverlay() {
     <button className="margins-overlay-open" onClick={() => {
       const projectId = (() => { try { return sessionStorage.getItem("margins.bb.meetings-project") || context.projectId || ""; } catch { return context.projectId || ""; } })();
       navigate.toPluginPanel("meetings", { subPath: projectId ? `${projectId}/${sessionId}` : "" });
-    }}><MeetingLevelDot level={recording && !nativeLive ? browserCaptureOwner.level : null} paused={paused} />
-      <span>{failure ? "Needs attention" : paused ? `Paused · ${elapsed}` : recording ? `Recording · ${elapsed}` : "Saving"}</span></button>
+    }}><MeetingLevelDot level={recording ? nativeLive ? native!.micPeak ?? null : browserCaptureOwner.level : null} paused={paused} />
+      <span>{failure ? "Needs attention" : noAudio ? "No audio — check microphone" : paused ? `Paused · ${elapsed}`
+        : recording ? nativeLive ? `Recording · ${elapsed}` : `Microphone only · ${elapsed}` : "Saving"}</span></button>
+    {noAudio && <span className="margins-overlay-error">{nativeLive ? "Check Margins Menu microphone permission" : "Check browser microphone permission"}</span>}
     {(recording || paused) && <>
       <button onClick={() => void control(paused ? "resume" : "pause")} disabled={busy} aria-label={paused ? "Resume recording" : "Pause recording"}>{paused ? <Play size={13} /> : <Pause size={13} />}</button>
       <button onClick={() => void control("stop")} disabled={busy} aria-label="Stop and save recording"><Square size={12} /></button>
@@ -446,6 +461,7 @@ function MarginsSettings() {
     </select></label>
     {projectId && <>
       <ProjectWorkspaceSetting key={projectId} projectId={projectId} onSaved={() => undefined} />
+      <MenuAccessSetting projectId={projectId} />
       <NativeCapturePanel key={`native-${projectId}`} projectId={projectId} />
     </>}
   </div>;

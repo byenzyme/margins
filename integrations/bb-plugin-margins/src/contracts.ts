@@ -113,6 +113,12 @@ export const marginsHostContract = defineRpcContract({
       z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
     ]),
   },
+  relayWorkspaceHttp: {
+    input: z.object({ target: projectTargetSchema, method: z.enum(["GET", "POST", "PUT"]), path: z.string().min(1).max(300),
+      bodyBase64: z.string().max(2_000_000), contentType: z.string().max(120).optional(),
+      producerToken: z.string().max(300).optional(), instanceId: z.string().max(300).optional() }).strict(),
+    output: z.object({ status: z.number().int().min(100).max(599), bodyBase64: z.string().max(4_000_000) }).strict(),
+  },
   startBrowserCapture: {
     input: z.object({ target: projectTargetSchema, ownerId: z.string().min(1), name: z.string().min(1).max(160) }).strict(),
     output: hostResultSchema,
@@ -211,6 +217,15 @@ export const marginsRpcContract = defineRpcContract({
       z.object({ ok: z.literal(true), instanceId: z.string().min(1), workspaceId: z.string().min(1) }).strict(),
       z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
     ]),
+  },
+  issueMenuGrant: {
+    input: z.object({ projectId: z.string().min(1), origin: z.string().url().max(300) }).strict(),
+    output: z.object({ serviceUrl: z.string().url(), token: z.string().min(32), workspaceId: z.string().min(1),
+      workspaceName: z.string().min(1), instanceId: z.string().min(1), expiresAt: z.number().int() }).strict(),
+  },
+  revokeMenuGrants: {
+    input: z.object({ projectId: z.string().min(1) }).strict(),
+    output: z.object({ revoked: z.boolean() }).strict(),
   },
   pinNativeSession: {
     input: z.object({ threadId: z.string().min(1).optional(), projectId: z.string().min(1).optional(), sessionId: z.string().min(1), instanceId: z.string().min(1), workspaceId: z.string().min(1) }).strict(),

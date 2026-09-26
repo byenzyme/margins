@@ -47,6 +47,7 @@ fn desktop_live_golden_fixture_is_emitted_by_the_rust_contract() {
             tap_warning: None,
             system_audio_expected: true,
             system_audio_observed: true,
+            microphone_peak_milli: None,
             transcript_freshness: Some(LiveTranscriptFreshnessV1 {
                 decoded_until_ms: DurationMillis(11_000),
                 committed_until_ms: DurationMillis(10_000),
@@ -75,6 +76,7 @@ fn desktop_live_golden_fixture_is_emitted_by_the_rust_contract() {
             tap_warning: None,
             system_audio_expected: false,
             system_audio_observed: false,
+            microphone_peak_milli: None,
             transcript_freshness: None,
         },
         rolling_transcript: Vec::new(),
@@ -180,6 +182,7 @@ fn desktop_live_snapshot_json_shape_is_stable_and_bounded_fields_are_plain() {
             tap_warning: None,
             system_audio_expected: true,
             system_audio_observed: true,
+            microphone_peak_milli: None,
             transcript_freshness: Some(LiveTranscriptFreshnessV1 {
                 decoded_until_ms: DurationMillis(11_000),
                 committed_until_ms: DurationMillis(10_000),
@@ -248,6 +251,7 @@ fn desktop_live_idle_snapshot_keeps_required_null_session() {
             tap_warning: None,
             system_audio_expected: false,
             system_audio_observed: false,
+            microphone_peak_milli: None,
             transcript_freshness: None,
         },
         rolling_transcript: Vec::new(),

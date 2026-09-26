@@ -6,7 +6,7 @@ const browser = { clientId: "client-1", platform: "other" as const, secureContex
 const mac = { ...browser, platform: "macos" as const };
 const snapshot = { recordingId: "rec-1", sessionId: "rec-1", status: "recording" as const, notepad: { text: "", revision: "v1" } };
 
-function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: string; meetingList?: boolean } = {}) {
+function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: string; meetingList?: boolean; relay?: boolean } = {}) {
   let stopped = false;
   let captureStatus: "recording" | "paused" = "recording";
   const host = createFakePluginHost({
@@ -31,6 +31,7 @@ function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: strin
         threadIds: ["thr-note"], distilledMemoRevision: "memo-v1",
       }] };
       if (method === "captureAuthority") return { ok: true, instanceId: "instance-1", workspaceId: "workspace-1" };
+      if (method === "relayWorkspaceHttp" && options.relay) return { status: 200, bodyBase64: Buffer.from('{"ok":true}').toString("base64") };
       if (method === "sessionExists") return { ok: true, found: true };
       if (method === "stop") { stopped = true; return { ok: true, snapshot: null }; }
       if (method === "pause") captureStatus = "paused";
@@ -50,6 +51,24 @@ function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: strin
 }
 
 describe("Margins project recording server", () => {
+  it("issues a Workspace-bound Menu grant and revokes its relay access", async () => {
+    const host = harness({ relay: true });
+    const grant = await host.harness.behavior.callRpc("issueMenuGrant", { projectId: "proj-1", origin: "https://jpham-server.getbb.app" }) as { token: string; serviceUrl: string; workspaceId: string };
+    expect(grant).toMatchObject({ workspaceId: "workspace-1",
+      serviceUrl: "https://jpham-server.getbb.app/api/v1/plugins/margins/http/menu/relay" });
+    const auth = { authorization: `Bearer ${grant.token}` };
+    const verified = await host.harness.behavior.fetchHttp("POST", "/menu/verify", { headers: auth });
+    await expect(verified.json()).resolves.toMatchObject({ ok: true, workspaceId: "workspace-1" });
+    const relayed = await host.harness.behavior.fetchHttp("POST", "/menu/relay", { headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({ method: "GET", path: "v1/workspaces/workspace-1/current", bodyBase64: "" }) });
+    await expect(relayed.json()).resolves.toMatchObject({ status: 200 });
+    expect(host.harness.inspection.experimental_hostRpcCalls).toEqual(expect.arrayContaining([
+      expect.objectContaining({ method: "relayWorkspaceHttp", input: expect.objectContaining({ target: expect.objectContaining({ workspaceId: "workspace-1" }) }) }),
+    ]));
+    await host.harness.behavior.callRpc("revokeMenuGrants", { projectId: "proj-2" });
+    const rejected = await host.harness.behavior.fetchHttp("POST", "/menu/verify", { headers: auth });
+    expect(rejected.status).toBe(401);
+  });
   it("resolves linked thread titles while retaining the host note preview target", async () => {
     const host = harness({ meetingList: true });
     await expect(host.harness.behavior.callRpc("listWorkspaceMeetings", { projectId: "proj-1" })).resolves.toMatchObject({ ok: true,

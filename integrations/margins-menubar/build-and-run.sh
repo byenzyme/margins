@@ -14,7 +14,7 @@ else
   set --
 fi
 swiftc -parse-as-library -O -framework AppKit -framework SwiftUI "$@" \
-  "$SCRIPT_DIR/MarginsMenu.swift" -o "$EXECUTABLE"
+  "$SCRIPT_DIR/MarginsMenu.swift" "$SCRIPT_DIR/MenuPairingServer.swift" -o "$EXECUTABLE"
 cat > "$APP_PATH/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

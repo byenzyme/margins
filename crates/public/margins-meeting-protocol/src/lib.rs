@@ -258,6 +258,8 @@ pub struct LiveHealthV1 {
     pub system_audio_expected: bool,
     pub system_audio_observed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub microphone_peak_milli: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_freshness: Option<LiveTranscriptFreshnessV1>,
 }
 

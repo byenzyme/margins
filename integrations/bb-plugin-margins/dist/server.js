@@ -19011,6 +19011,18 @@ var marginsHostContract = defineRpcContract({
       external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
     ])
   },
+  relayWorkspaceHttp: {
+    input: external_exports.object({
+      target: projectTargetSchema,
+      method: external_exports.enum(["GET", "POST", "PUT"]),
+      path: external_exports.string().min(1).max(300),
+      bodyBase64: external_exports.string().max(2e6),
+      contentType: external_exports.string().max(120).optional(),
+      producerToken: external_exports.string().max(300).optional(),
+      instanceId: external_exports.string().max(300).optional()
+    }).strict(),
+    output: external_exports.object({ status: external_exports.number().int().min(100).max(599), bodyBase64: external_exports.string().max(4e6) }).strict()
+  },
   startBrowserCapture: {
     input: external_exports.object({ target: projectTargetSchema, ownerId: external_exports.string().min(1), name: external_exports.string().min(1).max(160) }).strict(),
     output: hostResultSchema
@@ -19136,6 +19148,21 @@ var marginsRpcContract = defineRpcContract({
       external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
     ])
   },
+  issueMenuGrant: {
+    input: external_exports.object({ projectId: external_exports.string().min(1), origin: external_exports.string().url().max(300) }).strict(),
+    output: external_exports.object({
+      serviceUrl: external_exports.string().url(),
+      token: external_exports.string().min(32),
+      workspaceId: external_exports.string().min(1),
+      workspaceName: external_exports.string().min(1),
+      instanceId: external_exports.string().min(1),
+      expiresAt: external_exports.number().int()
+    }).strict()
+  },
+  revokeMenuGrants: {
+    input: external_exports.object({ projectId: external_exports.string().min(1) }).strict(),
+    output: external_exports.object({ revoked: external_exports.boolean() }).strict()
+  },
   pinNativeSession: {
     input: external_exports.object({ threadId: external_exports.string().min(1).optional(), projectId: external_exports.string().min(1).optional(), sessionId: external_exports.string().min(1), instanceId: external_exports.string().min(1), workspaceId: external_exports.string().min(1) }).strict(),
     output: external_exports.discriminatedUnion("ok", [
@@ -19167,11 +19194,15 @@ var marginsRpcContract = defineRpcContract({
 });
 
 // src/server.ts
+import { createHash, randomBytes } from "node:crypto";
 var SESSION_PREFIX = "session:";
 var RECORDING_PREFIX = "recording:";
 var LIVE_PREFIX = "live:";
 var LAST_SESSION_PREFIX = "last-session:";
 var PROJECT_WORKSPACE_PREFIX = "project-workspace:";
+var MENU_GRANT_PREFIX = "menu-grant:";
+var MENU_GRANT_EPOCH_PREFIX = "menu-grant-epoch:";
+var MENU_GRANT_TTL_MS = 60 * 60 * 1e3;
 var REALTIME_CHANNEL = "margins-recording";
 var DISCONNECT_GRACE_MS = CAPTURE_DISCONNECT_GRACE_MS;
 function sessionKey(sessionId) {
@@ -19278,6 +19309,22 @@ function sourceFor(client) {
 function marginsPlugin(bb) {
   const host = bb.hosts.experimental_client({ contract: marginsHostContract, experimental_signals: hostSignals });
   const startLocks = /* @__PURE__ */ new Map();
+  const menuGrantSchema = external_exports.object({
+    target: external_exports.object({ projectId: external_exports.string(), hostId: external_exports.string(), projectRoot: external_exports.string(), workspaceId: external_exports.string() }).strict(),
+    origin: external_exports.string(),
+    instanceId: external_exports.string(),
+    workspaceId: external_exports.string(),
+    epoch: external_exports.number().int(),
+    expiresAt: external_exports.number().int()
+  }).strict();
+  const grantKey = (token) => `${MENU_GRANT_PREFIX}${createHash("sha256").update(token).digest("hex")}`;
+  const grantEpoch = async (workspaceId) => Number(await bb.storage.kv.get(`${MENU_GRANT_EPOCH_PREFIX}${workspaceId}`) || 0);
+  async function readMenuGrant(token) {
+    if (!/^[A-Za-z0-9_-]{40,60}$/.test(token)) return null;
+    const parsed = menuGrantSchema.safeParse(await bb.storage.kv.get(grantKey(token)));
+    if (!parsed.success || parsed.data.expiresAt < Date.now() || parsed.data.epoch !== await grantEpoch(parsed.data.workspaceId)) return null;
+    return parsed.data;
+  }
   host.experimental_onSignal("changed", ({ payload }) => bb.realtime.publish(REALTIME_CHANNEL, payload));
   host.experimental_onWorkerExit(({ hostId }) => bb.realtime.publish(REALTIME_CHANNEL, { hostId, reason: "project-recorder-offline" }));
   async function targetForThread(threadId) {
@@ -19572,6 +19619,42 @@ function marginsPlugin(bb) {
         return { ok: false, error: { code: "project_folder_unavailable", message: cause instanceof Error ? cause.message : String(cause), retryable: false } };
       }
     },
+    async issueMenuGrant({ projectId, origin }) {
+      const parsed = new URL(origin);
+      if (parsed.origin !== origin || !(parsed.protocol === "https:" && (parsed.hostname === "getbb.app" || parsed.hostname.endsWith(".getbb.app")) || parsed.protocol === "http:" && ["127.0.0.1", "localhost", "::1"].includes(parsed.hostname))) {
+        throw new Error("The bb page must have one HTTPS or local origin");
+      }
+      const target = await targetForProject(projectId);
+      const authority = await callHost(target, "captureAuthority", { target });
+      if (!authority.ok) throw new Error(authority.error.message);
+      const options = await callHost(target, "workspaceOptions", {});
+      const workspaceName = options.workspaces?.find((item) => item.id === authority.workspaceId)?.name || authority.workspaceId;
+      const token = randomBytes(32).toString("base64url");
+      const expiresAt = Date.now() + MENU_GRANT_TTL_MS;
+      await bb.storage.kv.set(grantKey(token), {
+        target: { ...target, workspaceId: authority.workspaceId },
+        origin,
+        instanceId: authority.instanceId,
+        workspaceId: authority.workspaceId,
+        epoch: await grantEpoch(authority.workspaceId),
+        expiresAt
+      });
+      return {
+        serviceUrl: `${origin}/api/v1/plugins/margins/http/menu/relay`,
+        token,
+        workspaceId: authority.workspaceId,
+        workspaceName,
+        instanceId: authority.instanceId,
+        expiresAt
+      };
+    },
+    async revokeMenuGrants({ projectId }) {
+      const target = await targetForProject(projectId);
+      const authority = await callHost(target, "captureAuthority", { target });
+      if (!authority.ok) throw new Error(authority.error.message);
+      await bb.storage.kv.set(`${MENU_GRANT_EPOCH_PREFIX}${authority.workspaceId}`, await grantEpoch(authority.workspaceId) + 1);
+      return { revoked: true };
+    },
     async pinNativeSession({ threadId, projectId, sessionId, instanceId, workspaceId }) {
       try {
         const target = await targetForSelection({ threadId, projectId });
@@ -19648,6 +19731,56 @@ function marginsPlugin(bb) {
     });
     return context.json(result, result.ok ? 200 : 502);
   });
+  bb.http.route("POST", "/menu/verify", async (context) => {
+    const token = context.req.header("authorization")?.replace(/^Bearer /, "") || "";
+    const grant = await readMenuGrant(token);
+    return context.json(grant ? {
+      ok: true,
+      workspaceId: grant.workspaceId,
+      instanceId: grant.instanceId,
+      origin: grant.origin,
+      expiresAt: grant.expiresAt
+    } : { ok: false, error: "Capture grant expired or revoked" }, grant ? 200 : 401);
+  }, { auth: "none" });
+  bb.http.route("POST", "/menu/renew", async (context) => {
+    const token = context.req.header("authorization")?.replace(/^Bearer /, "") || "";
+    const grant = await readMenuGrant(token);
+    if (!grant) return context.json({ ok: false, error: "Capture grant expired or revoked" }, 401);
+    const expiresAt = Date.now() + MENU_GRANT_TTL_MS;
+    await bb.storage.kv.set(grantKey(token), { ...grant, expiresAt });
+    return context.json({ ok: true, expiresAt });
+  }, { auth: "none" });
+  bb.http.route("POST", "/menu/relay", async (context) => {
+    const token = context.req.header("authorization")?.replace(/^Bearer /, "") || "";
+    const grant = await readMenuGrant(token);
+    if (!grant) return context.json({ ok: false, error: "Capture grant expired or revoked" }, 401);
+    const raw = await context.req.text();
+    if (raw.length > 21e5) return context.json({ ok: false, error: "Capture payload too large" }, 413);
+    let body;
+    try {
+      body = JSON.parse(raw || "null");
+    } catch {
+      return context.json({ ok: false, error: "Invalid capture relay JSON" }, 400);
+    }
+    const parsed = external_exports.object({
+      method: external_exports.enum(["GET", "POST", "PUT"]),
+      path: external_exports.string().min(1).max(300),
+      bodyBase64: external_exports.string().max(2e6),
+      contentType: external_exports.string().max(120).optional(),
+      producerToken: external_exports.string().max(300).optional(),
+      instanceId: external_exports.string().max(300).optional()
+    }).strict().safeParse(body);
+    if (!parsed.success) return context.json({ ok: false, error: "Invalid capture relay request" }, 400);
+    try {
+      const result = await callHost(grant.target, "relayWorkspaceHttp", { target: grant.target, ...parsed.data });
+      if (!Number.isInteger(result.status) || typeof result.bodyBase64 !== "string") {
+        return context.json({ ok: false, error: "Capture host unavailable" }, 502);
+      }
+      return context.json(result);
+    } catch {
+      return context.json({ ok: false, error: "Capture relay unavailable" }, 502);
+    }
+  }, { auth: "none" });
   bb.ui.registerMentionProvider({
     id: "margins",
     label: "Margins",

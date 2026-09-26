@@ -367,6 +367,34 @@ export class ProjectMarginsTransport {
     }
   }
 
+  async relayWorkspaceHttp(target: ProjectTarget, dataDir: string, input: {
+    method: "GET" | "POST" | "PUT"; path: string; bodyBase64: string;
+    contentType?: string; producerToken?: string; instanceId?: string;
+  }) {
+    const handle = await this.manager.ensure(target, dataDir);
+    const [pathname = "", query, ...extra] = input.path.split("?");
+    const scopedPrefix = `v1/workspaces/${handle.workspaceId}/`;
+    const safePath = extra.length === 0 && (pathname === "v1/capabilities" || pathname.startsWith(scopedPrefix))
+      && /^[a-zA-Z0-9/_-]+$/.test(pathname) && !pathname.includes("//")
+      && (query === undefined || pathname === `${scopedPrefix}sessions` && /^limit=\d{1,3}(?:&after=[A-Za-z0-9_-]{1,200})?$/.test(query));
+    if (!safePath) throw new Error("Menu relay path is outside its Workspace");
+    const bytes = Buffer.from(input.bodyBase64, "base64");
+    if (bytes.length > 1_500_000 || bytes.toString("base64") !== input.bodyBase64) throw new Error("Invalid Menu relay body");
+    const response = await fetch(`${handle.baseUrl}/${input.path}`, {
+      method: input.method,
+      headers: {
+        authorization: `Bearer ${handle.token}`,
+        ...(input.contentType ? { "content-type": input.contentType } : {}),
+        ...(input.producerToken ? { "X-Margins-Producer-Token": input.producerToken } : {}),
+        ...(input.instanceId ? { "X-Margins-Instance-Id": input.instanceId } : {}),
+      },
+      body: input.method === "GET" ? undefined : bytes,
+    });
+    const body = Buffer.from(await response.arrayBuffer());
+    if (body.length > 3_000_000) throw new Error("Menu relay response is too large");
+    return { status: response.status, bodyBase64: body.toString("base64") };
+  }
+
   private async request<T>(handle: ServerHandle, path: string, method: "GET" | "POST" | "PUT", body?: object, signal?: AbortSignal): Promise<T> {
     const response = await fetch(`${handle.baseUrl}/v1/workspaces/${handle.workspaceId}/${path}`, {
       method,

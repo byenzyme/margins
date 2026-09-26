@@ -33397,6 +33397,18 @@ var marginsHostContract = defineRpcContract2({
       external_exports2.object({ ok: external_exports2.literal(false), error: hostErrorSchema }).strict()
     ])
   },
+  relayWorkspaceHttp: {
+    input: external_exports2.object({
+      target: projectTargetSchema,
+      method: external_exports2.enum(["GET", "POST", "PUT"]),
+      path: external_exports2.string().min(1).max(300),
+      bodyBase64: external_exports2.string().max(2e6),
+      contentType: external_exports2.string().max(120).optional(),
+      producerToken: external_exports2.string().max(300).optional(),
+      instanceId: external_exports2.string().max(300).optional()
+    }).strict(),
+    output: external_exports2.object({ status: external_exports2.number().int().min(100).max(599), bodyBase64: external_exports2.string().max(4e6) }).strict()
+  },
   startBrowserCapture: {
     input: external_exports2.object({ target: projectTargetSchema, ownerId: external_exports2.string().min(1), name: external_exports2.string().min(1).max(160) }).strict(),
     output: hostResultSchema
@@ -33521,6 +33533,21 @@ var marginsRpcContract = defineRpcContract2({
       external_exports2.object({ ok: external_exports2.literal(true), instanceId: external_exports2.string().min(1), workspaceId: external_exports2.string().min(1) }).strict(),
       external_exports2.object({ ok: external_exports2.literal(false), error: hostErrorSchema }).strict()
     ])
+  },
+  issueMenuGrant: {
+    input: external_exports2.object({ projectId: external_exports2.string().min(1), origin: external_exports2.string().url().max(300) }).strict(),
+    output: external_exports2.object({
+      serviceUrl: external_exports2.string().url(),
+      token: external_exports2.string().min(32),
+      workspaceId: external_exports2.string().min(1),
+      workspaceName: external_exports2.string().min(1),
+      instanceId: external_exports2.string().min(1),
+      expiresAt: external_exports2.number().int()
+    }).strict()
+  },
+  revokeMenuGrants: {
+    input: external_exports2.object({ projectId: external_exports2.string().min(1) }).strict(),
+    output: external_exports2.object({ revoked: external_exports2.boolean() }).strict()
   },
   pinNativeSession: {
     input: external_exports2.object({ threadId: external_exports2.string().min(1).optional(), projectId: external_exports2.string().min(1).optional(), sessionId: external_exports2.string().min(1), instanceId: external_exports2.string().min(1), workspaceId: external_exports2.string().min(1) }).strict(),
@@ -34080,6 +34107,28 @@ var ProjectMarginsTransport = class {
       return { ok: false, error: hostError("session_lookup_unavailable", cause instanceof Error ? cause.message : String(cause)) };
     }
   }
+  async relayWorkspaceHttp(target, dataDir, input2) {
+    const handle = await this.manager.ensure(target, dataDir);
+    const [pathname = "", query, ...extra] = input2.path.split("?");
+    const scopedPrefix = `v1/workspaces/${handle.workspaceId}/`;
+    const safePath = extra.length === 0 && (pathname === "v1/capabilities" || pathname.startsWith(scopedPrefix)) && /^[a-zA-Z0-9/_-]+$/.test(pathname) && !pathname.includes("//") && (query === void 0 || pathname === `${scopedPrefix}sessions` && /^limit=\d{1,3}(?:&after=[A-Za-z0-9_-]{1,200})?$/.test(query));
+    if (!safePath) throw new Error("Menu relay path is outside its Workspace");
+    const bytes = Buffer.from(input2.bodyBase64, "base64");
+    if (bytes.length > 15e5 || bytes.toString("base64") !== input2.bodyBase64) throw new Error("Invalid Menu relay body");
+    const response = await fetch(`${handle.baseUrl}/${input2.path}`, {
+      method: input2.method,
+      headers: {
+        authorization: `Bearer ${handle.token}`,
+        ...input2.contentType ? { "content-type": input2.contentType } : {},
+        ...input2.producerToken ? { "X-Margins-Producer-Token": input2.producerToken } : {},
+        ...input2.instanceId ? { "X-Margins-Instance-Id": input2.instanceId } : {}
+      },
+      body: input2.method === "GET" ? void 0 : bytes
+    });
+    const body = Buffer.from(await response.arrayBuffer());
+    if (body.length > 3e6) throw new Error("Menu relay response is too large");
+    return { status: response.status, bodyBase64: body.toString("base64") };
+  }
   async request(handle, path2, method, body, signal) {
     const response = await fetch(`${handle.baseUrl}/v1/workspaces/${handle.workspaceId}/${path2}`, {
       method,
@@ -34273,6 +34322,10 @@ function createMarginsHostEntry(transport) {
       captureAuthority(input2, context) {
         retain(context);
         return transport.authority(input2.target, context.experimental_paths.dataDir);
+      },
+      relayWorkspaceHttp(input2, context) {
+        retain(context);
+        return transport.relayWorkspaceHttp(input2.target, context.experimental_paths.dataDir, input2);
       },
       async startBrowserCapture(input2, context) {
         retain(context);

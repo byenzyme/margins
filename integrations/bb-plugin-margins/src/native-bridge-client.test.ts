@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { NativeBridgeOwner } from "./native-bridge-client.js";
+import { NativeBridgeOwner, type NativeStatus } from "./native-bridge-client.js";
 
 const ready = {
   state: "ready", instanceId: "linux-one", workspaceId: "practice", sessionId: null, transferId: null,
@@ -8,9 +8,29 @@ const ready = {
   systemDroppedSamples: 0, systemFrames: 0, systemSilentSamples: 0, error: null,
 };
 
-afterEach(() => { vi.unstubAllGlobals(); sessionStorage.clear(); });
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); sessionStorage.clear(); });
 
 describe("Mac PWA bridge destination", () => {
+  it("warns after three seconds of silent Mac input and clears when speech arrives", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    let status: NativeStatus = { ...ready, state: "recording", sessionId: "meeting-1", micPeak: 0 };
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => new Response(JSON.stringify(
+      init.method === "GET" ? status : { token: "local-secret", instanceId: "linux-one", workspaceId: "practice", status: ready },
+    ), { status: 200 })));
+    const owner = new NativeBridgeOwner();
+    await owner.pair("one-time-code", { instanceId: "linux-one", workspaceId: "practice" });
+    await owner.refresh();
+    expect(owner.noAudioWarning).toBe(false);
+    await vi.advanceTimersByTimeAsync(3_100);
+    expect(owner.noAudioWarning).toBe(true);
+    status = { ...status, micPeak: 0.3 };
+    await owner.refresh();
+    expect(owner.noAudioWarning).toBe(false);
+    status = { ...ready, state: "ready", sessionId: null, micPeak: 0 };
+    await owner.refresh();
+    owner.forget();
+  });
   it("rejects a paired bridge pointed at another Workspace before storing its token", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
       token: "local-secret", instanceId: "linux-one", workspaceId: "other", status: { ...ready, workspaceId: "other" },

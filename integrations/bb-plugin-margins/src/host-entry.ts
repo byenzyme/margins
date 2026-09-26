@@ -47,6 +47,10 @@ export function createMarginsHostEntry(transport: Transport) {
         retain(context);
         return transport.authority(input.target, context.experimental_paths.dataDir);
       },
+      relayWorkspaceHttp(input, context) {
+        retain(context);
+        return transport.relayWorkspaceHttp(input.target, context.experimental_paths.dataDir, input);
+      },
       async startBrowserCapture(input, context) {
         retain(context);
         const result = await transport.start(input.target, context.experimental_paths.dataDir, input.ownerId, input.name);

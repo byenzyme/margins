@@ -99,6 +99,16 @@ describe("browser capture ownership", () => {
     expect(owner.panel("thr-2")).toMatchObject({ state: "ready" });
   });
 
+  it("shows a silence warning after three seconds of browser capture", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const { owner } = controllerFixture(async () => state({}) as never);
+    await owner.start("thr-1");
+    expect(owner.noAudioWarning).toBe(false);
+    vi.setSystemTime(4_100);
+    expect(owner.noAudioWarning).toBe(true);
+  });
+
   it("replaces the overlay state when Stop returns a saved panel without a recording id", async () => {
     const { owner } = controllerFixture(async () => state({}) as never);
     await owner.start("thr-1");

@@ -37,6 +37,7 @@ struct LiveCounters {
     system_dropped: Option<Arc<AtomicU64>>,
     frames: Option<Arc<AtomicU64>>,
     silent: Option<Arc<AtomicU64>>,
+    mic_peak: Option<Arc<AtomicU32>>,
 }
 
 #[derive(Default)]
@@ -68,6 +69,7 @@ impl CaptureStatus {
             "systemDroppedSamples": self.completed.system_dropped + load(&self.live.system_dropped),
             "systemFrames": self.completed.frames + load(&self.live.frames),
             "systemSilentSamples": self.completed.silent + load(&self.live.silent),
+            "micPeak": self.live.mic_peak.as_ref().map(|peak| f32::from_bits(peak.load(Ordering::Relaxed))).unwrap_or(0.0),
             "error": self.error,
             "localAudioPaths": self.local_audio_paths,
         })
@@ -100,6 +102,7 @@ impl CaptureController {
         sink: &crate::recorder::LiveAudioSink,
         recorder: &crate::recorder::RecorderHandle,
     ) {
+        recorder.mic_peak().store(0, Ordering::Relaxed);
         let mut state = self.status.lock().unwrap();
         state.state = "recording";
         state.session_id = Some(session.into());
@@ -111,6 +114,7 @@ impl CaptureController {
             system_dropped: Some(sink.system_dropped_samples.clone()),
             frames: Some(recorder.spk_frames()),
             silent: Some(recorder.spk_silence()),
+            mic_peak: Some(recorder.mic_peak()),
         };
     }
 
@@ -175,6 +179,7 @@ struct Bridge {
     workspace: String,
     instance: String,
     origin: String,
+    menu_origin: Option<String>,
     mic_device_name: Option<String>,
     local_audio_dir: Option<std::path::PathBuf>,
     pair_code: Option<String>,
@@ -199,6 +204,8 @@ fn run_bridge(args: &[OsString]) -> Result<()> {
     let mut remote = None;
     let mut workspace = None;
     let mut origin = None;
+    let mut menu_origin = None;
+    let mut remote_token_file = None;
     let mut mic_device_name = None;
     let mut local_audio_dir = None;
     let mut pair_code_file = None;
@@ -213,6 +220,10 @@ fn run_bridge(args: &[OsString]) -> Result<()> {
             Some("--remote") => remote = Some(value.to_string()),
             Some("--workspace") => workspace = Some(value.to_string()),
             Some("--origin") => origin = Some(value.to_string()),
+            Some("--menu-origin") => menu_origin = Some(value.to_string()),
+            Some("--remote-token-file") => {
+                remote_token_file = Some(std::path::PathBuf::from(value))
+            }
             Some("--port") => port = parse_port(value)?,
             Some("--mic-device") => mic_device_name = Some(value.to_string()),
             Some("--local-audio-dir") => local_audio_dir = Some(std::path::PathBuf::from(value)),
@@ -244,6 +255,23 @@ fn run_bridge(args: &[OsString]) -> Result<()> {
     if !valid_origin(&origin) {
         bail!("--origin must be one exact HTTPS origin (HTTP localhost is allowed for local development)");
     }
+    if menu_origin
+        .as_deref()
+        .is_some_and(|value| !valid_origin(value))
+    {
+        bail!("--menu-origin must be one exact local origin");
+    }
+    if let Some(path) = remote_token_file {
+        if !path.is_absolute() || !std::fs::symlink_metadata(&path)?.is_file() {
+            bail!("--remote-token-file must be an absolute plain file");
+        }
+        let token = std::fs::read_to_string(&path)?.trim().to_string();
+        if token.len() < 32 {
+            bail!("remote capture grant is invalid");
+        }
+        std::env::set_var("MARGINS_REMOTE_TOKEN", token);
+        std::fs::remove_file(path)?;
+    }
     let token = std::env::var("MARGINS_REMOTE_TOKEN").ok();
     let connection = margins_workflows::remote_workspace::RemoteConnection::connect(
         &remote,
@@ -270,6 +298,7 @@ fn run_bridge(args: &[OsString]) -> Result<()> {
         workspace,
         instance,
         origin,
+        menu_origin,
         mic_device_name,
         local_audio_dir,
         pair_code: Some(pair_code),
@@ -367,7 +396,8 @@ fn handle_stream(mut stream: TcpStream, bridge: &mut Bridge) -> Result<()> {
         return Ok(());
     }
     let host_ok = request.header("host") == Some(format!("127.0.0.1:{}", bridge.port).as_str());
-    let origin_ok = request.header("origin") == Some(bridge.origin.as_str());
+    let origin = request.header("origin").unwrap_or("");
+    let origin_ok = origin == bridge.origin || bridge.menu_origin.as_deref() == Some(origin);
     if !host_ok || !origin_ok {
         write_response(
             &mut stream,
@@ -377,7 +407,7 @@ fn handle_stream(mut stream: TcpStream, bridge: &mut Bridge) -> Result<()> {
         )?;
         return Ok(());
     }
-    let allowed_origin = bridge.origin.clone();
+    let allowed_origin = origin.to_string();
     let cors = Some(allowed_origin.as_str());
     if request.method == "OPTIONS" {
         write_response(&mut stream, 204, &json!({}), cors)?;
@@ -669,6 +699,7 @@ mod tests {
             workspace: "journal".into(),
             instance: "linux-instance".into(),
             origin: "https://example.test".into(),
+            menu_origin: Some("http://127.0.0.1:18766".into()),
             mic_device_name: None,
             local_audio_dir: None,
             pair_code: Some("secret-code".into()),

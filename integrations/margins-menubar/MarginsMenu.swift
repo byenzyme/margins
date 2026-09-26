@@ -19,8 +19,16 @@ final class MenuRecorder: ObservableObject {
     @Published var state = "ready"
     @Published var error: String?
     @Published var sessionID: String?
+    @Published var connectedWorkspaceName: String?
+    private(set) var connectedOrigin: String?
 
     private var generation: Int?
+    private var pairingServer: MenuPairingServer?
+    private var grantToken: String?
+    private var grantExpiresAt: Int64?
+    private var bbMachineCredential: String?
+    private var localSilenceSince: Date?
+    private var localHeardAudio = false
     private var bridgeToken: String?
     private var bridgePID: Int32?
     private var pairDirectory: URL?
@@ -38,6 +46,8 @@ final class MenuRecorder: ObservableObject {
             workspace = preferences.string(forKey: "workspace") ?? ""
         }
         setupComplete = preferences.bool(forKey: "setupComplete")
+        do { pairingServer = try MenuPairingServer(recorder: self) }
+        catch { self.error = "bb connection is unavailable: \(error.localizedDescription)" }
         Task { await refresh() }
         Task {
             while !Task.isCancelled {
@@ -76,6 +86,85 @@ final class MenuRecorder: ObservableObject {
         error = nil
     }
 
+    func connectGrant(_ grant: MenuGrant, origin: String) async throws -> [String: Any] {
+        guard !active else { throw MenuError("Finish the current meeting before changing Workspace") }
+        guard grant.expiresAt > Int64(Date().timeIntervalSince1970 * 1_000),
+              let service = URL(string: grant.serviceUrl),
+              grant.serviceUrl == origin + "/api/v1/plugins/margins/http/menu/relay",
+              service.scheme == "https" || service.host == "127.0.0.1" || service.host == "localhost" else {
+            throw MenuError("The bb capture grant has an invalid destination")
+        }
+        let machineCredential = try machineCredential(for: origin)
+        var verify = URLRequest(url: URL(string: origin + "/api/v1/plugins/margins/http/menu/verify")!)
+        verify.httpMethod = "POST"
+        verify.setValue("Bearer \(grant.token)", forHTTPHeaderField: "Authorization")
+        if let machineCredential { verify.setValue(machineCredential, forHTTPHeaderField: "x-bb-connect-machine") }
+        verify.timeoutInterval = 10
+        let (data, response) = try await URLSession.shared.data(for: verify)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let result = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              result["ok"] as? Bool == true,
+              result["origin"] as? String == origin,
+              result["workspaceId"] as? String == grant.workspaceId,
+              result["instanceId"] as? String == grant.instanceId else {
+            throw MenuError("bb did not verify this Workspace grant")
+        }
+        if bridgeToken != nil { await disconnect() }
+        remote = "http://127.0.0.1:18764/api/v1/plugins/margins/http/menu/relay"
+        workspace = grant.workspaceId
+        mode = .project
+        connectedOrigin = origin
+        bbMachineCredential = machineCredential
+        grantToken = grant.token
+        grantExpiresAt = grant.expiresAt
+        try await connectBridge(origin: origin, remoteToken: grant.token)
+        connectedWorkspaceName = grant.workspaceName
+        setupComplete = true
+        let snapshot = try await bridgeRequest("/v1/status")
+        return ["token": bridgeToken ?? "", "instanceId": grant.instanceId,
+                "workspaceId": grant.workspaceId, "status": snapshot]
+    }
+
+    private func machineCredential(for origin: String) throws -> String? {
+        guard let url = URL(string: origin), let host = url.host else { throw MenuError("Invalid bb origin") }
+        if url.scheme == "http" && ["127.0.0.1", "localhost"].contains(host) { return nil }
+        guard url.scheme == "https", host == "getbb.app" || host.hasSuffix(".getbb.app") else {
+            throw MenuError("Connect from an enrolled bb server")
+        }
+        let path = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".bb-machines/\(host)/config.json")
+        let data = try Data(contentsOf: path)
+        guard let config = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              config["serverUrl"] as? String == origin,
+              let credential = config["machineCredential"] as? String,
+              credential.hasPrefix("bbcm_"), credential.count >= 32 else {
+            throw MenuError("Enroll this Mac as a bb machine before connecting Margins Menu")
+        }
+        return credential
+    }
+
+    func forwardCaptureRelay(_ body: Data, token: String) async throws -> [String: Any] {
+        guard let origin = connectedOrigin, token == grantToken,
+              let expires = grantExpiresAt,
+              expires > Int64(Date().timeIntervalSince1970 * 1_000) else {
+            throw MenuError("The bb capture grant expired or was revoked")
+        }
+        var request = URLRequest(url: URL(string: origin + "/api/v1/plugins/margins/http/menu/relay")!)
+        request.httpMethod = "POST"
+        request.httpBody = body
+        request.timeoutInterval = 30
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        if let bbMachineCredential { request.setValue(bbMachineCredential, forHTTPHeaderField: "x-bb-connect-machine") }
+        let (responseBody, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let relay = try JSONSerialization.jsonObject(with: responseBody) as? [String: Any],
+              relay["status"] as? Int != nil, relay["bodyBase64"] as? String != nil else {
+            throw MenuError("bb could not relay the capture upload")
+        }
+        return relay
+    }
+
     private func ensureLocalRecorder() async throws {
         if let discovery = try? readDiscovery(),
            (try? await request(discovery.baseURL + "/v1/live/snapshot", token: discovery.token)) != nil {
@@ -111,18 +200,42 @@ final class MenuRecorder: ObservableObject {
 
     func refresh() async {
         do {
+            if let grantToken, let connectedOrigin, let grantExpiresAt,
+               grantExpiresAt < Int64(Date().timeIntervalSince1970 * 1_000) + 600_000 {
+                let renewed = try await request(connectedOrigin + "/api/v1/plugins/margins/http/menu/renew",
+                                                token: grantToken, body: [:])
+                guard renewed["ok"] as? Bool == true,
+                      let expires = renewed["expiresAt"] as? Int64 else {
+                    throw MenuError("bb capture access expired; reconnect from Meetings")
+                }
+                self.grantExpiresAt = expires
+            }
             if mode == .mac {
                 try await ensureLocalRecorder()
                 let discovery = try readDiscovery()
                 let snapshot = try await request(discovery.baseURL + "/v1/live/snapshot", token: discovery.token)
                 let session = snapshot["session"] as? [String: Any]
+                let previousSession = sessionID
+                let previousState = state
                 sessionID = session?["session_id"] as? String
                 generation = session?["generation"] as? Int
                 state = session?["status"] as? String ?? "ready"
                 let health = snapshot["health"] as? [String: Any]
+                if state == "recording" {
+                    if previousState != "recording" || previousSession != sessionID {
+                        localSilenceSince = Date()
+                        localHeardAudio = false
+                    }
+                    if (health?["microphone_peak_milli"] as? Int ?? 0) > 10 { localHeardAudio = true }
+                } else {
+                    localSilenceSince = nil
+                    localHeardAudio = false
+                }
                 let system = (health?["system_audio_observed"] as? Bool) == true ? "system audio seen" : "waiting for system audio"
                 let lines = (snapshot["rolling_transcript"] as? [[String: Any]])?.count ?? 0
-                status = session == nil ? "Mac recorder ready" : "\(state) · \(system) · \(lines) transcript lines"
+                status = localSilenceSince.map { !localHeardAudio && Date().timeIntervalSince($0) >= 3 } == true
+                    ? "No audio — check Margins Menu microphone permission"
+                    : session == nil ? "Mac recorder ready" : "\(state) · \(system) · \(lines) transcript lines"
             } else if bridgeToken != nil {
                 let snapshot = try await bridgeRequest("/v1/status")
                 state = snapshot["state"] as? String ?? "ready"
@@ -134,7 +247,8 @@ final class MenuRecorder: ObservableObject {
                 error = snapshot["error"] as? String
             } else {
                 state = "ready"
-                status = "Connect the Mac bridge to the BB project"
+                status = remote.contains("/plugins/margins/http/menu/relay")
+                    ? "Open Meetings in bb to reconnect" : "Connect the Mac bridge to the BB project"
             }
         } catch {
             status = mode == .mac ? "Mac recorder is unavailable" : "Mac bridge is unavailable"
@@ -150,7 +264,12 @@ final class MenuRecorder: ObservableObject {
                 _ = try await request(discovery.baseURL + "/v1/live/start", token: discovery.token,
                                       body: ["operation_id": UUID().uuidString, "name": title])
             } else {
-                if bridgeToken == nil { try await connectBridge() }
+                if bridgeToken == nil {
+                    if remote.contains("/plugins/margins/http/menu/relay") && grantToken == nil {
+                        throw MenuError("Reconnect from the Meetings page in bb")
+                    }
+                    try await connectBridge(origin: connectedOrigin, remoteToken: grantToken)
+                }
                 _ = try await bridgeRequest("/v1/start", body: ["title": title])
             }
             await refresh()
@@ -173,7 +292,7 @@ final class MenuRecorder: ObservableObject {
         } catch { self.error = error.localizedDescription }
     }
 
-    func connectBridge() async throws {
+    func connectBridge(origin browserOrigin: String? = nil, remoteToken: String? = nil) async throws {
         guard !remote.trimmingCharacters(in: .whitespaces).isEmpty,
               !workspace.trimmingCharacters(in: .whitespaces).isEmpty else {
             throw MenuError("Enter a remote and Workspace")
@@ -188,6 +307,7 @@ final class MenuRecorder: ObservableObject {
                                                 attributes: [.posixPermissions: 0o700])
         pairDirectory = directory
         let pairFile = directory.appendingPathComponent("pair-code")
+        let tokenFile = directory.appendingPathComponent("remote-token")
         let audioDirectory = directory.appendingPathComponent("local-audio")
         var args = ["-n"]
         for (source, target) in [("MARGINS_MENU_SSH_REMOTE_BINARY", "MARGINS_SSH_REMOTE_BINARY"),
@@ -197,8 +317,16 @@ final class MenuRecorder: ObservableObject {
             if let value = ProcessInfo.processInfo.environment[source] { args += ["--env", "\(target)=\(value)"] }
         }
         args += ["-a", bridgeApp, "--args", "native-bridge", "--remote", remote,
-                 "--workspace", workspace, "--origin", bridgeOrigin, "--port", String(bridgePort),
+                 "--workspace", workspace, "--origin", browserOrigin ?? bridgeOrigin, "--port", String(bridgePort),
                  "--pair-code-file", pairFile.path, "--local-audio-dir", audioDirectory.path]
+        if let browserOrigin, browserOrigin != bridgeOrigin { args += ["--menu-origin", bridgeOrigin] }
+        if let remoteToken {
+            guard FileManager.default.createFile(atPath: tokenFile.path, contents: Data(remoteToken.utf8),
+                                                 attributes: [.posixPermissions: 0o600]) else {
+                throw MenuError("Could not stage the bb capture grant")
+            }
+            args += ["--remote-token-file", tokenFile.path]
+        }
         if let micDevice = ProcessInfo.processInfo.environment["MARGINS_MENU_MIC_DEVICE"], !micDevice.isEmpty {
             args += ["--mic-device", micDevice]
         }
@@ -232,6 +360,11 @@ final class MenuRecorder: ObservableObject {
         guard !active else { error = "Stop and save before disconnecting"; return }
         if let bridgePID { kill(bridgePID, SIGTERM) }
         bridgeToken = nil
+        grantToken = nil
+        grantExpiresAt = nil
+        bbMachineCredential = nil
+        connectedOrigin = nil
+        connectedWorkspaceName = nil
         bridgePID = nil
         if let pairDirectory { try? FileManager.default.removeItem(at: pairDirectory) }
         pairDirectory = nil
@@ -265,6 +398,9 @@ final class MenuRecorder: ObservableObject {
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        if let connectedOrigin, endpoint.hasPrefix(connectedOrigin + "/"), let bbMachineCredential {
+            request.setValue(bbMachineCredential, forHTTPHeaderField: "x-bb-connect-machine")
+        }
         if let origin { request.setValue(origin, forHTTPHeaderField: "Origin") }
         if let body {
             request.httpMethod = "POST"
@@ -303,7 +439,7 @@ private struct RecorderControls: View {
                 TextField("Workspace ID", text: $recorder.workspace)
                 Button("Connect Workspace") { Task { await recorder.chooseProject() } }
             } else {
-                Text(recorder.mode.rawValue).font(.subheadline)
+                Text(recorder.connectedWorkspaceName ?? recorder.mode.rawValue).font(.subheadline)
                 Text(recorder.status).font(.caption).foregroundStyle(.secondary)
                 if let session = recorder.sessionID {
                     Text("Meeting: \(session)").font(.caption2).lineLimit(1).truncationMode(.middle)

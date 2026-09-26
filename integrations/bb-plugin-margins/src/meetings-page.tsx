@@ -76,7 +76,7 @@ export function MeetingsAccessory() {
   const recording = browser.active && browser.state === "recording" || native?.state === "recording";
   if (paused) return <Pause size={12} aria-label="Paused" />;
   if (!recording) return null;
-  return <MeetingLevelDot level={native?.state === "recording" ? null : browser.active ? browser.level : null} accessory />;
+  return <MeetingLevelDot level={native?.state === "recording" ? native.micPeak ?? null : browser.active ? browser.level : null} accessory />;
 }
 
 export function MeetingsPage({ subPath }: { subPath: string }) {
@@ -88,6 +88,8 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   const [workspaceChoice, setWorkspaceChoice] = useState("");
   const [workspaceOptions, setWorkspaceOptions] = useState<Array<{ id: string; name: string | null }>>([]);
   const [workspaceNotice, setWorkspaceNotice] = useState("");
+  const [menuAvailable, setMenuAvailable] = useState(false);
+  const [menuBusy, setMenuBusy] = useState(false);
   const [panel, setPanel] = useState<PanelState | null>(null);
   const [meetings, setMeetings] = useState<WorkspaceMeetingSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(() => subPath.split("/")[1] || null);
@@ -114,6 +116,12 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     }).catch((error) => setMessage(String(error)));
   }, [rpc]);
   useEffect(() => { if (projectId) try { sessionStorage.setItem(LAST_PROJECT_KEY, projectId); } catch { /* private browser */ } }, [projectId]);
+  useEffect(() => {
+    if (client.platform !== "macos") return;
+    let disposed = false;
+    void nativeBridgeOwner.probeMenu().then((available) => { if (!disposed) setMenuAvailable(available); });
+    return () => { disposed = true; };
+  }, [client.platform]);
 
   const refresh = useCallback(async () => {
     if (!projectId) return;
@@ -272,11 +280,36 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     if (live && !window.confirm("Stop and save the current meeting, then start?")) return;
     if (live && !await control("stop", live.sessionId)) return;
     try {
+      if (menuAvailable) {
+        if (!nativeBridgeOwner.paired) await connectMenu();
+        const authority = await rpc.call("captureAuthority", { projectId });
+        if (!authority.ok) throw new Error(authority.error.message);
+        await nativeBridgeOwner.verify(authority);
+        try { sessionStorage.setItem(LAST_PROJECT_KEY, projectId); } catch { /* private browser */ }
+        await nativeBridgeOwner.control("start");
+        await refresh();
+        return;
+      }
+      const fallbackKey = "margins.bb.browser-mic-confirmed";
+      if (sessionStorage.getItem(fallbackKey) !== "yes") {
+        if (!window.confirm("Record with this browser's microphone only?")) return;
+        sessionStorage.setItem(fallbackKey, "yes");
+      }
       const next = await browserCaptureOwner.startFromProject(projectId);
       if (next.error) throw new Error(next.error.message);
       await refresh();
       if (next.sessionId) setSelectedId(next.sessionId);
     } catch (error) { setMessage(String(error)); }
+  }
+  async function connectMenu() {
+    if (!projectId) return;
+    setMenuBusy(true);
+    try {
+      const grant = await rpc.call("issueMenuGrant", { projectId, origin: window.location.origin });
+      await nativeBridgeOwner.connectMenu(grant);
+      setMessage("");
+    } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); throw error; }
+    finally { setMenuBusy(false); }
   }
   async function chooseWorkspace() {
     if (!projectId) return;
@@ -343,6 +376,10 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
           tabIndex={meetings.length === 0 || live.length > 0 ? -1 : undefined}
           onClick={() => void start()} disabled={panel?.state === "unavailable" || meetings.length === 0 || live.length > 0}>Start</button></div>
       <select aria-label="bb project for Meetings" value={projectId} disabled={live.length > 0} onChange={(event) => void chooseProject(event.target.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select>
+      {menuAvailable && live.length === 0 && <div className="margins-menu-connect">
+        <span>{nativeBridgeOwner.paired ? "Margins Menu connected (mic + computer audio)" : "Record with Margins Menu (mic + computer audio)"}</span>
+        {!nativeBridgeOwner.paired && <button disabled={menuBusy || !projectId} onClick={() => void connectMenu().catch(() => undefined)}>Connect</button>}
+      </div>}
       {groups.map(([label, items]) => items.length > 0 && <section key={label}>
         <h3>{label}</h3>{items.map((item) => <button key={item.sessionId} className={item.sessionId === selectedId ? "selected" : ""}
           onClick={() => void choose(item.sessionId)}><span>{item.title || meetingListTitle(item.startedAt)}</span>

@@ -27,6 +27,25 @@ afterEach(() => {
 });
 
 describe("ProjectServerManager remote adapter", () => {
+  it("forwards capture upload through the selected Workspace service only", async () => {
+    const manager = { ensure: vi.fn(async () => ({ baseUrl: "http://127.0.0.1:8787", token: "service-token",
+      workspaceId: "practice", instanceId: "instance-1" })) } as unknown as ProjectServerManager;
+    const fetchMock = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const transport = new ProjectMarginsTransport(manager);
+    const target = { projectId: "project", projectRoot: "/tmp/project", hostId: "host", workspaceId: "practice" };
+    const bodyBase64 = Buffer.from('{"commands":[]}').toString("base64");
+    await expect(transport.relayWorkspaceHttp(target, "/tmp/data", { method: "POST",
+      path: "v1/workspaces/practice/audio-chunks", bodyBase64, contentType: "application/json" }))
+      .resolves.toMatchObject({ status: 200 });
+    expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:8787/v1/workspaces/practice/audio-chunks",
+      expect.objectContaining({ method: "POST", headers: expect.objectContaining({ authorization: "Bearer service-token" }) }));
+    await expect(transport.relayWorkspaceHttp(target, "/tmp/data", { method: "GET",
+      path: "v1/workspaces/practice/sessions?limit=1", bodyBase64: "" })).resolves.toMatchObject({ status: 200 });
+    await expect(transport.relayWorkspaceHttp(target, "/tmp/data", { method: "GET",
+      path: "v1/workspaces/other/current", bodyBase64: "" })).rejects.toThrow(/outside its Workspace/);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
   it("previews only existing notes confined to the selected Workspace Home", async () => {
     const root = await mkdtemp(join(tmpdir(), "margins-bb-note-preview-"));
     try {

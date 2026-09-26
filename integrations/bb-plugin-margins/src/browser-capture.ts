@@ -220,6 +220,8 @@ export class BrowserCaptureOwner {
   private readonly routePanels = new Map<string, PanelState>();
   private latestPanel: PanelState | null = null;
   private inputLevel = 0;
+  private listeningSince = 0;
+  private heardAudio = false;
   private readonly drafts = new Map<string, string>();
 
   constructor(private readonly dependencies: BrowserCaptureDependencies = defaultDependencies) {}
@@ -236,6 +238,10 @@ export class BrowserCaptureOwner {
   get active() { return this.capture !== null; }
   get recovering() { return this.heartbeatRecovering; }
   get level() { return this.inputLevel; }
+  get noAudioWarning() {
+    return Boolean(this.capture && !this.capture.paused && this.listeningSince
+      && !this.heardAudio && Date.now() - this.listeningSince >= 3_000);
+  }
   get hasPendingStop() { return readStored()?.pendingControl?.kind === "stop"; }
   get recordingId() { return this.capture?.sessionId ?? readStored()?.sessionId ?? this.endedRecordingId; }
   get elapsedMs() { return this.capture ? Date.now() - this.capture.startedAtMs : 0; }
@@ -297,6 +303,7 @@ export class BrowserCaptureOwner {
         analyser.getByteTimeDomainData(values);
         const sum = values.reduce((total, value) => total + ((value - 128) / 128) ** 2, 0);
         this.inputLevel = Math.min(1, Math.sqrt(sum / values.length) * 5);
+        if (this.inputLevel > 0.015) this.heardAudio = true;
         this.emit();
       }, 90);
       return { dispose: () => { clearInterval(timer); this.inputLevel = 0; void context.close(); this.emit(); } };
@@ -368,6 +375,8 @@ export class BrowserCaptureOwner {
     }, this.dependencies.heartbeatMs);
     recorder.start(3_000);
     if (stored.paused) recorder.pause();
+    this.listeningSince = stored.paused ? 0 : Date.now();
+    this.heardAudio = false;
     this.capture = { ...stored, stream, recorder, uploads, heartbeat, reachability, heartbeatInFlight: false, generation, uploadErrors,
       levelMonitor: this.monitorLevel(stream) };
     reachability.start();
@@ -449,6 +458,8 @@ export class BrowserCaptureOwner {
     const current = this.capture; if (!current || !this.pluginId) return;
     if (current.paused) current.recorder.resume();
     current.paused = false;
+    this.listeningSince = Date.now();
+    this.heardAudio = false;
     const pendingControl = current.pendingControl?.kind === "resume"
       ? current.pendingControl
       : { kind: "resume" as const, operationId: id() };

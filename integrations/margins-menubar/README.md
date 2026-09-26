@@ -1,7 +1,18 @@
 # Margins menu bar recorder
 
-The menu offers one first-run destination choice: **On this Mac** or
-**Connected Workspace**. It remembers that choice in its own preferences.
+Open **Meetings** in bb on a Mac and click **Connect**. bb sends the resolved
+Workspace and a revocable capture grant directly to the Menu over loopback; no
+SSH alias, Workspace id, or pairing code is needed. For remote bb, the Mac must
+already be enrolled as a bb machine. The Menu reads that machine's local Connect
+credential only to cross the bb edge; the native helper receives only the
+Workspace grant and talks to the Menu's local relay. Recording from either bb or
+the Menu then appears in the same Workspace. bb settings can revoke the grant.
+The grant stays in Menu memory, renews while connected, and expires after the
+Menu disconnects or bb revokes access.
+
+The menu also offers a first-run destination choice: **On this Mac** or
+**Connected Workspace**. Typed Connected Workspace settings are an advanced
+fallback. It remembers that choice in its own preferences.
 The everyday surface has one primary action, **Record meeting** or **Finish
 meeting**; Pause, Resume, Change destination, and Quit are in **More**.
 
@@ -12,9 +23,10 @@ running. This path does not send audio to Linux. The local model must already be
 installed; a clean-install model downloader is still needed before shipping.
 
 **Connected Workspace** launches a `native-bridge` helper and sends microphone
-and system audio to the selected Linux Workspace. The menu checks that pairing
-returns the requested Workspace. The Linux service stores the recording and
-runs its configured ASR. A CoreML-enabled bridge can currently publish
+and system audio to the selected Workspace through bb's scoped HTTP relay.
+Remote bb uses the project host's Workspace service; local bb uses the same
+machine's service and store. The menu checks that pairing returns the requested
+Workspace. The service stores the recording and runs its configured ASR. A CoreML-enabled bridge can currently publish
 provisional words during recording; that is a development behavior, not an
 additional Mac transcription choice shown in this menu.
 

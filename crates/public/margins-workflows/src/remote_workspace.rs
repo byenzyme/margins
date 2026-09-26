@@ -3,6 +3,7 @@
 //! This module is never constructed by the default local capture path.
 
 use anyhow::{bail, Context, Result};
+use base64::Engine as _;
 use fs4::fs_std::FileExt;
 use margins_meeting_protocol::{
     decode_opus_packet_blocks_v1, validate_opus_packet_stream_v1, AudioChunkBatchV1, AudioChunkV1,
@@ -56,6 +57,7 @@ pub struct ServiceStateV1 {
 #[derive(Debug, Clone)]
 pub struct WorkspaceHttpClient {
     base_url: url::Url,
+    relay_url: Option<url::Url>,
     token: String,
     workspace_id: String,
     expected_instance_id: Option<String>,
@@ -187,7 +189,7 @@ impl Drop for RemoteConnection {
 
 impl WorkspaceHttpClient {
     pub fn new(
-        base_url: url::Url,
+        mut base_url: url::Url,
         token: impl Into<String>,
         workspace_id: impl Into<String>,
         expected_instance_id: Option<String>,
@@ -201,8 +203,17 @@ impl WorkspaceHttpClient {
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
+        let relay_url = base_url
+            .path()
+            .ends_with("/api/v1/plugins/margins/http/menu/relay")
+            .then(|| base_url.clone());
+        if relay_url.is_some() {
+            base_url.set_path("/");
+            base_url.set_query(None);
+        }
         Ok(Self {
             base_url,
+            relay_url,
             token: token.into(),
             workspace_id: workspace_id.into(),
             expected_instance_id,
@@ -670,9 +681,65 @@ impl WorkspaceHttpClient {
         &self,
         request: reqwest::blocking::RequestBuilder,
     ) -> Result<T> {
-        let response = request.bearer_auth(&self.token).send()?;
-        let status = response.status();
-        let body = response.bytes()?;
+        let (status, body) = if let Some(relay_url) = &self.relay_url {
+            let request = request.build()?;
+            let body = request
+                .body()
+                .and_then(reqwest::blocking::Body::as_bytes)
+                .unwrap_or(&[]);
+            if body.len() > 1_500_000 {
+                bail!("capture relay payload exceeds 1.5 MB");
+            }
+            let header = |name: &str| {
+                request
+                    .headers()
+                    .get(name)
+                    .and_then(|value| value.to_str().ok())
+            };
+            let mut payload = serde_json::json!({
+                "method": request.method().as_str(),
+                "path": format!("{}{}", request.url().path().trim_start_matches('/'),
+                    request.url().query().map(|query| format!("?{query}")).unwrap_or_default()),
+                "bodyBase64": base64::engine::general_purpose::STANDARD.encode(body),
+            });
+            for (field, name) in [
+                ("contentType", "content-type"),
+                ("producerToken", "x-margins-producer-token"),
+                ("instanceId", "x-margins-instance-id"),
+            ] {
+                if let Some(value) = header(name) {
+                    payload[field] = serde_json::Value::String(value.to_string());
+                }
+            }
+            let response = self
+                .client
+                .post(relay_url.clone())
+                .bearer_auth(&self.token)
+                .json(&payload)
+                .send()?;
+            let relay_status = response.status();
+            let relay: serde_json::Value = response.json()?;
+            if !relay_status.is_success() {
+                bail!("capture relay rejected request ({relay_status})");
+            }
+            let status = relay
+                .get("status")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| u16::try_from(value).ok())
+                .and_then(|value| reqwest::StatusCode::from_u16(value).ok())
+                .context("capture relay omitted upstream status")?;
+            let body = relay
+                .get("bodyBase64")
+                .and_then(serde_json::Value::as_str)
+                .context("capture relay omitted upstream body")?;
+            (
+                status,
+                base64::engine::general_purpose::STANDARD.decode(body)?,
+            )
+        } else {
+            let response = request.bearer_auth(&self.token).send()?;
+            (response.status(), response.bytes()?.to_vec())
+        };
         let envelope: ClientEnvelope<T> = serde_json::from_slice(&body)
             .with_context(|| format!("server returned a non-contract response ({status})"))?;
         if !status.is_success() || !envelope.ok {

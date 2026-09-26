@@ -621,6 +621,9 @@ fn snapshot_for_state(
             tap_warning: status.tap_warning,
             system_audio_expected: status.system_audio_expected,
             system_audio_observed: status.system_audio_observed,
+            microphone_peak_milli: status
+                .mic_level
+                .map(|level| (level.clamp(0.0, 1.0) * 1_000.0) as u16),
             transcript_freshness: freshness,
         },
         rolling_transcript: bounded_transcript_lines(&transcript),
@@ -640,6 +643,7 @@ fn idle_snapshot(now: u64) -> LiveSnapshotV1 {
             tap_warning: None,
             system_audio_expected: false,
             system_audio_observed: false,
+            microphone_peak_milli: None,
             transcript_freshness: None,
         },
         rolling_transcript: Vec::new(),

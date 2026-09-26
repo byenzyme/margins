@@ -62,7 +62,7 @@ describe("Margins recording panel", () => {
     const screen = within(overlay.container);
     fireEvent.click(screen.getByRole("button", { name: "Pause recording" }));
     await waitFor(() => expect(pause).toHaveBeenCalledOnce());
-    fireEvent.click(screen.getByRole("button", { name: /Recording/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Microphone only/ }));
     expect(overlay.inspection.navigateCalls).toContainEqual({ method: "toPluginPanel", path: "meetings", options: { subPath: "" } });
     overlay.lifecycle.unmount();
   });
