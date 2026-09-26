@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { execFile as execFileCallback, spawn, type ChildProcess } from "node:child_process";
 import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -57,8 +57,8 @@ function hostError(code: string, message: string, retryable = true): HostError {
   return { code, message, retryable };
 }
 
-function projectKey(target: ProjectTarget) {
-  return createHash("sha256").update(`${target.projectId}\0${target.projectRoot}`).digest("hex").slice(0, 20);
+export function workspaceInstanceDir(dataDir: string, workspaceId: string) {
+  return join(dataDir, "workspace-servers", workspaceId);
 }
 
 function marginsCli(): string {
@@ -166,7 +166,7 @@ export class ProjectServerManager {
 
   async ensure(target: ProjectTarget, dataDir: string, signal?: AbortSignal): Promise<ServerHandle> {
     const workspaceId = await resolveWorkspaceId(target);
-    const key = `${projectKey(target)}:${workspaceId}`;
+    const key = workspaceId;
     const existing = this.handles.get(key);
     if (existing) return existing;
     const pending = this.start(target, dataDir, key, workspaceId, signal).catch((error) => {
@@ -211,17 +211,17 @@ export class ProjectServerManager {
     }
     const asrRuntime = await readAsrRuntimeConfig(dataDir);
     const binary = asrRuntime?.serverPath ?? await this.runtime.ensureProjectServer({ dataDir, signal });
-    const instanceDir = join(dataDir, "projects", projectKey(target), workspaceId);
+    const instanceDir = workspaceInstanceDir(dataDir, workspaceId);
     await mkdir(instanceDir, { recursive: true });
     const port = await availablePort();
     const child = spawn(binary, [], {
-      cwd: target.projectRoot,
+      cwd: marginsHome(),
       env: {
         ...process.env,
         MARGINS_HOST: "127.0.0.1",
         MARGINS_PORT: String(port),
         MARGINS_DATA_DIR: instanceDir,
-        MARGINS_WORK_DIR: target.projectRoot,
+        MARGINS_WORK_DIR: marginsHome(),
         MARGINS_BB_CAPTURE_WORKSPACE: "1",
         MARGINS_HOME: marginsHome(),
         MARGINS_INSTANCE_ID: `bb-host-${target.hostId}`,

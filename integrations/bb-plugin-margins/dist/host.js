@@ -33553,7 +33553,7 @@ var marginsRpcContract = defineRpcContract2({
 });
 
 // src/project-server.ts
-import { createHash as createHash2, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { execFile as execFileCallback2, spawn } from "node:child_process";
 import { lstat as lstat2, mkdir as mkdir2, readFile as readFile2, realpath } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -33782,8 +33782,8 @@ async function readAsrRuntimeConfig(dataDir) {
 function hostError(code, message, retryable = true) {
   return { code, message, retryable };
 }
-function projectKey(target) {
-  return createHash2("sha256").update(`${target.projectId}\0${target.projectRoot}`).digest("hex").slice(0, 20);
+function workspaceInstanceDir(dataDir, workspaceId) {
+  return join2(dataDir, "workspace-servers", workspaceId);
 }
 function marginsCli() {
   const configured = process.env.MARGINS_CLI_BIN?.trim();
@@ -33882,7 +33882,7 @@ var ProjectServerManager = class {
   runtime = createRuntimeManager();
   async ensure(target, dataDir, signal) {
     const workspaceId = await resolveWorkspaceId(target);
-    const key = `${projectKey(target)}:${workspaceId}`;
+    const key = workspaceId;
     const existing = this.handles.get(key);
     if (existing) return existing;
     const pending = this.start(target, dataDir, key, workspaceId, signal).catch((error108) => {
@@ -33921,17 +33921,17 @@ var ProjectServerManager = class {
     }
     const asrRuntime = await readAsrRuntimeConfig(dataDir);
     const binary = asrRuntime?.serverPath ?? await this.runtime.ensureProjectServer({ dataDir, signal });
-    const instanceDir = join2(dataDir, "projects", projectKey(target), workspaceId);
+    const instanceDir = workspaceInstanceDir(dataDir, workspaceId);
     await mkdir2(instanceDir, { recursive: true });
     const port = await availablePort();
     const child = spawn(binary, [], {
-      cwd: target.projectRoot,
+      cwd: marginsHome(),
       env: {
         ...process.env,
         MARGINS_HOST: "127.0.0.1",
         MARGINS_PORT: String(port),
         MARGINS_DATA_DIR: instanceDir,
-        MARGINS_WORK_DIR: target.projectRoot,
+        MARGINS_WORK_DIR: marginsHome(),
         MARGINS_BB_CAPTURE_WORKSPACE: "1",
         MARGINS_HOME: marginsHome(),
         MARGINS_INSTANCE_ID: `bb-host-${target.hostId}`,

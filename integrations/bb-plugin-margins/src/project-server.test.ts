@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { marginsHome, ProjectMarginsTransport, ProjectServerManager, readAsrRuntimeConfig, resolveWorkspaceId, workspaceOptions } from "./project-server.js";
+import { marginsHome, ProjectMarginsTransport, ProjectServerManager, readAsrRuntimeConfig, resolveWorkspaceId, workspaceInstanceDir, workspaceOptions } from "./project-server.js";
 
 const saved = {
   url: process.env.MARGINS_BB_REMOTE_URL,
@@ -163,6 +163,76 @@ describe("ProjectServerManager remote adapter", () => {
       "https://margins.example.test/v1/capabilities",
       expect.objectContaining({ headers: { authorization: "Bearer scoped-token" } }),
     );
+  });
+
+  it("shares one Workspace server and Meetings list across bb projects", async () => {
+    process.env.MARGINS_BB_REMOTE_URL = "https://margins.example.test";
+    process.env.MARGINS_BB_REMOTE_TOKEN = "scoped-token";
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const path = new URL(String(input)).pathname;
+      const result = path === "/v1/capabilities" ? { workspace_id: "practice", instance_id: "instance-remote" }
+        : path.endsWith("/sessions") ? { sessions: [{ session_id: "meeting-1" }] }
+          : path.endsWith("/note-association") ? null
+            : { session_id: "meeting-1", title: "Shared meeting", started_at: "2026-09-25T01:00:00Z", input_finalized: true };
+      return new Response(JSON.stringify({ ok: true, result }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const manager = new ProjectServerManager();
+    const transport = new ProjectMarginsTransport(manager);
+    const first = { projectId: "first", projectRoot: "/code/one", hostId: "host", workspaceId: "practice" };
+    const second = { projectId: "second", projectRoot: "/code/two", hostId: "host", workspaceId: "practice" };
+    const [firstHandle, secondHandle] = await Promise.all([
+      manager.ensure(first, "/plugin-data"), manager.ensure(second, "/plugin-data"),
+    ]);
+    expect(firstHandle).toBe(secondHandle);
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/v1/capabilities"))).toHaveLength(1);
+    const firstList = await transport.listWorkspaceMeetings(first, "/plugin-data");
+    const secondList = await transport.listWorkspaceMeetings(second, "/plugin-data");
+    expect(firstList).toMatchObject({ ok: true, meetings: [{ sessionId: "meeting-1", title: "Shared meeting" }] });
+    expect(secondList).toEqual(firstList);
+    expect(workspaceInstanceDir("/plugin-data", "practice")).toBe("/plugin-data/workspace-servers/practice");
+  });
+
+  it("starts one local process and reads the same meetings from either project", async () => {
+    const root = await mkdtemp(join(tmpdir(), "margins-bb-shared-server-"));
+    const manager = new ProjectServerManager();
+    try {
+      process.env.MARGINS_HOME = join(root, "home");
+      await mkdir(process.env.MARGINS_HOME);
+      const serverPath = join(root, "fixture-server");
+      const modelDir = join(root, "model");
+      const ortLibraryPath = join(root, "libonnxruntime.so");
+      await mkdir(modelDir);
+      await writeFile(ortLibraryPath, "fixture");
+      await writeFile(serverPath, `#!/usr/bin/env node
+const fs=require('node:fs');const http=require('node:http');const path=require('node:path');
+const data=process.env.MARGINS_DATA_DIR;fs.mkdirSync(data,{recursive:true});
+fs.appendFileSync(${JSON.stringify(join(root, "spawns"))},String(process.pid)+'\\n');
+fs.writeFileSync(path.join(data,'token'),'fixture-token');
+http.createServer((req,res)=>{if(req.url==='/health'){res.writeHead(200);res.end('ok');return;}
+const pathname=new URL(req.url,'http://localhost').pathname;
+const result=pathname.endsWith('/sessions')?{sessions:[{session_id:'meeting-1'}]}:
+pathname.endsWith('/note-association')?null:
+{session_id:'meeting-1',title:'Shared meeting',started_at:'2026-09-25T01:00:00Z',input_finalized:true};
+res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:true,result}));
+}).listen(Number(process.env.MARGINS_PORT),'127.0.0.1');
+`);
+      await chmod(serverPath, 0o755);
+      await writeFile(join(root, "asr-runtime.json"), JSON.stringify({ serverPath, modelDir, ortLibraryPath }));
+      const first = { projectId: "first", projectRoot: join(root, "one"), hostId: "host", workspaceId: "practice" };
+      const second = { projectId: "second", projectRoot: join(root, "two"), hostId: "host", workspaceId: "practice" };
+      const transport = new ProjectMarginsTransport(manager);
+      const [firstList, secondList] = await Promise.all([
+        transport.listWorkspaceMeetings(first, root), transport.listWorkspaceMeetings(second, root),
+      ]);
+      expect(firstList).toMatchObject({ ok: true, meetings: [{ sessionId: "meeting-1" }] });
+      expect(secondList).toEqual(firstList);
+      expect((await readFile(join(root, "spawns"), "utf8")).trim().split("\n")).toHaveLength(1);
+      expect(workspaceInstanceDir(root, "practice")).toBe(join(root, "workspace-servers", "practice"));
+    } finally {
+      await manager.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("builds a pinned handoff from typed metadata routes without fetching artifact or note bytes", async () => {
