@@ -93,6 +93,87 @@ audio where channel separation does not identify speakers. If automatic labels
 need correction, offer that choice during transcript refinement rather than
 before recording.
 
+## Menu-first recording on a Mac
+
+Evidence (2026-09-26 live run): on a Mac, Meetings **Start** always used the
+browser microphone. Helium raised no permission prompt and delivered 77 s of
+digital silence, so the meeting saved with an empty transcript. The user
+expected bb to be the UI for Margins Menu. Margins Menu can only join bb through
+**Connected Workspace** after typing an SSH alias/URL and Workspace, and bb's
+own Start path needs a hidden manual pairing code.
+
+Principle: **bb is the screen; Margins Menu is the recorder; the Workspace is
+the store.** When a Mac recorder is available, it records (mic + computer
+audio, macOS permissions owned by the signed Menu app). The browser microphone
+is a labelled fallback only.
+
+### Topologies (both must work with the same UX)
+
+| | bb server / project host | Browser | Recorder | Where audio goes |
+|---|---|---|---|---|
+| A. Remote | Linux server (e.g. jpham-server) | Helium on the Mac | Margins Menu on the Mac | Menu streams to the Workspace service on the project host |
+| B. Local | bb running on the Mac | Browser/app on the same Mac | Margins Menu on the same Mac | Menu records into the same Workspace service on this Mac |
+| C. No recorder | any | phone / other computer / Menu absent | browser microphone | project host Workspace service (today's path) |
+
+The difference between A and B is only the destination URL and credential the
+recorder receives. The recorder protocol, the pairing flow, and the bb UI are
+identical. In B, do not run a second, competing capture store: the plugin and
+the Menu must resolve the same machine Margins home and Workspace, and one
+runtime owns capture.
+
+### Pairing: the destination travels with the pairing
+
+- The Meetings page, when opened in a browser on a Mac, probes the Menu's
+  loopback bridge (exact-origin allowlist; handle Chrome Private Network Access
+  preflight for an HTTPS bb origin calling 127.0.0.1).
+- If found and not yet paired with this bb project's Workspace, show one quiet
+  line: "Record with Margins Menu (mic + computer audio)" → **Connect**.
+- **Connect** asks the plugin backend for a scoped, revocable capture grant for
+  the resolved Workspace (Workspace id, service URL reachable from the Mac, and
+  a short-lived token bound to that Workspace) and hands it to the Menu over the
+  loopback bridge. The user types nothing: no SSH alias, URL, Workspace id, or
+  pairing code.
+  - A: the service URL must be reachable from the Mac without SSH config. Prefer
+    an authenticated plugin HTTP route on the bb origin the browser already
+    uses (proxy to the project-host margins-server), if bb plugin routes can
+    carry the capture upload/stream; otherwise report the smallest honest
+    alternative (e.g. `bb connect expose`) before building it.
+  - B: the service URL is loopback on the same Mac.
+- The Menu stores the grant, shows the connected Workspace name, and can
+  **Disconnect**. Grants are revocable from bb settings.
+- The typed Connected Workspace fields in the Menu remain only as an advanced
+  fallback.
+
+### Recording
+
+- bb **Start** → the Menu starts recording (Menu bar icon turns red); bb shows
+  the same pill, live pad, and level dot, driven by the Menu's reported mic
+  level.
+- Starting from the Menu → bb shows that meeting live automatically.
+- Pause/Resume/Stop work from either surface; one meeting, two controls.
+- On stop, the Menu finalizes into the Workspace; bb shows **Ready to refine**
+  and the transcript status.
+- No Mac recorder reachable → Start asks once: "Record with this browser's
+  microphone only?" and the pill reads "Microphone only".
+
+### No-audio guard (all recorders)
+
+If no non-silent audio arrives within ~3 s of Start (or after resume), the pill
+shows **"No audio — check microphone"** with the likely fix for that recorder
+(macOS Privacy → Microphone for the browser; Menu permissions for the Menu). A
+meeting must never silently record only zeros.
+
+### Verification
+
+- A: Helium on the Mac against jpham-server: Connect → Start from bb →
+  speak → Stop → transcript contains the spoken words; also start from the Menu
+  and confirm bb joins; exactly one runtime; closing check clean.
+- B: bb running on the Mac: same journey, one capture store, same Workspace as
+  the Menu.
+- C: phone/browser fallback labelled Microphone only; no-audio guard fires on a
+  muted input.
+- Follow AGENTS.md "Leave no capture running unannounced" for every run.
+
 ## Runaway capture guards
 
 Review evidence from the Mac: Margins Menu left `meeting-7` recording for about
