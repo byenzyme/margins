@@ -293,6 +293,10 @@ export default function marginsPlugin(bb: BbPluginApi) {
   }
 
   bb.rpc.register(marginsRpcContract, {
+    async availableWorkspaces({ projectId }) {
+      const target = await targetForProject(projectId);
+      return callHost(target, "workspaceOptions", {});
+    },
     async availableProjects() {
       const projects = await bb.sdk.projects.list();
       return { projects: projects.filter((project) => project.kind !== "personal")
@@ -326,6 +330,12 @@ export default function marginsPlugin(bb: BbPluginApi) {
       if (workspaceId !== undefined) {
         const selected = workspaceId.trim();
         if (selected && !/^[a-z0-9][a-z0-9-]*$/.test(selected)) throw new Error("Invalid Workspace id");
+        if (selected) {
+          const options = await callHost(target, "workspaceOptions", {});
+          if (!options.workspaces.some((workspace: { id: string }) => workspace.id === selected)) {
+            throw new Error("Choose a Workspace from the list.");
+          }
+        }
         if (selected) await bb.storage.kv.set(`${PROJECT_WORKSPACE_PREFIX}${target.projectId}`, selected);
         else await bb.storage.kv.delete(`${PROJECT_WORKSPACE_PREFIX}${target.projectId}`);
       }

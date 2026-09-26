@@ -184,6 +184,11 @@ fn run_inner(
             };
         }
         Some(Command::Workspace {
+            command: WorkspaceCommand::List { json },
+        }) => {
+            return commands::workspace::list(json, stdout);
+        }
+        Some(Command::Workspace {
             command: WorkspaceCommand::Default { set, json },
         }) => {
             return commands::workspace::default(set.as_deref(), json, stdout);

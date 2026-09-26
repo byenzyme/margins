@@ -298,6 +298,11 @@ pub enum SetupLocalModelPolicyArg {
 
 #[derive(Debug, Subcommand)]
 pub enum WorkspaceCommand {
+    /// List Workspaces and the machine default
+    List {
+        #[arg(long)]
+        json: bool,
+    },
     /// Read or set the machine's default Workspace
     Default {
         /// Set the default to an existing Workspace id

@@ -44,7 +44,7 @@
 .margins-native button:disabled { cursor:default; opacity:.5; }
 .margins-settings { display:flex; flex-direction:column; gap:12px; max-width:640px; }
 .margins-settings label,.margins-workspace-setting { display:flex; flex-wrap:wrap; align-items:center; gap:8px; font-size:12px; }
-.margins-settings select,.margins-workspace-setting input { border:1px solid var(--border); border-radius:7px; padding:7px 9px; background:var(--background); color:var(--foreground); }
+.margins-settings select,.margins-workspace-setting select { border:1px solid var(--border); border-radius:7px; padding:7px 9px; background:var(--background); color:var(--foreground); }
 .margins-workspace-setting button { border:1px solid var(--border); border-radius:7px; padding:7px 10px; background:var(--background); color:var(--foreground); cursor:pointer; }
 .margins-meetings-page { display:grid; grid-template-columns:minmax(180px,240px) minmax(0,1fr); min-height:100%; color:var(--foreground); }
 .margins-meeting-list { display:flex; flex-direction:column; gap:13px; padding:18px 12px; border-right:1px solid var(--border); }
@@ -83,7 +83,8 @@
 .margins-meetings-empty { display:flex; min-height:50vh; flex-direction:column; align-items:flex-start; justify-content:center; gap:12px; }
 .margins-meetings-empty p { max-width:460px; margin:0; color:var(--muted-foreground); font-size:13px; }
 .margins-meetings-empty div { display:flex; gap:7px; }
-.margins-meetings-empty input { border:1px solid var(--border); border-radius:7px; padding:7px 9px; background:var(--background); color:var(--foreground); }
+.margins-meetings-empty select { border:1px solid var(--border); border-radius:7px; padding:7px 9px; background:var(--background); color:var(--foreground); }
+.margins-workspace-notice { color:var(--muted-foreground); font-size:12px; margin:0 0 8px; }
 @media (max-width:700px) { .margins-meetings-page { grid-template-columns:120px minmax(0,1fr); } .margins-meeting-list { padding:12px 5px; } .margins-meeting-pad { padding:20px; } }
 @media (max-width: 480px) { .margins-panel { min-height:240px; padding:12px; } .margins-notepad { min-height:170px; } }
 @media (pointer: coarse) { .margins-control { min-width:42px; min-height:42px; } .margins-control.margins-start { height:42px; border-radius:21px; padding:0 14px; } }

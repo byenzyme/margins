@@ -21,14 +21,25 @@ function Signal({ state }: { state: PanelState["state"] }) {
 function ProjectWorkspaceSetting({ threadId, projectId, onSaved }: { threadId?: string; projectId?: string; onSaved: () => void }) {
   const rpc = useRpc<typeof marginsRpcContract>();
   const [value, setValue] = useState("");
+  const [workspaces, setWorkspaces] = useState<Array<{ id: string; name: string | null }>>([]);
+  const [defaultWorkspaceId, setDefaultWorkspaceId] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   useEffect(() => {
-    void rpc.call("projectWorkspace", { threadId, projectId }).then((result) => setValue(result.workspaceId || "")).catch(() => setMessage("Workspace setting unavailable"));
+    if (!projectId) return;
+    void Promise.all([rpc.call("projectWorkspace", { threadId, projectId }), rpc.call("availableWorkspaces", { projectId })])
+      .then(([selected, options]) => {
+        setValue(selected.workspaceId || ""); setWorkspaces(options.workspaces);
+        setDefaultWorkspaceId(options.defaultWorkspaceId);
+        if (options.autoSelected) setMessage(`Using ${options.workspaces[0]?.name || options.workspaces[0]?.id} as the machine default.`);
+      }).catch(() => setMessage("Workspace setting unavailable"));
   }, [rpc, threadId, projectId]);
   return <div className="margins-workspace-setting">
     <label htmlFor="margins-project-workspace">Margins Workspace for this project</label>
-    <input id="margins-project-workspace" aria-label="Margins Workspace for this project" value={value}
-      onChange={(event) => setValue(event.target.value)} placeholder="Use machine default" />
+    <select id="margins-project-workspace" aria-label="Margins Workspace for this project" value={value}
+      onChange={(event) => setValue(event.target.value)}>
+      <option value="">Machine default ({workspaces.find((item) => item.id === defaultWorkspaceId)?.name || defaultWorkspaceId || "not set"})</option>
+      {workspaces.map((item) => <option key={item.id} value={item.id}>{item.name || item.id}</option>)}
+    </select>
     <button onClick={() => void rpc.call("projectWorkspace", { threadId, projectId, workspaceId: value }).then(() => { setMessage("Workspace preference saved"); onSaved(); }).catch((error) => setMessage(String(error)))}>Save</button>
     {message && <span role="status">{message}</span>}
   </div>;

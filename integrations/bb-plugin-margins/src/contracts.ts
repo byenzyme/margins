@@ -80,6 +80,11 @@ const ownedCaptureInputSchema = z.object({ target: projectTargetSchema }).extend
   recordingId: z.string().min(1), ownerId: z.string().min(1),
 }).strict();
 export const marginsHostContract = defineRpcContract({
+  workspaceOptions: {
+    input: z.object({}).strict(),
+    output: z.object({ defaultWorkspaceId: z.string().nullable(), autoSelected: z.boolean(),
+      workspaces: z.array(z.object({ id: z.string(), name: z.string().nullable() }).strict()) }).strict(),
+  },
   listWorkspaceMeetings: {
     input: z.object({ target: projectTargetSchema }).strict(),
     output: workspaceMeetingsResultSchema,
@@ -166,6 +171,11 @@ const captureClientInputSchema = z.object({
   operationId: z.string().min(1),
 }).strict();
 export const marginsRpcContract = defineRpcContract({
+  availableWorkspaces: {
+    input: z.object({ projectId: z.string().min(1) }).strict(),
+    output: z.object({ defaultWorkspaceId: z.string().nullable(), autoSelected: z.boolean(),
+      workspaces: z.array(z.object({ id: z.string(), name: z.string().nullable() }).strict()) }).strict(),
+  },
   availableProjects: {
     input: z.object({}).strict(),
     output: z.object({ projects: z.array(z.object({ id: z.string(), name: z.string() }).strict()) }).strict(),

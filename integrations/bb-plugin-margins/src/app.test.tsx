@@ -20,7 +20,7 @@ function panel(changes: Partial<PanelState> = {}): PanelState {
   };
 }
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.restoreAllMocks(); sessionStorage.clear(); });
 
 describe("Margins recording panel", () => {
   it("registers Meetings navigation, a sidebar level, persistent status, and one compact thread panel", () => {
@@ -31,6 +31,26 @@ describe("Margins recording panel", () => {
     expect(app.navPanels[0]?.experimental_sidebarAccessory).toBeDefined();
     expect(app.settingsSections).toMatchObject([{ id: "recording" }]);
     expect(app.messageActions).toEqual([]);
+  });
+
+  it("offers known Workspaces in a picker when the machine has no default", async () => {
+    const choose = vi.fn(() => ({ workspaceId: "vault" }));
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "project-1" }, { rpc: {
+      availableProjects: () => ({ projects: [{ id: "project-1", name: "Project" }] }),
+      availableWorkspaces: () => ({ defaultWorkspaceId: null, autoSelected: false,
+        workspaces: [{ id: "vault", name: "Notes" }, { id: "other", name: "Other" }] }),
+      getProjectPanelState: () => panel({ state: "unavailable", error: { code: "workspace_required", message: "Choose a Workspace", retryable: false } }),
+      listWorkspaceMeetings: () => ({ ok: true, meetings: [] }),
+      projectWorkspace: choose,
+    } });
+    const screen = within(slot.container);
+    const picker = await screen.findByRole("combobox", { name: "Margins Workspace" });
+    expect(within(picker).getAllByRole("option")).toHaveLength(2);
+    expect(screen.queryByRole("textbox", { name: "Workspace id" })).toBeNull();
+    fireEvent.change(picker, { target: { value: "other" } });
+    fireEvent.click(screen.getByRole("button", { name: "Use Workspace" }));
+    await waitFor(() => expect(choose).toHaveBeenCalledWith({ projectId: "project-1", workspaceId: "other" }));
+    slot.lifecycle.unmount();
   });
 
   it("keeps Pause and Stop reachable after the recording panel unmounts", async () => {
@@ -54,6 +74,7 @@ describe("Margins recording panel", () => {
       notepad: { text: "Ended memo", revision: "ended-r1" }, notePath: null };
     const slot = renderSlot(app.navPanels[0]!, { subPath: "project-1" }, { rpc: {
       availableProjects: () => ({ projects: [{ id: "project-1", name: "Project" }] }),
+      availableWorkspaces: () => ({ defaultWorkspaceId: "vault", autoSelected: false, workspaces: [{ id: "vault", name: "Notes" }] }),
       getProjectPanelState: () => panel({ state: "recording", recordingId: "live-1" }),
       listWorkspaceMeetings: () => ({ ok: true, meetings: [live, ended] }),
       readWorkspaceMeeting: (input: unknown) => ({ ok: true, candidates: [], meeting: (input as { sessionId: string }).sessionId === live.sessionId ? live : ended }),
@@ -75,6 +96,7 @@ describe("Margins recording panel", () => {
       notepad: { text: "Decision", revision: "memo-v3" }, notePath: null, threadIds: [], distilledMemoRevision: null };
     const slot = renderSlot(app.navPanels[0]!, { subPath: "project-1/ended-2" }, { context: { projectId: "project-1" }, rpc: {
       availableProjects: () => ({ projects: [{ id: "project-1", name: "Project" }] }),
+      availableWorkspaces: () => ({ defaultWorkspaceId: "vault", autoSelected: false, workspaces: [{ id: "vault", name: "Notes" }] }),
       getProjectPanelState: () => panel({ state: "ready", recordingId: null }),
       listWorkspaceMeetings: () => ({ ok: true, meetings: [ended] }),
       readWorkspaceMeeting: () => ({ ok: true, candidates: [], meeting: ended }),
@@ -106,6 +128,7 @@ describe("Margins recording panel", () => {
     const revised = { ...linked, notepad: { text: "Revised decision", revision: "memo-v2" } };
     const slot = renderSlot(app.navPanels[0]!, { subPath: "project-1/ended-linked" }, { context: { projectId: "project-1" }, rpc: {
       availableProjects: () => ({ projects: [{ id: "project-1", name: "Project" }] }),
+      availableWorkspaces: () => ({ defaultWorkspaceId: "vault", autoSelected: false, workspaces: [{ id: "vault", name: "Notes" }] }),
       getProjectPanelState: () => panel({ state: "ready", recordingId: null }),
       listWorkspaceMeetings: () => ({ ok: true, meetings: [linked] }),
       readWorkspaceMeeting: () => ({ ok: true, candidates: [], meeting: linked }),
@@ -139,6 +162,7 @@ describe("Margins recording panel", () => {
       threadIds: ["thr-distilled"], threadLinks: [{ id: "thr-distilled", title: "Create connected meeting note" }], distilledMemoRevision: "memo-v1" };
     const slot = renderSlot(app.navPanels[0]!, { subPath: "project-1/ended-linked" }, { context: { projectId: "project-1" }, openFilePreview: () => true, rpc: {
       availableProjects: () => ({ projects: [{ id: "project-1", name: "Project" }] }),
+      availableWorkspaces: () => ({ defaultWorkspaceId: "vault", autoSelected: false, workspaces: [{ id: "vault", name: "Notes" }] }),
       getProjectPanelState: () => panel({ state: "ready", recordingId: null }),
       listWorkspaceMeetings: () => ({ ok: true, meetings: [linked] }),
       readWorkspaceMeeting: () => ({ ok: true, candidates: [], meeting: linked }),
@@ -165,6 +189,7 @@ describe("Margins recording panel", () => {
       notepad: { text: "Decision", revision: "memo-v1" }, notePath: null, threadIds: [], distilledMemoRevision: null };
     const slot = renderSlot(app.navPanels[0]!, { subPath: "project-1/ended-error" }, { context: { projectId: "project-1" }, rpc: {
       availableProjects: () => ({ projects: [{ id: "project-1", name: "Project" }] }),
+      availableWorkspaces: () => ({ defaultWorkspaceId: "vault", autoSelected: false, workspaces: [{ id: "vault", name: "Notes" }] }),
       getProjectPanelState: () => panel({ state: "ready", recordingId: null }),
       listWorkspaceMeetings: () => ({ ok: true, meetings: [ended] }),
       readWorkspaceMeeting: () => ({ ok: true, candidates: [], meeting: ended }),
@@ -194,6 +219,7 @@ describe("Margins recording panel", () => {
     }));
     const slot = renderSlot(app.navPanels[0]!, { subPath: "project-1/ended-editing" }, { rpc: {
       availableProjects: () => ({ projects: [{ id: "project-1", name: "Project" }] }),
+      availableWorkspaces: () => ({ defaultWorkspaceId: "vault", autoSelected: false, workspaces: [{ id: "vault", name: "Notes" }] }),
       getProjectPanelState: () => panel({ state: "ready", recordingId: null }),
       listWorkspaceMeetings: () => ({ ok: true, meetings: [meeting] }),
       readWorkspaceMeeting: () => ({ ok: true, candidates: [], meeting }),

@@ -33358,6 +33358,14 @@ var ownedCaptureInputSchema = external_exports2.object({ target: projectTargetSc
   ownerId: external_exports2.string().min(1)
 }).strict();
 var marginsHostContract = defineRpcContract2({
+  workspaceOptions: {
+    input: external_exports2.object({}).strict(),
+    output: external_exports2.object({
+      defaultWorkspaceId: external_exports2.string().nullable(),
+      autoSelected: external_exports2.boolean(),
+      workspaces: external_exports2.array(external_exports2.object({ id: external_exports2.string(), name: external_exports2.string().nullable() }).strict())
+    }).strict()
+  },
   listWorkspaceMeetings: {
     input: external_exports2.object({ target: projectTargetSchema }).strict(),
     output: workspaceMeetingsResultSchema
@@ -33460,6 +33468,14 @@ var captureClientInputSchema = external_exports2.object({
   operationId: external_exports2.string().min(1)
 }).strict();
 var marginsRpcContract = defineRpcContract2({
+  availableWorkspaces: {
+    input: external_exports2.object({ projectId: external_exports2.string().min(1) }).strict(),
+    output: external_exports2.object({
+      defaultWorkspaceId: external_exports2.string().nullable(),
+      autoSelected: external_exports2.boolean(),
+      workspaces: external_exports2.array(external_exports2.object({ id: external_exports2.string(), name: external_exports2.string().nullable() }).strict())
+    }).strict()
+  },
   availableProjects: {
     input: external_exports2.object({}).strict(),
     output: external_exports2.object({ projects: external_exports2.array(external_exports2.object({ id: external_exports2.string(), name: external_exports2.string() }).strict()) }).strict()
@@ -33541,6 +33557,7 @@ import { createHash as createHash2, randomUUID } from "node:crypto";
 import { execFile as execFileCallback2, spawn } from "node:child_process";
 import { lstat as lstat2, mkdir as mkdir2, readFile as readFile2, realpath } from "node:fs/promises";
 import { createServer } from "node:net";
+import { homedir as homedir2 } from "node:os";
 import { isAbsolute, join as join2, relative, resolve } from "node:path";
 import { promisify as promisify2 } from "node:util";
 
@@ -33768,14 +33785,19 @@ function hostError(code, message, retryable = true) {
 function projectKey(target) {
   return createHash2("sha256").update(`${target.projectId}\0${target.projectRoot}`).digest("hex").slice(0, 20);
 }
-async function localHomeRoot(dataDir, target, workspaceId) {
+function marginsCli() {
   const configured = process.env.MARGINS_CLI_BIN?.trim();
-  const binary = configured && isAbsolute(configured) ? configured : join2(dataDir, "runtime", `v${RUNTIME_RELEASE_VERSION}`, "margins");
+  if (configured && isAbsolute(configured)) return configured;
+  const installed = join2(homedir2(), ".local", "bin", "margins");
+  return installed;
+}
+async function localHomeRoot(workspaceId) {
+  const binary = marginsCli();
   const executable = await lstat2(binary).catch(() => null);
   if (!executable?.isFile() || (executable.mode & 73) === 0) return null;
   try {
     const { stdout } = await execFile2(binary, ["--workspace", workspaceId, "workspace", "destination", "--json"], {
-      env: { ...process.env, MARGINS_HOME: marginsHome(dataDir, target) },
+      env: { ...process.env, MARGINS_HOME: marginsHome() },
       timeout: 5e3,
       maxBuffer: 65536
     });
@@ -33795,22 +33817,36 @@ async function associatedNoteFile(homeRoot, relativePath) {
     return null;
   }
 }
-function marginsHome(dataDir, target) {
-  return process.env.MARGINS_HOME?.trim() || join2(dataDir, "projects", projectKey(target), "margins-home");
+function marginsHome() {
+  return process.env.MARGINS_HOME?.trim() || join2(homedir2(), ".margins");
 }
-async function resolveWorkspaceId(target, dataDir) {
+async function workspaceOptions() {
+  const binary = marginsCli();
+  const env = { ...process.env, MARGINS_HOME: marginsHome() };
+  const { stdout } = await execFile2(binary, ["workspace", "list", "--json"], { env, timeout: 5e3, maxBuffer: 65536 });
+  const listing = JSON.parse(stdout);
+  if (!Array.isArray(listing.workspaces) || !listing.workspaces.every((item) => item && typeof item === "object" && typeof item.id === "string" && (item.name === null || typeof item.name === "string"))) {
+    throw new Error("Margins Workspace list is unavailable.");
+  }
+  const workspaces = listing.workspaces;
+  let defaultWorkspaceId = typeof listing.default_workspace === "string" ? listing.default_workspace : null;
+  let autoSelected = false;
+  if (!defaultWorkspaceId && workspaces.length === 1) {
+    const selected = workspaces[0].id;
+    await execFile2(binary, ["workspace", "default", "--set", selected, "--json"], { env, timeout: 5e3, maxBuffer: 65536 });
+    defaultWorkspaceId = selected;
+    autoSelected = true;
+  }
+  return { defaultWorkspaceId, workspaces, autoSelected };
+}
+async function resolveWorkspaceId(target) {
   if (target.workspaceId) {
     if (!/^[a-z0-9][a-z0-9-]*$/.test(target.workspaceId)) throw new Error("Invalid Margins Workspace id");
     return target.workspaceId;
   }
-  const raw = await readFile2(join2(marginsHome(dataDir, target), "config.toml"), "utf8").catch((error108) => {
-    if (error108.code === "ENOENT") return "";
-    throw error108;
-  });
-  const section = raw.match(/(?:^|\n)\s*\[workspace\]\s*\n([\s\S]*?)(?=\n\s*\[|$)/)?.[1] || "";
-  const id = section.match(/(?:^|\n)\s*default\s*=\s*"([a-z0-9][a-z0-9-]*)"\s*(?:#.*)?(?:\n|$)/)?.[1];
-  if (!id) throw new Error("Choose a Margins Workspace for this project or set a machine default with margins workspace default --set <id>.");
-  return id;
+  const options = await workspaceOptions();
+  if (!options.defaultWorkspaceId) throw new Error(options.workspaces.length ? "Choose a Margins Workspace from the picker." : "Set up a Margins Workspace to store meetings and notes.");
+  return options.defaultWorkspaceId;
 }
 async function availablePort() {
   return new Promise((resolve2, reject) => {
@@ -33845,7 +33881,7 @@ var ProjectServerManager = class {
   handles = /* @__PURE__ */ new Map();
   runtime = createRuntimeManager();
   async ensure(target, dataDir, signal) {
-    const workspaceId = await resolveWorkspaceId(target, dataDir);
+    const workspaceId = await resolveWorkspaceId(target);
     const key = `${projectKey(target)}:${workspaceId}`;
     const existing = this.handles.get(key);
     if (existing) return existing;
@@ -33897,7 +33933,7 @@ var ProjectServerManager = class {
         MARGINS_DATA_DIR: instanceDir,
         MARGINS_WORK_DIR: target.projectRoot,
         MARGINS_BB_CAPTURE_WORKSPACE: "1",
-        MARGINS_HOME: marginsHome(dataDir, target),
+        MARGINS_HOME: marginsHome(),
         MARGINS_INSTANCE_ID: `bb-host-${target.hostId}`,
         MARGINS_WORKSPACE: workspaceId,
         ...asrRuntime ? {
@@ -33944,7 +33980,7 @@ var ProjectMarginsTransport = class {
         ]);
         return { summary, note };
       }));
-      const homeRoot = handle.child && rows.some(({ note }) => note?.relative_path) ? await localHomeRoot(dataDir, target, handle.workspaceId) : null;
+      const homeRoot = handle.child && rows.some(({ note }) => note?.relative_path) ? await localHomeRoot(handle.workspaceId) : null;
       const meetings = await Promise.all(rows.map(async ({ summary, note }) => {
         const noteFilePath = await associatedNoteFile(homeRoot, note?.relative_path);
         return {
@@ -34208,6 +34244,10 @@ function createMarginsHostEntry(transport) {
     contract: marginsHostContract,
     experimental_signals: hostSignals,
     handlers: {
+      workspaceOptions(_input, context) {
+        retain(context);
+        return workspaceOptions();
+      },
       listWorkspaceMeetings(input2, context) {
         retain(context);
         return transport.listWorkspaceMeetings(input2.target, context.experimental_paths.dataDir);

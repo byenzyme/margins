@@ -86,6 +86,8 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   const [projects, setProjects] = useState<Array<{ id: string; name: string }>>([]);
   const [projectId, setProjectId] = useState(() => subPath.split("/")[0] || context.projectId || rememberedProject());
   const [workspaceChoice, setWorkspaceChoice] = useState("");
+  const [workspaceOptions, setWorkspaceOptions] = useState<Array<{ id: string; name: string | null }>>([]);
+  const [workspaceNotice, setWorkspaceNotice] = useState("");
   const [panel, setPanel] = useState<PanelState | null>(null);
   const [meetings, setMeetings] = useState<WorkspaceMeetingSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(() => subPath.split("/")[1] || null);
@@ -115,6 +117,11 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
 
   const refresh = useCallback(async () => {
     if (!projectId) return;
+    const options = await rpc.call("availableWorkspaces", { projectId });
+    setWorkspaceOptions(options.workspaces);
+    setWorkspaceChoice((current) => current && options.workspaces.some((item) => item.id === current)
+      ? current : options.workspaces[0]?.id || "");
+    if (options.autoSelected) setWorkspaceNotice(`Using ${options.workspaces[0]?.name || options.workspaces[0]?.id} as the machine default.`);
     const [nextPanel, listed] = await Promise.all([
       rpc.call("getProjectPanelState", { projectId, client }),
       rpc.call("listWorkspaceMeetings", { projectId }),
@@ -344,12 +351,15 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     </aside>
     <section className="margins-meeting-pad">
       {panel?.state === "unavailable" && <div className="margins-meetings-empty">
-        <h2>Choose a Margins Workspace</h2><p>{panel.error?.message || "Set up a Workspace to store meetings and notes."}</p>
-        <div><input aria-label="Workspace id" value={workspaceChoice} onChange={(event) => setWorkspaceChoice(event.target.value)} placeholder="Workspace id" />
-          <button onClick={() => void chooseWorkspace()}>Use Workspace</button></div>
-        <p>To create one, use the Margins workspace-setup skill.</p>
+        <h2>{workspaceOptions.length ? "Choose a Margins Workspace" : "Set up a Margins Workspace"}</h2>
+        {workspaceOptions.length ? <div><select aria-label="Margins Workspace" value={workspaceChoice} onChange={(event) => setWorkspaceChoice(event.target.value)}>
+          {workspaceOptions.map((item) => <option key={item.id} value={item.id}>{item.name || item.id}</option>)}
+        </select><button onClick={() => void chooseWorkspace()} disabled={!workspaceChoice}>Use Workspace</button></div>
+          : <p>Use the Margins workspace-setup skill to choose where meetings and notes live.</p>}
+        {message && <p role="alert">{message}</p>}
       </div>}
       {panel?.state !== "unavailable" && selected && meeting ? <>
+        {workspaceNotice && <p className="margins-workspace-notice">{workspaceNotice}</p>}
         <header><div><div className="margins-meeting-meta"><span className="margins-meeting-kicker">
           {!selected.inputFinalized ? <><i className={`margins-meeting-state-dot${pausedSession(selected.sessionId) ? " paused" : ""}`} aria-hidden="true" />{pausedSession(selected.sessionId) ? "Paused" : "Recording"}</>
             : stopAck?.sessionId === selected.sessionId ? `Saved · ${stopAck.elapsed} recorded`
@@ -368,7 +378,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
           {handoff && <span>Note draft opened — press Enter to start</span>}</div>}
         <textarea ref={memoRef} aria-label="Meeting memo pad" placeholder="Write notes..." value={draft} onChange={(event) => { dirty.current = true; latestDraft.current = event.target.value; setDraft(event.target.value); setMessage(""); }} onBlur={() => void saveMemo().catch((error) => setMessage(String(error)))} />
         <footer>{memoChangedSinceNote && <span>Note uses an earlier memo revision</span>}</footer>
-      </> : panel?.state !== "unavailable" && <div className="margins-meetings-empty"><h2>No meetings yet</h2><button onClick={() => void start()}>Start meeting</button>
+      </> : panel?.state !== "unavailable" && <div className="margins-meetings-empty"><h2>No meetings yet</h2>{workspaceNotice && <p>{workspaceNotice}</p>}<button onClick={() => void start()}>Start meeting</button>
         {message && <p role="alert">{message}</p>}</div>}
     </section>
   </main>;

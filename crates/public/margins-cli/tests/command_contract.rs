@@ -47,6 +47,11 @@ fn workspace_default_and_destination_are_explicit_json_reads() {
     );
     assert!(missing.is_err());
     let workspace = workspace::create_workspace(&machine, "practice", None, &vault).unwrap();
+    let (listed, output, _) = invoke(&service, &code, &["margins", "workspace", "list", "--json"]);
+    assert!(listed.is_ok(), "{output}");
+    let listing: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(listing["default_workspace"], serde_json::Value::Null);
+    assert_eq!(listing["workspaces"][0]["id"], "practice");
     let mut desired = workspace.config.clone();
     let WorkspaceBinding::NativeMarkdown { note_folder, .. } =
         desired.bindings.get_mut("home").unwrap()

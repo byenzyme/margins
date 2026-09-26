@@ -18972,6 +18972,14 @@ var ownedCaptureInputSchema = external_exports.object({ target: projectTargetSch
   ownerId: external_exports.string().min(1)
 }).strict();
 var marginsHostContract = defineRpcContract({
+  workspaceOptions: {
+    input: external_exports.object({}).strict(),
+    output: external_exports.object({
+      defaultWorkspaceId: external_exports.string().nullable(),
+      autoSelected: external_exports.boolean(),
+      workspaces: external_exports.array(external_exports.object({ id: external_exports.string(), name: external_exports.string().nullable() }).strict())
+    }).strict()
+  },
   listWorkspaceMeetings: {
     input: external_exports.object({ target: projectTargetSchema }).strict(),
     output: workspaceMeetingsResultSchema
@@ -19074,6 +19082,14 @@ var captureClientInputSchema = external_exports.object({
   operationId: external_exports.string().min(1)
 }).strict();
 var marginsRpcContract = defineRpcContract({
+  availableWorkspaces: {
+    input: external_exports.object({ projectId: external_exports.string().min(1) }).strict(),
+    output: external_exports.object({
+      defaultWorkspaceId: external_exports.string().nullable(),
+      autoSelected: external_exports.boolean(),
+      workspaces: external_exports.array(external_exports.object({ id: external_exports.string(), name: external_exports.string().nullable() }).strict())
+    }).strict()
+  },
   availableProjects: {
     input: external_exports.object({}).strict(),
     output: external_exports.object({ projects: external_exports.array(external_exports.object({ id: external_exports.string(), name: external_exports.string() }).strict()) }).strict()
@@ -19482,6 +19498,10 @@ function marginsPlugin(bb) {
     });
   }
   bb.rpc.register(marginsRpcContract, {
+    async availableWorkspaces({ projectId }) {
+      const target = await targetForProject(projectId);
+      return callHost(target, "workspaceOptions", {});
+    },
     async availableProjects() {
       const projects = await bb.sdk.projects.list();
       return { projects: projects.filter((project) => project.kind !== "personal").map((project) => ({ id: project.id, name: project.name })) };
@@ -19519,6 +19539,12 @@ function marginsPlugin(bb) {
       if (workspaceId !== void 0) {
         const selected = workspaceId.trim();
         if (selected && !/^[a-z0-9][a-z0-9-]*$/.test(selected)) throw new Error("Invalid Workspace id");
+        if (selected) {
+          const options = await callHost(target, "workspaceOptions", {});
+          if (!options.workspaces.some((workspace) => workspace.id === selected)) {
+            throw new Error("Choose a Workspace from the list.");
+          }
+        }
         if (selected) await bb.storage.kv.set(`${PROJECT_WORKSPACE_PREFIX}${target.projectId}`, selected);
         else await bb.storage.kv.delete(`${PROJECT_WORKSPACE_PREFIX}${target.projectId}`);
       }

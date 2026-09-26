@@ -23,6 +23,8 @@ function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: strin
       }) as never },
     },
     experimental_callHostRpc: ({ method }) => {
+      if (method === "workspaceOptions") return { defaultWorkspaceId: "workspace-1", autoSelected: false,
+        workspaces: [{ id: "workspace-1", name: "Notes" }, { id: "practice", name: "Practice" }] };
       if (method === "listWorkspaceMeetings" && options.meetingList) return { ok: true, meetings: [{
         sessionId: "meeting-1", title: null, startedAt: "2026-09-25T01:00:00Z", inputFinalized: true,
         notePath: "inbox/note.md", noteFile: { hostId: "project-host", path: "/tmp/vault/inbox/note.md" },

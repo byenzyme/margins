@@ -69,6 +69,41 @@ pub fn new(
     render_workspace(&resolved, json, &BTreeMap::new(), stdout)
 }
 
+pub fn list(json: bool, stdout: &mut dyn Write) -> Result<(), CliError> {
+    let home = workspace::margins_home().map_err(CliError::from_anyhow)?;
+    let workspaces = workspace::list_workspaces(&home).map_err(CliError::from_anyhow)?;
+    let default = workspace::default_workspace(&home).map_err(CliError::from_anyhow)?;
+    if json {
+        let entries = workspaces
+            .iter()
+            .map(|item| {
+                serde_json::json!({
+                    "id": item.config.id, "name": item.config.name,
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_writer(
+            &mut *stdout,
+            &serde_json::json!({
+                "default_workspace": default, "workspaces": entries,
+            }),
+        )
+        .map_err(|error| CliError::from_anyhow(error.into()))?;
+        writeln!(stdout).map_err(|error| CliError::from_anyhow(error.into()))
+    } else {
+        for item in workspaces {
+            writeln!(
+                stdout,
+                "{}\t{}",
+                item.config.id,
+                item.config.name.as_deref().unwrap_or("")
+            )
+            .map_err(|error| CliError::from_anyhow(error.into()))?;
+        }
+        Ok(())
+    }
+}
+
 pub fn default(set: Option<&str>, json: bool, stdout: &mut dyn Write) -> Result<(), CliError> {
     let home = workspace::margins_home().map_err(CliError::from_anyhow)?;
     if let Some(id) = set {

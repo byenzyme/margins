@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { marginsHome, ProjectMarginsTransport, ProjectServerManager, readAsrRuntimeConfig, resolveWorkspaceId } from "./project-server.js";
+import { marginsHome, ProjectMarginsTransport, ProjectServerManager, readAsrRuntimeConfig, resolveWorkspaceId, workspaceOptions } from "./project-server.js";
 
 const saved = {
   url: process.env.MARGINS_BB_REMOTE_URL,
@@ -55,27 +55,33 @@ describe("ProjectServerManager remote adapter", () => {
       ] });
     } finally { await rm(root, { recursive: true, force: true }); }
   });
-  it("resolves project override, then machine default, without a project-folder fallback", async () => {
+  it("resolves two projects to the same machine default and keeps their overrides separate", async () => {
     const home = await mkdtemp(join(tmpdir(), "margins-bb-workspace-"));
     try {
       process.env.MARGINS_HOME = home;
-      await expect(resolveWorkspaceId({ projectId: "p", projectRoot: "/code", hostId: "h" }, home)).rejects.toThrow("Choose a Margins Workspace");
-      await writeFile(join(home, "config.toml"), '[llm]\nmode = "local"\n[workspace]\ndefault = "vault"\n');
-      await expect(resolveWorkspaceId({ projectId: "p", projectRoot: "/code", hostId: "h" }, home)).resolves.toBe("vault");
-      await expect(resolveWorkspaceId({ projectId: "p", projectRoot: "/code", hostId: "h", workspaceId: "other" }, home)).resolves.toBe("other");
+      const cli = join(home, "margins-fixture");
+      await writeFile(cli, '#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({default_workspace:"vault",workspaces:[{id:"vault",name:"Notes"},{id:"other",name:null}]}));\n');
+      await chmod(cli, 0o755);
+      process.env.MARGINS_CLI_BIN = cli;
+      const first = { projectId: "p1", projectRoot: "/code/one", hostId: "h" };
+      const second = { projectId: "p2", projectRoot: "/code/two", hostId: "h" };
+      expect(marginsHome()).toBe(home);
+      await expect(resolveWorkspaceId(first)).resolves.toBe("vault");
+      await expect(resolveWorkspaceId(second)).resolves.toBe("vault");
+      await expect(resolveWorkspaceId({ ...second, workspaceId: "other" })).resolves.toBe("other");
     } finally { await rm(home, { recursive: true, force: true }); }
   });
-  it("uses the bb project Margins home when the host worker has no MARGINS_HOME", async () => {
-    const dataDir = await mkdtemp(join(tmpdir(), "margins-bb-host-data-"));
-    const target = { projectId: "p", projectRoot: "/code", hostId: "h" };
+  it("sets the sole Workspace as machine default on first use", async () => {
+    const home = await mkdtemp(join(tmpdir(), "margins-bb-host-data-"));
     try {
-      delete process.env.MARGINS_HOME;
-      const home = marginsHome(dataDir, target);
-      expect(home).toMatch(/^.*\/projects\/[a-f0-9]{20}\/margins-home$/);
-      await mkdir(home, { recursive: true });
-      await writeFile(join(home, "config.toml"), '[workspace]\ndefault = "vault"\n');
-      await expect(resolveWorkspaceId(target, dataDir)).resolves.toBe("vault");
-    } finally { await rm(dataDir, { recursive: true, force: true }); }
+      process.env.MARGINS_HOME = home;
+      const cli = join(home, "margins-fixture");
+      await writeFile(cli, `#!/usr/bin/env node\nconst fs=require('node:fs');const p=require('node:path');const file=p.join(process.env.MARGINS_HOME,'selected');if(process.argv[3]==='default'){fs.writeFileSync(file,process.argv[5]);process.stdout.write('{}');}else{process.stdout.write(JSON.stringify({default_workspace:fs.existsSync(file)?fs.readFileSync(file,'utf8'):null,workspaces:[{id:'vault',name:'Notes'}]}));}\n`);
+      await chmod(cli, 0o755);
+      process.env.MARGINS_CLI_BIN = cli;
+      await expect(workspaceOptions()).resolves.toMatchObject({ defaultWorkspaceId: "vault", autoSelected: true });
+      await expect(workspaceOptions()).resolves.toMatchObject({ defaultWorkspaceId: "vault", autoSelected: false });
+    } finally { await rm(home, { recursive: true, force: true }); }
   });
   it("reopens the newest saved Workspace meeting after recording ends", async () => {
     const manager = { ensure: vi.fn(async () => ({
