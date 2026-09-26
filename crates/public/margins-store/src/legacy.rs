@@ -761,6 +761,47 @@ pub fn update_segment_duration(
     Ok(())
 }
 
+/// Mark a stopped capture as ended once its durable segment is finalized.
+/// The legacy lifecycle also tracks deletion, so ended sessions remain listable.
+pub fn mark_session_ended(dir: &Path, name: &str) -> Result<()> {
+    // The legacy store may be opened without the additive repository tables.
+    // Install them before updating the two lifecycle views together.
+    crate::SqliteSessionRepository::open(dir).map_err(|error| anyhow::anyhow!(error))?;
+    let mut conn = open_db(dir)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let finalized: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM session_segments WHERE session_name = ?1 AND duration_secs IS NOT NULL",
+        params![name],
+        |row| row.get(0),
+    )?;
+    if finalized == 0 {
+        anyhow::bail!("session '{name}' has no finalized audio segment");
+    }
+    let changed = tx.execute(
+        "UPDATE sessions SET lifecycle_state = 'ended', lifecycle_updated_at = ?1 WHERE name = ?2 AND lifecycle_state = 'active'",
+        params![Local::now().to_rfc3339(), name],
+    )?;
+    if changed == 0 {
+        let state: Option<String> = tx
+            .query_row(
+                "SELECT lifecycle_state FROM sessions WHERE name = ?1",
+                params![name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if state.as_deref() != Some("ended") {
+            anyhow::bail!("session '{name}' cannot be marked ended from {state:?}");
+        }
+    } else {
+        tx.execute(
+            "UPDATE session_repository_state SET lifecycle = 'processing' WHERE session_name = ?1 AND lifecycle = 'active'",
+            params![name],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn list_sessions(dir: &Path) -> Result<Vec<SessionInfo>> {
     // Listing must not materialize the vault: an absent DB means no sessions
     // yet, so return empty instead of letting open_db create_dir_all the vault.
@@ -775,7 +816,7 @@ pub fn list_sessions(dir: &Path) -> Result<Vec<SessionInfo>> {
         SELECT s.name, s.start_time, s.notes_path, COUNT(seg.segment_index) AS segment_count
         FROM sessions s
         LEFT JOIN session_segments seg ON seg.session_name = s.name
-        WHERE COALESCE(s.lifecycle_state, 'active') = 'active'
+        WHERE COALESCE(s.lifecycle_state, 'active') IN ('active', 'ended')
         GROUP BY s.name, s.start_time, s.notes_path
         ORDER BY s.start_time DESC
         "#,
@@ -1734,6 +1775,36 @@ pub fn remove_vault_note_by_path(dir: &Path, path: &str) -> Result<bool> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn finalized_capture_is_ended_and_remains_listed() {
+        let dir = tempdir().unwrap();
+        let margins_dir = dir.path().join(".margins");
+        create_session(&margins_dir, "meet", &Local::now(), "meet.md").unwrap();
+        add_segment(&margins_dir, "meet", 0, "meet.wav", 0, None).unwrap();
+        assert!(mark_session_ended(&margins_dir, "meet").is_err());
+        update_segment_duration(&margins_dir, "meet", 0, 12.5).unwrap();
+        mark_session_ended(&margins_dir, "meet").unwrap();
+        mark_session_ended(&margins_dir, "meet").unwrap();
+        assert_eq!(list_sessions(&margins_dir).unwrap().len(), 1);
+        let conn = open_db(&margins_dir).unwrap();
+        let lifecycle: String = conn
+            .query_row(
+                "SELECT lifecycle_state FROM sessions WHERE name = 'meet'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let repository: String = conn
+            .query_row(
+                "SELECT lifecycle FROM session_repository_state WHERE session_name = 'meet'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(lifecycle, "ended");
+        assert_eq!(repository, "processing");
+    }
 
     #[test]
     fn stores_session_metadata_in_sqlite() {

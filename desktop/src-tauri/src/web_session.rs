@@ -1586,6 +1586,8 @@ where
         &meta,
     ));
 
+    retain_on_error!(session::mark_session_ended(&margins_dir, name));
+
     append_capture_finish_trace(
         work_dir,
         name,

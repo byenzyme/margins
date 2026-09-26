@@ -478,7 +478,11 @@ pub(crate) fn init_repository_schema(connection: &Connection) -> rusqlite::Resul
         INSERT OR IGNORE INTO session_repository_state
             (session_name, revision, lifecycle, updated_at_ms)
         SELECT s.name, 0,
-               CASE WHEN t.name IS NULL THEN 'active' ELSE 'tombstoned' END,
+               CASE
+                   WHEN t.name IS NOT NULL THEN 'tombstoned'
+                   WHEN s.lifecycle_state = 'ended' THEN 'processing'
+                   ELSE 'active'
+               END,
                MAX(0, CAST(strftime('%s', COALESCE(s.lifecycle_updated_at, s.created_at)) AS INTEGER) * 1000)
         FROM sessions s
         LEFT JOIN session_tombstones t ON t.name = s.name;
@@ -501,6 +505,7 @@ pub(crate) fn init_repository_schema(connection: &Connection) -> rusqlite::Resul
             SET revision = revision + 1,
                 lifecycle = CASE
                     WHEN NEW.lifecycle_state = 'deleting' THEN 'tombstoned'
+                    WHEN NEW.lifecycle_state = 'ended' THEN 'processing'
                     WHEN OLD.lifecycle_state = 'deleting' AND NEW.lifecycle_state = 'active' THEN 'active'
                     ELSE lifecycle
                 END,
