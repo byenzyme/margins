@@ -128,9 +128,8 @@ final class MenuRecorder: ObservableObject {
     private func machineCredential(for origin: String) throws -> String? {
         guard let url = URL(string: origin), let host = url.host else { throw MenuError("Invalid bb origin") }
         if url.scheme == "http" && ["127.0.0.1", "localhost"].contains(host) { return nil }
-        guard url.scheme == "https", host == "getbb.app" || host.hasSuffix(".getbb.app") else {
-            throw MenuError("Connect from an enrolled bb server")
-        }
+        guard url.scheme == "https" else { throw MenuError("Connect from an HTTPS bb server") }
+        if host != "getbb.app" && !host.hasSuffix(".getbb.app") { return nil }
         let path = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".bb-machines/\(host)/config.json")
         let data = try Data(contentsOf: path)

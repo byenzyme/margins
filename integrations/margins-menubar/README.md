@@ -2,10 +2,11 @@
 
 Open **Meetings** in bb on a Mac and click **Connect**. bb sends the resolved
 Workspace and a revocable capture grant directly to the Menu over loopback; no
-SSH alias, Workspace id, or pairing code is needed. For remote bb, the Mac must
-already be enrolled as a bb machine. The Menu reads that machine's local Connect
-credential only to cross the bb edge; the native helper receives only the
-Workspace grant and talks to the Menu's local relay. Recording from either bb or
+SSH alias, Workspace id, or pairing code is needed. For a `getbb.app` origin,
+the Mac must already be enrolled as a bb machine. The Menu reads that machine's
+local Connect credential only to cross the bb edge; other HTTPS bb origins are
+verified directly with the grant. The native helper receives only the Workspace
+grant and talks to the Menu's local relay. Recording from either bb or
 the Menu then appears in the same Workspace. bb settings can revoke the grant.
 The grant stays in Menu memory, renews while connected, and expires after the
 Menu disconnects or bb revokes access.

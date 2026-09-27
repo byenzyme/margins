@@ -394,11 +394,6 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
           tabIndex={meetings.length === 0 || live.length > 0 ? -1 : undefined}
           onClick={() => void start()} disabled={panel?.state === "unavailable" || meetings.length === 0 || live.length > 0}>Start</button></div>
       <select aria-label="bb project for Meetings" value={projectId} disabled={live.length > 0} onChange={(event) => void chooseProject(event.target.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select>
-      {(client.platform === "macos" || menuAvailable) && live.length === 0 && <div className="margins-menu-connect">
-        <span>{nativeBridgeOwner.paired ? "Margins Menu connected (mic + computer audio)" : "Record with Margins Menu (mic + computer audio)"}</span>
-        {!nativeBridgeOwner.paired && <button disabled={menuBusy || !projectId} onClick={() => void connectMenu().catch(() => undefined)}>Connect</button>}
-        {client.platform === "macos" && !nativeBridgeOwner.paired && <button disabled={menuBusy || !projectId} onClick={() => void startBrowserMicrophone()}>Browser mic only</button>}
-      </div>}
       {groups.map(([label, items]) => items.length > 0 && <section key={label}>
         <h3>{label}</h3>{items.map((item) => <button key={item.sessionId} className={item.sessionId === selectedId ? "selected" : ""}
           onClick={() => void choose(item.sessionId)}><span>{item.title || meetingListTitle(item.startedAt)}</span>
@@ -406,6 +401,11 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
       </section>)}
     </aside>
     <section className="margins-meeting-pad">
+      {(client.platform === "macos" || menuAvailable) && live.length === 0 && <div className="margins-menu-connect">
+        <span>{nativeBridgeOwner.paired ? "Margins Menu connected (mic + computer audio)" : "Record with Margins Menu (mic + computer audio)"}</span>
+        {!nativeBridgeOwner.paired && <button disabled={menuBusy || !projectId} onClick={() => void connectMenu().catch(() => undefined)}>Connect</button>}
+        {client.platform === "macos" && !nativeBridgeOwner.paired && <button disabled={menuBusy || !projectId} onClick={() => void startBrowserMicrophone()}>Browser mic only</button>}
+      </div>}
       {panel?.state === "unavailable" && <div className="margins-meetings-empty">
         <h2>{workspaceOptions.length ? "Choose a Margins Workspace" : "Set up a Margins Workspace"}</h2>
         {workspaceOptions.length ? <div><select aria-label="Margins Workspace" value={workspaceChoice} onChange={(event) => setWorkspaceChoice(event.target.value)}>

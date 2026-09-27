@@ -69,6 +69,16 @@ describe("Margins project recording server", () => {
     const rejected = await host.harness.behavior.fetchHttp("POST", "/menu/verify", { headers: auth });
     expect(rejected.status).toBe(401);
   });
+  it("uses the bb page's HTTPS origin while refusing insecure remote origins", async () => {
+    const host = harness();
+    const grant = await host.harness.behavior.callRpc("issueMenuGrant", {
+      projectId: "proj-1", origin: "https://jpham-server.taildd119e.ts.net:8443",
+    }) as { serviceUrl: string };
+    expect(grant.serviceUrl).toBe("https://jpham-server.taildd119e.ts.net:8443/api/v1/plugins/margins/http/menu/relay");
+    await expect(host.harness.behavior.callRpc("issueMenuGrant", {
+      projectId: "proj-1", origin: "http://100.107.201.27:38886",
+    })).rejects.toThrow("HTTPS or localhost");
+  });
   it("resolves linked thread titles while retaining the host note preview target", async () => {
     const host = harness({ meetingList: true });
     await expect(host.harness.behavior.callRpc("listWorkspaceMeetings", { projectId: "proj-1" })).resolves.toMatchObject({ ok: true,

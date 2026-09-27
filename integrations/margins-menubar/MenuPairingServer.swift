@@ -108,7 +108,7 @@ final class MenuPairingServer {
     private func allowed(_ origin: String) -> Bool {
         guard let url = URL(string: origin), url.absoluteString == origin, url.path.isEmpty || url.path == "/",
               url.query == nil, url.fragment == nil, let host = url.host else { return false }
-        if url.scheme == "https" { return host == "getbb.app" || host.hasSuffix(".getbb.app") }
+        if url.scheme == "https" { return true }
         return url.scheme == "http" && ["127.0.0.1", "localhost"].contains(host)
     }
 
@@ -119,12 +119,8 @@ final class MenuPairingServer {
         }
         Task { @MainActor in
             guard let recorder = self.recorder else { self.respond(connection, status: 503, body: ["error": "menu_unavailable"], origin: origin); return }
-            if let pinned = recorder.connectedOrigin, pinned != origin {
-                self.respond(connection, status: 409, body: ["error": "different_bb_origin_connected"], origin: origin); return
-            }
             if method == "GET" && path == "/v1/probe" {
-                self.respond(connection, status: 200, body: ["available": true,
-                    "workspaceId": recorder.connectedOrigin == nil ? NSNull() : recorder.workspace], origin: origin)
+                self.respond(connection, status: 200, body: ["available": true], origin: origin)
                 return
             }
             if method == "POST" && path == "/v1/connect" {
@@ -136,6 +132,9 @@ final class MenuPairingServer {
                     self.respond(connection, status: 400, body: ["error": error.localizedDescription], origin: origin)
                 }
                 return
+            }
+            if let pinned = recorder.connectedOrigin, pinned != origin {
+                self.respond(connection, status: 409, body: ["error": "different_bb_origin_connected"], origin: origin); return
             }
             self.respond(connection, status: 404, body: ["error": "not_found"], origin: origin)
         }

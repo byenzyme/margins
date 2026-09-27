@@ -19621,8 +19621,8 @@ function marginsPlugin(bb) {
     },
     async issueMenuGrant({ projectId, origin }) {
       const parsed = new URL(origin);
-      if (parsed.origin !== origin || !(parsed.protocol === "https:" && (parsed.hostname === "getbb.app" || parsed.hostname.endsWith(".getbb.app")) || parsed.protocol === "http:" && ["127.0.0.1", "localhost", "::1"].includes(parsed.hostname))) {
-        throw new Error("The bb page must have one HTTPS or local origin");
+      if (parsed.origin !== origin || !(parsed.protocol === "https:" || parsed.protocol === "http:" && ["127.0.0.1", "localhost", "::1"].includes(parsed.hostname))) {
+        throw new Error("Open bb over HTTPS or localhost to connect Margins Menu");
       }
       const target = await targetForProject(projectId);
       const authority = await callHost(target, "captureAuthority", { target });
