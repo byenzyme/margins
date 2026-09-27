@@ -52,7 +52,7 @@ struct CaptureStatus {
 }
 
 impl CaptureStatus {
-    fn snapshot(&self, instance_id: &str, workspace_id: &str) -> Value {
+    fn snapshot(&self, instance_id: &str, workspace_id: &str, selected_mic: Option<&str>) -> Value {
         let load = |counter: &Option<Arc<AtomicU64>>| {
             counter.as_ref().map_or(0, |v| v.load(Ordering::Relaxed))
         };
@@ -60,6 +60,9 @@ impl CaptureStatus {
             "state": if self.state.is_empty() { "ready" } else { self.state },
             "instanceId": instance_id,
             "workspaceId": workspace_id,
+            "microphoneDeviceName": selected_mic.map(str::to_string)
+                .or_else(crate::recorder::default_input_device_name),
+            "microphoneDevicePinned": selected_mic.is_some(),
             "pid": std::process::id(),
             "sessionId": self.session_id,
             "transferId": self.transfer_id,
@@ -439,11 +442,11 @@ fn handle_stream(mut stream: TcpStream, bridge: &mut Bridge) -> Result<()> {
             uuid::Uuid::new_v4().simple()
         );
         bridge.token = Some(token.clone());
-        let status = bridge
-            .status
-            .lock()
-            .unwrap()
-            .snapshot(&bridge.instance, &bridge.workspace);
+        let status = bridge.status.lock().unwrap().snapshot(
+            &bridge.instance,
+            &bridge.workspace,
+            bridge.mic_device_name.as_deref(),
+        );
         write_response(
             &mut stream,
             200,
@@ -460,12 +463,50 @@ fn handle_stream(mut stream: TcpStream, bridge: &mut Bridge) -> Result<()> {
     let response = match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/v1/status") => (
             200,
-            bridge
-                .status
-                .lock()
-                .unwrap()
-                .snapshot(&bridge.instance, &bridge.workspace),
+            bridge.status.lock().unwrap().snapshot(
+                &bridge.instance,
+                &bridge.workspace,
+                bridge.mic_device_name.as_deref(),
+            ),
         ),
+        ("GET", "/v1/microphones") => (200, microphones(bridge)),
+        ("POST", "/v1/microphone") => {
+            let value: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+            let requested = value.get("deviceName");
+            let name = requested
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty());
+            let idle = matches!(
+                bridge.status.lock().unwrap().state,
+                "" | "ready" | "saved" | "needs_attention"
+            );
+            if !idle {
+                (
+                    409,
+                    json!({"error":"Finish the meeting before changing microphones"}),
+                )
+            } else if !matches!(requested, Some(Value::Null) | Some(Value::String(_)))
+                || requested.is_some_and(|value| value.as_str() == Some(""))
+            {
+                (
+                    400,
+                    json!({"error":"Select a microphone or System default"}),
+                )
+            } else if name.is_some_and(|name| {
+                name.len() > 200
+                    || !crate::recorder::list_input_devices()
+                        .iter()
+                        .any(|(available, _)| available == name)
+            }) {
+                (
+                    400,
+                    json!({"error":"The selected microphone is unavailable"}),
+                )
+            } else {
+                bridge.mic_device_name = name.map(str::to_string);
+                (200, microphones(bridge))
+            }
+        }
         ("POST", "/v1/start") => {
             let value: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
             let title = value
@@ -537,6 +578,20 @@ fn handle_stream(mut stream: TcpStream, bridge: &mut Bridge) -> Result<()> {
         _ => (404, json!({"error":"not_found"})),
     };
     write_response(&mut stream, response.0, &response.1, cors)
+}
+
+fn microphones(bridge: &Bridge) -> Value {
+    let mut devices: Vec<String> = crate::recorder::list_input_devices()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    devices.sort();
+    devices.dedup();
+    json!({
+        "devices": devices,
+        "defaultDeviceName": crate::recorder::default_input_device_name(),
+        "selectedDeviceName": bridge.mic_device_name,
+    })
 }
 
 fn control(bridge: &Bridge, expected: &str, action: CaptureAction) -> (u16, Value) {
@@ -778,6 +833,47 @@ mod tests {
         );
         assert!(exchange(&mut bridge, &raw).starts_with("HTTP/1.1 200"));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn microphone_choice_requires_pairing_and_idle_capture() {
+        let mut bridge = bridge();
+        let request = |method: &str, path: &str, body: &str| {
+            format!(
+                "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:18765\r\nOrigin: https://example.test\r\nAuthorization: Bearer paired-token\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+        };
+        assert!(
+            exchange(&mut bridge, &request("GET", "/v1/microphones", ""))
+                .starts_with("HTTP/1.1 401")
+        );
+        bridge.token = Some("paired-token".into());
+        assert!(
+            exchange(&mut bridge, &request("GET", "/v1/microphones", ""))
+                .contains("\"selectedDeviceName\":null")
+        );
+        assert!(exchange(
+            &mut bridge,
+            &request(
+                "POST",
+                "/v1/microphone",
+                "{\"deviceName\":\"missing-device\"}"
+            )
+        )
+        .starts_with("HTTP/1.1 400"));
+        bridge.status.lock().unwrap().state = "recording";
+        assert!(exchange(
+            &mut bridge,
+            &request("POST", "/v1/microphone", "{\"deviceName\":null}")
+        )
+        .starts_with("HTTP/1.1 409"));
+        bridge.status.lock().unwrap().state = "ready";
+        assert!(exchange(
+            &mut bridge,
+            &request("POST", "/v1/microphone", "{\"deviceName\":null}")
+        )
+        .starts_with("HTTP/1.1 200"));
     }
 
     #[test]

@@ -83,7 +83,14 @@ surface and browser support. Browser permission cannot grant audio access to a
 separate native executable.
 
 Margins Menu handles pairing when **Connected Workspace** is selected. For a
-manual or older recorder, expand **Connect a Mac recorder manually** and run
+connected Workspace recording, choose **Microphone** in Margins Menu before
+Start. The menu lists the Mac's available inputs and a System default choice;
+the chosen input stays selected for future meetings on that Mac. bb shows the
+selected microphone beside its connection status. If a pinned microphone is
+unplugged, choose another input in the menu before recording. This choice does
+not change the Mac's system default or the separate **On this Mac** recorder.
+
+For a manual or older recorder, expand **Connect a Mac recorder manually** and run
 an audio-capture-enabled Margins build **on the Mac running the browser**:
 
 ```sh

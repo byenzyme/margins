@@ -105,7 +105,9 @@ function RecordingOverlay() {
     }}><MeetingLevelDot level={recording ? nativeLive ? native!.micPeak ?? null : browserCaptureOwner.level : null} paused={paused} />
       <span>{failure ? "Needs attention" : noAudio ? "No audio — check microphone" : paused ? `Paused · ${elapsed}`
         : recording ? nativeLive ? `Recording · ${elapsed}` : `Microphone only · ${elapsed}` : "Saving"}</span></button>
-    {noAudio && <span className="margins-overlay-error">{nativeLive ? "Check Margins Menu microphone permission" : "Check browser microphone permission"}</span>}
+    {noAudio && <span className="margins-overlay-error">{nativeLive
+      ? native?.microphoneDeviceName ? `Check ${native.microphoneDeviceName} in Margins Menu` : "Check Margins Menu microphone permission"
+      : "Check browser microphone permission"}</span>}
     {(recording || paused) && <>
       <button onClick={() => void control(paused ? "resume" : "pause")} disabled={busy} aria-label={paused ? "Resume recording" : "Pause recording"}>{paused ? <Play size={13} /> : <Pause size={13} />}</button>
       <button onClick={() => void control("stop")} disabled={busy} aria-label="Stop and save recording"><Square size={12} /></button>
@@ -176,6 +178,7 @@ function NativeCapturePanel({ projectId, title }: { projectId: string; title?: s
       {status?.state === "recording" && <div className="margins-native-actions"><button disabled={busy} onClick={() => void act(() => nativeBridgeOwner.control("pause"))}>Pause</button><button disabled={busy} onClick={() => void act(() => nativeBridgeOwner.control("stop"))}>Stop and save</button></div>}
       {status?.state === "paused" && <div className="margins-native-actions"><button disabled={busy} onClick={() => void act(() => nativeBridgeOwner.control("resume"))}>Resume</button><button disabled={busy} onClick={() => void act(() => nativeBridgeOwner.control("stop"))}>Stop and save</button></div>}
       {status?.state === "getting_ready" && <p>Getting microphone and computer audio ready…</p>}
+      {status?.microphoneDeviceName && <p>Microphone: {status.microphoneDeviceName} · Change it in Margins Menu before recording.</p>}
       {status?.state === "saving" && <p>Saving the meeting…</p>}
       {status?.state === "saved" && <p>Mac recording saved. The connected note action will appear in this thread once BB confirms the session.</p>}
       {status?.state === "needs_attention" && <p>{status.error || "Mac recording needs attention. The local transfer spool may still need delivery."}</p>}

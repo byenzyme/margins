@@ -33,7 +33,8 @@ vi.mock("./browser-capture.js", () => ({
     browserMicrophone: true, nativeMacCapture: false }),
 }));
 vi.mock("./native-bridge-client.js", () => ({
-  nativeBridgeOwner: { paired: false, status: null, probeMenu: mocks.probeMenu, connectMenu: mocks.connectMenu },
+  nativeBridgeOwner: { paired: false, status: null, subscribe: () => () => undefined,
+    probeMenu: mocks.probeMenu, connectMenu: mocks.connectMenu },
 }));
 
 afterEach(() => { vi.clearAllMocks(); sessionStorage.clear(); });

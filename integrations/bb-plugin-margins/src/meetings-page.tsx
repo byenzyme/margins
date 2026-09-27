@@ -90,6 +90,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   const [workspaceNotice, setWorkspaceNotice] = useState("");
   const [menuAvailable, setMenuAvailable] = useState(false);
   const [menuBusy, setMenuBusy] = useState(false);
+  const [nativeStatus, setNativeStatus] = useState(() => nativeBridgeOwner.status);
   const [panel, setPanel] = useState<PanelState | null>(null);
   const [meetings, setMeetings] = useState<WorkspaceMeetingSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(() => subPath.split("/")[1] || null);
@@ -116,6 +117,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     }).catch((error) => setMessage(String(error)));
   }, [rpc]);
   useEffect(() => { if (projectId) try { sessionStorage.setItem(LAST_PROJECT_KEY, projectId); } catch { /* private browser */ } }, [projectId]);
+  useEffect(() => nativeBridgeOwner.subscribe(() => setNativeStatus(nativeBridgeOwner.status)), []);
   useEffect(() => {
     if (client.platform !== "macos" || !navigator.permissions) return;
     let disposed = false;
@@ -402,7 +404,9 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     </aside>
     <section className="margins-meeting-pad">
       {(client.platform === "macos" || menuAvailable) && live.length === 0 && <div className="margins-menu-connect">
-        <span>{nativeBridgeOwner.paired ? "Margins Menu connected (mic + computer audio)" : "Record with Margins Menu (mic + computer audio)"}</span>
+        <span>{nativeBridgeOwner.paired
+          ? `Margins Menu connected · ${nativeStatus?.microphoneDeviceName || "Microphone"} + computer audio`
+          : "Record with Margins Menu (mic + computer audio)"}</span>
         {!nativeBridgeOwner.paired && <button disabled={menuBusy || !projectId} onClick={() => void connectMenu().catch(() => undefined)}>Connect</button>}
         {client.platform === "macos" && !nativeBridgeOwner.paired && <button disabled={menuBusy || !projectId} onClick={() => void startBrowserMicrophone()}>Browser mic only</button>}
       </div>}

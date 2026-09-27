@@ -12,6 +12,8 @@ export interface NativeStatus extends CaptureAuthority {
   systemFrames: number;
   systemSilentSamples: number;
   micPeak?: number;
+  microphoneDeviceName?: string | null;
+  microphoneDevicePinned?: boolean;
   error: string | null;
 }
 interface Pairing extends CaptureAuthority { token: string; port: number }

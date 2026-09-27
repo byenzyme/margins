@@ -149,6 +149,13 @@ runtime owns capture.
 - bb **Start** → the Menu starts recording (Menu bar icon turns red); bb shows
   the same pill, live pad, and level dot, driven by the Menu's reported mic
   level.
+- Margins Menu offers an idle-only **Microphone** picker with the system default
+  and available inputs. Its choice persists on this Mac and applies to the next
+  connected Workspace recording without changing the macOS default. bb shows
+  the selected microphone before Start and names it in a no-audio warning. An
+  unavailable pinned input must be visible and must block Start with a clear
+  instruction to choose another input; do not silently fall back to a different
+  microphone. The Menu still owns this device setting in topology A.
 - Starting from the Menu → bb shows that meeting live automatically.
 - Pause/Resume/Stop work from either surface; one meeting, two controls.
 - On stop, the Menu finalizes into the Workspace; bb shows **Ready to refine**

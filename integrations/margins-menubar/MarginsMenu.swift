@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import SwiftUI
 
 enum CaptureMode: String, CaseIterable, Identifiable {
@@ -20,6 +21,9 @@ final class MenuRecorder: ObservableObject {
     @Published var error: String?
     @Published var sessionID: String?
     @Published var connectedWorkspaceName: String?
+    @Published var microphones: [String] = []
+    @Published var microphoneChoice = ""
+    @Published var microphoneBusy = false
     private(set) var connectedOrigin: String?
 
     private var generation: Int?
@@ -46,6 +50,8 @@ final class MenuRecorder: ObservableObject {
             workspace = preferences.string(forKey: "workspace") ?? ""
         }
         setupComplete = preferences.bool(forKey: "setupComplete")
+        microphoneChoice = preferences.string(forKey: "microphoneName") ?? ""
+        refreshMicrophones()
         do { pairingServer = try MenuPairingServer(recorder: self) }
         catch { self.error = "bb connection is unavailable: \(error.localizedDescription)" }
         Task { await refresh() }
@@ -58,6 +64,37 @@ final class MenuRecorder: ObservableObject {
     }
 
     var active: Bool { ["starting", "getting_ready", "recording", "paused", "saving", "finalizing"].contains(state) }
+
+    var defaultMicrophone: String {
+        AVCaptureDevice.default(for: .audio)?.localizedName ?? "Unavailable"
+    }
+
+    private func refreshMicrophones() {
+        microphones = Array(Set(AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.microphone], mediaType: .audio, position: .unspecified
+        ).devices.map(\.localizedName))).sorted()
+    }
+
+    func chooseMicrophone(_ name: String) async {
+        guard !active && !microphoneBusy else { return }
+        refreshMicrophones()
+        guard name.isEmpty || microphones.contains(name) else {
+            error = "That microphone is unavailable. Choose another input."
+            return
+        }
+        microphoneBusy = true
+        defer { microphoneBusy = false }
+        do {
+            if mode == .project && bridgeToken != nil {
+                let selection: Any = name.isEmpty ? NSNull() as Any : name as Any
+                _ = try await bridgeRequest("/v1/microphone", body: ["deviceName": selection])
+            }
+            microphoneChoice = name
+            preferences.set(name, forKey: "microphoneName")
+            error = nil
+            await refresh()
+        } catch { self.error = error.localizedDescription }
+    }
 
     func chooseMac() async {
         error = nil
@@ -198,6 +235,7 @@ final class MenuRecorder: ObservableObject {
     }
 
     func refresh() async {
+        refreshMicrophones()
         do {
             if let grantToken, let connectedOrigin, let grantExpiresAt,
                grantExpiresAt < Int64(Date().timeIntervalSince1970 * 1_000) + 600_000 {
@@ -258,6 +296,9 @@ final class MenuRecorder: ObservableObject {
     func start() async {
         error = nil
         do {
+            if mode == .project && !microphoneChoice.isEmpty && !microphones.contains(microphoneChoice) {
+                throw MenuError("\(microphoneChoice) is unavailable. Choose another microphone before recording.")
+            }
             if mode == .mac {
                 let discovery = try readDiscovery()
                 _ = try await request(discovery.baseURL + "/v1/live/start", token: discovery.token,
@@ -326,7 +367,9 @@ final class MenuRecorder: ObservableObject {
             }
             args += ["--remote-token-file", tokenFile.path]
         }
-        if let micDevice = ProcessInfo.processInfo.environment["MARGINS_MENU_MIC_DEVICE"], !micDevice.isEmpty {
+        let micDevice = microphoneChoice.isEmpty
+            ? ProcessInfo.processInfo.environment["MARGINS_MENU_MIC_DEVICE"] : microphoneChoice
+        if let micDevice, !micDevice.isEmpty {
             args += ["--mic-device", micDevice]
         }
         let launcher = Process()
@@ -440,6 +483,19 @@ private struct RecorderControls: View {
             } else {
                 Text(recorder.connectedWorkspaceName ?? recorder.mode.rawValue).font(.subheadline)
                 Text(recorder.status).font(.caption).foregroundStyle(.secondary)
+                if recorder.mode == .project {
+                    Picker("Microphone", selection: Binding(
+                        get: { recorder.microphoneChoice },
+                        set: { choice in Task { await recorder.chooseMicrophone(choice) } }
+                    )) {
+                        Text("System default (\(recorder.defaultMicrophone))").tag("")
+                        ForEach(recorder.microphones, id: \.self) { name in Text(name).tag(name) }
+                        if !recorder.microphoneChoice.isEmpty && !recorder.microphones.contains(recorder.microphoneChoice) {
+                            Text("\(recorder.microphoneChoice) (unavailable)").tag(recorder.microphoneChoice)
+                        }
+                    }
+                    .disabled(recorder.active || recorder.microphoneBusy)
+                }
                 if let session = recorder.sessionID {
                     Text("Meeting: \(session)").font(.caption2).lineLimit(1).truncationMode(.middle)
                         .help(session)
