@@ -117,9 +117,14 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   }, [rpc]);
   useEffect(() => { if (projectId) try { sessionStorage.setItem(LAST_PROJECT_KEY, projectId); } catch { /* private browser */ } }, [projectId]);
   useEffect(() => {
-    if (client.platform !== "macos") return;
+    if (client.platform !== "macos" || !navigator.permissions) return;
     let disposed = false;
-    void nativeBridgeOwner.probeMenu().then((available) => { if (!disposed) setMenuAvailable(available); });
+    // Chromium prompts for loopback access. Only probe silently after the site
+    // already has permission; Connect and Start provide a deliberate gesture.
+    void navigator.permissions.query({ name: "loopback-network" as PermissionName }).then((permission) => {
+      if (permission.state === "granted") return nativeBridgeOwner.probeMenu();
+      return false;
+    }).then((available) => { if (!disposed && available) setMenuAvailable(true); }).catch(() => undefined);
     return () => { disposed = true; };
   }, [client.platform]);
 
@@ -280,7 +285,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     if (live && !window.confirm("Stop and save the current meeting, then start?")) return;
     if (live && !await control("stop", live.sessionId)) return;
     try {
-      if (menuAvailable) {
+      if (client.platform === "macos" || menuAvailable) {
         if (!nativeBridgeOwner.paired) await connectMenu();
         const authority = await rpc.call("captureAuthority", { projectId });
         if (!authority.ok) throw new Error(authority.error.message);
@@ -290,6 +295,12 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
         await refresh();
         return;
       }
+      await startBrowserMicrophone();
+    } catch (error) { setMessage(String(error)); }
+  }
+  async function startBrowserMicrophone() {
+    if (!projectId) return;
+    try {
       const fallbackKey = "margins.bb.browser-mic-confirmed";
       if (sessionStorage.getItem(fallbackKey) !== "yes") {
         if (!window.confirm("Record with this browser's microphone only?")) return;
@@ -306,7 +317,14 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     setMenuBusy(true);
     try {
       const grant = await rpc.call("issueMenuGrant", { projectId, origin: window.location.origin });
-      await nativeBridgeOwner.connectMenu(grant);
+      try { await nativeBridgeOwner.connectMenu(grant); }
+      catch (error) {
+        if (error instanceof TypeError || error instanceof DOMException && error.name === "AbortError") {
+          throw new Error("Can't reach Margins Menu. Open it and allow bb to access local devices in this browser, then click Connect again.");
+        }
+        throw error;
+      }
+      setMenuAvailable(true);
       setMessage("");
     } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); throw error; }
     finally { setMenuBusy(false); }
@@ -376,9 +394,10 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
           tabIndex={meetings.length === 0 || live.length > 0 ? -1 : undefined}
           onClick={() => void start()} disabled={panel?.state === "unavailable" || meetings.length === 0 || live.length > 0}>Start</button></div>
       <select aria-label="bb project for Meetings" value={projectId} disabled={live.length > 0} onChange={(event) => void chooseProject(event.target.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select>
-      {menuAvailable && live.length === 0 && <div className="margins-menu-connect">
+      {(client.platform === "macos" || menuAvailable) && live.length === 0 && <div className="margins-menu-connect">
         <span>{nativeBridgeOwner.paired ? "Margins Menu connected (mic + computer audio)" : "Record with Margins Menu (mic + computer audio)"}</span>
         {!nativeBridgeOwner.paired && <button disabled={menuBusy || !projectId} onClick={() => void connectMenu().catch(() => undefined)}>Connect</button>}
+        {client.platform === "macos" && !nativeBridgeOwner.paired && <button disabled={menuBusy || !projectId} onClick={() => void startBrowserMicrophone()}>Browser mic only</button>}
       </div>}
       {groups.map(([label, items]) => items.length > 0 && <section key={label}>
         <h3>{label}</h3>{items.map((item) => <button key={item.sessionId} className={item.sessionId === selectedId ? "selected" : ""}

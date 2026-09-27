@@ -93,7 +93,7 @@ export class NativeBridgeOwner {
   }
   async probeMenu(): Promise<boolean> {
     try {
-      const value = await bridgeRequest<{ available: boolean }>(18764, "/v1/probe", undefined, undefined, 1_500);
+      const value = await bridgeRequest<{ available: boolean }>(18764, "/v1/probe", undefined, undefined, 5_000);
       return value.available === true;
     } catch { return false; }
   }
