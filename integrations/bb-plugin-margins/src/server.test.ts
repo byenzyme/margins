@@ -1,6 +1,7 @@
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { describe, expect, it, vi } from "vitest";
 import plugin from "./server.js";
+import { meetingMentionId } from "./meeting-mention.js";
 
 const browser = { clientId: "client-1", platform: "other" as const, secureContext: true, browserMicrophone: true, nativeMacCapture: false };
 const mac = { ...browser, platform: "macos" as const };
@@ -51,6 +52,18 @@ function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: strin
 }
 
 describe("Margins project recording server", () => {
+  it("resolves a pinned meeting pill to hidden agent context and rejects a stale memo", async () => {
+    const host = harness();
+    const provider = host.harness.registrations.mentionProviders.find((item) => item.id === "margins")!;
+    const id = meetingMentionId({ projectId: "proj-1", workspaceId: "workspace-1", sessionId: "rec-1",
+      memoRevision: "memo-1", note: "create" });
+    await expect(provider.resolve(id)).resolves.toEqual({ context: `<margins-context-v1>\n${JSON.stringify({
+      workspaceId: "workspace-1", sessionId: "rec-1", memoRevision: "memo-1", bbProjectId: "proj-1",
+      transcript: "ready", note: "create",
+    })}\n</margins-context-v1>` });
+    await expect(provider.resolve(meetingMentionId({ projectId: "proj-1", workspaceId: "workspace-1", sessionId: "rec-1",
+      memoRevision: "old", note: "create" }))).rejects.toThrow("This meeting changed");
+  });
   it("issues a Workspace-bound Menu grant and revokes its relay access", async () => {
     const host = harness({ relay: true });
     const grant = await host.harness.behavior.callRpc("issueMenuGrant", { projectId: "proj-1", origin: "https://jpham-server.getbb.app" }) as { token: string; serviceUrl: string; workspaceId: string };

@@ -1,15 +1,28 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { experimental_FileLink as FileLink, useBbContext, useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
+import { experimental_FileLink as FileLink, useBbContext, useBbNavigate, useComposer, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import { Pause } from "lucide-react";
 import type { marginsRpcContract } from "../server.js";
 import { browserCaptureOwner, detectClientCapabilities } from "./browser-capture.js";
 import { nativeBridgeOwner } from "./native-bridge-client.js";
 import type { PanelState, WorkspaceMeeting, WorkspaceMeetingSummary } from "./contracts.js";
+import { meetingMentionId } from "./meeting-mention.js";
 
 const LAST_PROJECT_KEY = "margins.bb.meetings-project";
 const HANDOFF_KEY = "margins.bb.note-draft";
 const STOP_ACK_KEY = "margins.bb.stop-ack";
 const STOP_ACK_EVENT = "margins:stop-saved";
+const openedMeetings = new Map<string, WorkspaceMeeting>();
+const openedSummaries = new Map<string, WorkspaceMeetingSummary>();
+function rememberMeeting(key: string, value: WorkspaceMeeting) {
+  openedMeetings.delete(key);
+  openedMeetings.set(key, value);
+  if (openedMeetings.size > 50) openedMeetings.delete(openedMeetings.keys().next().value!);
+}
+function rememberSummary(key: string, value: WorkspaceMeetingSummary) {
+  openedSummaries.delete(key);
+  openedSummaries.set(key, value);
+  if (openedSummaries.size > 50) openedSummaries.delete(openedSummaries.keys().next().value!);
+}
 type StopAck = { sessionId: string; elapsed: string; at: number };
 
 function meetingTime(value: string) {
@@ -82,6 +95,7 @@ export function MeetingsAccessory() {
 export function MeetingsPage({ subPath }: { subPath: string }) {
   const rpc = useRpc<typeof marginsRpcContract>();
   const navigate = useBbNavigate();
+  const composer = useComposer();
   const navigateRef = useRef(navigate);
   navigateRef.current = navigate;
   const context = useBbContext();
@@ -101,22 +115,23 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   const [panel, setPanel] = useState<PanelState | null>(null);
   const [meetings, setMeetings] = useState<WorkspaceMeetingSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(() => subPath.split("/")[1] || null);
-  const [meeting, setMeeting] = useState<WorkspaceMeeting | null>(null);
-  const [draft, setDraft] = useState("");
+  const [meeting, setMeeting] = useState<WorkspaceMeeting | null>(() => openedMeetings.get(`${projectId}/${selectedId}`) || null);
+  const [draft, setDraft] = useState(() => openedMeetings.get(`${projectId}/${selectedId}`)?.notepad.text || "");
   const [message, setMessage] = useState("");
   const [transcriptStatus, setTranscriptStatus] = useState<{ sessionId: string; state: "checking" | "ready" | "pending" | "not_ready" | "failed" } | null>(null);
   const [stopAck, setStopAck] = useState<StopAck | null>(null);
   const [handoffTick, setHandoffTick] = useState(0);
   const dirty = useRef(false);
-  const latestDraft = useRef("");
-  const revision = useRef("");
+  const latestDraft = useRef(draft);
+  const revision = useRef(meeting?.notepad.revision || "");
   const saveLoop = useRef<Promise<void> | null>(null);
   const memoRef = useRef<HTMLTextAreaElement | null>(null);
   const focusedSession = useRef("");
   const pendingDraftText = useRef("");
   const pendingNativeStart = useRef<{ projectId: string; existing: Set<string>; startedAt: number; accepted: boolean } | null>(null);
   const client = useRef(detectClientCapabilities()).current;
-  const selected = meetings.find((item) => item.sessionId === selectedId);
+  const selected = meetings.find((item) => item.sessionId === selectedId)
+    || (selectedId ? openedSummaries.get(`${projectId}/${selectedId}`) : undefined);
   const handoff = readHandoff(projectId, selectedId);
 
   useEffect(() => {
@@ -155,6 +170,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     ]);
     setPanel(nextPanel);
     if (!listed.ok) { setMessage(listed.error.message); return; }
+    for (const item of listed.meetings) rememberSummary(`${projectId}/${item.sessionId}`, item);
     setMeetings(listed.meetings);
     const pending = pendingNativeStart.current;
     const recordingId = nativeBridgeOwner.status?.sessionId;
@@ -215,6 +231,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     let cancelled = false;
     void rpc.call("readWorkspaceMeeting", { projectId, sessionId: selectedId }).then((result) => {
       if (cancelled || !result.ok || !result.meeting) return;
+      rememberMeeting(`${projectId}/${selectedId}`, result.meeting);
       setMeeting(result.meeting);
       revision.current = result.meeting.notepad.revision;
       if (!dirty.current) {
@@ -283,6 +300,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
           expectedRevision: revision.current, text });
         if (!result.ok || !result.meeting) throw new Error(result.ok ? "Meeting unavailable" : result.error.message);
         revision.current = result.meeting.notepad.revision;
+        rememberMeeting(`${projectId}/${sessionId}`, result.meeting);
         setMeeting(result.meeting);
         dirty.current = latestDraft.current !== text;
       }
@@ -299,7 +317,12 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
 
   async function choose(sessionId: string) {
     try { await saveMemo(); } catch (error) { setMessage(String(error)); return; }
-    setMeeting(null);
+    const cached = openedMeetings.get(`${projectId}/${sessionId}`) || null;
+    dirty.current = false;
+    revision.current = cached?.notepad.revision || "";
+    latestDraft.current = cached?.notepad.text || "";
+    setMeeting(cached);
+    setDraft(cached?.notepad.text || "");
     setSelectedId(sessionId);
     navigate.toPluginPanel("meetings", { subPath: `${projectId}/${sessionId}` });
   }
@@ -325,6 +348,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
         rememberStopAck(sessionId, elapsed);
         const latest = await rpc.call("readWorkspaceMeeting", { projectId, sessionId });
         if (latest.ok && latest.meeting && !dirty.current) {
+          rememberMeeting(`${projectId}/${sessionId}`, latest.meeting);
           setMeeting(latest.meeting); setDraft(latest.meeting.notepad.text);
           latestDraft.current = latest.meeting.notepad.text;
           revision.current = latest.meeting.notepad.revision;
@@ -424,28 +448,24 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   async function distill() {
     if (!selected || !projectId) return;
     try {
+      if (composer.text.trim()) throw new Error("Send or clear your current new-thread draft before opening a meeting note.");
       await saveMemo();
       const result = await rpc.call("connectedNoteContext", { projectId, sessionId: selected.sessionId });
       if (!result.ok) throw new Error(result.error.message);
       const { sessionId, workspaceId, memo } = result.context;
-      let transcript: "ready" | "pending" = "ready";
       if (!result.context.transcript.available) {
         const requested = await rpc.call("transcribePinnedSession", { projectId, sessionId });
         if (!requested.ok) { setTranscriptStatus({ sessionId, state: "failed" }); throw new Error(requested.error.message); }
-        transcript = requested.status === "complete" ? "ready" : "pending";
-        setTranscriptStatus({ sessionId, state: transcript });
+        setTranscriptStatus({ sessionId, state: requested.status === "complete" ? "ready" : "pending" });
       }
-      const date = new Date(meeting?.startedAt || selected.startedAt).toLocaleDateString("en-US", {
-        month: "long", day: "numeric", year: "numeric",
-      });
-      const title = (selected.title || "").replace(/\s+/g, " ").trim().slice(0, 100);
-      const label = title ? `${title}${/meeting$/i.test(title) ? "" : " meeting"} on ${date}` : `meeting on ${date}`;
-      const action = result.context.noteAssociation ? "Update the connected note from" : "Make a connected note from";
-      const contextBlock = JSON.stringify({ workspaceId, sessionId, memoRevision: memo.revision,
-        bbProjectId: projectId, transcript, note: result.context.noteAssociation ? "update" : "create" });
+      const updating = Boolean(result.context.noteAssociation);
+      composer.setText(updating ? "Update the connected note from this meeting: " : "Make a connected note from this meeting: ");
+      composer.insertMention({ provider: "margins", id: meetingMentionId({ projectId, workspaceId, sessionId,
+        memoRevision: memo.revision, note: updating ? "update" : "create" }),
+        label: selected.title?.trim().slice(0, 100) || `Meeting · ${meetingTime(selected.startedAt)}` });
       try { sessionStorage.setItem(handoffKey(projectId, sessionId), JSON.stringify(selected.threadIds || [])); } catch { /* private browser */ }
       setHandoffTick((tick) => tick + 1);
-      navigate.toCompose({ initialPrompt: `${action} my ${label}.\n\n<margins-context-v1>\n${contextBlock}\n</margins-context-v1>`, focusPrompt: true });
+      navigate.toCompose({ focusPrompt: true });
     } catch (error) { setMessage(String(error)); }
   }
 
@@ -499,7 +519,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
         <textarea aria-label="Meeting memo pad" placeholder="Write notes..." autoFocus value={pendingDraft}
           onChange={(event) => { pendingDraftText.current = event.target.value; setPendingDraft(event.target.value); }} />
       </div>
-        : panel?.state !== "unavailable" && selected && meeting ? <>
+        : panel?.state !== "unavailable" && selected && meeting?.sessionId === selected.sessionId ? <>
         {workspaceNotice && <p className="margins-workspace-notice">{workspaceNotice}</p>}
         <header><div><div className="margins-meeting-meta"><span className="margins-meeting-kicker">
           {!selected.inputFinalized ? nativeStatus?.sessionId === selected.sessionId && nativeStatus.state === "saving" ? "Saving recording…"
@@ -524,7 +544,8 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
           {handoff && <span>Note draft opened — press Enter to start</span>}</div>}
         <textarea ref={memoRef} aria-label="Meeting memo pad" placeholder="Write notes..." value={draft} onChange={(event) => { dirty.current = true; latestDraft.current = event.target.value; setDraft(event.target.value); setMessage(""); }} onBlur={() => void saveMemo().catch((error) => setMessage(String(error)))} />
         <footer>{memoChangedSinceNote && <span>Note uses an earlier memo revision</span>}</footer>
-      </> : panel?.state !== "unavailable" && <div className="margins-meetings-empty"><h2>No meetings yet</h2>{workspaceNotice && <p>{workspaceNotice}</p>}<button onClick={() => void start()}>Start meeting</button>
+      </> : selectedId && panel?.state !== "unavailable" ? <div className="margins-meetings-empty" role="status"><h2>{selected?.title || (selected ? `Meeting · ${meetingTime(selected.startedAt)}` : "Opening meeting…")}</h2><p>Opening memo…</p></div>
+      : panel?.state !== "unavailable" && <div className="margins-meetings-empty"><h2>No meetings yet</h2>{workspaceNotice && <p>{workspaceNotice}</p>}<button onClick={() => void start()}>Start meeting</button>
         {message && <p role="alert">{message}</p>}</div>}
     </section>
   </main>;

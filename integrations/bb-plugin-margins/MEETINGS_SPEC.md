@@ -207,14 +207,16 @@ used about 55% CPU without a session. Capture needs these guards:
 On an ended meeting: **Make note in new thread →**. After a linked note's
 memo revision changes: **Update note in new thread →**.
 
-- Calls `navigate.toCompose({ initialPrompt, focusPrompt: true })` in the
-  current bb project. The user presses Enter. No backend `threads.spawn`: the
+- Seeds the shared new-thread composer with `useComposer().setText(...)` and a
+  meeting mention pill via `insertMention(...)`, then calls
+  `navigate.toCompose({ focusPrompt: true })` in the current bb project. The user
+  presses Enter. No backend `threads.spawn`: the
   prefilled composer keeps the user's on-screen provider/model/permission
   settings.
-- The prompt carries the `sessionId`, the Workspace id, and the memo revision
-  being distilled in a compact `<margins-context-v1>` JSON block beneath one
-  plain sentence asking for the note. It also carries the bb project id and
-  transcription status, but no destination path or raw server error text.
+- The visible draft is a plain request plus the meeting pill. At send time, the
+  pill resolves to agent-only `<margins-context-v1>` JSON carrying `sessionId`,
+  Workspace id, pinned memo revision, bb project id, note action, and current
+  transcription status. The visible draft never includes ids or server errors.
 - Opening a composer does not freeze or mark the memo distilled. The new thread
   uses a saved memo revision as its input; the memo remains editable. Once a
   note is associated, a later memo edit offers "Update note in new thread".

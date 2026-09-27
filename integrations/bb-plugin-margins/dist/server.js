@@ -19195,6 +19195,25 @@ var marginsRpcContract = defineRpcContract({
 
 // src/server.ts
 import { createHash, randomBytes } from "node:crypto";
+
+// src/meeting-mention.ts
+function parseMeetingMentionId(id) {
+  if (id.length > 2048) throw new Error("Meeting reference is too long. Open Make note again.");
+  let value;
+  try {
+    value = JSON.parse(decodeURIComponent(id));
+  } catch {
+    throw new Error("Invalid meeting reference. Open Make note again.");
+  }
+  if (!value || typeof value !== "object") throw new Error("Invalid meeting reference. Open Make note again.");
+  const item = value;
+  if (["projectId", "workspaceId", "sessionId", "memoRevision"].some((key) => typeof item[key] !== "string" || !item[key] || item[key].length > 300) || item.note !== "create" && item.note !== "update") {
+    throw new Error("Invalid meeting reference. Open Make note again.");
+  }
+  return item;
+}
+
+// src/server.ts
 var SESSION_PREFIX = "session:";
 var RECORDING_PREFIX = "recording:";
 var LIVE_PREFIX = "live:";
@@ -19788,8 +19807,25 @@ function marginsPlugin(bb) {
     async search() {
       return [];
     },
-    async resolve() {
-      throw new Error("Live Margins context is not available until the project recorder has produced a transcript.");
+    async resolve(itemId) {
+      const pinned = parseMeetingMentionId(itemId);
+      const target = await targetForProject(pinned.projectId);
+      const result = await callHost(target, "connectedNoteContext", { target, recordingId: pinned.sessionId });
+      if (!result.ok) throw new Error("Meeting unavailable. Open Make note again.");
+      const current = result.context;
+      if (current.workspaceId !== pinned.workspaceId || current.sessionId !== pinned.sessionId || current.memo.revision !== pinned.memoRevision || Boolean(current.noteAssociation) !== (pinned.note === "update")) {
+        throw new Error("This meeting changed. Open Make note again to use the latest memo.");
+      }
+      return { context: `<margins-context-v1>
+${JSON.stringify({
+        workspaceId: pinned.workspaceId,
+        sessionId: pinned.sessionId,
+        memoRevision: pinned.memoRevision,
+        bbProjectId: pinned.projectId,
+        transcript: current.transcript.available ? "ready" : "pending",
+        note: pinned.note
+      })}
+</margins-context-v1>` };
     }
   });
   bb.agents.configure((context) => context.project.kind === "personal" ? { tools: [], skills: [] } : {

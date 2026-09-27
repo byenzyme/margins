@@ -43,6 +43,7 @@ vi.mock("@get-bb/plugin-sdk/app", () => ({
   experimental_FileLink: () => null,
   useBbContext: () => ({ projectId: "proj-mac" }),
   useBbNavigate: () => ({ toPluginPanel: mocks.navigate }),
+  useComposer: () => ({ text: "", setText: vi.fn(), insertMention: vi.fn() }),
   useRealtime: () => undefined,
   useRpc: () => mocks.rpc,
 }));
@@ -67,6 +68,42 @@ afterEach(() => {
 });
 
 describe("Meetings Mac recorder choice", () => {
+  it("keeps opened memos visible when switching and shows a loading pad for uncached meetings", async () => {
+    const first = { sessionId: "first", title: "First", startedAt: "2026-09-27T00:00:00Z",
+      inputFinalized: true, notePath: null, threadIds: [], distilledMemoRevision: null };
+    const second = { ...first, sessionId: "second", title: "Second" };
+    mocks.meetings = [first, second];
+    const originalCall = mocks.call.getMockImplementation()!;
+    let finishSecond!: () => void;
+    mocks.call.mockImplementation(async (method: string, input?: { sessionId?: string; text?: string }) => {
+      if (method === "availableProjects") return { projects: [{ id: "proj-mac", name: "Mac" }] };
+      if (method === "availableWorkspaces") return { workspaces: [{ id: "obsidian", name: "Obsidian" }], autoSelected: false };
+      if (method === "getProjectPanelState") return { state: "ready", sessionId: null };
+      if (method === "listWorkspaceMeetings") return { ok: true, meetings: [first, second] };
+      if (method === "readWorkspaceMeeting") {
+        if (input?.sessionId === "second") return new Promise((resolve) => {
+          finishSecond = () => resolve({ ok: true, meeting: { ...second, notepad: { revision: "rev", text: "Second memo" } } });
+        });
+        return { ok: true, meeting: { ...first, notepad: { revision: "rev", text: "First memo" } } };
+      }
+      throw new Error(`Unexpected RPC ${method}`);
+    });
+    const view = render(<MeetingsPage subPath="proj-mac/first" />);
+    await screen.findByDisplayValue("First memo");
+    fireEvent.click(screen.getByRole("button", { name: "Second" }));
+    await screen.findByRole("heading", { name: "Second" });
+    expect(screen.getByText("Opening memo…")).toBeDefined();
+    expect(screen.queryByText("No meetings yet")).toBeNull();
+    finishSecond();
+    await screen.findByDisplayValue("Second memo");
+    fireEvent.click(screen.getByRole("button", { name: "First" }));
+    await screen.findByDisplayValue("First memo");
+    view.unmount();
+    const reopened = render(<MeetingsPage subPath="proj-mac/first" />);
+    expect(screen.getByDisplayValue("First memo")).toBeDefined();
+    reopened.unmount();
+    mocks.call.mockImplementation(originalCall);
+  });
   it("keeps Connect visible and does not silently choose the browser mic after a loopback failure", async () => {
     mocks.connectMenu.mockRejectedValueOnce(new TypeError("Failed to fetch"));
     const confirm = vi.spyOn(window, "confirm");

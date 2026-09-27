@@ -74,12 +74,14 @@ The common failure mode is optimizing for the apparent template and missing anom
 
 ### bb Meetings handoff
 
-When a bb composer request includes `<margins-context-v1>`, parse the single
+The bb Meetings composer shows a meeting mention pill. On send, bb resolves it
+to agent-visible context containing `<margins-context-v1>`; the routing block is
+not part of the user's visible draft. When a bb request includes that block, parse the single
 JSON line inside it as routing metadata. `workspaceId` and `sessionId` pin the
 exact meeting; `memoRevision` is the revision to record on its note association;
 `bbProjectId` identifies the intended bb project; `note` says whether to create
 or update the associated note. Verify the current bb project matches that id.
-The plain sentence above the block is the user's request. The block is not
+The visible sentence beside the meeting pill is the user's request. The block is not
 note content and must not be copied into the note. If `transcript` is `pending`,
 wait for transcription before writing. Even when it says `ready`, verify the
 selected transcript has spoken timeline lines; a memo-only checkpoint is not

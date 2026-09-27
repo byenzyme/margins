@@ -1,6 +1,7 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
+import { parseMeetingMentionId } from "./meeting-mention.js";
 import {
   PANEL_STATE_SCHEMA,
   captureRecordSchema,
@@ -512,7 +513,23 @@ export default function marginsPlugin(bb: BbPluginApi) {
   bb.ui.registerMentionProvider({
     id: "margins", label: "Margins", triggers: ["@"],
     async search() { return []; },
-    async resolve() { throw new Error("Live Margins context is not available until the project recorder has produced a transcript."); },
+    async resolve(itemId) {
+      const pinned = parseMeetingMentionId(itemId);
+      const target = await targetForProject(pinned.projectId);
+      const result = await callHost(target, "connectedNoteContext", { target, recordingId: pinned.sessionId });
+      if (!result.ok) throw new Error("Meeting unavailable. Open Make note again.");
+      const current = result.context;
+      if (current.workspaceId !== pinned.workspaceId || current.sessionId !== pinned.sessionId
+        || current.memo.revision !== pinned.memoRevision
+        || Boolean(current.noteAssociation) !== (pinned.note === "update")) {
+        throw new Error("This meeting changed. Open Make note again to use the latest memo.");
+      }
+      return { context: `<margins-context-v1>\n${JSON.stringify({
+        workspaceId: pinned.workspaceId, sessionId: pinned.sessionId, memoRevision: pinned.memoRevision,
+        bbProjectId: pinned.projectId, transcript: current.transcript.available ? "ready" : "pending",
+        note: pinned.note,
+      })}\n</margins-context-v1>` };
+    },
   });
   bb.agents.configure((context) => context.project.kind === "personal" ? { tools: [], skills: [] } : {
     tools: [], skills: ["watermark", "workspace-setup"],

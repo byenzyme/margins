@@ -126,11 +126,14 @@ describe("Margins recording panel", () => {
     await waitFor(() => expect(slot.inspection.navigateCalls.some((call) => call.method === "toCompose")).toBe(true));
     const compose = slot.inspection.navigateCalls.find((call) => call.method === "toCompose");
     expect(compose).toMatchObject({ options: { focusPrompt: true } });
-    const prompt = (compose as { options: { initialPrompt: string } }).options.initialPrompt;
-    expect(prompt).toMatch(/^Make a connected note from my Review meeting on [A-Za-z]+ \d+, \d{4}\.\n\n<margins-context-v1>\n/);
-    const context = JSON.parse(prompt.match(/<margins-context-v1>\n(.+)\n<\/margins-context-v1>/)?.[1] || "null");
-    expect(context).toEqual({ workspaceId: "vault", sessionId: "ended-2", memoRevision: "memo-v3",
-      bbProjectId: "project-1", transcript: "pending", note: "create" });
+    expect(compose).toMatchObject({ options: { focusPrompt: true } });
+    expect((compose as { options: { initialPrompt?: string } }).options.initialPrompt).toBeUndefined();
+    expect(slot.inspection.composer.text).toBe("Make a connected note from this meeting: Review ");
+    expect(slot.inspection.composer.text).not.toContain("margins-context-v1");
+    const mention = slot.inspection.composer.mentions[0]!;
+    expect(mention).toMatchObject({ provider: "margins", label: "Review" });
+    expect(JSON.parse(decodeURIComponent(mention.id))).toEqual({ projectId: "project-1", workspaceId: "vault",
+      sessionId: "ended-2", memoRevision: "memo-v3", note: "create" });
     expect(slot.inspection.rpcCalls.some((call) => call.method === "transcribePinnedSession")).toBe(true);
     expect(slot.inspection.rpcCalls.some((call) => call.method === "threads.spawn")).toBe(false);
     slot.lifecycle.unmount();
@@ -162,9 +165,10 @@ describe("Margins recording panel", () => {
     await waitFor(() => expect(slot.inspection.navigateCalls.some((call) => call.method === "toCompose")).toBe(true));
     expect(slot.inspection.rpcCalls).toContainEqual(expect.objectContaining({ method: "saveWorkspaceMemo",
       input: expect.objectContaining({ expectedRevision: "memo-v1", text: "Revised decision" }) }));
-    expect(JSON.stringify(slot.inspection.navigateCalls)).toContain("memo-v2");
-    expect(JSON.stringify(slot.inspection.navigateCalls)).toContain("Update the connected note from my Review meeting");
-    expect(JSON.stringify(slot.inspection.navigateCalls)).toContain('\\"note\\":\\"update\\"');
+    expect(slot.inspection.composer.text).toBe("Update the connected note from this meeting: Review ");
+    expect(JSON.parse(decodeURIComponent(slot.inspection.composer.mentions[0]!.id))).toMatchObject({
+      memoRevision: "memo-v2", note: "update",
+    });
     slot.lifecycle.unmount();
   });
 
