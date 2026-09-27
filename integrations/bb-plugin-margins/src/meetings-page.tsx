@@ -91,6 +91,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   const [menuAvailable, setMenuAvailable] = useState(false);
   const [menuBusy, setMenuBusy] = useState(false);
   const [nativeStatus, setNativeStatus] = useState(() => nativeBridgeOwner.status);
+  const [nativeConnectionError, setNativeConnectionError] = useState(() => nativeBridgeOwner.connectionError);
   const [panel, setPanel] = useState<PanelState | null>(null);
   const [meetings, setMeetings] = useState<WorkspaceMeetingSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(() => subPath.split("/")[1] || null);
@@ -117,7 +118,10 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     }).catch((error) => setMessage(String(error)));
   }, [rpc]);
   useEffect(() => { if (projectId) try { sessionStorage.setItem(LAST_PROJECT_KEY, projectId); } catch { /* private browser */ } }, [projectId]);
-  useEffect(() => nativeBridgeOwner.subscribe(() => setNativeStatus(nativeBridgeOwner.status)), []);
+  useEffect(() => nativeBridgeOwner.subscribe(() => {
+    setNativeStatus(nativeBridgeOwner.status);
+    setNativeConnectionError(nativeBridgeOwner.connectionError);
+  }), []);
   useEffect(() => {
     if (client.platform !== "macos" || !navigator.permissions) return;
     let disposed = false;
@@ -291,14 +295,19 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
         if (!nativeBridgeOwner.paired) await connectMenu();
         const authority = await rpc.call("captureAuthority", { projectId });
         if (!authority.ok) throw new Error(authority.error.message);
-        await nativeBridgeOwner.verify(authority);
+        try { await nativeBridgeOwner.verify(authority); }
+        catch {
+          // A Menu restart invalidates the bridge, while sessionStorage still holds its pairing.
+          await connectMenu();
+          await nativeBridgeOwner.verify(authority);
+        }
         try { sessionStorage.setItem(LAST_PROJECT_KEY, projectId); } catch { /* private browser */ }
         await nativeBridgeOwner.control("start");
         await refresh();
         return;
       }
       await startBrowserMicrophone();
-    } catch (error) { setMessage(String(error)); }
+    } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
   }
   async function startBrowserMicrophone() {
     if (!projectId) return;
@@ -404,10 +413,12 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     </aside>
     <section className="margins-meeting-pad">
       {(client.platform === "macos" || menuAvailable) && live.length === 0 && <div className="margins-menu-connect">
-        <span>{nativeBridgeOwner.paired
+        <span>{nativeBridgeOwner.paired && nativeConnectionError
+          ? "Margins Menu disconnected"
+          : nativeBridgeOwner.paired
           ? `Margins Menu connected · ${nativeStatus?.microphoneDeviceName || "Microphone"} + computer audio`
           : "Record with Margins Menu (mic + computer audio)"}</span>
-        {!nativeBridgeOwner.paired && <button disabled={menuBusy || !projectId} onClick={() => void connectMenu().catch(() => undefined)}>Connect</button>}
+        {(!nativeBridgeOwner.paired || nativeConnectionError) && <button disabled={menuBusy || !projectId} onClick={() => void connectMenu().catch(() => undefined)}>{nativeBridgeOwner.paired ? "Reconnect" : "Connect"}</button>}
         {client.platform === "macos" && !nativeBridgeOwner.paired && <button disabled={menuBusy || !projectId} onClick={() => void startBrowserMicrophone()}>Browser mic only</button>}
       </div>}
       {panel?.state === "unavailable" && <div className="margins-meetings-empty">
