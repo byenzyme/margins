@@ -82,6 +82,8 @@ export function MeetingsAccessory() {
 export function MeetingsPage({ subPath }: { subPath: string }) {
   const rpc = useRpc<typeof marginsRpcContract>();
   const navigate = useBbNavigate();
+  const navigateRef = useRef(navigate);
+  navigateRef.current = navigate;
   const context = useBbContext();
   const [projects, setProjects] = useState<Array<{ id: string; name: string }>>([]);
   const [projectId, setProjectId] = useState(() => subPath.split("/")[0] || context.projectId || rememberedProject());
@@ -90,6 +92,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   const [workspaceNotice, setWorkspaceNotice] = useState("");
   const [menuAvailable, setMenuAvailable] = useState(false);
   const [menuBusy, setMenuBusy] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [nativeStatus, setNativeStatus] = useState(() => nativeBridgeOwner.status);
   const [nativeConnectionError, setNativeConnectionError] = useState(() => nativeBridgeOwner.connectionError);
   const [panel, setPanel] = useState<PanelState | null>(null);
@@ -107,6 +110,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   const saveLoop = useRef<Promise<void> | null>(null);
   const memoRef = useRef<HTMLTextAreaElement | null>(null);
   const focusedSession = useRef("");
+  const pendingNativeStart = useRef<{ projectId: string; existing: Set<string> } | null>(null);
   const client = useRef(detectClientCapabilities()).current;
   const selected = meetings.find((item) => item.sessionId === selectedId);
   const handoff = readHandoff(projectId, selectedId);
@@ -148,7 +152,20 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     setPanel(nextPanel);
     if (!listed.ok) { setMessage(listed.error.message); return; }
     setMeetings(listed.meetings);
+    const pending = pendingNativeStart.current;
+    const recordingId = nativeBridgeOwner.status?.sessionId;
+    const newMeeting = pending?.projectId === projectId && recordingId && !pending.existing.has(recordingId)
+      ? listed.meetings.find((item) => item.sessionId === recordingId) : null;
+    if (newMeeting) {
+      pendingNativeStart.current = null;
+      setStarting(false);
+      dirty.current = false; latestDraft.current = ""; revision.current = "";
+      setMeeting(null); setDraft("");
+      navigateRef.current.toPluginPanel("meetings", { subPath: `${projectId}/${newMeeting.sessionId}` });
+    }
     setSelectedId((current) => {
+      if (newMeeting) return newMeeting.sessionId;
+      if (pendingNativeStart.current) return current;
       if (current && listed.meetings.some((item) => item.sessionId === current)) return current;
       return listed.meetings.find((item) => !item.inputFinalized)?.sessionId
         || listed.meetings.find((item) => item.inputFinalized && !item.notePath)?.sessionId
@@ -161,6 +178,27 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     return () => clearInterval(timer);
   }, [refresh]);
   useRealtime("margins-recording", () => void refresh().catch(() => undefined));
+  useEffect(() => {
+    if (!starting) return;
+    let busy = false;
+    const poll = async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        const status = await nativeBridgeOwner.refresh();
+        if (starting && status.state === "needs_attention") {
+          pendingNativeStart.current = null;
+          setStarting(false);
+          setMessage(status.error || "Margins Menu could not start recording.");
+        } else if (status.sessionId) {
+          await refresh();
+        }
+      } catch { /* Regular bridge polling reports connection errors. */ }
+      finally { busy = false; }
+    };
+    const timer = setInterval(() => void poll(), 500);
+    return () => clearInterval(timer);
+  }, [starting, refresh]);
 
   useEffect(() => {
     if (!projectId || !selectedId) { setMeeting(null); return; }
@@ -291,7 +329,11 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     if (live && !window.confirm("Stop and save the current meeting, then start?")) return;
     if (live && !await control("stop", live.sessionId)) return;
     try {
+      await saveMemo();
+      setMessage("");
       if (client.platform === "macos" || menuAvailable) {
+        pendingNativeStart.current = { projectId, existing: new Set(meetings.map((item) => item.sessionId)) };
+        setStarting(true);
         if (!nativeBridgeOwner.paired) await connectMenu();
         const authority = await rpc.call("captureAuthority", { projectId });
         if (!authority.ok) throw new Error(authority.error.message);
@@ -307,7 +349,11 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
         return;
       }
       await startBrowserMicrophone();
-    } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
+    } catch (error) {
+      pendingNativeStart.current = null;
+      setStarting(false);
+      setMessage(error instanceof Error ? error.message : String(error));
+    }
   }
   async function startBrowserMicrophone() {
     if (!projectId) return;
@@ -401,10 +447,10 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   return <main className="margins-meetings-page">
     <aside className="margins-meeting-list">
       <div className="margins-meetings-top"><strong>Meetings</strong>
-        <button className={meetings.length === 0 || live.length > 0 ? "is-reserved" : ""} aria-hidden={meetings.length === 0 || live.length > 0}
-          tabIndex={meetings.length === 0 || live.length > 0 ? -1 : undefined}
-          onClick={() => void start()} disabled={panel?.state === "unavailable" || meetings.length === 0 || live.length > 0}>Start</button></div>
-      <select aria-label="bb project for Meetings" value={projectId} disabled={live.length > 0} onChange={(event) => void chooseProject(event.target.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select>
+        <button className={meetings.length === 0 || live.length > 0 || starting ? "is-reserved" : ""} aria-hidden={meetings.length === 0 || live.length > 0 || starting}
+          tabIndex={meetings.length === 0 || live.length > 0 || starting ? -1 : undefined}
+          onClick={() => void start()} disabled={panel?.state === "unavailable" || meetings.length === 0 || live.length > 0 || starting}>Start</button></div>
+      <select aria-label="bb project for Meetings" value={projectId} disabled={live.length > 0 || starting} onChange={(event) => void chooseProject(event.target.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select>
       {groups.map(([label, items]) => items.length > 0 && <section key={label}>
         <h3>{label}</h3>{items.map((item) => <button key={item.sessionId} className={item.sessionId === selectedId ? "selected" : ""}
           onClick={() => void choose(item.sessionId)}><span>{item.title || meetingListTitle(item.startedAt)}</span>
@@ -429,10 +475,11 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
           : <p>Use the Margins workspace-setup skill to choose where meetings and notes live.</p>}
         {message && <p role="alert">{message}</p>}
       </div>}
-      {panel?.state !== "unavailable" && selected && meeting ? <>
+      {panel?.state !== "unavailable" && starting ? <div className="margins-meetings-empty" role="status"><h2>Starting meeting…</h2><p>Preparing the recorder and opening a new memo pad.</p></div>
+        : panel?.state !== "unavailable" && selected && meeting ? <>
         {workspaceNotice && <p className="margins-workspace-notice">{workspaceNotice}</p>}
         <header><div><div className="margins-meeting-meta"><span className="margins-meeting-kicker">
-          {!selected.inputFinalized ? <><i className={`margins-meeting-state-dot${pausedSession(selected.sessionId) ? " paused" : ""}`} aria-hidden="true" />{pausedSession(selected.sessionId) ? "Paused" : "Recording"}</>
+          {!selected.inputFinalized ? nativeStatus?.sessionId === selected.sessionId && nativeStatus.state === "saving" ? "Saving recording…" : <><i className={`margins-meeting-state-dot${pausedSession(selected.sessionId) ? " paused" : ""}`} aria-hidden="true" />{pausedSession(selected.sessionId) ? "Paused" : "Recording"}</>
             : stopAck?.sessionId === selected.sessionId ? `Saved · ${stopAck.elapsed} recorded`
               : memoChangedSinceNote ? "Memo updated since note" : selected.notePath ? "Note created" : "Ready"}</span>
           {selected.notePath && <nav className="margins-meeting-links" aria-label="Meeting links">

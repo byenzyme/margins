@@ -62,6 +62,7 @@ function RecordingOverlay() {
   const context = useBbContext();
   const [tick, setTick] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [failure, setFailure] = useState(false);
   useEffect(() => {
     const unsubscribe = browserCaptureOwner.subscribe(() => setTick((value) => value + 1));
@@ -77,6 +78,8 @@ function RecordingOverlay() {
   const nativeLive = native?.sessionId && ["recording", "paused", "saving", "needs_attention"].includes(native.state);
   const state = browserCaptureOwner.panel();
   const browserLive = browserCaptureOwner.recordingId && state && ["recording", "paused", "saving", "recovering", "needs_attention"].includes(state.state);
+  const currentSessionId = nativeLive ? native!.sessionId : browserLive ? state!.sessionId || browserCaptureOwner.recordingId : null;
+  useEffect(() => setStopping(false), [currentSessionId]);
   if (!nativeLive && !browserLive) return null;
   const sessionId = nativeLive ? native!.sessionId! : state!.sessionId || browserCaptureOwner.recordingId!;
   const status = nativeLive ? native!.state : state!.state;
@@ -87,6 +90,7 @@ function RecordingOverlay() {
   const elapsed = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
   async function control(action: "pause" | "resume" | "stop") {
     setBusy(true);
+    if (action === "stop") setStopping(true);
     try {
       if (nativeLive) await nativeBridgeOwner.control(action);
       else {
@@ -95,7 +99,7 @@ function RecordingOverlay() {
       }
       if (action === "stop") rememberStopAck(sessionId, elapsed);
       setFailure(false);
-    } catch { setFailure(true); }
+    } catch { setFailure(true); setStopping(false); }
     finally { setBusy(false); }
   }
   return <aside className="margins-overlay" role="status" aria-label="Margins recording">
@@ -103,12 +107,12 @@ function RecordingOverlay() {
       const projectId = (() => { try { return sessionStorage.getItem("margins.bb.meetings-project") || context.projectId || ""; } catch { return context.projectId || ""; } })();
       navigate.toPluginPanel("meetings", { subPath: projectId ? `${projectId}/${sessionId}` : "" });
     }}><MeetingLevelDot level={recording ? nativeLive ? native!.micPeak ?? null : browserCaptureOwner.level : null} paused={paused} />
-      <span>{failure ? "Needs attention" : noAudio ? "No audio — check microphone" : paused ? `Paused · ${elapsed}`
+      <span>{failure || status === "needs_attention" ? "Needs attention" : stopping ? "Saving recording…" : noAudio ? "No audio — check microphone" : paused ? `Paused · ${elapsed}`
         : recording ? nativeLive ? `Recording · ${elapsed}` : `Microphone only · ${elapsed}` : "Saving"}</span></button>
     {noAudio && <span className="margins-overlay-error">{nativeLive
       ? native?.microphoneDeviceName ? `Check ${native.microphoneDeviceName} in Margins Menu` : "Check Margins Menu microphone permission"
       : "Check browser microphone permission"}</span>}
-    {(recording || paused) && <>
+    {(recording || paused) && !stopping && <>
       <button onClick={() => void control(paused ? "resume" : "pause")} disabled={busy} aria-label={paused ? "Resume recording" : "Pause recording"}>{paused ? <Play size={13} /> : <Pause size={13} />}</button>
       <button onClick={() => void control("stop")} disabled={busy} aria-label="Stop and save recording"><Square size={12} /></button>
     </>}

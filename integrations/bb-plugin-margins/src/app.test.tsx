@@ -67,6 +67,20 @@ describe("Margins recording panel", () => {
     overlay.lifecycle.unmount();
   });
 
+  it("shows Saving immediately while a stop request is in flight", async () => {
+    vi.spyOn(browserCaptureOwner, "recordingId", "get").mockReturnValue("rec-owner");
+    vi.spyOn(browserCaptureOwner, "active", "get").mockReturnValue(true);
+    vi.spyOn(browserCaptureOwner, "panel").mockReturnValue(panel());
+    const stop = vi.spyOn(browserCaptureOwner, "stop").mockImplementation(() => new Promise(() => {}));
+    const overlay = renderSlot(app.appOverlays[0]!, {}, { context: { threadId: "thr-other" } });
+    const screen = within(overlay.container);
+    fireEvent.click(screen.getByRole("button", { name: "Stop and save recording" }));
+    expect(stop).toHaveBeenCalledOnce();
+    expect(screen.getByText("Saving recording…")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Stop and save recording" })).toBeNull();
+    overlay.lifecycle.unmount();
+  });
+
   it("switches meeting memo pads without controlling the live capture", async () => {
     const live = { sessionId: "live-1", title: "Planning", startedAt: "2026-09-25T01:00:00Z", inputFinalized: false,
       notepad: { text: "Live memo", revision: "live-r1" }, notePath: null };
