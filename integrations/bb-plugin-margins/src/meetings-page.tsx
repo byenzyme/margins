@@ -93,6 +93,9 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   const [menuAvailable, setMenuAvailable] = useState(false);
   const [menuBusy, setMenuBusy] = useState(false);
   const [starting, setStarting] = useState(false);
+  const [audioStartingId, setAudioStartingId] = useState<string | null>(null);
+  const [startError, setStartError] = useState("");
+  const [pendingDraft, setPendingDraft] = useState("");
   const [nativeStatus, setNativeStatus] = useState(() => nativeBridgeOwner.status);
   const [nativeConnectionError, setNativeConnectionError] = useState(() => nativeBridgeOwner.connectionError);
   const [panel, setPanel] = useState<PanelState | null>(null);
@@ -110,7 +113,8 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   const saveLoop = useRef<Promise<void> | null>(null);
   const memoRef = useRef<HTMLTextAreaElement | null>(null);
   const focusedSession = useRef("");
-  const pendingNativeStart = useRef<{ projectId: string; existing: Set<string> } | null>(null);
+  const pendingDraftText = useRef("");
+  const pendingNativeStart = useRef<{ projectId: string; existing: Set<string>; startedAt: number; accepted: boolean } | null>(null);
   const client = useRef(detectClientCapabilities()).current;
   const selected = meetings.find((item) => item.sessionId === selectedId);
   const handoff = readHandoff(projectId, selectedId);
@@ -154,13 +158,20 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     setMeetings(listed.meetings);
     const pending = pendingNativeStart.current;
     const recordingId = nativeBridgeOwner.status?.sessionId;
-    const newMeeting = pending?.projectId === projectId && recordingId && !pending.existing.has(recordingId)
-      ? listed.meetings.find((item) => item.sessionId === recordingId) : null;
+    const candidates = pending?.projectId === projectId && pending.accepted
+      ? listed.meetings.filter((item) => !pending.existing.has(item.sessionId)
+        && Date.parse(item.startedAt) >= pending.startedAt - 2_000) : [];
+    const expectedId = recordingId && pending && !pending.existing.has(recordingId) ? recordingId : null;
+    const newMeeting = expectedId ? candidates.find((item) => item.sessionId === expectedId)
+      : candidates.length === 1 ? candidates[0] : null;
     if (newMeeting) {
       pendingNativeStart.current = null;
       setStarting(false);
-      dirty.current = false; latestDraft.current = ""; revision.current = "";
-      setMeeting(null); setDraft("");
+      setStartError("");
+      setAudioStartingId(newMeeting.sessionId);
+      const text = pendingDraftText.current;
+      dirty.current = text.length > 0; latestDraft.current = text; revision.current = "";
+      setMeeting(null); setDraft(text);
       navigateRef.current.toPluginPanel("meetings", { subPath: `${projectId}/${newMeeting.sessionId}` });
     }
     setSelectedId((current) => {
@@ -179,26 +190,25 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   }, [refresh]);
   useRealtime("margins-recording", () => void refresh().catch(() => undefined));
   useEffect(() => {
-    if (!starting) return;
+    if (!starting || !pendingNativeStart.current || startError) return;
     let busy = false;
     const poll = async () => {
       if (busy) return;
       busy = true;
       try {
-        const status = await nativeBridgeOwner.refresh();
-        if (starting && status.state === "needs_attention") {
-          pendingNativeStart.current = null;
-          setStarting(false);
-          setMessage(status.error || "Margins Menu could not start recording.");
-        } else if (status.sessionId) {
-          await refresh();
-        }
-      } catch { /* Regular bridge polling reports connection errors. */ }
+        try {
+          const status = await nativeBridgeOwner.refresh();
+          if (pendingNativeStart.current?.accepted && status.state === "needs_attention") {
+            setStartError(status.error || "Margins Menu could not start recording.");
+          }
+        } catch { /* Regular bridge polling reports connection errors. */ }
+        if (pendingNativeStart.current) await refresh().catch(() => undefined);
+      }
       finally { busy = false; }
     };
     const timer = setInterval(() => void poll(), 500);
     return () => clearInterval(timer);
-  }, [starting, refresh]);
+  }, [starting, startError, refresh]);
 
   useEffect(() => {
     if (!projectId || !selectedId) { setMeeting(null); return; }
@@ -206,10 +216,10 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     void rpc.call("readWorkspaceMeeting", { projectId, sessionId: selectedId }).then((result) => {
       if (cancelled || !result.ok || !result.meeting) return;
       setMeeting(result.meeting);
+      revision.current = result.meeting.notepad.revision;
       if (!dirty.current) {
         setDraft(result.meeting.notepad.text);
         latestDraft.current = result.meeting.notepad.text;
-        revision.current = result.meeting.notepad.revision;
       }
     }).catch((error) => { if (!cancelled) setMessage(String(error)); });
     return () => { cancelled = true; };
@@ -285,7 +295,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     if (!dirty.current) return;
     const timer = setTimeout(() => void saveMemo().catch((error) => setMessage(String(error))), 800);
     return () => clearTimeout(timer);
-  }, [draft]);
+  }, [draft, meeting?.sessionId]);
 
   async function choose(sessionId: string) {
     try { await saveMemo(); } catch (error) { setMessage(String(error)); return; }
@@ -328,12 +338,18 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     const live = meetings.find((item) => !item.inputFinalized);
     if (live && !window.confirm("Stop and save the current meeting, then start?")) return;
     if (live && !await control("stop", live.sessionId)) return;
+    const nativeStart = client.platform === "macos" || menuAvailable;
+    const retrying = starting;
+    if (nativeStart) {
+      pendingNativeStart.current = { projectId, existing: new Set(meetings.map((item) => item.sessionId)), startedAt: Date.now(), accepted: false };
+      setStarting(true);
+      setStartError("");
+      if (!retrying) { pendingDraftText.current = ""; setPendingDraft(""); }
+    }
     try {
       await saveMemo();
       setMessage("");
-      if (client.platform === "macos" || menuAvailable) {
-        pendingNativeStart.current = { projectId, existing: new Set(meetings.map((item) => item.sessionId)) };
-        setStarting(true);
+      if (nativeStart) {
         if (!nativeBridgeOwner.paired) await connectMenu();
         const authority = await rpc.call("captureAuthority", { projectId });
         if (!authority.ok) throw new Error(authority.error.message);
@@ -345,14 +361,15 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
         }
         try { sessionStorage.setItem(LAST_PROJECT_KEY, projectId); } catch { /* private browser */ }
         await nativeBridgeOwner.control("start");
+        if (pendingNativeStart.current) pendingNativeStart.current.accepted = true;
         await refresh();
         return;
       }
       await startBrowserMicrophone();
     } catch (error) {
       pendingNativeStart.current = null;
-      setStarting(false);
-      setMessage(error instanceof Error ? error.message : String(error));
+      if (nativeStart) setStartError(error instanceof Error ? error.message : String(error));
+      else setMessage(error instanceof Error ? error.message : String(error));
     }
   }
   async function startBrowserMicrophone() {
@@ -475,11 +492,20 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
           : <p>Use the Margins workspace-setup skill to choose where meetings and notes live.</p>}
         {message && <p role="alert">{message}</p>}
       </div>}
-      {panel?.state !== "unavailable" && starting ? <div className="margins-meetings-empty" role="status"><h2>Starting meeting…</h2><p>Preparing the recorder and opening a new memo pad.</p></div>
+      {panel?.state !== "unavailable" && starting ? <div className="margins-preparing-pad">
+        <header><div><span className="margins-meeting-kicker" role="status">{startError ? "Recording could not start" : nativeStatus?.state === "recording" ? "Recording" : "Preparing audio…"}</span>
+          <h2>New meeting</h2></div>{startError && <button onClick={() => void start()}>Retry Start</button>}</header>
+        {startError && <p role="alert">{startError}</p>}
+        <textarea aria-label="Meeting memo pad" placeholder="Write notes..." autoFocus value={pendingDraft}
+          onChange={(event) => { pendingDraftText.current = event.target.value; setPendingDraft(event.target.value); }} />
+      </div>
         : panel?.state !== "unavailable" && selected && meeting ? <>
         {workspaceNotice && <p className="margins-workspace-notice">{workspaceNotice}</p>}
         <header><div><div className="margins-meeting-meta"><span className="margins-meeting-kicker">
-          {!selected.inputFinalized ? nativeStatus?.sessionId === selected.sessionId && nativeStatus.state === "saving" ? "Saving recording…" : <><i className={`margins-meeting-state-dot${pausedSession(selected.sessionId) ? " paused" : ""}`} aria-hidden="true" />{pausedSession(selected.sessionId) ? "Paused" : "Recording"}</>
+          {!selected.inputFinalized ? nativeStatus?.sessionId === selected.sessionId && nativeStatus.state === "saving" ? "Saving recording…"
+            : audioStartingId === selected.sessionId && nativeStatus?.state === "needs_attention" ? "Audio needs attention"
+              : audioStartingId === selected.sessionId && !(nativeStatus?.sessionId === selected.sessionId && ["recording", "paused"].includes(nativeStatus.state)) ? "Preparing audio…"
+                : <><i className={`margins-meeting-state-dot${pausedSession(selected.sessionId) ? " paused" : ""}`} aria-hidden="true" />{pausedSession(selected.sessionId) ? "Paused" : "Recording"}</>
             : stopAck?.sessionId === selected.sessionId ? `Saved · ${stopAck.elapsed} recorded`
               : memoChangedSinceNote ? "Memo updated since note" : selected.notePath ? "Note created" : "Ready"}</span>
           {selected.notePath && <nav className="margins-meeting-links" aria-label="Meeting links">
@@ -491,6 +517,8 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
           <h2>{meeting.title || `Meeting · ${meetingTime(meeting.startedAt)}`}</h2></div>
           {noteAction && <div className="margins-meeting-next"><button onClick={() => void distill()}>{selected.notePath ? "Update note" : "Make note"} →</button></div>}
         </header>
+        {audioStartingId === selected.sessionId && nativeStatus?.state === "needs_attention" &&
+          <p role="alert">{nativeStatus.error || "Margins Menu could not start recording."}</p>}
         {selected.inputFinalized && <div className="margins-meeting-trail"><span>{shownTranscript === "ready" ? "Transcript ready" : shownTranscript === "pending" ? "Transcribing…" : shownTranscript === "checking" ? "Checking transcript…" : shownTranscript === "failed" ? "Transcript unavailable" : "Transcript not ready"}</span>
           {(shownTranscript === "failed" || shownTranscript === "not_ready") && <button onClick={() => void retryTranscription()}>{shownTranscript === "failed" ? "Retry" : "Transcribe"}</button>}
           {handoff && <span>Note draft opened — press Enter to start</span>}</div>}

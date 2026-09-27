@@ -97,6 +97,17 @@ pub struct RemoteConnection {
 }
 
 impl RemoteConnection {
+    /// Reuse an already verified HTTP destination without repeating discovery
+    /// when a paired recorder starts. SSH connections own a tunnel and must be
+    /// established separately for each capture.
+    pub fn reusable_http(&self) -> Option<Self> {
+        self.tunnel.is_none().then(|| Self {
+            client: self.client.clone(),
+            capabilities: self.capabilities.clone(),
+            tunnel: None,
+        })
+    }
+
     pub fn connect(remote: &str, workspace_id: &str, https_token: Option<&str>) -> Result<Self> {
         match RemoteEndpoint::parse(remote)? {
             RemoteEndpoint::Https(url) | RemoteEndpoint::LoopbackHttp(url) => {

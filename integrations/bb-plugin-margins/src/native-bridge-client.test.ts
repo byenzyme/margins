@@ -56,4 +56,19 @@ describe("Mac PWA bridge destination", () => {
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/v1/start"))).toBe(false);
     owner.forget();
   });
+
+  it("treats an accepted asynchronous Start as accepted if the next status fetch fails", async () => {
+    const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+      if (String(url).endsWith("/v1/status")) throw new TypeError("Failed to fetch");
+      return new Response(JSON.stringify(String(url).endsWith("/v1/start") ? {} : {
+        token: "local-secret", instanceId: "linux-one", workspaceId: "practice", status: ready,
+      }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const owner = new NativeBridgeOwner();
+    await owner.pair("one-time-code", { instanceId: "linux-one", workspaceId: "practice" });
+    await expect(owner.control("start")).resolves.toBeUndefined();
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/v1/start"))).toHaveLength(1);
+    owner.forget();
+  });
 });

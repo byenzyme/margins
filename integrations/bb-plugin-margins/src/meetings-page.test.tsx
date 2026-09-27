@@ -15,7 +15,7 @@ const mocks = vi.hoisted(() => ({
     microphoneSamples: number; micPeak: number } | null, connectionError: null as string | null },
   probeMenu: vi.fn(async () => false),
   startBrowser: vi.fn(),
-  call: vi.fn(async (method: string, input?: { sessionId?: string }) => {
+  call: vi.fn(async (method: string, input?: { sessionId?: string; text?: string }) => {
     if (method === "availableProjects") return { projects: [{ id: "proj-mac", name: "Mac" }] };
     if (method === "availableWorkspaces") return { workspaces: [{ id: "obsidian", name: "Obsidian" }], autoSelected: false };
     if (method === "getProjectPanelState") return { state: "ready", sessionId: null };
@@ -23,6 +23,10 @@ const mocks = vi.hoisted(() => ({
     if (method === "readWorkspaceMeeting") {
       const item = mocks.meetings.find((meeting) => meeting.sessionId === input?.sessionId);
       return { ok: true, meeting: item && { ...item, notepad: { revision: "rev", text: "" } } };
+    }
+    if (method === "saveWorkspaceMemo") {
+      const item = mocks.meetings.find((meeting) => meeting.sessionId === input?.sessionId);
+      return { ok: true, meeting: item && { ...item, notepad: { revision: "rev2", text: input?.text || "" } } };
     }
     if (method === "captureAuthority") return { ok: true, instanceId: "one", workspaceId: "obsidian" };
     if (method === "issueMenuGrant") return {
@@ -91,25 +95,52 @@ describe("Meetings Mac recorder choice", () => {
     view.unmount();
   });
 
-  it("opens the new memo pad once the native recorder creates its session", async () => {
+  it("opens an editable pad immediately and binds it before native audio is ready", async () => {
     const oldMeeting = { sessionId: "old", title: "Earlier meeting", startedAt: "2026-09-27T00:00:00Z",
       inputFinalized: true, notePath: null, threadIds: [], distilledMemoRevision: null };
-    const newMeeting = { ...oldMeeting, sessionId: "new", title: "New meeting", inputFinalized: false };
+    const newMeeting = { ...oldMeeting, sessionId: "new", title: "New meeting", startedAt: new Date().toISOString(), inputFinalized: false };
     mocks.meetings = [oldMeeting];
     mocks.native.paired = true;
     mocks.refreshNative.mockImplementation(async () => mocks.native.status);
+    let finishVerify!: () => void;
+    mocks.verify.mockImplementationOnce(() => new Promise<void>((resolve) => { finishVerify = resolve; }));
     const view = render(<MeetingsPage subPath="proj-mac/old" />);
     await screen.findByRole("heading", { name: "Earlier meeting" });
     fireEvent.click(screen.getByRole("button", { name: "Start" }));
-    await screen.findByRole("heading", { name: "Starting meeting…" });
+    await screen.findByRole("heading", { name: "New meeting" });
+    fireEvent.change(screen.getByRole("textbox", { name: "Meeting memo pad" }), { target: { value: "Remember the decision" } });
+    expect(mocks.control).not.toHaveBeenCalled();
+    finishVerify();
     await waitFor(() => expect(mocks.control).toHaveBeenCalledWith("start"));
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(screen.queryByRole("heading", { name: "Earlier meeting" })).toBeNull();
     mocks.meetings = [newMeeting, oldMeeting];
-    mocks.native.status = { state: "recording", sessionId: "new", microphoneSamples: 16000, micPeak: 0.1 };
+    mocks.native.status = { state: "getting_ready", sessionId: null, microphoneSamples: 0, micPeak: 0 };
     await screen.findByRole("heading", { name: "New meeting" });
-    expect(screen.getByRole("textbox", { name: "Meeting memo pad" })).toHaveProperty("value", "");
+    await waitFor(() => expect(mocks.navigate).toHaveBeenCalledWith("meetings", { subPath: "proj-mac/new" }));
+    await waitFor(() => expect(mocks.call).toHaveBeenCalledWith("saveWorkspaceMemo", expect.objectContaining({
+      sessionId: "new", expectedRevision: "rev", text: "Remember the decision",
+    })));
+    expect(screen.getByRole("textbox", { name: "Meeting memo pad" })).toHaveProperty("value", "Remember the decision");
     expect(mocks.navigate).toHaveBeenCalledWith("meetings", { subPath: "proj-mac/new" });
+    view.unmount();
+  });
+
+  it("keeps the unsent memo visible when native Start fails", async () => {
+    mocks.native.paired = true;
+    let failStart!: () => void;
+    mocks.control.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => {
+      failStart = () => reject(new Error("Microphone unavailable"));
+    }));
+    const view = render(<MeetingsPage subPath="proj-mac" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Start meeting" }));
+    const pad = await screen.findByRole("textbox", { name: "Meeting memo pad" });
+    fireEvent.change(pad, { target: { value: "Keep this thought" } });
+    await waitFor(() => expect(mocks.control).toHaveBeenCalledWith("start"));
+    failStart();
+    await screen.findByRole("alert", { name: "" });
+    expect(screen.getByRole("textbox", { name: "Meeting memo pad" })).toHaveProperty("value", "Keep this thought");
+    expect(screen.getByRole("button", { name: "Retry Start" })).toBeDefined();
     view.unmount();
   });
 });

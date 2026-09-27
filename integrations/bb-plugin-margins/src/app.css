@@ -61,6 +61,9 @@
 .margins-meeting-list section button span { max-width:100%; overflow:hidden; font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
 .margins-meeting-list section button small { color:var(--muted-foreground); font-size:10px; }
 .margins-meeting-pad { display:flex; min-width:0; min-height:70vh; flex-direction:column; padding:24px clamp(20px,5vw,64px); }
+.margins-preparing-pad { display:flex; flex:1; flex-direction:column; }
+.margins-preparing-pad header button { border:1px solid var(--border); border-radius:8px; padding:7px 10px; background:transparent; color:var(--foreground); font:inherit; font-size:12px; cursor:pointer; }
+.margins-preparing-pad p[role="alert"] { color:var(--destructive); font-size:12px; }
 .margins-menu-connect { display:flex; flex-wrap:wrap; align-items:center; gap:6px 12px; margin-bottom:14px; color:var(--muted-foreground); font-size:12px; }
 .margins-menu-connect button { border:0; padding:0; background:transparent; color:var(--foreground); font:inherit; text-decoration:underline; text-underline-offset:2px; cursor:pointer; }
 .margins-menu-connect button:last-child:not(:first-of-type) { color:var(--muted-foreground); }

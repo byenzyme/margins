@@ -293,6 +293,8 @@ where
                 None,
                 None,
                 None,
+                None,
+                false,
             ) {
                 Ok(()) => 0,
                 Err(error) => {
@@ -1948,6 +1950,8 @@ fn run_remote_native_capture(
     controller: Option<native_bridge::CaptureController>,
     local_audio_dir: Option<&Path>,
     mic_device_name: Option<&str>,
+    prepared_connection: Option<margins_workflows::remote_workspace::RemoteConnection>,
+    permissions_verified: bool,
 ) -> Result<()> {
     use margins_meeting_protocol::{
         SegmentCloseReasonV1, SessionFinalizeReasonV1, WorkspaceAttachV1, WorkspaceMemoLineV1,
@@ -1960,7 +1964,9 @@ fn run_remote_native_capture(
         NativeRemoteLane, NativeRemoteTransfer, RemoteConnection, NATIVE_REMOTE_RATE_HZ,
     };
 
-    ensure_capture_permissions(&NativeCapturePermissionSource)?;
+    if !permissions_verified {
+        ensure_capture_permissions(&NativeCapturePermissionSource)?;
+    }
     let mut selected_device = mic_device_name
         .map(|name| {
             crate::recorder::list_input_devices()
@@ -1971,7 +1977,10 @@ fn run_remote_native_capture(
         })
         .transpose()?;
     let token = std::env::var("MARGINS_REMOTE_TOKEN").ok();
-    let connection = RemoteConnection::connect(remote, workspace_id, token.as_deref())?;
+    let connection = match prepared_connection {
+        Some(connection) => connection,
+        None => RemoteConnection::connect(remote, workspace_id, token.as_deref())?,
+    };
     let capabilities = &connection.capabilities;
     let opus_supported = capabilities.capture_formats.iter().any(|format| {
         format.codec == margins_meeting_protocol::AudioCodecV1::Opus

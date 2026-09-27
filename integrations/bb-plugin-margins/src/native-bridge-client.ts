@@ -154,7 +154,11 @@ export class NativeBridgeOwner {
   async control(action: "start" | "pause" | "resume" | "stop", title?: string) {
     if (!this.pairing) throw new Error("Pair the Mac recorder first.");
     await bridgeRequest(this.pairing.port, `/v1/${action}`, action === "start" ? { title } : {}, this.pairing.token);
-    await this.refresh();
+    if (action === "start") {
+      // The 202 response accepts an asynchronous start. A transient status
+      // fetch must not turn that accepted request into a second Start attempt.
+      void this.refresh().catch(() => undefined);
+    } else await this.refresh();
   }
   forget() {
     if (this.currentStatus && ["recording", "paused", "saving", "getting_ready"].includes(this.currentStatus.state)) {

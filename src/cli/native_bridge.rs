@@ -185,6 +185,7 @@ struct Bridge {
     menu_origin: Option<String>,
     mic_device_name: Option<String>,
     local_audio_dir: Option<std::path::PathBuf>,
+    prepared_connection: Option<margins_workflows::remote_workspace::RemoteConnection>,
     pair_code: Option<String>,
     pair_code_file: Option<std::path::PathBuf>,
     token: Option<String>,
@@ -304,6 +305,7 @@ fn run_bridge(args: &[OsString]) -> Result<()> {
         menu_origin,
         mic_device_name,
         local_audio_dir,
+        prepared_connection: Some(connection),
         pair_code: Some(pair_code),
         pair_code_file,
         token: None,
@@ -535,6 +537,10 @@ fn handle_stream(mut stream: TcpStream, bridge: &mut Bridge) -> Result<()> {
                 let workspace = bridge.workspace.clone();
                 let mic_device_name = bridge.mic_device_name.clone();
                 let local_audio_dir = bridge.local_audio_dir.clone();
+                let prepared_connection = bridge
+                    .prepared_connection
+                    .as_ref()
+                    .and_then(|connection| connection.reusable_http());
                 let bridge_status = bridge.status.clone();
                 std::thread::Builder::new()
                     .name("margins-native-bridge-capture".into())
@@ -551,6 +557,8 @@ fn handle_stream(mut stream: TcpStream, bridge: &mut Bridge) -> Result<()> {
                                     Some(controller),
                                     local_audio_dir.as_deref(),
                                     mic_device_name.as_deref(),
+                                    prepared_connection,
+                                    true,
                                 )
                             });
                         let mut state = bridge_status.lock().unwrap();
@@ -757,6 +765,7 @@ mod tests {
             menu_origin: Some("http://127.0.0.1:18766".into()),
             mic_device_name: None,
             local_audio_dir: None,
+            prepared_connection: None,
             pair_code: Some("secret-code".into()),
             pair_code_file: None,
             token: None,
