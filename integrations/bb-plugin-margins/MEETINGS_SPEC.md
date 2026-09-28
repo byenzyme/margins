@@ -73,8 +73,9 @@ Consequences:
   provenance; all projects resolving to the same Workspace see its meetings.
 - Keep the transcript status and View/Transcribe/Retry with **Make note →** in
   one action area below the memo. The note opens as a new thread in the current
-  bb project, which is shown beside the action. The recording's starting
-  project remains provenance and does not force the distillation thread there.
+  bb project when one is selected; otherwise say "Choose project in composer"
+  and let the composer ask. The recording's starting project remains
+  provenance and does not force the distillation thread there.
 - **More** contains Archive and Discard. Archive is reversible and hides the
   meeting from the recent groups without changing its source data. Discard
   requires explicit confirmation and permanently removes the recording,

@@ -251,6 +251,10 @@ try {
   await until("Meetings page", () => browserEval('!!document.querySelector(".margins-meetings-page")'));
   shot("01-workspace.png");
 
+  // The fake microphone is this harness's deliberate browser-only choice.
+  // A modal confirm can block headless Chrome's renderer before CDP can
+  // acknowledge the click, so persist the same one-time choice first.
+  browserEval('sessionStorage.setItem("margins.bb.browser-mic-confirmed", "yes"); true');
   browser(["find", "role", "button", "click", "--name", "Start meeting", "--exact"]);
   const startState = await until("Recording", () => browserEval(`document.querySelector('button[aria-label="Pause recording"]') ? 'recording' : document.querySelector('.margins-meetings-empty [role="alert"]')?.textContent || null`), 60_000);
   assert.equal(startState, "recording", `Start failed: ${startState}`);
@@ -276,7 +280,7 @@ try {
   browser(["click", `a[aria-label="Open E2E thread two"]`]);
   await until("thread composer submit", () => browserEval(`!!document.querySelector('button[aria-label="Submit (Enter)"]')`));
   assert(browserEval(`!!document.querySelector('button[aria-label="Pause recording"]')`));
-  assert(browserEval(`document.querySelector('.margins-overlay')?.innerText.includes('Recording')`));
+  assert(browserEval(`document.querySelector('.margins-overlay')?.innerText.includes('Microphone only')`));
   const composerClearance = browserEval(`(() => {
     const pill = document.querySelector('.margins-overlay')?.getBoundingClientRect();
     const submit = document.querySelector('button[aria-label="Submit (Enter)"]')?.getBoundingClientRect();
@@ -323,18 +327,19 @@ try {
   shot("06-revised.png");
 
   browser(["find", "role", "button", "click", "--name", "Make note →", "--exact"]);
-  await until("Composer", () => browserEval(`document.querySelector('[role="textbox"]')?.textContent?.includes('<margins-context-v1>')`), 120_000);
+  await until("Composer", () => browserEval(`!!document.querySelector('[role="textbox"] [data-prompt-mention-resource]')`), 120_000);
   const prompt = browserEval(`document.querySelector('[role="textbox"]')?.innerText || ''`);
-  const plainPrompt = prompt.split("<margins-context-v1>")[0].trim();
-  assert.match(plainPrompt, /^Make a connected note from my meeting on [A-Za-z]+ \d+, \d{4}\.$/);
-  const contextMatch = prompt.match(/<margins-context-v1>\s*(\{[^\n]+\})\s*<\/margins-context-v1>/);
-  assert(contextMatch, "Composer lacks a delimited Margins context block");
-  const composerContext = JSON.parse(contextMatch[1]);
+  const plainPrompt = prompt.split("\n")[0].trim();
+  assert.equal(plainPrompt, "Make a connected note from this meeting:");
+  const mention = browserEval(`JSON.parse(document.querySelector('[role="textbox"] [data-prompt-mention-resource]')?.getAttribute('data-prompt-mention-resource') || 'null')`);
+  assert.equal(mention?.pluginId, "margins", "Composer lacks a Margins meeting pill");
+  assert.match(mention?.label || "", /^Meeting · \d{1,2}:\d{2} [AP]M$/);
+  assert.match(mention?.itemId || "", /^margins:/);
+  const composerContext = JSON.parse(decodeURIComponent(mention.itemId.slice("margins:".length)));
   assert.deepEqual({ workspaceId: composerContext.workspaceId, sessionId: composerContext.sessionId,
-    bbProjectId: composerContext.bbProjectId, note: composerContext.note },
-  { workspaceId: "e2e", sessionId: "meeting", bbProjectId: projectId, note: "create" });
+    projectId: composerContext.projectId, note: composerContext.note },
+  { workspaceId: "e2e", sessionId: "meeting", projectId, note: "create" });
   assert.match(composerContext.memoRevision, /^v\d+-/);
-  assert.equal(composerContext.transcript, "ready");
   assert(!/\(\d{3}\)/.test(prompt), "Composer draft includes a raw HTTP error");
   const transcript = await until("Parakeet transcript", () => {
     const result = jsonCommand(marginsBin, ["--workspace", "e2e", "transcript", "latest", "--format", "json"], { env: marginsEnv });

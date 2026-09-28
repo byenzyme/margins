@@ -644,7 +644,9 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
           {memoChangedSinceNote && <span>Note uses an earlier memo revision</span>}
           {selected.inputFinalized && <div className="margins-meeting-next">
             {noteAction && <button onClick={() => void distill()}>{selected.notePath ? "Update note" : "Make note"} →</button>}
-            {noteAction && <span>New thread in {projects.find((item) => item.id === context.projectId)?.name || "current bb project"}</span>}
+            {noteAction && <span>{context.projectId
+              ? `New thread in ${projects.find((item) => item.id === context.projectId)?.name || "current project"}`
+              : "Choose project in composer"}</span>}
             <div className="margins-meeting-more"><button className="margins-inline-action" aria-expanded={moreOpen} onClick={() => setMoreOpen(!moreOpen)}>More</button>
               {moreOpen && <div className="margins-meeting-more-menu">
                 <button disabled={actionBusy} onClick={() => void archiveMeeting(!selected.archived)}>{selected.archived ? "Restore to recent" : "Archive"}</button>
