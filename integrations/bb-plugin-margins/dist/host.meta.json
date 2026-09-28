@@ -5,8 +5,8 @@
   "pluginId": "margins",
   "pluginVersion": "0.1.0",
   "builtWith": {
-    "bbVersion": "0.41.0",
+    "bbVersion": "0.43.1",
     "pluginSdkVersion": "0.4.97"
   },
-  "artifactDigest": "70e8c34b74d0c0cd23699d7ae9aae0bb033d24c9ead52c958ab4f6d8d2a80eee"
+  "artifactDigest": "4e3999ed74f5e64343ba0fd2d92381f15d09c34af4417b158432bf49fe677af9"
 }

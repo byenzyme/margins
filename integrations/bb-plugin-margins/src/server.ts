@@ -168,6 +168,11 @@ export default function marginsPlugin(bb: BbPluginApi) {
     try {
       return await host.call(method as never, input as never, { hostId: target.hostId });
     } catch (cause) {
+      // These methods return plain values, not HostResult. Returning an error
+      // envelope here violates their RPC output schemas and hides the host
+      // failure behind an unrelated validation error.
+      if (method === "workspaceOptions" || method === "workspacePaths"
+        || method === "previewWorkspaceSetup" || method === "applyWorkspaceSetup") throw cause;
       return { ok: false, error: { code: "project_machine_offline", message: "Margins could not reach this bb project's machine. Audio already received there is safe; reconnect the project machine and try again.", retryable: true } };
     }
   }

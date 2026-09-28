@@ -19497,6 +19497,7 @@ function marginsPlugin(bb) {
     try {
       return await host.call(method, input2, { hostId: target.hostId });
     } catch (cause) {
+      if (method === "workspaceOptions" || method === "workspacePaths" || method === "previewWorkspaceSetup" || method === "applyWorkspaceSetup") throw cause;
       return { ok: false, error: { code: "project_machine_offline", message: "Margins could not reach this bb project's machine. Audio already received there is safe; reconnect the project machine and try again.", retryable: true } };
     }
   }

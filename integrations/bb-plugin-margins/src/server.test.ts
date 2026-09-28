@@ -7,7 +7,7 @@ const browser = { clientId: "client-1", platform: "other" as const, secureContex
 const mac = { ...browser, platform: "macos" as const };
 const snapshot = { recordingId: "rec-1", sessionId: "rec-1", status: "recording" as const, notepad: { text: "", revision: "v1" } };
 
-function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: string; meetingList?: boolean; relay?: boolean } = {}) {
+function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: string; meetingList?: boolean; relay?: boolean; workspaceHostFails?: boolean } = {}) {
   let stopped = false;
   let captureStatus: "recording" | "paused" = "recording";
   const host = createFakePluginHost({
@@ -24,6 +24,7 @@ function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: strin
       }) as never },
     },
     experimental_callHostRpc: ({ method }) => {
+      if (method === "workspaceOptions" && options.workspaceHostFails) throw new Error("Host artifact unavailable");
       if (method === "workspaceOptions") return { defaultWorkspaceId: "workspace-1", autoSelected: false,
         workspaces: [{ id: "workspace-1", name: "Notes" }, { id: "practice", name: "Practice" }] };
       if (method === "listWorkspaceMeetings" && options.meetingList) return { ok: true, meetings: [{
@@ -56,6 +57,11 @@ function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: strin
 }
 
 describe("Margins project recording server", () => {
+  it("reports a Workspace host failure without masking it as RPC output validation", async () => {
+    const host = harness({ workspaceHostFails: true });
+    await expect(host.harness.behavior.callRpc("availableWorkspaces", { projectId: "proj-1" }))
+      .rejects.toThrow("Host artifact unavailable");
+  });
   it("resolves a pinned meeting pill to hidden agent context and rejects a stale memo", async () => {
     const host = harness();
     const provider = host.harness.registrations.mentionProviders.find((item) => item.id === "margins")!;
