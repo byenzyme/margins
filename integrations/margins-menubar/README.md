@@ -37,6 +37,16 @@ The menu app controls recording but does not acquire audio permission itself.
 The signed capture process needs its own Microphone and System Audio grants.
 The menu does not run a second `margins transcribe` pass after Stop.
 
+For bb-connected recording, macOS lists the bundled **Margins Capture** helper
+under System Settings → Privacy & Security → Microphone after its first access
+request. **On this Mac** uses the separate **Margins Live** helper. Neither
+helper should be dragged into the Settings list. When packaging a Developer ID
+build, run `sign-bundled-recorders.sh '/path/to/Margins Menu.app' '<Developer ID identity>'`
+after bundling both helpers and before notarization. It signs the helpers with
+the Hardened Runtime microphone entitlement and reseals the Menu bundle. Without
+that entitlement, the helper can report denied access without ever appearing
+in the Microphone list.
+
 ## Scoped Mac build
 
 Run `./build-and-run.sh` to build and launch the menu-only app. Set
