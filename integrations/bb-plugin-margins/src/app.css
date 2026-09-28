@@ -108,6 +108,11 @@
 .margins-meetings-empty p { max-width:460px; margin:0; color:var(--muted-foreground); font-size:13px; }
 .margins-meetings-empty div { display:flex; gap:7px; }
 .margins-meetings-empty select { border:1px solid var(--border); border-radius:7px; padding:7px 9px; background:var(--background); color:var(--foreground); }
+.margins-meetings-empty .margins-setup,.margins-meetings-empty .margins-setup-preview { display:flex; flex-direction:column; align-items:flex-start; gap:10px; width:min(100%,520px); }
+.margins-setup label { display:flex; flex-direction:column; gap:4px; width:100%; color:var(--muted-foreground); font-size:12px; }
+.margins-setup input { box-sizing:border-box; width:100%; border:1px solid var(--border); border-radius:7px; padding:8px 10px; background:var(--background); color:var(--foreground); }
+.margins-setup-preview details { max-width:100%; font-size:12px; color:var(--muted-foreground); }
+.margins-setup-preview pre { max-height:180px; max-width:500px; overflow:auto; white-space:pre-wrap; font-size:11px; }
 .margins-workspace-notice { color:var(--muted-foreground); font-size:12px; margin:0 0 8px; }
 @media (max-width:700px) { .margins-meetings-page { grid-template-columns:120px minmax(0,1fr); } .margins-meeting-list { padding:12px 5px; } .margins-meeting-pad { padding:20px; } }
 @media (max-width: 480px) { .margins-panel { min-height:240px; padding:12px; } .margins-notepad { min-height:170px; } }

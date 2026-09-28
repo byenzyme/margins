@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFile as execFileCallback, spawn, type ChildProcess } from "node:child_process";
-import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
+import { access, lstat, mkdir, readFile, realpath } from "node:fs/promises";
 import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
@@ -61,7 +61,7 @@ export function workspaceInstanceDir(dataDir: string, workspaceId: string) {
   return join(dataDir, "workspace-servers", workspaceId);
 }
 
-function marginsCli(): string {
+export function marginsCli(): string {
   const configured = process.env.MARGINS_CLI_BIN?.trim();
   if (configured && isAbsolute(configured)) return configured;
   const installed = join(homedir(), ".local", "bin", "margins");
@@ -96,6 +96,10 @@ export function marginsHome(): string {
   return process.env.MARGINS_HOME?.trim() || join(homedir(), ".margins");
 }
 
+export function pendingWorkspaceSetupMarker(workspaceId: string): string {
+  return join(marginsHome(), "pending-workspace-setup", workspaceId);
+}
+
 export async function workspaceOptions(): Promise<{ defaultWorkspaceId: string | null; workspaces: Array<{ id: string; name: string | null }>; autoSelected: boolean }> {
   const binary = marginsCli();
   const env = { ...process.env, MARGINS_HOME: marginsHome() };
@@ -105,8 +109,12 @@ export async function workspaceOptions(): Promise<{ defaultWorkspaceId: string |
     && typeof item.id === "string" && (item.name === null || typeof item.name === "string"))) {
     throw new Error("Margins Workspace list is unavailable.");
   }
-  const workspaces = listing.workspaces as Array<{ id: string; name: string | null }>;
+  const listed = listing.workspaces as Array<{ id: string; name: string | null }>;
+  const pending = await Promise.all(listed.map(async (item) =>
+    await access(pendingWorkspaceSetupMarker(item.id)).then(() => true, () => false)));
+  const workspaces = listed.filter((_item, index) => !pending[index]);
   let defaultWorkspaceId = typeof listing.default_workspace === "string" ? listing.default_workspace : null;
+  if (defaultWorkspaceId && !workspaces.some((item) => item.id === defaultWorkspaceId)) defaultWorkspaceId = null;
   let autoSelected = false;
   if (!defaultWorkspaceId && workspaces.length === 1) {
     const selected = workspaces[0]!.id;

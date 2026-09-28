@@ -29,6 +29,10 @@ pub fn run_scan(workspace: &ResolvedWorkspace) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn evidence_for_compile(workspace: &ResolvedWorkspace) -> Result<serde_json::Value> {
+    Ok(serde_json::to_value(execute_scan(workspace)?)?)
+}
+
 fn execute_scan(workspace: &ResolvedWorkspace) -> Result<ScanSuggestion> {
     let docs = process_docs(
         &workspace.home_dir,

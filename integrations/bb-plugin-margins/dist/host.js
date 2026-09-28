@@ -146,12 +146,12 @@ var require_isexe = __commonJS({
         if (typeof Promise !== "function") {
           throw new TypeError("callback not provided");
         }
-        return new Promise(function(resolve2, reject) {
+        return new Promise(function(resolve22, reject) {
           isexe(path2, options || {}, function(er, is) {
             if (er) {
               reject(er);
             } else {
-              resolve2(is);
+              resolve22(is);
             }
           });
         });
@@ -215,27 +215,27 @@ var require_which = __commonJS({
         opt = {};
       const { pathEnv, pathExt, pathExtExe } = getPathInfo(cmd, opt);
       const found = [];
-      const step = (i) => new Promise((resolve2, reject) => {
+      const step = (i) => new Promise((resolve22, reject) => {
         if (i === pathEnv.length)
-          return opt.all && found.length ? resolve2(found) : reject(getNotFoundError(cmd));
+          return opt.all && found.length ? resolve22(found) : reject(getNotFoundError(cmd));
         const ppRaw = pathEnv[i];
         const pathPart = /^".*"$/.test(ppRaw) ? ppRaw.slice(1, -1) : ppRaw;
         const pCmd = path2.join(pathPart, cmd);
         const p = !pathPart && /^\.[\\\/]/.test(cmd) ? cmd.slice(0, 2) + pCmd : pCmd;
-        resolve2(subStep(p, i, 0));
+        resolve22(subStep(p, i, 0));
       });
-      const subStep = (p, i, ii) => new Promise((resolve2, reject) => {
+      const subStep = (p, i, ii) => new Promise((resolve22, reject) => {
         if (ii === pathExt.length)
-          return resolve2(step(i + 1));
+          return resolve22(step(i + 1));
         const ext = pathExt[ii];
         isexe(p + ext, { pathExt: pathExtExe }, (er, is) => {
           if (!er && is) {
             if (opt.all)
               found.push(p + ext);
             else
-              return resolve2(p + ext);
+              return resolve22(p + ext);
           }
-          return resolve2(subStep(p, i, ii + 1));
+          return resolve22(subStep(p, i, ii + 1));
         });
       });
       return cb ? step(0).then((res) => cb(null, res), cb) : step(0);
@@ -33385,6 +33385,24 @@ var marginsHostContract = defineRpcContract2({
     input: external_exports2.object({ workspaceId: external_exports2.string().min(1) }).strict(),
     output: external_exports2.object({ notes: external_exports2.string(), recordings: external_exports2.string() }).strict()
   },
+  previewWorkspaceSetup: {
+    input: external_exports2.object({ target: projectTargetSchema, homeRoot: external_exports2.string(), noteFolder: external_exports2.string() }).strict(),
+    output: external_exports2.object({
+      previewId: external_exports2.string(),
+      workspaceId: external_exports2.string(),
+      homeRoot: external_exports2.string(),
+      destination: external_exports2.string(),
+      mode: external_exports2.enum(["jev", "automatic_fallback", "empty"]),
+      warning: external_exports2.string().nullable(),
+      filesScanned: external_exports2.number().int(),
+      selectedEntities: external_exports2.array(external_exports2.string()),
+      actions: external_exports2.array(external_exports2.unknown())
+    }).strict()
+  },
+  applyWorkspaceSetup: {
+    input: external_exports2.object({ previewId: external_exports2.string() }).strict(),
+    output: external_exports2.object({ workspaceId: external_exports2.string(), destination: external_exports2.string() }).strict()
+  },
   listWorkspaceMeetings: {
     input: external_exports2.object({ target: projectTargetSchema }).strict(),
     output: workspaceMeetingsResultSchema
@@ -33524,6 +33542,24 @@ var marginsRpcContract = defineRpcContract2({
     input: external_exports2.object({ projectId: external_exports2.string().min(1) }).strict(),
     output: external_exports2.object({ workspaceId: external_exports2.string().nullable(), notes: external_exports2.string().nullable(), recordings: external_exports2.string().nullable() }).strict()
   },
+  previewWorkspaceSetup: {
+    input: external_exports2.object({ projectId: external_exports2.string().min(1), homeRoot: external_exports2.string(), noteFolder: external_exports2.string() }).strict(),
+    output: external_exports2.object({
+      previewId: external_exports2.string(),
+      workspaceId: external_exports2.string(),
+      homeRoot: external_exports2.string(),
+      destination: external_exports2.string(),
+      mode: external_exports2.enum(["jev", "automatic_fallback", "empty"]),
+      warning: external_exports2.string().nullable(),
+      filesScanned: external_exports2.number().int(),
+      selectedEntities: external_exports2.array(external_exports2.string()),
+      actions: external_exports2.array(external_exports2.unknown())
+    }).strict()
+  },
+  applyWorkspaceSetup: {
+    input: external_exports2.object({ projectId: external_exports2.string().min(1), previewId: external_exports2.string() }).strict(),
+    output: external_exports2.object({ workspaceId: external_exports2.string(), destination: external_exports2.string() }).strict()
+  },
   availableProjects: {
     input: external_exports2.object({}).strict(),
     output: external_exports2.object({ projects: external_exports2.array(external_exports2.object({ id: external_exports2.string(), name: external_exports2.string() }).strict()) }).strict()
@@ -33638,7 +33674,7 @@ var marginsRpcContract = defineRpcContract2({
 // src/project-server.ts
 import { randomUUID } from "node:crypto";
 import { execFile as execFileCallback2, spawn } from "node:child_process";
-import { lstat as lstat2, mkdir as mkdir2, readFile as readFile2, realpath } from "node:fs/promises";
+import { access, lstat as lstat2, mkdir as mkdir2, readFile as readFile2, realpath } from "node:fs/promises";
 import { createServer } from "node:net";
 import { homedir as homedir2 } from "node:os";
 import { isAbsolute, join as join2, relative, resolve } from "node:path";
@@ -33903,6 +33939,9 @@ async function associatedNoteFile(homeRoot, relativePath) {
 function marginsHome() {
   return process.env.MARGINS_HOME?.trim() || join2(homedir2(), ".margins");
 }
+function pendingWorkspaceSetupMarker(workspaceId) {
+  return join2(marginsHome(), "pending-workspace-setup", workspaceId);
+}
 async function workspaceOptions() {
   const binary = marginsCli();
   const env = { ...process.env, MARGINS_HOME: marginsHome() };
@@ -33911,8 +33950,11 @@ async function workspaceOptions() {
   if (!Array.isArray(listing.workspaces) || !listing.workspaces.every((item) => item && typeof item === "object" && typeof item.id === "string" && (item.name === null || typeof item.name === "string"))) {
     throw new Error("Margins Workspace list is unavailable.");
   }
-  const workspaces = listing.workspaces;
+  const listed = listing.workspaces;
+  const pending = await Promise.all(listed.map(async (item) => await access(pendingWorkspaceSetupMarker(item.id)).then(() => true, () => false)));
+  const workspaces = listed.filter((_item, index) => !pending[index]);
   let defaultWorkspaceId = typeof listing.default_workspace === "string" ? listing.default_workspace : null;
+  if (defaultWorkspaceId && !workspaces.some((item) => item.id === defaultWorkspaceId)) defaultWorkspaceId = null;
   let autoSelected = false;
   if (!defaultWorkspaceId && workspaces.length === 1) {
     const selected = workspaces[0].id;
@@ -33948,7 +33990,7 @@ async function resolveWorkspaceId(target) {
   return options.defaultWorkspaceId;
 }
 async function availablePort() {
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     const server = createServer();
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {
@@ -33958,7 +34000,7 @@ async function availablePort() {
         reject(new Error("Could not reserve a local recording port"));
         return;
       }
-      server.close((error108) => error108 ? reject(error108) : resolve2(address.port));
+      server.close((error108) => error108 ? reject(error108) : resolve3(address.port));
     });
   });
 }
@@ -33972,7 +34014,7 @@ async function waitForServer(baseUrl, tokenPath, child, signal) {
       const healthy = await fetch(`${baseUrl}/health`, { signal }).then((response) => response.ok).catch(() => false);
       if (healthy) return token.trim();
     }
-    await new Promise((resolve2) => setTimeout(resolve2, 80));
+    await new Promise((resolve3) => setTimeout(resolve3, 80));
   }
   throw new Error("Margins did not become ready on the project machine");
 }
@@ -34383,6 +34425,129 @@ var ProjectMarginsTransport = class {
   }
 };
 
+// src/workspace-setup.ts
+import { createHash as createHash2, randomUUID as randomUUID2 } from "node:crypto";
+import { execFile as execFileCallback3 } from "node:child_process";
+import { lstat as lstat3, mkdir as mkdir3, readFile as readFile3, realpath as realpath2, unlink, writeFile as writeFile2 } from "node:fs/promises";
+import { basename, isAbsolute as isAbsolute2, join as join3, relative as relative2, resolve as resolve2 } from "node:path";
+import { promisify as promisify3 } from "node:util";
+var execFile3 = promisify3(execFileCallback3);
+var previewIdPattern = /^[0-9a-f]{8}-[0-9a-f-]{27}$/;
+function setupEnv() {
+  return { ...process.env, MARGINS_HOME: marginsHome() };
+}
+async function cli(args, timeout = 15e3, maxBuffer = 1e6) {
+  const { stdout } = await execFile3(marginsCli(), args, { env: setupEnv(), timeout, maxBuffer });
+  return stdout;
+}
+async function selectedHome(target, input2) {
+  const requested = input2.trim();
+  if (requested && !isAbsolute2(requested)) throw new Error("Choose an absolute notes folder on the Workspace machine.");
+  const path2 = requested || target.projectRoot;
+  if (!requested && !(await lstat3(join3(path2, ".obsidian")).catch(() => null))?.isDirectory()) {
+    throw new Error("Choose the notes folder on the Workspace machine.");
+  }
+  const root = await realpath2(path2);
+  if (!(await lstat3(root)).isDirectory()) throw new Error("The notes folder is not a directory.");
+  const projectRoot = await realpath2(target.projectRoot);
+  const within = relative2(projectRoot, root);
+  if (within === ".." || within.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute2(within)) {
+    throw new Error("Choose the notes folder as a bb project before setting up its Workspace.");
+  }
+  return root;
+}
+function validNoteFolder(value) {
+  const folder = value.trim();
+  if (!folder) return "";
+  if (isAbsolute2(folder) || folder.split(/[\\/]/).some((part) => !part || part === "." || part === "..")) {
+    throw new Error("Note folder must be a folder name relative to Home.");
+  }
+  return folder;
+}
+function workspaceIdFor(root, existing) {
+  const slug = basename(root).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "notes";
+  if (!existing.has(slug)) return slug;
+  return `${slug}-${createHash2("sha256").update(root).digest("hex").slice(0, 8)}`;
+}
+function entityNames(value) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => typeof entry === "string" ? [entry] : entry && typeof entry === "object" && !Array.isArray(entry) ? Object.keys(entry) : []);
+}
+async function previewWorkspaceSetup(target, dataDir, homeInput, noteFolderInput) {
+  const homeRoot = await selectedHome(target, homeInput);
+  const noteFolder = validNoteFolder(noteFolderInput);
+  const listing = JSON.parse(await cli(["workspace", "list", "--json"]));
+  if (!Array.isArray(listing.workspaces)) throw new Error("Margins Workspace list is unavailable.");
+  let workspaceId = null;
+  for (const item of listing.workspaces) {
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(item.id)) continue;
+    const destination = JSON.parse(await cli(["--workspace", item.id, "workspace", "destination", "--json"]));
+    if (destination.home_root && await realpath2(destination.home_root).catch(() => null) === homeRoot) {
+      workspaceId = item.id;
+      break;
+    }
+  }
+  if (!workspaceId) {
+    workspaceId = workspaceIdFor(homeRoot, new Set(listing.workspaces.map((item) => item.id)));
+    const marker = pendingWorkspaceSetupMarker(workspaceId);
+    await mkdir3(join3(marginsHome(), "pending-workspace-setup"), { recursive: true, mode: 448 });
+    await writeFile2(marker, homeRoot, { mode: 384 });
+    try {
+      await cli(["workspace", "new", workspaceId, "--home", homeRoot, "--name", basename(homeRoot), "--json"]);
+    } catch (error108) {
+      await unlink(marker).catch(() => void 0);
+      throw error108;
+    }
+  }
+  const compiled = JSON.parse(await cli([
+    "--workspace",
+    workspaceId,
+    "workspace",
+    "compile",
+    ...noteFolder ? ["--note-folder", noteFolder] : [],
+    "--json"
+  ], 12e4, 2e6));
+  if (compiled.schema_version !== "margins.workspace.compile.v1" || typeof compiled.desired_toml !== "string" || !["jev", "automatic_fallback", "empty"].includes(compiled.mode || "")) {
+    throw new Error("Margins returned an invalid Workspace proposal.");
+  }
+  const previewId = randomUUID2();
+  const plansDir = join3(dataDir, "setup-plans");
+  await mkdir3(plansDir, { recursive: true, mode: 448 });
+  const desiredFile = join3(plansDir, `${previewId}.desired.toml`);
+  await writeFile2(desiredFile, compiled.desired_toml, { mode: 384, flag: "wx" });
+  const planJson = await cli(["--workspace", workspaceId, "workspace", "plan", "--desired", desiredFile, "--json"]);
+  const plan = JSON.parse(planJson);
+  if (plan.workspace_id !== workspaceId || !Array.isArray(plan.actions)) throw new Error("Margins returned an invalid Workspace plan.");
+  await writeFile2(join3(plansDir, `${previewId}.plan.json`), planJson, { mode: 384, flag: "wx" });
+  return {
+    previewId,
+    workspaceId,
+    homeRoot,
+    destination: noteFolder ? resolve2(homeRoot, noteFolder) : homeRoot,
+    mode: compiled.mode,
+    warning: compiled.warning || null,
+    filesScanned: Number(compiled.files_scanned || 0),
+    selectedEntities: entityNames(compiled.selected_entities),
+    actions: plan.actions
+  };
+}
+async function applyWorkspaceSetup(dataDir, previewId) {
+  if (!previewIdPattern.test(previewId)) throw new Error("Invalid Workspace setup preview.");
+  const planFile = join3(dataDir, "setup-plans", `${previewId}.plan.json`);
+  const plan = JSON.parse(await readFile3(planFile, "utf8"));
+  if (!plan.workspace_id || !/^[a-z0-9][a-z0-9-]*$/.test(plan.workspace_id)) {
+    throw new Error("Invalid Workspace setup plan.");
+  }
+  await cli(["--workspace", plan.workspace_id, "workspace", "apply", "--plan", planFile, "--json"]);
+  await cli(["workspace", "default", "--set", plan.workspace_id, "--json"]);
+  await unlink(pendingWorkspaceSetupMarker(plan.workspace_id)).catch((error108) => {
+    if (error108.code !== "ENOENT") throw error108;
+  });
+  const destination = JSON.parse(await cli(["--workspace", plan.workspace_id, "workspace", "destination", "--json"]));
+  if (!destination.destination || !isAbsolute2(destination.destination)) throw new Error("Workspace destination is unavailable after setup.");
+  return { workspaceId: plan.workspace_id, destination: destination.destination };
+}
+
 // src/host-entry.ts
 async function changed(context, projectId, reason, result) {
   if (result.ok) await context.experimental_emitSignal("changed", { projectId, reason });
@@ -34403,6 +34568,14 @@ function createMarginsHostEntry(transport) {
       workspacePaths(input2, context) {
         retain(context);
         return workspacePaths(input2.workspaceId);
+      },
+      previewWorkspaceSetup(input2, context) {
+        retain(context);
+        return previewWorkspaceSetup(input2.target, context.experimental_paths.dataDir, input2.homeRoot, input2.noteFolder);
+      },
+      applyWorkspaceSetup(input2, context) {
+        retain(context);
+        return applyWorkspaceSetup(context.experimental_paths.dataDir, input2.previewId);
       },
       listWorkspaceMeetings(input2, context) {
         retain(context);

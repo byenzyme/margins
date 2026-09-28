@@ -124,6 +124,17 @@ published CLI does not contain the new `native-bridge` command; use the built
 bounded live-context read. The control snapshot deliberately carries no rolling
 transcript.
 
+## First-run Workspace setup
+
+In Meetings, select the bb project containing your notes and choose its Home
+folder. An Obsidian project can use its own root without typing a path. The
+note destination defaults to `inbox`. Continue scans notes and uses hosted Jev
+selection when available, then shows the exact Workspace plan before **Use this
+Workspace** applies it and sets the machine default. A vault with no notes can
+still be connected for recording. Existing People notes can inform recall; the
+first confirmed participant can create a People folder during distillation.
+SQLite sources require an explicit mapping later.
+
 ## Development
 
 Run inside this directory:

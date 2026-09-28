@@ -338,9 +338,11 @@ without one, the command uses the machine's default Workspace. If no Workspace
 is selected, ask the user to choose or set one up. The distilled note lands in
 `destination`. A missing `note_folder` means the Home root itself.
 Never leave a note stranded inside `.margins/` — that directory is Margins'
-internal store, not a note destination. Never create `meetings/`, `people/`, or
-any other folder; if a `people/` (or similar) folder already exists, read it for
-context only.
+internal store, not a note destination. Do not create a `meetings/` folder or
+invent another note destination. The People-folder exception is described in
+`skills/margins/distillation-core.md`: after a meeting note is saved, a first
+confirmed participant can establish `people/` under Home with a minimal person
+note and meeting backlink.
 
 1. Read `saved_note_path` from `margins transcript "<session-id>"`. If it exists,
    read that note first. Prefer targeted edits or replacing the reviewed

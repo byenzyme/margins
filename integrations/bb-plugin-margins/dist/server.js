@@ -18999,6 +18999,24 @@ var marginsHostContract = defineRpcContract({
     input: external_exports.object({ workspaceId: external_exports.string().min(1) }).strict(),
     output: external_exports.object({ notes: external_exports.string(), recordings: external_exports.string() }).strict()
   },
+  previewWorkspaceSetup: {
+    input: external_exports.object({ target: projectTargetSchema, homeRoot: external_exports.string(), noteFolder: external_exports.string() }).strict(),
+    output: external_exports.object({
+      previewId: external_exports.string(),
+      workspaceId: external_exports.string(),
+      homeRoot: external_exports.string(),
+      destination: external_exports.string(),
+      mode: external_exports.enum(["jev", "automatic_fallback", "empty"]),
+      warning: external_exports.string().nullable(),
+      filesScanned: external_exports.number().int(),
+      selectedEntities: external_exports.array(external_exports.string()),
+      actions: external_exports.array(external_exports.unknown())
+    }).strict()
+  },
+  applyWorkspaceSetup: {
+    input: external_exports.object({ previewId: external_exports.string() }).strict(),
+    output: external_exports.object({ workspaceId: external_exports.string(), destination: external_exports.string() }).strict()
+  },
   listWorkspaceMeetings: {
     input: external_exports.object({ target: projectTargetSchema }).strict(),
     output: workspaceMeetingsResultSchema
@@ -19137,6 +19155,24 @@ var marginsRpcContract = defineRpcContract({
   workspacePaths: {
     input: external_exports.object({ projectId: external_exports.string().min(1) }).strict(),
     output: external_exports.object({ workspaceId: external_exports.string().nullable(), notes: external_exports.string().nullable(), recordings: external_exports.string().nullable() }).strict()
+  },
+  previewWorkspaceSetup: {
+    input: external_exports.object({ projectId: external_exports.string().min(1), homeRoot: external_exports.string(), noteFolder: external_exports.string() }).strict(),
+    output: external_exports.object({
+      previewId: external_exports.string(),
+      workspaceId: external_exports.string(),
+      homeRoot: external_exports.string(),
+      destination: external_exports.string(),
+      mode: external_exports.enum(["jev", "automatic_fallback", "empty"]),
+      warning: external_exports.string().nullable(),
+      filesScanned: external_exports.number().int(),
+      selectedEntities: external_exports.array(external_exports.string()),
+      actions: external_exports.array(external_exports.unknown())
+    }).strict()
+  },
+  applyWorkspaceSetup: {
+    input: external_exports.object({ projectId: external_exports.string().min(1), previewId: external_exports.string() }).strict(),
+    output: external_exports.object({ workspaceId: external_exports.string(), destination: external_exports.string() }).strict()
   },
   availableProjects: {
     input: external_exports.object({}).strict(),
@@ -19642,6 +19678,16 @@ function marginsPlugin(bb) {
       if (!workspaceId) return { workspaceId: null, notes: null, recordings: null };
       const paths = await callHost(target, "workspacePaths", { workspaceId });
       return { workspaceId, ...paths };
+    },
+    async previewWorkspaceSetup({ projectId, homeRoot, noteFolder }) {
+      const target = await targetForProject(projectId);
+      return callHost(target, "previewWorkspaceSetup", { target, homeRoot, noteFolder });
+    },
+    async applyWorkspaceSetup({ projectId, previewId }) {
+      const target = await targetForProject(projectId);
+      const result = await callHost(target, "applyWorkspaceSetup", { previewId });
+      bb.realtime.publish(REALTIME_CHANNEL, { projectId, reason: "workspace-setup" });
+      return result;
     },
     async availableProjects() {
       const projects = await bb.sdk.projects.list();

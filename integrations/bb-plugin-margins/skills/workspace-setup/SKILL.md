@@ -9,13 +9,21 @@ allowed-tools: Bash, Read, Glob, Grep
 Help the user show Margins how one set of notes is organized. This is separate
 from live meeting feedback and from turning a finished meeting into a note.
 
-Use the canonical Margins guide as the source of truth:
+For first recording setup in bb, open **Meetings** and select the notes project.
+The panel discovers existing note structure, chooses the `inbox` note destination
+by default, shows the exact Workspace changes, and applies them after the user
+accepts. No agent conversation is required to begin recording. An empty notes
+folder is valid; recall enrichment can be completed later.
+
+For additional Sources, corrections to the recall policy, and recall proof,
+use the canonical Margins guide as the source of truth:
 
 ```bash
 margins guide workspace-setup
 ```
 
-Follow that guide end to end. Do not invent a second setup flow in bb.
+Follow that guide end to end for advanced setup. The direct Meetings form uses
+the same `workspace plan --desired` and reviewed `apply` contract.
 
 The setup conversation should leave the user with:
 

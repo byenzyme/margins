@@ -352,6 +352,15 @@ pub enum WorkspaceCommand {
         #[arg(long, required = true)]
         json: bool,
     },
+    /// Propose Workspace recall settings from the declared Home Source
+    Compile {
+        /// Optional relative folder for approved notes under Home
+        #[arg(long)]
+        note_folder: Option<String>,
+        /// Emit a machine-readable proposal and complete desired TOML
+        #[arg(long, required = true)]
+        json: bool,
+    },
     /// Atomically apply an exact workspace plan
     Apply {
         /// JSON plan emitted by `workspace plan`

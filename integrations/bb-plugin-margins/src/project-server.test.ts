@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { marginsHome, ProjectMarginsTransport, ProjectServerManager, readAsrRuntimeConfig, resolveWorkspaceId, workspaceInstanceDir, workspaceOptions, workspacePaths } from "./project-server.js";
+import { marginsHome, pendingWorkspaceSetupMarker, ProjectMarginsTransport, ProjectServerManager, readAsrRuntimeConfig, resolveWorkspaceId, workspaceInstanceDir, workspaceOptions, workspacePaths } from "./project-server.js";
 
 const saved = {
   url: process.env.MARGINS_BB_REMOTE_URL,
@@ -135,6 +135,19 @@ describe("ProjectServerManager remote adapter", () => {
       process.env.MARGINS_CLI_BIN = cli;
       await expect(workspaceOptions()).resolves.toMatchObject({ defaultWorkspaceId: "vault", autoSelected: true });
       await expect(workspaceOptions()).resolves.toMatchObject({ defaultWorkspaceId: "vault", autoSelected: false });
+    } finally { await rm(home, { recursive: true, force: true }); }
+  });
+  it("does not expose or auto-select a Workspace while its setup plan is under review", async () => {
+    const home = await mkdtemp(join(tmpdir(), "margins-bb-pending-setup-"));
+    try {
+      process.env.MARGINS_HOME = home;
+      const cli = join(home, "margins-fixture");
+      await writeFile(cli, '#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({default_workspace:null,workspaces:[{id:"vault",name:"Notes"}]}));\n');
+      await chmod(cli, 0o755);
+      process.env.MARGINS_CLI_BIN = cli;
+      await mkdir(join(home, "pending-workspace-setup"));
+      await writeFile(pendingWorkspaceSetupMarker("vault"), "/notes");
+      await expect(workspaceOptions()).resolves.toEqual({ defaultWorkspaceId: null, workspaces: [], autoSelected: false });
     } finally { await rm(home, { recursive: true, force: true }); }
   });
   it("reopens the newest saved Workspace meeting after recording ends", async () => {

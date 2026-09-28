@@ -231,6 +231,14 @@ fn run_inner(
             );
         }
         Some(Command::Workspace {
+            command: WorkspaceCommand::Compile { .. },
+        }) => {
+            return Err(CliError::new(
+                "workspace_compile_unavailable",
+                "this build does not include the Workspace compiler",
+            ));
+        }
+        Some(Command::Workspace {
             command: WorkspaceCommand::Plan { desired, .. },
         }) => {
             return commands::workspace::plan(

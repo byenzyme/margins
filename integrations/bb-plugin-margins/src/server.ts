@@ -328,6 +328,16 @@ export default function marginsPlugin(bb: BbPluginApi) {
       const paths = await callHost(target, "workspacePaths", { workspaceId });
       return { workspaceId, ...paths };
     },
+    async previewWorkspaceSetup({ projectId, homeRoot, noteFolder }) {
+      const target = await targetForProject(projectId);
+      return callHost(target, "previewWorkspaceSetup", { target, homeRoot, noteFolder });
+    },
+    async applyWorkspaceSetup({ projectId, previewId }) {
+      const target = await targetForProject(projectId);
+      const result = await callHost(target, "applyWorkspaceSetup", { previewId });
+      bb.realtime.publish(REALTIME_CHANNEL, { projectId, reason: "workspace-setup" });
+      return result;
+    },
     async availableProjects() {
       const projects = await bb.sdk.projects.list();
       return { projects: projects.filter((project) => project.kind !== "personal")

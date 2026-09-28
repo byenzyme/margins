@@ -536,6 +536,14 @@ where
         return run_scan(workspace_selector.as_deref());
     }
 
+    #[cfg(feature = "recall")]
+    if let Some(Command::Workspace {
+        command: margins_cli::args::WorkspaceCommand::Compile { note_folder, .. },
+    }) = &parsed.command
+    {
+        return run_workspace_compile(workspace_selector.as_deref(), note_folder.as_deref());
+    }
+
     let interactive_command = match &parsed.command {
         None => Some((false, None, None, true)),
         Some(Command::New { title }) => Some((true, title.as_deref(), None, false)),
@@ -985,6 +993,23 @@ fn run_scan(workspace_selector: Option<&str>) -> i32 {
     match crate::scan::run_scan(&workspace) {
         Ok(()) => 0,
         Err(error) => report_error(&format!("scanning vault: {error:#}")),
+    }
+}
+
+#[cfg(feature = "recall")]
+fn run_workspace_compile(workspace_selector: Option<&str>, note_folder: Option<&str>) -> i32 {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+    let workspace =
+        match margins_cli::commands::workspace::resolve_existing(workspace_selector, &cwd) {
+            Ok(workspace) => workspace,
+            Err(error) => return report_error(&error.to_string()),
+        };
+    match crate::setup_compile::compile(&workspace, note_folder) {
+        Ok(result) => {
+            println!("{result}");
+            0
+        }
+        Err(error) => report_error(&format!("compiling Workspace setup: {error:#}")),
     }
 }
 
@@ -1935,7 +1960,10 @@ fn copy_remote_recovery_for_local_asr(
     {
         let destination = directory.join(format!("{transfer_id}-seg{segment_index}.wav"));
         let mut input = std::fs::File::open(source)?;
-        let mut output = OpenOptions::new().write(true).create_new(true).open(&destination)?;
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)?;
         copy(&mut input, &mut output)?;
         output.sync_all()?;
         Ok(destination)
@@ -3784,14 +3812,21 @@ mod tests {
         let source = temp.path().join("recovery.wav");
         std::fs::write(&source, b"RIFF-test-audio").unwrap();
         let directory = temp.path().join("local-audio");
-        let copied = copy_remote_recovery_for_local_asr(&source, &directory, "transfer-a", 0).unwrap();
+        let copied =
+            copy_remote_recovery_for_local_asr(&source, &directory, "transfer-a", 0).unwrap();
         assert_eq!(std::fs::read(&copied).unwrap(), b"RIFF-test-audio");
         assert_eq!(std::fs::read(&source).unwrap(), b"RIFF-test-audio");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&copied).unwrap().permissions().mode() & 0o777, 0o600);
-            assert_eq!(std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777, 0o700);
+            assert_eq!(
+                std::fs::metadata(&copied).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
         }
     }
 
