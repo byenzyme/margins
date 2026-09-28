@@ -472,6 +472,36 @@ fn handle_stream(mut stream: TcpStream, bridge: &mut Bridge) -> Result<()> {
             ),
         ),
         ("GET", "/v1/microphones") => (200, microphones(bridge)),
+        ("GET", "/v1/microphone-permission") => (200, microphone_permission()),
+        ("POST", "/v1/microphone-permission") => {
+            let idle = matches!(
+                bridge.status.lock().unwrap().state,
+                "" | "ready" | "saved" | "needs_attention"
+            );
+            if !idle {
+                (
+                    409,
+                    json!({"error":"Finish the meeting before changing microphone access"}),
+                )
+            } else {
+                let (reply, result) = mpsc::channel();
+                if bridge.permission_request.send(reply).is_err() {
+                    (503, json!({"error":"permission_worker_unavailable"}))
+                } else {
+                    match result.recv_timeout(Duration::from_secs(95)) {
+                        Ok(Ok(())) => (200, microphone_permission()),
+                        Ok(Err(error)) => (
+                            403,
+                            json!({"error":error,"permission":microphone_permission()}),
+                        ),
+                        Err(_) => (
+                            503,
+                            json!({"error":"microphone_permission_request_timed_out"}),
+                        ),
+                    }
+                }
+            }
+        }
         ("POST", "/v1/microphone") => {
             let value: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
             let requested = value.get("deviceName");
@@ -600,6 +630,17 @@ fn microphones(bridge: &Bridge) -> Value {
         "defaultDeviceName": crate::recorder::default_input_device_name(),
         "selectedDeviceName": bridge.mic_device_name,
     })
+}
+
+fn microphone_permission() -> Value {
+    let status = match crate::recorder::microphone_authorization() {
+        Ok(crate::recorder::MicrophoneAuthorization::Authorized) => "authorized",
+        Ok(crate::recorder::MicrophoneAuthorization::NotDetermined) => "not_determined",
+        Ok(crate::recorder::MicrophoneAuthorization::Denied) => "denied",
+        Ok(crate::recorder::MicrophoneAuthorization::Restricted) => "restricted",
+        Err(_) => "unknown",
+    };
+    json!({"status":status})
 }
 
 fn control(bridge: &Bridge, expected: &str, action: CaptureAction) -> (u16, Value) {
@@ -883,6 +924,31 @@ mod tests {
             &request("POST", "/v1/microphone", "{\"deviceName\":null}")
         )
         .starts_with("HTTP/1.1 200"));
+    }
+
+    #[test]
+    fn microphone_permission_request_is_paired_and_does_not_start_capture() {
+        let mut bridge = bridge();
+        let request = |method: &str| {
+            format!(
+                "{method} /v1/microphone-permission HTTP/1.1\r\nHost: 127.0.0.1:18765\r\nOrigin: https://example.test\r\nAuthorization: Bearer paired-token\r\nContent-Length: 2\r\n\r\n{{}}"
+            )
+        };
+        assert!(exchange(&mut bridge, &request("POST")).starts_with("HTTP/1.1 401"));
+        bridge.token = Some("paired-token".into());
+        bridge.status.lock().unwrap().state = "recording";
+        assert!(exchange(&mut bridge, &request("POST")).starts_with("HTTP/1.1 409"));
+        bridge.status.lock().unwrap().state = "ready";
+        let (permission_request, permission_receiver) = mpsc::channel();
+        bridge.permission_request = permission_request;
+        let worker = std::thread::spawn(move || {
+            permission_receiver.recv().unwrap().send(Ok(())).unwrap();
+        });
+        let response = exchange(&mut bridge, &request("POST"));
+        worker.join().unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"));
+        assert_eq!(bridge.status.lock().unwrap().state, "ready");
+        assert!(bridge.status.lock().unwrap().session_id.is_none());
     }
 
     #[test]

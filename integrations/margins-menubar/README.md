@@ -48,6 +48,10 @@ that entitlement, the helper can report denied access without ever appearing
 in the Microphone list.
 The capture executable's embedded bundle ID must match its helper app's bundle
 ID; the signing script checks this before replacing signatures.
+When connected to bb, the Menu shows microphone authorization and offers
+**Allow microphone** before starting a meeting. That action asks the helper for
+permission without opening a capture session. A denied grant links to the Mac
+Microphone settings pane.
 
 ## Scoped Mac build
 

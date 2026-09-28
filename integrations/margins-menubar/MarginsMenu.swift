@@ -24,6 +24,7 @@ final class MenuRecorder: ObservableObject {
     @Published var microphones: [String] = []
     @Published var microphoneChoice = ""
     @Published var microphoneBusy = false
+    @Published var microphonePermission = "unknown"
     private(set) var connectedOrigin: String?
 
     private var generation: Int?
@@ -94,6 +95,24 @@ final class MenuRecorder: ObservableObject {
             error = nil
             await refresh()
         } catch { self.error = error.localizedDescription }
+    }
+
+    func requestMicrophonePermission() async {
+        guard mode == .project && bridgeToken != nil && !active && !microphoneBusy else { return }
+        microphoneBusy = true
+        do {
+            _ = try await bridgeRequest("/v1/microphone-permission", body: [:])
+            error = nil
+        } catch {
+            self.error = "Margins Capture could not use the microphone. Check its access in System Settings."
+        }
+        microphoneBusy = false
+        await refresh()
+    }
+
+    func openMicrophoneSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") else { return }
+        NSWorkspace.shared.open(url)
     }
 
     func chooseMac() async {
@@ -235,6 +254,7 @@ final class MenuRecorder: ObservableObject {
     }
 
     func refresh() async {
+        if microphoneBusy { return }
         refreshMicrophones()
         if !setupComplete {
             state = "ready"
@@ -280,6 +300,8 @@ final class MenuRecorder: ObservableObject {
                     : session == nil ? "Mac recorder ready" : "\(state) · \(system) · \(lines) transcript lines"
             } else if bridgeToken != nil {
                 let snapshot = try await bridgeRequest("/v1/status")
+                let permission = try await bridgeRequest("/v1/microphone-permission")
+                microphonePermission = permission["status"] as? String ?? "unknown"
                 state = snapshot["state"] as? String ?? "ready"
                 sessionID = snapshot["sessionId"] as? String
                 bridgePID = (snapshot["pid"] as? NSNumber)?.int32Value
@@ -289,6 +311,7 @@ final class MenuRecorder: ObservableObject {
                 error = snapshot["error"] as? String
             } else {
                 state = "ready"
+                microphonePermission = "unknown"
                 status = remote.contains("/plugins/margins/http/menu/relay")
                     ? "Open Meetings in bb to reconnect" : "Connect the Mac bridge to the BB project"
             }
@@ -413,6 +436,7 @@ final class MenuRecorder: ObservableObject {
         connectedOrigin = nil
         connectedWorkspaceName = nil
         bridgePID = nil
+        microphonePermission = "unknown"
         if let pairDirectory { try? FileManager.default.removeItem(at: pairDirectory) }
         pairDirectory = nil
         sessionID = nil
@@ -443,7 +467,7 @@ final class MenuRecorder: ObservableObject {
                          body: [String: Any]? = nil) async throws -> [String: Any] {
         guard let url = URL(string: endpoint) else { throw MenuError("Invalid recorder URL") }
         var request = URLRequest(url: url)
-        request.timeoutInterval = 10
+        request.timeoutInterval = endpoint.hasSuffix("/v1/microphone-permission") && body != nil ? 100 : 10
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         if let connectedOrigin, endpoint.hasPrefix(connectedOrigin + "/"), let bbMachineCredential {
             request.setValue(bbMachineCredential, forHTTPHeaderField: "x-bb-connect-machine")
@@ -505,6 +529,16 @@ private struct RecorderControls: View {
                         }
                     }
                     .disabled(recorder.active || recorder.microphoneBusy)
+                    if recorder.microphonePermission == "not_determined" {
+                        Button("Allow microphone") { Task { await recorder.requestMicrophonePermission() } }
+                            .disabled(recorder.microphoneBusy)
+                        Text("macOS will ask for Margins Capture access. No meeting starts yet.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else if recorder.microphonePermission == "denied" || recorder.microphonePermission == "restricted" {
+                        Text("Microphone access is blocked for Margins Capture.")
+                            .font(.caption).foregroundStyle(.red)
+                        Button("Open Microphone Settings") { recorder.openMicrophoneSettings() }
+                    }
                 }
                 if let session = recorder.sessionID {
                     Text("Meeting: \(session)").font(.caption2).lineLimit(1).truncationMode(.middle)
@@ -516,7 +550,7 @@ private struct RecorderControls: View {
                         else { await recorder.start() }
                     }
                 }
-                .disabled(["starting", "getting_ready", "saving", "finalizing"].contains(recorder.state))
+                .disabled(recorder.microphoneBusy || ["starting", "getting_ready", "saving", "finalizing"].contains(recorder.state))
                 Menu("More") {
                     if recorder.state == "recording" {
                         Button("Pause") { Task { await recorder.control("pause") } }
