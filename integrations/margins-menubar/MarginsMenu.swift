@@ -236,6 +236,11 @@ final class MenuRecorder: ObservableObject {
 
     func refresh() async {
         refreshMicrophones()
+        if !setupComplete {
+            state = "ready"
+            status = "Choose where meetings live"
+            return
+        }
         do {
             if let grantToken, let connectedOrigin, let grantExpiresAt,
                grantExpiresAt < Int64(Date().timeIntervalSince1970 * 1_000) + 600_000 {
