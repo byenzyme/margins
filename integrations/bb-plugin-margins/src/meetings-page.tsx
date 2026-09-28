@@ -580,7 +580,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
       }}>{showArchived ? "Hide archived" : `Archived (${archived.length})`}</button>}
     </aside>
     <section className={`margins-meeting-pad${selected?.inputFinalized ? " finished" : ""}`}>
-      {(client.platform === "macos" || menuAvailable) && live.length === 0 && <div className="margins-menu-connect">
+      {panel && panel.state !== "unavailable" && (client.platform === "macos" || menuAvailable) && live.length === 0 && <div className="margins-menu-connect">
         <span>{nativeBridgeOwner.paired && nativeConnectionError
           ? "Margins Menu disconnected"
           : nativeBridgeOwner.paired
@@ -594,7 +594,8 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
         {workspaceOptions.length ? <div><select aria-label="Margins Workspace" value={workspaceChoice} onChange={(event) => setWorkspaceChoice(event.target.value)}>
           {workspaceOptions.map((item) => <option key={item.id} value={item.id}>{item.name || item.id}</option>)}
         </select><button onClick={() => void chooseWorkspace()} disabled={!workspaceChoice}>Use Workspace</button></div>
-          : <p>Use the Margins workspace-setup skill to choose where meetings and notes live.</p>}
+          : <div><p>Choose where meetings and notes live before connecting your Mac.</p>
+            <button onClick={() => navigate.toCompose({ initialPrompt: "Help me set up a Margins Workspace for meetings and notes in this project.", focusPrompt: true })}>Set up Workspace →</button></div>}
         {message && <p role="alert">{message}</p>}
       </div>}
       {panel?.state !== "unavailable" && starting ? <div className="margins-preparing-pad">
