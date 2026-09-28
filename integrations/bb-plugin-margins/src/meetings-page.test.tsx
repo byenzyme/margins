@@ -94,7 +94,10 @@ describe("Meetings Mac recorder choice", () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     render(<MeetingsPage subPath="proj-mac/complete" />);
     await screen.findByDisplayValue("Decisions");
-    expect(screen.getByText(/Saved · 1:17 · Microphone \+ computer audio · Workspace: Obsidian · Started from Mac/)).toBeDefined();
+    expect(screen.getByText("Saved · 1:17 · Obsidian · from Mac")).toBeDefined();
+    expect(screen.queryByText(/Record with Margins Menu/)).toBeNull();
+    expect(screen.queryByText("Transcript ready")).toBeNull();
+    expect(screen.queryByText("Choose project in composer")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Rename" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Meeting title" }), { target: { value: "Launch review" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));

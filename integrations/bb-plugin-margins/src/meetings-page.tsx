@@ -603,7 +603,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
       }}>{showArchived ? "Hide archived" : `Archived (${archived.length})`}</button>}
     </aside>
     <section className={`margins-meeting-pad${selected?.inputFinalized ? " finished" : ""}`}>
-      {panel && panel.state !== "unavailable" && (client.platform === "macos" || menuAvailable) && live.length === 0 && <div className="margins-menu-connect">
+      {panel && panel.state !== "unavailable" && (client.platform === "macos" || menuAvailable) && live.length === 0 && !selectedId && meetings.length === 0 && <div className="margins-menu-connect">
         <span>{nativeBridgeOwner.paired && nativeConnectionError
           ? "Margins Menu disconnected"
           : nativeBridgeOwner.paired
@@ -642,19 +642,19 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
       </div>
         : panel?.state !== "unavailable" && selected && meeting?.sessionId === selected.sessionId ? <>
         {workspaceNotice && <p className="margins-workspace-notice">{workspaceNotice}</p>}
-        <header><div><div className="margins-meeting-meta"><span className="margins-meeting-kicker">
+        <header><div>{(!selected.inputFinalized || memoChangedSinceNote || selected.notePath || message && message !== "Saved") && <div className="margins-meeting-meta">
+          {(!selected.inputFinalized || memoChangedSinceNote) && <span className="margins-meeting-kicker">
           {!selected.inputFinalized ? nativeStatus?.sessionId === selected.sessionId && nativeStatus.state === "saving" ? "Saving recording…"
             : audioStartingId === selected.sessionId && nativeStatus?.state === "needs_attention" ? "Audio needs attention"
               : audioStartingId === selected.sessionId && !(nativeStatus?.sessionId === selected.sessionId && ["recording", "paused"].includes(nativeStatus.state)) ? "Preparing audio…"
                 : <><i className={`margins-meeting-state-dot${pausedSession(selected.sessionId) ? " paused" : ""}`} aria-hidden="true" />{pausedSession(selected.sessionId) ? "Paused" : "Recording"}</>
-            : stopAck?.sessionId === selected.sessionId ? `Saved · ${stopAck.elapsed} recorded`
-              : memoChangedSinceNote ? "Memo updated since note" : selected.notePath ? "Note created" : "Ready"}</span>
+            : "Memo updated since note"}</span>}
           {selected.notePath && <nav className="margins-meeting-links" aria-label="Meeting links">
             {selected.noteFile ? <FileLink title="Open note preview" target={{ kind: "host", ...selected.noteFile }} location={null}>{noteTitle(selected.notePath)}</FileLink>
               : <span title="File preview is unavailable on this host">{noteTitle(selected.notePath)}</span>}
             {threadLinks.map(({ id, title }) => <button key={id} onClick={() => navigate.toThread(id)}>{title}</button>)}
           </nav>}
-          {message && <span className={`margins-meeting-status${message === "Saved" ? " saved" : " error"}`} role="status">{message}</span>}</div>
+          {message && (message !== "Saved" || !selected.inputFinalized) && <span className={`margins-meeting-status${message === "Saved" ? " saved" : " error"}`} role="status">{message}</span>}</div>}
           <div className="margins-meeting-title-row">
             {editingTitle ? <><input aria-label="Meeting title" maxLength={160} value={titleDraft} autoFocus
               onChange={(event) => setTitleDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void renameMeeting(); if (event.key === "Escape") setEditingTitle(false); }} />
@@ -663,16 +663,20 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
               : <><h2>{meeting.title || `Meeting · ${meetingTime(meeting.startedAt)}`}</h2>
                 {selected.inputFinalized && <button className="margins-inline-action" onClick={() => { setTitleDraft(meeting.title || `Meeting · ${meetingTime(meeting.startedAt)}`); setEditingTitle(true); }}>Rename</button>}</>}
           </div>
-          <p className="margins-meeting-details">{selected.inputFinalized ? `Saved${selected.durationMs !== null && selected.durationMs !== undefined ? ` · ${elapsedLabel(selected.durationMs)}` : ""}` : "Recording"}
-            {selected.audioSource && ` · ${selected.audioSource}`}
-            {selected.workspaceName && ` · Workspace: ${selected.workspaceName}`}
-            {(selected.originProjectName || !selected.inputFinalized && projects.find((item) => item.id === projectId)?.name) && ` · Started from ${selected.originProjectName || projects.find((item) => item.id === projectId)?.name}`}</p></div>
+          <p className="margins-meeting-details">{selected.inputFinalized
+            ? stopAck?.sessionId === selected.sessionId ? `Saved · ${stopAck.elapsed} recorded` : `Saved${selected.durationMs !== null && selected.durationMs !== undefined ? ` · ${elapsedLabel(selected.durationMs)}` : ""}`
+            : "Recording"}
+            {!selected.inputFinalized && selected.audioSource && ` · ${selected.audioSource}`}
+            {selected.workspaceName && ` · ${selected.inputFinalized ? selected.workspaceName : `Workspace: ${selected.workspaceName}`}`}
+            {selected.originProjectName && selected.inputFinalized && selected.originProjectName.toLowerCase() !== selected.workspaceName?.toLowerCase() && ` · from ${selected.originProjectName}`}
+            {!selected.inputFinalized && (selected.originProjectName || projects.find((item) => item.id === projectId)?.name) && ` · Started from ${selected.originProjectName || projects.find((item) => item.id === projectId)?.name}`}
+            {selected.inputFinalized && message === "Saved" && <span className="margins-meeting-status saved" role="status"> · Memo updated</span>}</p></div>
         </header>
         {audioStartingId === selected.sessionId && nativeStatus?.state === "needs_attention" &&
           <p role="alert">{nativeStatus.error || "Margins Menu could not start recording."}</p>}
         <textarea ref={memoRef} aria-label="Meeting memo pad" placeholder="Write notes..." value={draft} onChange={(event) => { dirty.current = true; latestDraft.current = event.target.value; setDraft(event.target.value); setMessage(""); }} onBlur={() => void saveMemo().catch((error) => setMessage(String(error)))} />
         <footer className={selected.inputFinalized ? "margins-meeting-actions" : undefined}>
-          {selected.inputFinalized && <div className="margins-meeting-trail"><span>{shownTranscript === "ready" ? "Transcript ready" : shownTranscript === "pending" ? "Transcribing…" : shownTranscript === "checking" ? "Checking transcript…" : shownTranscript === "failed" ? "Transcript unavailable" : "Transcript not ready"}</span>
+          {selected.inputFinalized && <div className="margins-meeting-trail">{shownTranscript !== "ready" && <span>{shownTranscript === "pending" ? "Transcribing…" : shownTranscript === "checking" ? "Checking transcript…" : shownTranscript === "failed" ? "Transcript unavailable" : "Transcript not ready"}</span>}
             {shownTranscript === "ready" && <button onClick={() => void viewTranscript()}>{transcriptOpen ? "Hide transcript" : "View transcript"}</button>}
             {(shownTranscript === "failed" || shownTranscript === "not_ready") && <button onClick={() => void retryTranscription()}>{shownTranscript === "failed" ? "Retry" : "Transcribe"}</button>}
             {handoff && <span>Note draft opened — press Enter to start</span>}</div>}
@@ -680,9 +684,6 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
           {memoChangedSinceNote && <span>Note uses an earlier memo revision</span>}
           {selected.inputFinalized && <div className="margins-meeting-next">
             {noteAction && <button onClick={() => void distill()}>{selected.notePath ? "Update note" : "Make note"} →</button>}
-            {noteAction && <span>{context.projectId
-              ? `New thread in ${projects.find((item) => item.id === context.projectId)?.name || "current project"}`
-              : "Choose project in composer"}</span>}
             <div className="margins-meeting-more"><button className="margins-inline-action" aria-expanded={moreOpen} onClick={() => setMoreOpen(!moreOpen)}>More</button>
               {moreOpen && <div className="margins-meeting-more-menu">
                 <button disabled={actionBusy} onClick={() => void archiveMeeting(!selected.archived)}>{selected.archived ? "Restore to recent" : "Archive"}</button>
