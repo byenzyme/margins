@@ -11,6 +11,27 @@ const ready = {
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); sessionStorage.clear(); });
 
 describe("Mac PWA bridge destination", () => {
+  it("renews an old Menu grant before Start, including pairings saved by older plugin builds", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-28T01:00:00Z"));
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => new Response(JSON.stringify(
+      init.method === "GET" ? ready : { token: "local-secret", instanceId: "linux-one", workspaceId: "practice", status: ready },
+    ), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const grant = { serviceUrl: "https://bb.example/api/v1/plugins/margins/http/menu/relay", token: "grant",
+      instanceId: "linux-one", workspaceId: "practice", workspaceName: "Notes", expiresAt: Date.now() + 3_600_000 };
+    const owner = new NativeBridgeOwner();
+    await owner.connectMenu(grant);
+    await expect(owner.verify({ instanceId: "linux-one", workspaceId: "practice" })).resolves.toMatchObject(ready);
+    vi.setSystemTime(Date.now() + 3_600_000);
+    await expect(owner.verify({ instanceId: "linux-one", workspaceId: "practice" })).rejects.toThrow("needs renewal");
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/v1/start"))).toBe(false);
+    sessionStorage.setItem("margins.bb.native-bridge.v1", JSON.stringify({ token: "old", port: 18765,
+      instanceId: "linux-one", workspaceId: "practice" }));
+    const olderPairing = new NativeBridgeOwner();
+    await expect(olderPairing.verify({ instanceId: "linux-one", workspaceId: "practice" })).rejects.toThrow("needs renewal");
+    owner.forget();
+  });
   it("warns after three seconds of silent Mac input and clears when speech arrives", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_000);

@@ -16,7 +16,7 @@ export interface NativeStatus extends CaptureAuthority {
   microphoneDevicePinned?: boolean;
   error: string | null;
 }
-interface Pairing extends CaptureAuthority { token: string; port: number }
+interface Pairing extends CaptureAuthority { token: string; port: number; grantExpiresAt: number | null }
 export interface MenuGrant extends CaptureAuthority {
   serviceUrl: string; token: string; workspaceName: string; expiresAt: number;
 }
@@ -27,7 +27,9 @@ function storedPairing(): Pairing | null {
     const value = JSON.parse(sessionStorage.getItem(STORAGE_KEY) || "null") as Partial<Pairing> | null;
     return value && typeof value.token === "string"
       && typeof value.instanceId === "string" && typeof value.workspaceId === "string"
-      && Number.isInteger(value.port) && Number(value.port) > 0 && Number(value.port) <= 65535 ? value as Pairing : null;
+      && Number.isInteger(value.port) && Number(value.port) > 0 && Number(value.port) <= 65535
+      ? { ...value, grantExpiresAt: value.grantExpiresAt === null ? null
+        : typeof value.grantExpiresAt === "number" ? value.grantExpiresAt : 0 } as Pairing : null;
   } catch { return null; }
 }
 
@@ -106,7 +108,8 @@ export class NativeBridgeOwner {
     if (value.instanceId !== grant.instanceId || value.workspaceId !== grant.workspaceId || !value.token) {
       throw new Error("Margins Menu connected to a different Workspace");
     }
-    this.pairing = { token: value.token, instanceId: value.instanceId, workspaceId: value.workspaceId, port: 18765 };
+    this.pairing = { token: value.token, instanceId: value.instanceId, workspaceId: value.workspaceId,
+      port: 18765, grantExpiresAt: grant.expiresAt };
     this.acceptStatus(value.status);
     this.currentError = null;
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(this.pairing));
@@ -119,7 +122,8 @@ export class NativeBridgeOwner {
     if (value.instanceId !== expected.instanceId || value.workspaceId !== expected.workspaceId) {
       throw new Error(`Mac recorder points to ${value.instanceId}/${value.workspaceId}; this BB project uses ${expected.instanceId}/${expected.workspaceId}. Configure both for the same Margins destination.`);
     }
-    this.pairing = { token: value.token, instanceId: value.instanceId, workspaceId: value.workspaceId, port };
+    this.pairing = { token: value.token, instanceId: value.instanceId, workspaceId: value.workspaceId,
+      port, grantExpiresAt: null };
     this.acceptStatus(value.status);
     this.currentError = null;
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(this.pairing));
@@ -130,6 +134,9 @@ export class NativeBridgeOwner {
     if (!this.pairing) throw new Error("Pair the Mac recorder first.");
     if (this.pairing.instanceId !== expected.instanceId || this.pairing.workspaceId !== expected.workspaceId) {
       throw new Error("The BB project recording destination changed. Pair the Mac recorder with this project's Margins destination.");
+    }
+    if (this.pairing.grantExpiresAt !== null && this.pairing.grantExpiresAt < Date.now() + 60_000) {
+      throw new Error("Margins Menu access needs renewal. Connect again before recording.");
     }
     const status = await this.refresh();
     if (status.instanceId !== expected.instanceId || status.workspaceId !== expected.workspaceId) {
