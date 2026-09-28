@@ -320,6 +320,14 @@ export default function marginsPlugin(bb: BbPluginApi) {
       const resolvedWorkspaceId = target.workspaceId || options.defaultWorkspaceId || null;
       return { ...options, resolvedWorkspaceId };
     },
+    async workspacePaths({ projectId }) {
+      const target = await targetForProject(projectId);
+      const options = await callHost(target, "workspaceOptions", {});
+      const workspaceId = target.workspaceId || options.defaultWorkspaceId || null;
+      if (!workspaceId) return { workspaceId: null, notes: null, recordings: null };
+      const paths = await callHost(target, "workspacePaths", { workspaceId });
+      return { workspaceId, ...paths };
+    },
     async availableProjects() {
       const projects = await bb.sdk.projects.list();
       return { projects: projects.filter((project) => project.kind !== "personal")

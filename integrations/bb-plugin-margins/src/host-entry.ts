@@ -1,6 +1,6 @@
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
 import { hostSignals, marginsHostContract, type HostResult } from "./contracts.js";
-import { ProjectMarginsTransport, workspaceOptions } from "./project-server.js";
+import { ProjectMarginsTransport, workspaceOptions, workspacePaths } from "./project-server.js";
 
 type Transport = ProjectMarginsTransport;
 
@@ -25,6 +25,10 @@ export function createMarginsHostEntry(transport: Transport) {
       workspaceOptions(_input, context) {
         retain(context);
         return workspaceOptions();
+      },
+      workspacePaths(input, context) {
+        retain(context);
+        return workspacePaths(input.workspaceId);
       },
       listWorkspaceMeetings(input, context) {
         retain(context);

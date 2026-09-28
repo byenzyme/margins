@@ -18,21 +18,29 @@ function Signal({ state }: { state: PanelState["state"] }) {
   </div>;
 }
 
-function ProjectWorkspaceSetting({ threadId, projectId, onSaved }: { threadId?: string; projectId?: string; onSaved: () => void }) {
+function ProjectWorkspaceSetting({ projectId, onSaved }: { projectId: string; onSaved: () => void }) {
   const rpc = useRpc<typeof marginsRpcContract>();
   const [value, setValue] = useState("");
   const [workspaces, setWorkspaces] = useState<Array<{ id: string; name: string | null }>>([]);
   const [defaultWorkspaceId, setDefaultWorkspaceId] = useState<string | null>(null);
+  const [paths, setPaths] = useState<{ notes: string | null; recordings: string | null } | null>(null);
+  const [pathsError, setPathsError] = useState(false);
+  const [pathsVersion, setPathsVersion] = useState(0);
   const [message, setMessage] = useState("");
   useEffect(() => {
-    if (!projectId) return;
-    void Promise.all([rpc.call("projectWorkspace", { threadId, projectId }), rpc.call("availableWorkspaces", { projectId })])
+    void Promise.all([rpc.call("projectWorkspace", { projectId }), rpc.call("availableWorkspaces", { projectId })])
       .then(([selected, options]) => {
         setValue(selected.workspaceId || ""); setWorkspaces(options.workspaces);
         setDefaultWorkspaceId(options.defaultWorkspaceId);
         if (options.autoSelected) setMessage(`Using ${options.workspaces[0]?.name || options.workspaces[0]?.id} as the machine default.`);
       }).catch(() => setMessage("Workspace setting unavailable"));
-  }, [rpc, threadId, projectId]);
+  }, [rpc, projectId]);
+  useEffect(() => {
+    setPaths(null); setPathsError(false);
+    void rpc.call("workspacePaths", { projectId })
+      .then(({ notes, recordings }) => setPaths({ notes, recordings }))
+      .catch(() => setPathsError(true));
+  }, [rpc, projectId, pathsVersion]);
   return <div className="margins-workspace-setting">
     <label htmlFor="margins-project-workspace">Margins Workspace for this project</label>
     <select id="margins-project-workspace" aria-label="Margins Workspace for this project" value={value}
@@ -40,8 +48,14 @@ function ProjectWorkspaceSetting({ threadId, projectId, onSaved }: { threadId?: 
       <option value="">Machine default ({workspaces.find((item) => item.id === defaultWorkspaceId)?.name || defaultWorkspaceId || "not set"})</option>
       {workspaces.map((item) => <option key={item.id} value={item.id}>{item.name || item.id}</option>)}
     </select>
-    <button onClick={() => void rpc.call("projectWorkspace", { threadId, projectId, workspaceId: value }).then(() => { setMessage("Workspace preference saved"); onSaved(); }).catch((error) => setMessage(String(error)))}>Save</button>
+    <button onClick={() => void rpc.call("projectWorkspace", { projectId, workspaceId: value }).then(() => { setMessage("Workspace preference saved"); setPathsVersion((version) => version + 1); onSaved(); }).catch((error) => setMessage(String(error)))}>Save</button>
     {message && <span role="status">{message}</span>}
+    {paths && <div className="margins-workspace-paths">
+      {paths.recordings && <div>Meeting recordings <code>{paths.recordings}</code></div>}
+      {paths.notes && <div>Connected notes <code>{paths.notes}</code></div>}
+      <small>These locations come from the selected Margins Workspace.</small>
+    </div>}
+    {pathsError && <span role="status">Workspace locations unavailable</span>}
   </div>;
 }
 

@@ -33381,6 +33381,10 @@ var marginsHostContract = defineRpcContract2({
       workspaces: external_exports2.array(external_exports2.object({ id: external_exports2.string(), name: external_exports2.string().nullable() }).strict())
     }).strict()
   },
+  workspacePaths: {
+    input: external_exports2.object({ workspaceId: external_exports2.string().min(1) }).strict(),
+    output: external_exports2.object({ notes: external_exports2.string(), recordings: external_exports2.string() }).strict()
+  },
   listWorkspaceMeetings: {
     input: external_exports2.object({ target: projectTargetSchema }).strict(),
     output: workspaceMeetingsResultSchema
@@ -33515,6 +33519,10 @@ var marginsRpcContract = defineRpcContract2({
       autoSelected: external_exports2.boolean(),
       workspaces: external_exports2.array(external_exports2.object({ id: external_exports2.string(), name: external_exports2.string().nullable() }).strict())
     }).strict()
+  },
+  workspacePaths: {
+    input: external_exports2.object({ projectId: external_exports2.string().min(1) }).strict(),
+    output: external_exports2.object({ workspaceId: external_exports2.string().nullable(), notes: external_exports2.string().nullable(), recordings: external_exports2.string().nullable() }).strict()
   },
   availableProjects: {
     input: external_exports2.object({}).strict(),
@@ -33913,6 +33921,22 @@ async function workspaceOptions() {
     autoSelected = true;
   }
   return { defaultWorkspaceId, workspaces, autoSelected };
+}
+async function workspacePaths(workspaceId) {
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(workspaceId)) throw new Error("Invalid Margins Workspace id");
+  const binary = marginsCli();
+  const env = { ...process.env, MARGINS_HOME: marginsHome() };
+  const [destinationResult, sourcesResult] = await Promise.all([
+    execFile2(binary, ["--workspace", workspaceId, "workspace", "destination", "--json"], { env, timeout: 5e3, maxBuffer: 65536 }),
+    execFile2(binary, ["--workspace", workspaceId, "source", "list", "--json"], { env, timeout: 5e3, maxBuffer: 65536 })
+  ]);
+  const destination = JSON.parse(destinationResult.stdout);
+  const sources = JSON.parse(sourcesResult.stdout);
+  const capture = Array.isArray(sources) ? sources.find((item) => item && typeof item === "object" && item.kind === "captures") : null;
+  if (typeof destination.destination !== "string" || !isAbsolute(destination.destination) || !capture || typeof capture.path !== "string" || !isAbsolute(capture.path)) {
+    throw new Error("Margins Workspace destinations are unavailable.");
+  }
+  return { notes: destination.destination, recordings: capture.path };
 }
 async function resolveWorkspaceId(target) {
   if (target.workspaceId) {
@@ -34375,6 +34399,10 @@ function createMarginsHostEntry(transport) {
       workspaceOptions(_input, context) {
         retain(context);
         return workspaceOptions();
+      },
+      workspacePaths(input2, context) {
+        retain(context);
+        return workspacePaths(input2.workspaceId);
       },
       listWorkspaceMeetings(input2, context) {
         retain(context);

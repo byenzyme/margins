@@ -2,7 +2,7 @@
   "name": "bb-plugin-margins",
   "version": "0.1.0",
   "private": true,
-  "description": "Record a meeting from bb into the project's Margins store.",
+  "description": "Record meetings from bb into a Margins Workspace.",
   "keywords": [
     "bb-plugin",
     "margins",
@@ -65,7 +65,7 @@
   },
   "bb": {
     "name": "Margins",
-    "description": "Record a meeting from bb into the project's Margins store.",
+    "description": "Record meetings from bb into a Margins Workspace.",
     "branding": {
       "icon": "Mic"
     },

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { marginsHome, ProjectMarginsTransport, ProjectServerManager, readAsrRuntimeConfig, resolveWorkspaceId, workspaceInstanceDir, workspaceOptions } from "./project-server.js";
+import { marginsHome, ProjectMarginsTransport, ProjectServerManager, readAsrRuntimeConfig, resolveWorkspaceId, workspaceInstanceDir, workspaceOptions, workspacePaths } from "./project-server.js";
 
 const saved = {
   url: process.env.MARGINS_BB_REMOTE_URL,
@@ -27,6 +27,18 @@ afterEach(() => {
 });
 
 describe("ProjectServerManager remote adapter", () => {
+  it("reads recording and note destinations from the selected Workspace CLI", async () => {
+    const root = await mkdtemp(join(tmpdir(), "margins-bb-workspace-paths-"));
+    try {
+      const cli = join(root, "margins-test-cli");
+      await writeFile(cli, `#!/usr/bin/env node\nif (process.argv.includes("destination")) console.log(JSON.stringify({destination:"/vault/inbox"}));\nelse console.log(JSON.stringify([{name:"captures",kind:"captures",path:"/data/captures"}]));\n`);
+      await chmod(cli, 0o755);
+      process.env.MARGINS_CLI_BIN = cli;
+      process.env.MARGINS_HOME = root;
+      await expect(workspacePaths("practice")).resolves.toEqual({ notes: "/vault/inbox", recordings: "/data/captures" });
+      await expect(workspacePaths("../other")).rejects.toThrow("Invalid Margins Workspace id");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
   it("uses the Workspace service for completed meeting actions", async () => {
     const manager = { ensure: vi.fn(async () => ({ baseUrl: "https://margins.example.test", token: "scoped-token",
       workspaceId: "practice", instanceId: "instance-remote" })) } as unknown as ProjectServerManager;

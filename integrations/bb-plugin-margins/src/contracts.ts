@@ -100,6 +100,10 @@ export const marginsHostContract = defineRpcContract({
     output: z.object({ defaultWorkspaceId: z.string().nullable(), autoSelected: z.boolean(),
       workspaces: z.array(z.object({ id: z.string(), name: z.string().nullable() }).strict()) }).strict(),
   },
+  workspacePaths: {
+    input: z.object({ workspaceId: z.string().min(1) }).strict(),
+    output: z.object({ notes: z.string(), recordings: z.string() }).strict(),
+  },
   listWorkspaceMeetings: {
     input: z.object({ target: projectTargetSchema }).strict(),
     output: workspaceMeetingsResultSchema,
@@ -208,6 +212,10 @@ export const marginsRpcContract = defineRpcContract({
     input: z.object({ projectId: z.string().min(1) }).strict(),
     output: z.object({ defaultWorkspaceId: z.string().nullable(), resolvedWorkspaceId: z.string().nullable(), autoSelected: z.boolean(),
       workspaces: z.array(z.object({ id: z.string(), name: z.string().nullable() }).strict()) }).strict(),
+  },
+  workspacePaths: {
+    input: z.object({ projectId: z.string().min(1) }).strict(),
+    output: z.object({ workspaceId: z.string().nullable(), notes: z.string().nullable(), recordings: z.string().nullable() }).strict(),
   },
   availableProjects: {
     input: z.object({}).strict(),

@@ -46,6 +46,9 @@
 .margins-settings label,.margins-workspace-setting { display:flex; flex-wrap:wrap; align-items:center; gap:8px; font-size:12px; }
 .margins-settings select,.margins-workspace-setting select { border:1px solid var(--border); border-radius:7px; padding:7px 9px; background:var(--background); color:var(--foreground); }
 .margins-workspace-setting button { border:1px solid var(--border); border-radius:7px; padding:7px 10px; background:var(--background); color:var(--foreground); cursor:pointer; }
+.margins-workspace-paths { flex-basis:100%; display:grid; gap:4px; padding-left:8px; color:var(--muted-foreground); }
+.margins-workspace-paths code { margin-left:6px; color:var(--foreground); overflow-wrap:anywhere; }
+.margins-workspace-paths small { font-size:11px; }
 .margins-meetings-page { display:grid; grid-template-columns:minmax(180px,240px) minmax(0,1fr); min-height:100%; color:var(--foreground); }
 .margins-meeting-list { display:flex; flex-direction:column; gap:13px; padding:18px 12px; border-right:1px solid var(--border); }
 .margins-meetings-top { display:flex; min-height:34px; align-items:center; justify-content:space-between; gap:8px; padding:0 6px; }

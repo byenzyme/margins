@@ -18995,6 +18995,10 @@ var marginsHostContract = defineRpcContract({
       workspaces: external_exports.array(external_exports.object({ id: external_exports.string(), name: external_exports.string().nullable() }).strict())
     }).strict()
   },
+  workspacePaths: {
+    input: external_exports.object({ workspaceId: external_exports.string().min(1) }).strict(),
+    output: external_exports.object({ notes: external_exports.string(), recordings: external_exports.string() }).strict()
+  },
   listWorkspaceMeetings: {
     input: external_exports.object({ target: projectTargetSchema }).strict(),
     output: workspaceMeetingsResultSchema
@@ -19129,6 +19133,10 @@ var marginsRpcContract = defineRpcContract({
       autoSelected: external_exports.boolean(),
       workspaces: external_exports.array(external_exports.object({ id: external_exports.string(), name: external_exports.string().nullable() }).strict())
     }).strict()
+  },
+  workspacePaths: {
+    input: external_exports.object({ projectId: external_exports.string().min(1) }).strict(),
+    output: external_exports.object({ workspaceId: external_exports.string().nullable(), notes: external_exports.string().nullable(), recordings: external_exports.string().nullable() }).strict()
   },
   availableProjects: {
     input: external_exports.object({}).strict(),
@@ -19626,6 +19634,14 @@ function marginsPlugin(bb) {
       const options = await callHost(target, "workspaceOptions", {});
       const resolvedWorkspaceId = target.workspaceId || options.defaultWorkspaceId || null;
       return { ...options, resolvedWorkspaceId };
+    },
+    async workspacePaths({ projectId }) {
+      const target = await targetForProject(projectId);
+      const options = await callHost(target, "workspaceOptions", {});
+      const workspaceId = target.workspaceId || options.defaultWorkspaceId || null;
+      if (!workspaceId) return { workspaceId: null, notes: null, recordings: null };
+      const paths = await callHost(target, "workspacePaths", { workspaceId });
+      return { workspaceId, ...paths };
     },
     async availableProjects() {
       const projects = await bb.sdk.projects.list();

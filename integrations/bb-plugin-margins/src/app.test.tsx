@@ -33,6 +33,25 @@ describe("Margins recording panel", () => {
     expect(app.messageActions).toEqual([]);
   });
 
+  it("shows the machine default and both Workspace destinations in settings", async () => {
+    const projectWorkspace = vi.fn(() => ({ workspaceId: null }));
+    const slot = renderSlot(app.settingsSections[0]!, {}, { rpc: {
+      availableProjects: () => ({ projects: [{ id: "project-1", name: "Project" }] }),
+      projectWorkspace,
+      availableWorkspaces: () => ({ defaultWorkspaceId: "obsidian", resolvedWorkspaceId: "obsidian",
+        autoSelected: false, workspaces: [{ id: "obsidian", name: "Obsidian" }] }),
+      workspacePaths: () => ({ workspaceId: "obsidian", notes: "/vault/inbox", recordings: "/home/me/.margins/captures" }),
+    } });
+    const screen = within(slot.container);
+    await screen.findByText("/vault/inbox");
+    expect(screen.getByText("/home/me/.margins/captures")).toBeTruthy();
+    expect(screen.getByRole("option", { name: "Machine default (Obsidian)" })).toBeTruthy();
+    expect(projectWorkspace).toHaveBeenCalledWith({ projectId: "project-1" });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(projectWorkspace).toHaveBeenCalledWith({ projectId: "project-1", workspaceId: "" }));
+    slot.lifecycle.unmount();
+  });
+
   it("offers known Workspaces in a picker when the machine has no default", async () => {
     const choose = vi.fn(() => ({ workspaceId: "vault" }));
     const slot = renderSlot(app.navPanels[0]!, { subPath: "project-1" }, { rpc: {

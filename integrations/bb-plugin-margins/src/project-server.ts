@@ -117,6 +117,24 @@ export async function workspaceOptions(): Promise<{ defaultWorkspaceId: string |
   return { defaultWorkspaceId, workspaces, autoSelected };
 }
 
+export async function workspacePaths(workspaceId: string): Promise<{ notes: string; recordings: string }> {
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(workspaceId)) throw new Error("Invalid Margins Workspace id");
+  const binary = marginsCli();
+  const env = { ...process.env, MARGINS_HOME: marginsHome() };
+  const [destinationResult, sourcesResult] = await Promise.all([
+    execFile(binary, ["--workspace", workspaceId, "workspace", "destination", "--json"], { env, timeout: 5_000, maxBuffer: 65_536 }),
+    execFile(binary, ["--workspace", workspaceId, "source", "list", "--json"], { env, timeout: 5_000, maxBuffer: 65_536 }),
+  ]);
+  const destination = JSON.parse(destinationResult.stdout) as { destination?: unknown };
+  const sources = JSON.parse(sourcesResult.stdout) as unknown;
+  const capture = Array.isArray(sources) ? sources.find((item) => item && typeof item === "object" && item.kind === "captures") : null;
+  if (typeof destination.destination !== "string" || !isAbsolute(destination.destination)
+    || !capture || typeof capture.path !== "string" || !isAbsolute(capture.path)) {
+    throw new Error("Margins Workspace destinations are unavailable.");
+  }
+  return { notes: destination.destination, recordings: capture.path };
+}
+
 export async function resolveWorkspaceId(target: ProjectTarget): Promise<string> {
   if (target.workspaceId) {
     if (!/^[a-z0-9][a-z0-9-]*$/.test(target.workspaceId)) throw new Error("Invalid Margins Workspace id");
