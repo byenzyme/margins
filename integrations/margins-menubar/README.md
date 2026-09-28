@@ -11,9 +11,11 @@ the Menu then appears in the same Workspace. bb settings can revoke the grant.
 The grant stays in Menu memory, renews while connected, and expires after the
 Menu disconnects or bb revokes access.
 
-The menu also offers a first-run destination choice: **On this Mac** or
-**Connected Workspace**. Typed Connected Workspace settings are an advanced
-fallback. It remembers that choice in its own preferences.
+The first-run menu points bb users to **Meetings → Connect**; it sends the
+Workspace and access without typing an SSH URL or Workspace ID. **On this Mac**
+is a separate local recording choice. Typed connection settings remain under
+**Manual connection (advanced)**. The menu remembers the chosen destination in
+its own preferences. If Meetings asks for a Workspace, set one up in bb first.
 The everyday surface has one primary action, **Record meeting** or **Finish
 meeting**; Pause, Resume, Change destination, and Quit are in **More**.
 

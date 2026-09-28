@@ -473,18 +473,23 @@ private struct MenuError: LocalizedError {
 
 private struct RecorderControls: View {
     @ObservedObject var recorder: MenuRecorder
+    @State private var showManualConnection = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Margins").font(.headline)
             if !recorder.setupComplete {
                 Text("Where should meetings live?").font(.subheadline)
-                Button("On this Mac") { Task { await recorder.chooseMac() } }
+                Text("With bb").font(.subheadline)
+                Text("Open Meetings in bb, set up a Workspace if asked, then click Connect. bb sends it here automatically.")
+                    .font(.caption).foregroundStyle(.secondary)
                 Divider()
-                Text("Connected Workspace").font(.subheadline)
-                TextField("SSH alias or HTTPS URL", text: $recorder.remote)
-                TextField("Workspace ID", text: $recorder.workspace)
-                Button("Connect Workspace") { Task { await recorder.chooseProject() } }
+                Button("On this Mac") { Task { await recorder.chooseMac() } }
+                DisclosureGroup("Manual connection (advanced)", isExpanded: $showManualConnection) {
+                    TextField("SSH alias or HTTPS URL", text: $recorder.remote)
+                    TextField("Workspace ID", text: $recorder.workspace)
+                    Button("Connect Workspace") { Task { await recorder.chooseProject() } }
+                }
             } else {
                 Text(recorder.connectedWorkspaceName ?? recorder.mode.rawValue).font(.subheadline)
                 Text(recorder.status).font(.caption).foregroundStyle(.secondary)
