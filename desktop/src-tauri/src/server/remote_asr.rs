@@ -6,7 +6,7 @@ use margins_workflows::{
     remote_workspace::{remote_opus_packet_stream_for_asr, remote_pcm_s16le_for_asr},
     workspace_service::{ServicePrincipal, WorkspaceService},
 };
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{mpsc, Arc, Mutex};
 
 struct JobRequest {
@@ -144,7 +144,12 @@ fn transcribe_remote_session(
         .repository_record(principal, session_id)?
         .context("finalized session has no canonical repository record")?;
     let artifacts = service.artifacts(principal, session_id.as_ref())?;
-    let mut timeline = Vec::<(u64, u8, String)>::new();
+    let mut entries = Vec::new();
+    let mut channel_labels = BTreeMap::from([
+        (0, "you (mic)".to_string()),
+        (1, "them (system)".to_string()),
+    ]);
+    let mut other_channels = HashMap::<String, u32>::new();
     for artifact in artifacts {
         let Some(kind) = artifact.kind.strip_prefix("audio_") else {
             continue;
@@ -178,7 +183,18 @@ fn transcribe_remote_session(
             _ => bail!("remote ASR lane uses an unsupported durable audio format"),
         };
         let words = backend.transcribe_words(&mono_16k)?;
-        let channel_order = if lane_id == "mic" { 0 } else { 1 };
+        let channel_order = match lane_id {
+            "mic" => 0,
+            "system" => 1,
+            _ => match other_channels.get(lane_id) {
+                Some(channel) => *channel,
+                None => {
+                    let channel = 2 + other_channels.len() as u32;
+                    other_channels.insert(lane_id.to_string(), channel);
+                    channel
+                }
+            },
+        };
         let label = if lane_id == "mic" {
             "you (mic)"
         } else if lane_id == "system" {
@@ -186,32 +202,24 @@ fn transcribe_remote_session(
         } else {
             lane_id
         };
-        for word in words {
-            let text = word.text.trim();
-            if !text.is_empty() {
-                timeline.push((
-                    segment.start_offset_ms.saturating_add(word.start_ms),
-                    channel_order,
-                    format!(
-                        "[{}] {label}: {text}",
-                        elapsed(segment.start_offset_ms.saturating_add(word.start_ms))
-                    ),
-                ));
-            }
-        }
+        channel_labels.insert(channel_order, label.to_string());
+        entries.extend(
+            margins::asr::words_to_transcript_entries(
+                &words,
+                channel_order,
+                segment.start_offset_ms,
+            )
+            .into_iter()
+            .filter(|entry| !entry.text.trim().is_empty()),
+        );
     }
-    timeline.sort_by_key(|(at, channel, _)| (*at, *channel));
-    let timeline = timeline
-        .into_iter()
-        .map(|(_, _, line)| line)
-        .collect::<Vec<_>>()
-        .join("\n");
     let memo = std::fs::read_to_string(
         service
             .margins_dir()
             .join(format!("{}.md", session_id.as_ref())),
     )
     .unwrap_or_default();
+    let timeline = render_remote_timeline(entries, &channel_labels, &memo);
     let content = crate::render_aligned_markdown(
         session_id.as_ref(),
         "Margins remote offline Parakeet TDT ONNX transcript and memo context.",
@@ -228,6 +236,51 @@ fn transcribe_remote_session(
     Ok(crate::session_transcript_artifact_registry_path(
         session_id.as_ref(),
     ))
+}
+
+fn render_remote_timeline(
+    mut entries: Vec<margins::asr::TranscriptWordEntry>,
+    channel_labels: &BTreeMap<u32, String>,
+    memo: &str,
+) -> String {
+    entries.sort_by_key(|entry| (entry.start_ms, entry.channel));
+    let mut entries = entries.into_iter().peekable();
+    let mut boundaries = memo
+        .lines()
+        .filter_map(|line| crate::parse_context_line_ms(line.trim()))
+        .collect::<Vec<_>>();
+    boundaries.sort_unstable();
+    let mut lines = Vec::new();
+    for boundary in boundaries {
+        let mut window = Vec::new();
+        while entries
+            .peek()
+            .is_some_and(|entry| entry.start_ms <= boundary)
+        {
+            window.push(entries.next().expect("peeked transcript entry"));
+        }
+        append_remote_phrases(&mut lines, window, channel_labels);
+    }
+    append_remote_phrases(&mut lines, entries.collect(), channel_labels);
+    lines.join("\n")
+}
+
+fn append_remote_phrases(
+    lines: &mut Vec<String>,
+    entries: Vec<margins::asr::TranscriptWordEntry>,
+    channel_labels: &BTreeMap<u32, String>,
+) {
+    for entry in margins::asr::merge_word_entries_to_phrases(entries, 2_000) {
+        let label = channel_labels
+            .get(&entry.channel)
+            .map(String::as_str)
+            .unwrap_or("speaker");
+        lines.push(format!(
+            "[{}] {label}: {}",
+            elapsed(entry.start_ms),
+            entry.text.trim()
+        ));
+    }
 }
 
 fn elapsed(ms: u64) -> String {
@@ -249,6 +302,44 @@ mod tests {
         workspace::ensure_service_workspace,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn remote_asr_groups_words_without_crossing_a_memo_boundary() {
+        let words = [
+            margins::asr::WordTiming {
+                start_ms: 1_000,
+                end_ms: 1_200,
+                text: "Nice".into(),
+            },
+            margins::asr::WordTiming {
+                start_ms: 2_000,
+                end_ms: 2_000,
+                text: ".".into(),
+            },
+            margins::asr::WordTiming {
+                start_ms: 3_000,
+                end_ms: 3_100,
+                text: "To".into(),
+            },
+            margins::asr::WordTiming {
+                start_ms: 3_200,
+                end_ms: 3_400,
+                text: "find".into(),
+            },
+        ];
+        let labels = BTreeMap::from([(0, "you (mic)".to_string())]);
+        let timeline = render_remote_timeline(
+            margins::asr::words_to_transcript_entries(&words, 0, 0),
+            &labels,
+            "[00:02] Current memo",
+        );
+        let artifact =
+            crate::render_aligned_markdown("meet", "fixture", "[00:02] Current memo", &timeline);
+        assert!(artifact.contains("[00:01] you (mic): Nice."));
+        assert!(artifact.contains("[00:03] you (mic): To find"));
+        assert!(artifact.find("Nice.").unwrap() < artifact.find("Current memo").unwrap());
+        assert!(artifact.find("Current memo").unwrap() < artifact.find("To find").unwrap());
+    }
 
     struct QualityCase {
         name: &'static str,
