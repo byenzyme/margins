@@ -80,13 +80,15 @@
 .margins-meeting-status { max-width:360px; overflow:hidden; color:var(--destructive); font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
 .margins-meeting-status.saved { color:var(--muted-foreground); }
 .margins-meeting-pad h2 { margin:5px 0 0; font-size:20px; font-weight:620; letter-spacing:-.02em; }
-.margins-meeting-next { display:flex; align-items:flex-end; }
+.margins-meeting-next { display:flex; }
 .margins-meeting-next button { border:1px solid var(--border); border-radius:8px; padding:7px 10px; background:transparent; color:var(--foreground); font:inherit; font-size:12px; cursor:pointer; }
-.margins-meeting-trail { display:flex; flex-wrap:wrap; align-items:center; gap:5px 12px; margin-top:14px; color:var(--muted-foreground); font-size:11px; }
+.margins-meeting-trail { display:flex; flex-wrap:wrap; align-items:center; gap:5px 12px; color:var(--muted-foreground); font-size:11px; }
 .margins-meeting-trail button { border:0; padding:0; background:transparent; color:var(--foreground); font:inherit; text-decoration:underline; cursor:pointer; }
 .margins-meeting-pad textarea { width:100%; min-height:350px; flex:1; resize:none; border:0; outline:0; margin-top:22px; background:transparent; color:var(--foreground); font:inherit; font-size:15px; line-height:1.7; }
+.margins-meeting-pad.finished textarea { height:clamp(220px,34vh,420px); min-height:220px; flex:none; }
 .margins-meeting-pad textarea::placeholder { color:color-mix(in srgb,var(--muted-foreground) 62%,transparent); }
 .margins-meeting-pad footer { display:flex; justify-content:space-between; gap:12px; color:var(--muted-foreground); font-size:11px; }
+.margins-meeting-pad footer.margins-meeting-actions { flex-direction:column; align-items:flex-start; justify-content:flex-start; gap:10px; margin-top:8px; }
 .margins-meetings-empty { display:flex; min-height:50vh; flex-direction:column; align-items:flex-start; justify-content:center; gap:12px; }
 .margins-meetings-empty p { max-width:460px; margin:0; color:var(--muted-foreground); font-size:13px; }
 .margins-meetings-empty div { display:flex; gap:7px; }

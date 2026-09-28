@@ -494,7 +494,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
           {!item.inputFinalized && pausedSession(item.sessionId) && <small>Paused</small>}</button>)}
       </section>)}
     </aside>
-    <section className="margins-meeting-pad">
+    <section className={`margins-meeting-pad${selected?.inputFinalized ? " finished" : ""}`}>
       {(client.platform === "macos" || menuAvailable) && live.length === 0 && <div className="margins-menu-connect">
         <span>{nativeBridgeOwner.paired && nativeConnectionError
           ? "Margins Menu disconnected"
@@ -535,15 +535,17 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
           </nav>}
           {message && <span className={`margins-meeting-status${message === "Saved" ? " saved" : " error"}`} role="status">{message}</span>}</div>
           <h2>{meeting.title || `Meeting · ${meetingTime(meeting.startedAt)}`}</h2></div>
-          {noteAction && <div className="margins-meeting-next"><button onClick={() => void distill()}>{selected.notePath ? "Update note" : "Make note"} →</button></div>}
         </header>
         {audioStartingId === selected.sessionId && nativeStatus?.state === "needs_attention" &&
           <p role="alert">{nativeStatus.error || "Margins Menu could not start recording."}</p>}
-        {selected.inputFinalized && <div className="margins-meeting-trail"><span>{shownTranscript === "ready" ? "Transcript ready" : shownTranscript === "pending" ? "Transcribing…" : shownTranscript === "checking" ? "Checking transcript…" : shownTranscript === "failed" ? "Transcript unavailable" : "Transcript not ready"}</span>
-          {(shownTranscript === "failed" || shownTranscript === "not_ready") && <button onClick={() => void retryTranscription()}>{shownTranscript === "failed" ? "Retry" : "Transcribe"}</button>}
-          {handoff && <span>Note draft opened — press Enter to start</span>}</div>}
         <textarea ref={memoRef} aria-label="Meeting memo pad" placeholder="Write notes..." value={draft} onChange={(event) => { dirty.current = true; latestDraft.current = event.target.value; setDraft(event.target.value); setMessage(""); }} onBlur={() => void saveMemo().catch((error) => setMessage(String(error)))} />
-        <footer>{memoChangedSinceNote && <span>Note uses an earlier memo revision</span>}</footer>
+        <footer className={selected.inputFinalized ? "margins-meeting-actions" : undefined}>
+          {selected.inputFinalized && <div className="margins-meeting-trail"><span>{shownTranscript === "ready" ? "Transcript ready" : shownTranscript === "pending" ? "Transcribing…" : shownTranscript === "checking" ? "Checking transcript…" : shownTranscript === "failed" ? "Transcript unavailable" : "Transcript not ready"}</span>
+            {(shownTranscript === "failed" || shownTranscript === "not_ready") && <button onClick={() => void retryTranscription()}>{shownTranscript === "failed" ? "Retry" : "Transcribe"}</button>}
+            {handoff && <span>Note draft opened — press Enter to start</span>}</div>}
+          {memoChangedSinceNote && <span>Note uses an earlier memo revision</span>}
+          {noteAction && <div className="margins-meeting-next"><button onClick={() => void distill()}>{selected.notePath ? "Update note" : "Make note"} →</button></div>}
+        </footer>
       </> : selectedId && panel?.state !== "unavailable" ? <div className="margins-meetings-empty" role="status"><h2>{selected?.title || (selected ? `Meeting · ${meetingTime(selected.startedAt)}` : "Opening meeting…")}</h2><p>Opening memo…</p></div>
       : panel?.state !== "unavailable" && <div className="margins-meetings-empty"><h2>No meetings yet</h2>{workspaceNotice && <p>{workspaceNotice}</p>}<button onClick={() => void start()}>Start meeting</button>
         {message && <p role="alert">{message}</p>}</div>}

@@ -122,7 +122,11 @@ describe("Margins recording panel", () => {
       transcribePinnedSession: () => ({ ok: true, status: "queued", attempt: 1 }),
     } });
     const screen = within(slot.container);
-    fireEvent.click(await screen.findByRole("button", { name: "Make note →" }));
+    const pad = await screen.findByRole("textbox", { name: "Meeting memo pad" });
+    const makeNote = screen.getByRole("button", { name: "Make note →" });
+    expect(makeNote.closest("footer")?.querySelector(".margins-meeting-trail")).not.toBeNull();
+    expect(pad.compareDocumentPosition(makeNote) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.click(makeNote);
     await waitFor(() => expect(slot.inspection.navigateCalls.some((call) => call.method === "toCompose")).toBe(true));
     const compose = slot.inspection.navigateCalls.find((call) => call.method === "toCompose");
     expect(compose).toMatchObject({ options: { focusPrompt: true } });
