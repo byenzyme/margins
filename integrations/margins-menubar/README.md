@@ -46,6 +46,8 @@ after bundling both helpers and before notarization. It signs the helpers with
 the Hardened Runtime microphone entitlement and reseals the Menu bundle. Without
 that entitlement, the helper can report denied access without ever appearing
 in the Microphone list.
+The capture executable's embedded bundle ID must match its helper app's bundle
+ID; the signing script checks this before replacing signatures.
 
 ## Scoped Mac build
 

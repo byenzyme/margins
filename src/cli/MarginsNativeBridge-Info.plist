@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
   <key>CFBundleIdentifier</key>
-  <string>com.byenzyme.margins.native-bridge</string>
+  <string>com.byenzyme.margins.capture</string>
   <key>CFBundleName</key>
-  <string>Margins</string>
+  <string>Margins Capture</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>Margins records your microphone for the meeting you start in bb and saves it to your selected Margins Workspace.</string>
   <key>NSAudioCaptureUsageDescription</key>

@@ -20,13 +20,22 @@ for helper in "$capture" "$live"; do
   fi
 done
 
+embedded_plist="$(otool -P "$capture/Contents/MacOS/margins" | sed -n '/^<?xml /,$p')"
+embedded_id="$(plutil -extract CFBundleIdentifier raw -o - - <<<"$embedded_plist")"
+bundle_id="$(plutil -extract CFBundleIdentifier raw -o - "$capture/Contents/Info.plist")"
+if [[ "$embedded_id" != "$bundle_id" ]]; then
+  echo "capture executable and app bundle IDs differ: $embedded_id != $bundle_id" >&2
+  exit 1
+fi
+
 # Hardened Runtime silently prevents microphone authorization without this
 # entitlement. Sign the nested apps first, then reseal the parent bundle.
 codesign --force --options runtime --sign "$identity" \
   --entitlements "$repo_dir/src/cli/MarginsNativeBridge.entitlements" "$capture"
 codesign --force --options runtime --sign "$identity" \
   --entitlements "$repo_dir/desktop/src-tauri/MarginsLive.entitlements" "$live"
-codesign --force --options runtime --sign "$identity" "$app"
+codesign --force --options runtime --sign "$identity" \
+  --entitlements "$repo_dir/src/cli/MarginsNativeBridge.entitlements" "$app"
 
 for helper in "$capture" "$live"; do
   entitlements="$(codesign --display --entitlements :- "$helper" 2>/dev/null | tr -d '[:space:]')"
