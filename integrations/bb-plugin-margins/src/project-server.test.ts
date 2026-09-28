@@ -27,6 +27,29 @@ afterEach(() => {
 });
 
 describe("ProjectServerManager remote adapter", () => {
+  it("uses the Workspace service for completed meeting actions", async () => {
+    const manager = { ensure: vi.fn(async () => ({ baseUrl: "https://margins.example.test", token: "scoped-token",
+      workspaceId: "practice", instanceId: "instance-remote" })) } as unknown as ProjectServerManager;
+    const fetchMock = vi.fn(async (input: string | URL | Request, _options?: RequestInit) => {
+      const url = String(input);
+      const result = url.endsWith("/transcript") ? { body: "Transcript text" } : { updated: true };
+      return new Response(JSON.stringify({ ok: true, result }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const transport = new ProjectMarginsTransport(manager);
+    const target = { projectId: "project", projectRoot: "/tmp/project", hostId: "host" };
+    await expect(transport.renameWorkspaceMeeting(target, "/tmp/data", "meeting-1", "Planning"))
+      .resolves.toEqual({ ok: true });
+    await expect(transport.readWorkspaceTranscript(target, "/tmp/data", "meeting-1"))
+      .resolves.toEqual({ ok: true, body: "Transcript text" });
+    await expect(transport.discardWorkspaceMeeting(target, "/tmp/data", "meeting-1"))
+      .resolves.toEqual({ ok: true });
+    expect(fetchMock.mock.calls.map(([url, options]) => [String(url), options?.method])).toEqual([
+      ["https://margins.example.test/v1/workspaces/practice/sessions/meeting-1/title", "PUT"],
+      ["https://margins.example.test/v1/workspaces/practice/sessions/meeting-1/transcript", "GET"],
+      ["https://margins.example.test/v1/workspaces/practice/sessions/meeting-1", "DELETE"],
+    ]);
+  });
   it("forwards capture upload through the selected Workspace service only", async () => {
     const manager = { ensure: vi.fn(async () => ({ baseUrl: "http://127.0.0.1:8787", token: "service-token",
       workspaceId: "practice", instanceId: "instance-1" })) } as unknown as ProjectServerManager;

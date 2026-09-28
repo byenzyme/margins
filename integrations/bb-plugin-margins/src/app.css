@@ -80,8 +80,19 @@
 .margins-meeting-status { max-width:360px; overflow:hidden; color:var(--destructive); font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
 .margins-meeting-status.saved { color:var(--muted-foreground); }
 .margins-meeting-pad h2 { margin:5px 0 0; font-size:20px; font-weight:620; letter-spacing:-.02em; }
-.margins-meeting-next { display:flex; }
+.margins-meeting-title-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.margins-meeting-title-row input { min-width:180px; max-width:100%; border:1px solid var(--border); border-radius:7px; padding:5px 7px; background:var(--background); color:var(--foreground); font:inherit; font-size:18px; }
+.margins-meeting-title-row button,.margins-inline-action { border:0; padding:3px 5px; background:transparent; color:var(--muted-foreground); font:inherit; font-size:11px; cursor:pointer; }
+.margins-meeting-details { margin:7px 0 0; color:var(--muted-foreground); font-size:11px; line-height:1.5; }
+.margins-meeting-next { display:flex; align-items:center; gap:10px; }
 .margins-meeting-next button { border:1px solid var(--border); border-radius:8px; padding:7px 10px; background:transparent; color:var(--foreground); font:inherit; font-size:12px; cursor:pointer; }
+.margins-meeting-next button.margins-inline-action { border:0; padding:7px 5px; color:var(--muted-foreground); }
+.margins-meeting-more { position:relative; }
+.margins-meeting-more-menu { position:absolute; z-index:5; top:100%; left:0; display:flex; flex-direction:column; min-width:160px; padding:4px; border:1px solid var(--border); border-radius:8px; background:var(--background); box-shadow:0 8px 25px color-mix(in srgb,var(--foreground) 12%,transparent); }
+.margins-meeting-more-menu button { border:0; text-align:left; white-space:nowrap; }
+.margins-meeting-more-menu button:hover { background:var(--muted); }
+.margins-meeting-more-menu button.destructive { color:var(--destructive); }
+.margins-meeting-transcript { box-sizing:border-box; width:100%; max-height:180px; overflow:auto; white-space:pre-wrap; padding:10px; border:1px solid var(--border); border-radius:8px; color:var(--foreground); line-height:1.5; }
 .margins-meeting-trail { display:flex; flex-wrap:wrap; align-items:center; gap:5px 12px; color:var(--muted-foreground); font-size:11px; }
 .margins-meeting-trail button { border:0; padding:0; background:transparent; color:var(--foreground); font:inherit; text-decoration:underline; cursor:pointer; }
 .margins-meeting-pad textarea { width:100%; min-height:350px; flex:1; resize:none; border:0; outline:0; margin-top:22px; background:transparent; color:var(--foreground); font:inherit; font-size:15px; line-height:1.7; }
@@ -89,6 +100,7 @@
 .margins-meeting-pad textarea::placeholder { color:color-mix(in srgb,var(--muted-foreground) 62%,transparent); }
 .margins-meeting-pad footer { display:flex; justify-content:space-between; gap:12px; color:var(--muted-foreground); font-size:11px; }
 .margins-meeting-pad footer.margins-meeting-actions { flex-direction:column; align-items:flex-start; justify-content:flex-start; gap:10px; margin-top:8px; }
+.margins-archive-toggle { align-self:flex-start; border:0; padding:5px 6px; background:transparent; color:var(--muted-foreground); font:inherit; font-size:11px; cursor:pointer; }
 .margins-meetings-empty { display:flex; min-height:50vh; flex-direction:column; align-items:flex-start; justify-content:center; gap:12px; }
 .margins-meetings-empty p { max-width:460px; margin:0; color:var(--muted-foreground); font-size:13px; }
 .margins-meetings-empty div { display:flex; gap:7px; }

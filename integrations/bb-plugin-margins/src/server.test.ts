@@ -31,6 +31,10 @@ function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: strin
         notePath: "inbox/note.md", noteFile: { hostId: "project-host", path: "/tmp/vault/inbox/note.md" },
         threadIds: ["thr-note"], distilledMemoRevision: "memo-v1",
       }] };
+      if (method === "readWorkspaceMeeting" && options.meetingList) return { ok: true, candidates: ["meeting-1"], meeting: {
+        sessionId: "meeting-1", title: null, startedAt: "2026-09-25T01:00:00Z", inputFinalized: true,
+        notepad: { text: "Memo", revision: "memo-v1" },
+      } };
       if (method === "captureAuthority") return { ok: true, instanceId: "instance-1", workspaceId: "workspace-1" };
       if (method === "relayWorkspaceHttp" && options.relay) return { status: 200, bodyBase64: Buffer.from('{"ok":true}').toString("base64") };
       if (method === "sessionExists") return { ok: true, found: true };
@@ -75,6 +79,11 @@ describe("Margins project recording server", () => {
     const relayed = await host.harness.behavior.fetchHttp("POST", "/menu/relay", { headers: { ...auth, "content-type": "application/json" },
       body: JSON.stringify({ method: "GET", path: "v1/workspaces/workspace-1/current", bodyBase64: "" }) });
     await expect(relayed.json()).resolves.toMatchObject({ status: 200 });
+    const created = await host.harness.behavior.fetchHttp("POST", "/menu/relay", { headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({ method: "POST", path: "v1/workspaces/workspace-1/sessions",
+        bodyBase64: Buffer.from(JSON.stringify({ session_id: "mac-meeting-1" })).toString("base64") }) });
+    await expect(created.json()).resolves.toMatchObject({ status: 200 });
+    await expect(host.bb.storage.kv.get("meeting-origin:workspace-1:mac-meeting-1")).resolves.toBe("proj-1");
     expect(host.harness.inspection.experimental_hostRpcCalls).toEqual(expect.arrayContaining([
       expect.objectContaining({ method: "relayWorkspaceHttp", input: expect.objectContaining({ target: expect.objectContaining({ workspaceId: "workspace-1" }) }) }),
     ]));
@@ -97,6 +106,18 @@ describe("Margins project recording server", () => {
     await expect(host.harness.behavior.callRpc("listWorkspaceMeetings", { projectId: "proj-1" })).resolves.toMatchObject({ ok: true,
       meetings: [{ noteFile: { hostId: "project-host", path: "/tmp/vault/inbox/note.md" },
         threadLinks: [{ id: "thr-note", title: "Create connected meeting note" }] }],
+    });
+  });
+  it("shares archive state and recording provenance across projects in one Workspace", async () => {
+    const host = harness({ meetingList: true });
+    await expect(host.harness.behavior.callRpc("recordMeetingOrigin", { projectId: "proj-1", sessionId: "meeting-1" })).resolves.toEqual({ ok: true });
+    await expect(host.harness.behavior.callRpc("archiveWorkspaceMeeting", { projectId: "proj-1", sessionId: "meeting-1", archived: true })).resolves.toEqual({ ok: true });
+    await expect(host.harness.behavior.callRpc("listWorkspaceMeetings", { projectId: "proj-2" })).resolves.toMatchObject({ ok: true,
+      meetings: [{ sessionId: "meeting-1", workspaceId: "workspace-1", originProjectId: "proj-1", archived: true }],
+    });
+    await expect(host.harness.behavior.callRpc("archiveWorkspaceMeeting", { projectId: "proj-2", sessionId: "meeting-1", archived: false })).resolves.toEqual({ ok: true });
+    await expect(host.harness.behavior.callRpc("listWorkspaceMeetings", { projectId: "proj-1" })).resolves.toMatchObject({ ok: true,
+      meetings: [{ sessionId: "meeting-1", archived: false }],
     });
   });
   it("keys ownership by the Workspace session while routing audio by browser recording id", async () => {

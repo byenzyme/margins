@@ -83,7 +83,7 @@ pub fn build_router(state: ServerState) -> Router {
         )
         .route(
             "/v1/workspaces/:workspace/sessions/:session",
-            get(workspace_session),
+            get(workspace_session).delete(workspace_discard_session),
         )
         .route(
             "/v1/workspaces/:workspace/sessions/:session/commands",
@@ -451,6 +451,25 @@ async fn workspace_session(
         .workspace_service
         .session(&principal, &SessionId(session))
         .map(workspace_ok)
+        .unwrap_or_else(service_error)
+}
+
+async fn workspace_discard_session(
+    State(state): State<ServerState>,
+    Path((workspace, session)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let principal = match workspace_auth(&state, &headers, Some(&workspace)) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(response) = workspace_instance_fence(&state, &headers) {
+        return response;
+    }
+    state
+        .workspace_service
+        .discard_session(&principal, &SessionId(session))
+        .map(|_| workspace_ok(json!({"discarded": true})))
         .unwrap_or_else(service_error)
 }
 

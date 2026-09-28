@@ -39,6 +39,18 @@ export function createMarginsHostEntry(transport: Transport) {
         return transport.saveWorkspaceMemo(input.target, context.experimental_paths.dataDir,
           input.sessionId, input.expectedRevision, input.text);
       },
+      renameWorkspaceMeeting(input, context) {
+        retain(context);
+        return transport.renameWorkspaceMeeting(input.target, context.experimental_paths.dataDir, input.sessionId, input.title);
+      },
+      discardWorkspaceMeeting(input, context) {
+        retain(context);
+        return transport.discardWorkspaceMeeting(input.target, context.experimental_paths.dataDir, input.sessionId);
+      },
+      readWorkspaceTranscript(input, context) {
+        retain(context);
+        return transport.readWorkspaceTranscript(input.target, context.experimental_paths.dataDir, input.sessionId);
+      },
       sessionExists(input, context) {
         retain(context);
         return transport.sessionExists(input.target, context.experimental_paths.dataDir, input.recordingId);

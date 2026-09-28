@@ -62,6 +62,36 @@ impl SqliteMeetingRuntimeStorage {
         self.directory.join("meeting-blobs")
     }
 
+    /// Remove immutable chunks for one discarded session while its DB rows
+    /// still identify the files. The identity hash includes the session ID.
+    pub fn delete_session_blobs(&self, session_id: &str) -> Result<()> {
+        let connection = self.connection()?;
+        let mut statement =
+            connection.prepare("SELECT blob_path FROM meeting_chunks WHERE session_id = ?1")?;
+        let paths = statement
+            .query_map([session_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let blob_dir = self.blob_dir();
+        let metadata = std::fs::symlink_metadata(&blob_dir)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            anyhow::bail!("meeting blob directory is not a regular directory");
+        }
+        for name in paths {
+            let valid = name.len() == 70
+                && name.ends_with(".chunk")
+                && name[..64].bytes().all(|byte| byte.is_ascii_hexdigit());
+            if !valid {
+                anyhow::bail!("invalid meeting chunk path");
+            }
+            match std::fs::remove_file(blob_dir.join(name)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
     /// Inject one storage failure after immutable blob publication but before
     /// metadata/receipt commit. Used by crash-boundary contract tests.
     #[doc(hidden)]

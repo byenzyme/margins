@@ -266,7 +266,9 @@ export class ProjectMarginsTransport {
       const rows = await Promise.all(listed.sessions.map(async ({ session_id }) => {
         const id = encodeURIComponent(session_id);
         const [summary, note] = await Promise.all([
-          this.request<{ session_id: string; title: string | null; started_at: string; input_finalized: boolean }>(handle, `sessions/${id}`, "GET"),
+          this.request<{ session_id: string; title: string | null; started_at: string; input_finalized: boolean;
+            capture_duration_ms?: number | null; segment_count?: number;
+            capture_lanes?: Array<{ label?: string | null; source_ids?: string[] }> }>(handle, `sessions/${id}`, "GET"),
           this.request<{ relative_path: string; bb_thread_ids?: string[]; distilled_memo_revision?: string | null } | null>(handle, `sessions/${id}/note-association`, "GET"),
         ]);
         return { summary, note };
@@ -275,8 +277,12 @@ export class ProjectMarginsTransport {
         ? await localHomeRoot(handle.workspaceId) : null;
       const meetings = await Promise.all(rows.map(async ({ summary, note }) => {
         const noteFilePath = await associatedNoteFile(homeRoot, note?.relative_path);
+        const laneLabels = (summary.capture_lanes || []).flatMap((lane) => [lane.label || "", ...(lane.source_ids || [])]).join(" ").toLowerCase();
+        const audioSource = laneLabels.includes("system") || laneLabels.includes("computer") || (summary.capture_lanes?.length || 0) > 1
+          ? "Microphone + computer audio" : summary.segment_count === 0 ? null : "Microphone";
         return { sessionId: summary.session_id, title: summary.title, startedAt: summary.started_at,
-          inputFinalized: summary.input_finalized, notePath: note?.relative_path || null,
+          inputFinalized: summary.input_finalized, durationMs: summary.capture_duration_ms ?? null, audioSource,
+          notePath: note?.relative_path || null,
           noteFile: noteFilePath ? { hostId: target.hostId, path: noteFilePath } : null,
           threadIds: note?.bb_thread_ids || [], distilledMemoRevision: note?.distilled_memo_revision || null };
       }));
@@ -334,6 +340,36 @@ export class ProjectMarginsTransport {
       return this.readWorkspaceMeeting(target, dataDir, sessionId);
     } catch (cause) {
       return { ok: false as const, error: hostError("workspace_memo_save_failed", cause instanceof Error ? cause.message : String(cause)) };
+    }
+  }
+
+  async renameWorkspaceMeeting(target: ProjectTarget, dataDir: string, sessionId: string, title: string) {
+    try {
+      const handle = await this.manager.ensure(target, dataDir);
+      await this.request(handle, `sessions/${encodeURIComponent(sessionId)}/title`, "PUT", { request_id: randomUUID(), title });
+      return { ok: true as const };
+    } catch (cause) {
+      return { ok: false as const, error: hostError("workspace_meeting_rename_failed", cause instanceof Error ? cause.message : String(cause)) };
+    }
+  }
+
+  async discardWorkspaceMeeting(target: ProjectTarget, dataDir: string, sessionId: string) {
+    try {
+      const handle = await this.manager.ensure(target, dataDir);
+      await this.request(handle, `sessions/${encodeURIComponent(sessionId)}`, "DELETE");
+      return { ok: true as const };
+    } catch (cause) {
+      return { ok: false as const, error: hostError("workspace_meeting_discard_failed", cause instanceof Error ? cause.message : String(cause)) };
+    }
+  }
+
+  async readWorkspaceTranscript(target: ProjectTarget, dataDir: string, sessionId: string) {
+    try {
+      const handle = await this.manager.ensure(target, dataDir);
+      const transcript = await this.request<{ body: string }>(handle, `sessions/${encodeURIComponent(sessionId)}/transcript`, "GET");
+      return { ok: true as const, body: transcript.body };
+    } catch (cause) {
+      return { ok: false as const, error: hostError("workspace_transcript_unavailable", cause instanceof Error ? cause.message : String(cause)) };
     }
   }
 
@@ -395,7 +431,7 @@ export class ProjectMarginsTransport {
     return { status: response.status, bodyBase64: body.toString("base64") };
   }
 
-  private async request<T>(handle: ServerHandle, path: string, method: "GET" | "POST" | "PUT", body?: object, signal?: AbortSignal): Promise<T> {
+  private async request<T>(handle: ServerHandle, path: string, method: "GET" | "POST" | "PUT" | "DELETE", body?: object, signal?: AbortSignal): Promise<T> {
     const response = await fetch(`${handle.baseUrl}/v1/workspaces/${handle.workspaceId}/${path}`, {
       method,
       signal,

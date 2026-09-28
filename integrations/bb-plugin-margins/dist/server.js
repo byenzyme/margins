@@ -18933,6 +18933,13 @@ var workspaceMeetingResultSchema = external_exports.discriminatedUnion("ok", [
   external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
 ]);
 var workspaceMeetingSummarySchema = workspaceMeetingSchema.omit({ notepad: true }).extend({
+  durationMs: external_exports.number().nonnegative().nullable().default(null),
+  audioSource: external_exports.string().nullable().default(null),
+  workspaceId: external_exports.string().nullable().default(null),
+  workspaceName: external_exports.string().nullable().default(null),
+  originProjectId: external_exports.string().nullable().default(null),
+  originProjectName: external_exports.string().nullable().default(null),
+  archived: external_exports.boolean().default(false),
   notePath: external_exports.string().nullable(),
   noteFile: external_exports.object({ hostId: external_exports.string().min(1), path: external_exports.string().min(1) }).strict().nullable().default(null),
   threadIds: external_exports.array(external_exports.string()).default([]),
@@ -18941,6 +18948,14 @@ var workspaceMeetingSummarySchema = workspaceMeetingSchema.omit({ notepad: true 
 }).strict();
 var workspaceMeetingsResultSchema = external_exports.discriminatedUnion("ok", [
   external_exports.object({ ok: external_exports.literal(true), meetings: external_exports.array(workspaceMeetingSummarySchema) }).strict(),
+  external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
+]);
+var workspaceMeetingActionResultSchema = external_exports.discriminatedUnion("ok", [
+  external_exports.object({ ok: external_exports.literal(true) }).strict(),
+  external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
+]);
+var workspaceTranscriptResultSchema = external_exports.discriminatedUnion("ok", [
+  external_exports.object({ ok: external_exports.literal(true), body: external_exports.string() }).strict(),
   external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
 ]);
 var hostResultSchema = external_exports.discriminatedUnion("ok", [
@@ -18996,6 +19011,18 @@ var marginsHostContract = defineRpcContract({
       text: external_exports.string().max(1e5)
     }).strict(),
     output: workspaceMeetingResultSchema
+  },
+  renameWorkspaceMeeting: {
+    input: external_exports.object({ target: projectTargetSchema, sessionId: external_exports.string().min(1), title: external_exports.string().trim().min(1).max(160) }).strict(),
+    output: workspaceMeetingActionResultSchema
+  },
+  discardWorkspaceMeeting: {
+    input: external_exports.object({ target: projectTargetSchema, sessionId: external_exports.string().min(1) }).strict(),
+    output: workspaceMeetingActionResultSchema
+  },
+  readWorkspaceTranscript: {
+    input: external_exports.object({ target: projectTargetSchema, sessionId: external_exports.string().min(1) }).strict(),
+    output: workspaceTranscriptResultSchema
   },
   sessionExists: {
     input: external_exports.object({ target: projectTargetSchema, recordingId: external_exports.string().min(1) }).strict(),
@@ -19098,6 +19125,7 @@ var marginsRpcContract = defineRpcContract({
     input: external_exports.object({ projectId: external_exports.string().min(1) }).strict(),
     output: external_exports.object({
       defaultWorkspaceId: external_exports.string().nullable(),
+      resolvedWorkspaceId: external_exports.string().nullable(),
       autoSelected: external_exports.boolean(),
       workspaces: external_exports.array(external_exports.object({ id: external_exports.string(), name: external_exports.string().nullable() }).strict())
     }).strict()
@@ -19140,6 +19168,26 @@ var marginsRpcContract = defineRpcContract({
       text: external_exports.string().max(1e5)
     }).strict(),
     output: workspaceMeetingResultSchema
+  },
+  renameWorkspaceMeeting: {
+    input: external_exports.object({ projectId: external_exports.string().min(1), sessionId: external_exports.string().min(1), title: external_exports.string().trim().min(1).max(160) }).strict(),
+    output: workspaceMeetingActionResultSchema
+  },
+  archiveWorkspaceMeeting: {
+    input: external_exports.object({ projectId: external_exports.string().min(1), sessionId: external_exports.string().min(1), archived: external_exports.boolean() }).strict(),
+    output: workspaceMeetingActionResultSchema
+  },
+  recordMeetingOrigin: {
+    input: external_exports.object({ projectId: external_exports.string().min(1), sessionId: external_exports.string().min(1) }).strict(),
+    output: workspaceMeetingActionResultSchema
+  },
+  discardWorkspaceMeeting: {
+    input: external_exports.object({ projectId: external_exports.string().min(1), sessionId: external_exports.string().min(1) }).strict(),
+    output: workspaceMeetingActionResultSchema
+  },
+  readWorkspaceTranscript: {
+    input: external_exports.object({ projectId: external_exports.string().min(1), sessionId: external_exports.string().min(1) }).strict(),
+    output: workspaceTranscriptResultSchema
   },
   captureAuthority: {
     input: external_exports.object({ threadId: external_exports.string().min(1).optional(), projectId: external_exports.string().min(1).optional() }).strict(),
@@ -19219,6 +19267,8 @@ var RECORDING_PREFIX = "recording:";
 var LIVE_PREFIX = "live:";
 var LAST_SESSION_PREFIX = "last-session:";
 var PROJECT_WORKSPACE_PREFIX = "project-workspace:";
+var MEETING_ORIGIN_PREFIX = "meeting-origin:";
+var MEETING_ARCHIVE_PREFIX = "meeting-archive:";
 var MENU_GRANT_PREFIX = "menu-grant:";
 var MENU_GRANT_EPOCH_PREFIX = "menu-grant-epoch:";
 var MENU_GRANT_TTL_MS = 60 * 60 * 1e3;
@@ -19235,6 +19285,12 @@ function liveKey(workspaceId) {
 }
 function lastSessionKey(workspaceId) {
   return `${LAST_SESSION_PREFIX}${workspaceId}`;
+}
+function originKey(workspaceId, sessionId) {
+  return `${MEETING_ORIGIN_PREFIX}${workspaceId}:${sessionId}`;
+}
+function archiveKey(workspaceId, sessionId) {
+  return `${MEETING_ARCHIVE_PREFIX}${workspaceId}:${sessionId}`;
 }
 function meetingName(value) {
   const slug = (value || "meeting").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 90);
@@ -19559,6 +19615,7 @@ function marginsPlugin(bb) {
         ownerId,
         lastHeartbeatUnixMs: Date.now()
       });
+      await bb.storage.kv.set(originKey(workspaceId, result.snapshot.sessionId), target.projectId);
       bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: "start" });
       return getPanelStateForTarget(target, client);
     });
@@ -19566,7 +19623,9 @@ function marginsPlugin(bb) {
   bb.rpc.register(marginsRpcContract, {
     async availableWorkspaces({ projectId }) {
       const target = await targetForProject(projectId);
-      return callHost(target, "workspaceOptions", {});
+      const options = await callHost(target, "workspaceOptions", {});
+      const resolvedWorkspaceId = target.workspaceId || options.defaultWorkspaceId || null;
+      return { ...options, resolvedWorkspaceId };
     },
     async availableProjects() {
       const projects = await bb.sdk.projects.list();
@@ -19588,17 +19647,37 @@ function marginsPlugin(bb) {
       const target = await targetForProject(projectId);
       const listed = await callHost(target, "listWorkspaceMeetings", { target });
       if (!listed.ok) return listed;
-      return { ok: true, meetings: await Promise.all(listed.meetings.map(async (meeting) => ({
-        ...meeting,
-        threadLinks: await Promise.all((meeting.threadIds || []).map(async (id) => {
+      const authority = await callHost(target, "captureAuthority", { target });
+      if (!authority.ok) return authority;
+      const options = await callHost(target, "workspaceOptions", {});
+      const workspaceName = options.workspaces?.find((item) => item.id === authority.workspaceId)?.name || authority.workspaceId;
+      return { ok: true, meetings: await Promise.all(listed.meetings.map(async (meeting) => {
+        const originProjectId = await bb.storage.kv.get(originKey(authority.workspaceId, meeting.sessionId));
+        let originProjectName = null;
+        if (typeof originProjectId === "string") {
           try {
-            const thread = await bb.sdk.threads.get({ threadId: id });
-            return { id, title: thread.title?.trim().slice(0, 100) || "Meeting note thread" };
+            originProjectName = (await bb.sdk.projects.get({ projectId: originProjectId })).name;
           } catch {
-            return { id, title: "Meeting note thread" };
+            originProjectName = null;
           }
-        }))
-      }))) };
+        }
+        return {
+          ...meeting,
+          workspaceId: authority.workspaceId,
+          workspaceName,
+          originProjectId: typeof originProjectId === "string" ? originProjectId : null,
+          originProjectName,
+          archived: await bb.storage.kv.get(archiveKey(authority.workspaceId, meeting.sessionId)) === true,
+          threadLinks: await Promise.all((meeting.threadIds || []).map(async (id) => {
+            try {
+              const thread = await bb.sdk.threads.get({ threadId: id });
+              return { id, title: thread.title?.trim().slice(0, 100) || "Meeting note thread" };
+            } catch {
+              return { id, title: "Meeting note thread" };
+            }
+          }))
+        };
+      })) };
     },
     async projectWorkspace({ threadId, projectId, workspaceId }) {
       const target = await targetForSelection({ threadId, projectId });
@@ -19629,6 +19708,53 @@ function marginsPlugin(bb) {
     async saveWorkspaceMemo({ threadId, projectId, sessionId, expectedRevision, text }) {
       const target = await targetForSelection({ threadId, projectId });
       return callHost(target, "saveWorkspaceMemo", { target, sessionId, expectedRevision, text });
+    },
+    async renameWorkspaceMeeting({ projectId, sessionId, title }) {
+      const target = await targetForProject(projectId);
+      return callHost(target, "renameWorkspaceMeeting", { target, sessionId, title });
+    },
+    async archiveWorkspaceMeeting({ projectId, sessionId, archived }) {
+      const target = await targetForProject(projectId);
+      const authority = await callHost(target, "captureAuthority", { target });
+      if (!authority.ok) return authority;
+      const read = await callHost(target, "readWorkspaceMeeting", { target, sessionId });
+      if (!read.ok) return read;
+      if (!read.meeting?.inputFinalized) return {
+        ok: false,
+        error: { code: "meeting_not_finished", message: "Stop and save this meeting before archiving it.", retryable: false }
+      };
+      if (archived) await bb.storage.kv.set(archiveKey(authority.workspaceId, sessionId), true);
+      else await bb.storage.kv.delete(archiveKey(authority.workspaceId, sessionId));
+      return { ok: true };
+    },
+    async recordMeetingOrigin({ projectId, sessionId }) {
+      const target = await targetForProject(projectId);
+      const authority = await callHost(target, "captureAuthority", { target });
+      if (!authority.ok) return authority;
+      const found = await callHost(target, "sessionExists", { target, recordingId: sessionId });
+      if (!found.ok) return found;
+      if (!found.found) return {
+        ok: false,
+        error: { code: "meeting_not_found", message: "Meeting has not appeared in this Workspace yet.", retryable: true }
+      };
+      const key = originKey(authority.workspaceId, sessionId);
+      if (!await bb.storage.kv.get(key)) await bb.storage.kv.set(key, projectId);
+      return { ok: true };
+    },
+    async discardWorkspaceMeeting({ projectId, sessionId }) {
+      const target = await targetForProject(projectId);
+      const authority = await callHost(target, "captureAuthority", { target });
+      if (!authority.ok) return authority;
+      const result = await callHost(target, "discardWorkspaceMeeting", { target, sessionId });
+      if (!result.ok) return result;
+      await bb.storage.kv.delete(archiveKey(authority.workspaceId, sessionId));
+      await bb.storage.kv.delete(originKey(authority.workspaceId, sessionId));
+      if (await bb.storage.kv.get(lastSessionKey(authority.workspaceId)) === sessionId) await bb.storage.kv.delete(lastSessionKey(authority.workspaceId));
+      return { ok: true };
+    },
+    async readWorkspaceTranscript({ projectId, sessionId }) {
+      const target = await targetForProject(projectId);
+      return callHost(target, "readWorkspaceTranscript", { target, sessionId });
     },
     async captureAuthority({ threadId, projectId }) {
       try {
@@ -19686,6 +19812,8 @@ function marginsPlugin(bb) {
         if (!found.ok) return { ok: false, error: found.error };
         if (!found.found) return { ok: false, error: { code: "native_session_not_found", message: "The saved Mac session is not visible in this BB project's Margins Workspace yet.", retryable: true } };
         await bb.storage.kv.set(lastSessionKey(authority.workspaceId), sessionId);
+        const origin = originKey(authority.workspaceId, sessionId);
+        if (!await bb.storage.kv.get(origin)) await bb.storage.kv.set(origin, target.projectId);
         bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: "stop" });
         return { ok: true };
       } catch (cause) {
@@ -19794,6 +19922,16 @@ function marginsPlugin(bb) {
       const result = await callHost(grant.target, "relayWorkspaceHttp", { target: grant.target, ...parsed.data });
       if (!Number.isInteger(result.status) || typeof result.bodyBase64 !== "string") {
         return context.json({ ok: false, error: "Capture host unavailable" }, 502);
+      }
+      if (result.status >= 200 && result.status < 300 && parsed.data.method === "POST" && parsed.data.path.replace(/^\//, "") === `v1/workspaces/${grant.workspaceId}/sessions`) {
+        try {
+          const command = JSON.parse(Buffer.from(parsed.data.bodyBase64, "base64").toString("utf8"));
+          if (typeof command.session_id === "string" && /^[A-Za-z0-9_-]{1,200}$/.test(command.session_id)) {
+            const key = originKey(grant.workspaceId, command.session_id);
+            if (!await bb.storage.kv.get(key)) await bb.storage.kv.set(key, grant.target.projectId);
+          }
+        } catch {
+        }
       }
       return context.json(result);
     } catch {

@@ -54,6 +54,7 @@ Consequences:
   - **Live** (at most one per recorder, pinned first, clearly labelled);
   - **Ready to refine** (ended, not distilled);
   - **Distilled** (links to note and thread(s)).
+  - **Archived** (collapsed by default; hidden from the recent groups until opened).
 - Selecting a meeting switches memo pads. Doing so while recording does not stop
   the recording; the live pad keeps its "Live" header so the user cannot confuse
   which pad they are typing into.
@@ -64,6 +65,24 @@ Consequences:
   buttons. Start is hidden while a meeting is live and the empty state has its
   own single Start action.
 - Manual Mac pairing and recording diagnostics move to plugin settings.
+
+### Completed meeting controls
+
+- The title can be renamed. A quiet details line shows saved duration, audio
+  source, Workspace, and the bb project where capture began. Project is
+  provenance; all projects resolving to the same Workspace see its meetings.
+- Keep the transcript status and View/Transcribe/Retry with **Make note →** in
+  one action area below the memo. The note opens as a new thread in the current
+  bb project, which is shown beside the action. The recording's starting
+  project remains provenance and does not force the distillation thread there.
+- **More** contains Archive and Discard. Archive is reversible and hides the
+  meeting from the recent groups without changing its source data. Discard
+  requires explicit confirmation and permanently removes the recording,
+  transcript, and memo through the Workspace service. A linked note or bb
+  thread remains, and confirmation warns that its source link will break.
+- A new meeting opens its memo pad immediately, even while audio is preparing.
+  Show the selected audio source, Workspace, and starting project there. The
+  recording overlay remains the sole Pause/Stop control set.
 
 ### Overlay (`experimental_appOverlay`, exists)
 

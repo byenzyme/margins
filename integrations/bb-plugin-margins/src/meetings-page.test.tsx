@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MeetingsPage } from "./meetings-page.js";
 
 const mocks = vi.hoisted(() => ({
@@ -10,7 +10,7 @@ const mocks = vi.hoisted(() => ({
   refreshNative: vi.fn(),
   navigate: vi.fn(),
   meetings: [] as Array<{ sessionId: string; title: string; startedAt: string; inputFinalized: boolean;
-    notePath: null; threadIds: string[]; distilledMemoRevision: null }>,
+    notePath: null; threadIds: string[]; distilledMemoRevision: null; archived?: boolean }>,
   native: { paired: false, status: null as { state: string; sessionId: string | null;
     microphoneSamples: number; micPeak: number } | null, connectionError: null as string | null },
   probeMenu: vi.fn(async () => false),
@@ -38,6 +38,7 @@ const mocks = vi.hoisted(() => ({
   rpc: null as unknown,
 }));
 mocks.rpc = { call: mocks.call };
+const defaultCall = mocks.call.getMockImplementation()!;
 
 vi.mock("@get-bb/plugin-sdk/app", () => ({
   experimental_FileLink: () => null,
@@ -59,7 +60,9 @@ vi.mock("./native-bridge-client.js", () => ({
 }));
 
 afterEach(() => {
+  cleanup();
   vi.clearAllMocks();
+  mocks.call.mockImplementation(defaultCall);
   mocks.native.paired = false;
   mocks.native.status = null;
   mocks.native.connectionError = null;
@@ -68,6 +71,51 @@ afterEach(() => {
 });
 
 describe("Meetings Mac recorder choice", () => {
+  it("renames, views transcript, archives, restores, and confirms permanent discard", async () => {
+    const item = { sessionId: "complete", title: "Planning", startedAt: "2026-09-27T00:00:00Z",
+      inputFinalized: true, notePath: null, threadIds: [], distilledMemoRevision: null,
+      durationMs: 77_000, audioSource: "Microphone + computer audio", workspaceName: "Obsidian",
+      originProjectName: "Mac", archived: false };
+    mocks.meetings = [item];
+    const originalCall = mocks.call.getMockImplementation()!;
+    mocks.call.mockImplementation((async (method: string, input?: { sessionId?: string; title?: string; archived?: boolean }) => {
+      if (method === "availableProjects") return { projects: [{ id: "proj-mac", name: "Mac" }] };
+      if (method === "availableWorkspaces") return { workspaces: [{ id: "obsidian", name: "Obsidian" }], autoSelected: false };
+      if (method === "getProjectPanelState") return { state: "ready", sessionId: null };
+      if (method === "listWorkspaceMeetings") return { ok: true, meetings: [...mocks.meetings] };
+      if (method === "readWorkspaceMeeting") return { ok: true, meeting: { ...mocks.meetings[0], notepad: { revision: "rev", text: "Decisions" } } };
+      if (method === "connectedNoteContext") return { ok: true, context: { transcript: { available: true } } };
+      if (method === "readWorkspaceTranscript") return { ok: true, body: "We chose the launch date." };
+      if (method === "renameWorkspaceMeeting") { mocks.meetings[0]!.title = input!.title!; return { ok: true }; }
+      if (method === "archiveWorkspaceMeeting") { mocks.meetings[0]!.archived = input!.archived!; return { ok: true }; }
+      if (method === "discardWorkspaceMeeting") { mocks.meetings = []; return { ok: true }; }
+      throw new Error(`Unexpected RPC ${method}`);
+    }) as unknown as typeof originalCall);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<MeetingsPage subPath="proj-mac/complete" />);
+    await screen.findByDisplayValue("Decisions");
+    expect(screen.getByText(/Saved · 1:17 · Microphone \+ computer audio · Workspace: Obsidian · Started from Mac/)).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Rename" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Meeting title" }), { target: { value: "Launch review" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("heading", { name: "Launch review" });
+    fireEvent.click(screen.getByRole("button", { name: "View transcript" }));
+    await screen.findByText("We chose the launch date.");
+    fireEvent.click(await screen.findByRole("button", { name: "More" }));
+    fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+    await screen.findByRole("button", { name: "Archived (1)" });
+    fireEvent.click(screen.getByRole("button", { name: "Archived (1)" }));
+    fireEvent.click(screen.getByRole("button", { name: "Launch review" }));
+    fireEvent.click(await screen.findByRole("button", { name: "More" }));
+    fireEvent.click(screen.getByRole("button", { name: "Restore to recent" }));
+    await screen.findByRole("heading", { name: "Launch review" });
+    fireEvent.click(screen.getByRole("button", { name: "More" }));
+    fireEvent.click(screen.getByRole("button", { name: "Discard permanently…" }));
+    await screen.findByRole("heading", { name: "No meetings yet" });
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Any linked note and bb thread remain"));
+    confirm.mockRestore();
+    mocks.call.mockImplementation(originalCall);
+  });
   it("keeps opened memos visible when switching and shows a loading pad for uncached meetings", async () => {
     const first = { sessionId: "first", title: "First", startedAt: "2026-09-27T00:00:00Z",
       inputFinalized: true, notePath: null, threadIds: [], distilledMemoRevision: null };

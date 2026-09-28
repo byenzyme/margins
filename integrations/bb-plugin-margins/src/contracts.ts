@@ -41,6 +41,13 @@ export const workspaceMeetingResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
 ]);
 export const workspaceMeetingSummarySchema = workspaceMeetingSchema.omit({ notepad: true }).extend({
+  durationMs: z.number().nonnegative().nullable().default(null),
+  audioSource: z.string().nullable().default(null),
+  workspaceId: z.string().nullable().default(null),
+  workspaceName: z.string().nullable().default(null),
+  originProjectId: z.string().nullable().default(null),
+  originProjectName: z.string().nullable().default(null),
+  archived: z.boolean().default(false),
   notePath: z.string().nullable(),
   noteFile: z.object({ hostId: z.string().min(1), path: z.string().min(1) }).strict().nullable().default(null),
   threadIds: z.array(z.string()).default([]),
@@ -49,6 +56,14 @@ export const workspaceMeetingSummarySchema = workspaceMeetingSchema.omit({ notep
 }).strict();
 export const workspaceMeetingsResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), meetings: z.array(workspaceMeetingSummarySchema) }).strict(),
+  z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
+]);
+export const workspaceMeetingActionResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true) }).strict(),
+  z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
+]);
+export const workspaceTranscriptResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), body: z.string() }).strict(),
   z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
 ]);
 export const hostResultSchema = z.discriminatedUnion("ok", [
@@ -98,6 +113,18 @@ export const marginsHostContract = defineRpcContract({
       expectedRevision: z.string().min(1), text: z.string().max(100_000),
     }).strict(),
     output: workspaceMeetingResultSchema,
+  },
+  renameWorkspaceMeeting: {
+    input: z.object({ target: projectTargetSchema, sessionId: z.string().min(1), title: z.string().trim().min(1).max(160) }).strict(),
+    output: workspaceMeetingActionResultSchema,
+  },
+  discardWorkspaceMeeting: {
+    input: z.object({ target: projectTargetSchema, sessionId: z.string().min(1) }).strict(),
+    output: workspaceMeetingActionResultSchema,
+  },
+  readWorkspaceTranscript: {
+    input: z.object({ target: projectTargetSchema, sessionId: z.string().min(1) }).strict(),
+    output: workspaceTranscriptResultSchema,
   },
   sessionExists: {
     input: z.object({ target: projectTargetSchema, recordingId: z.string().min(1) }).strict(),
@@ -179,7 +206,7 @@ const captureClientInputSchema = z.object({
 export const marginsRpcContract = defineRpcContract({
   availableWorkspaces: {
     input: z.object({ projectId: z.string().min(1) }).strict(),
-    output: z.object({ defaultWorkspaceId: z.string().nullable(), autoSelected: z.boolean(),
+    output: z.object({ defaultWorkspaceId: z.string().nullable(), resolvedWorkspaceId: z.string().nullable(), autoSelected: z.boolean(),
       workspaces: z.array(z.object({ id: z.string(), name: z.string().nullable() }).strict()) }).strict(),
   },
   availableProjects: {
@@ -210,6 +237,26 @@ export const marginsRpcContract = defineRpcContract({
     input: z.object({ threadId: z.string().min(1).optional(), projectId: z.string().min(1).optional(), sessionId: z.string().min(1),
       expectedRevision: z.string().min(1), text: z.string().max(100_000),
     }).strict(), output: workspaceMeetingResultSchema,
+  },
+  renameWorkspaceMeeting: {
+    input: z.object({ projectId: z.string().min(1), sessionId: z.string().min(1), title: z.string().trim().min(1).max(160) }).strict(),
+    output: workspaceMeetingActionResultSchema,
+  },
+  archiveWorkspaceMeeting: {
+    input: z.object({ projectId: z.string().min(1), sessionId: z.string().min(1), archived: z.boolean() }).strict(),
+    output: workspaceMeetingActionResultSchema,
+  },
+  recordMeetingOrigin: {
+    input: z.object({ projectId: z.string().min(1), sessionId: z.string().min(1) }).strict(),
+    output: workspaceMeetingActionResultSchema,
+  },
+  discardWorkspaceMeeting: {
+    input: z.object({ projectId: z.string().min(1), sessionId: z.string().min(1) }).strict(),
+    output: workspaceMeetingActionResultSchema,
+  },
+  readWorkspaceTranscript: {
+    input: z.object({ projectId: z.string().min(1), sessionId: z.string().min(1) }).strict(),
+    output: workspaceTranscriptResultSchema,
   },
   captureAuthority: {
     input: z.object({ threadId: z.string().min(1).optional(), projectId: z.string().min(1).optional() }).strict(),

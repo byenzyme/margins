@@ -694,6 +694,106 @@ impl WorkspaceService {
         self.session_summary(session_id.as_ref())
     }
 
+    /// Permanently discard a finished capture and its local source material.
+    /// Linked notes live in the Home Source and are deliberately untouched.
+    pub fn discard_session(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+    ) -> Result<()> {
+        principal.require(self.workspace_id(), OP_SESSION_WRITE)?;
+        let name = session_id.as_ref();
+        if name.is_empty()
+            || name.len() > 200
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            bail!("invalid session ID");
+        }
+        let meta = canonical::get_session_meta(&self.margins_dir, name)?;
+        // A prior interrupted deletion has already passed this check and left
+        // a tombstone. Permit retry so the remaining files can be reaped.
+        if !canonical::is_session_tombstoned(&self.margins_dir, name)? {
+            if !self.session_summary(name)?.input_finalized {
+                bail!("stop and save this meeting before discarding it");
+            }
+            canonical::begin_delete_session(&self.margins_dir, name)?;
+        }
+        let recording_dir = self.margins_dir.join("recordings");
+        if let Ok(metadata) = std::fs::symlink_metadata(&recording_dir) {
+            if metadata.file_type().is_symlink() {
+                bail!("session recording directory is a symlink");
+            }
+        }
+        for segment in &meta.segments {
+            if segment
+                .wav_path
+                .starts_with(&format!(".margins/artifacts/{name}/"))
+            {
+                let path = crate::artifacts::confined_session_artifact_registry_disk_path(
+                    &self.margins_dir,
+                    name,
+                    &segment.wav_path,
+                )
+                .context("recording segment path is not confined to this session")?;
+                remove_session_file(&path)?;
+                continue;
+            }
+            let path = Path::new(&segment.wav_path);
+            let filename = path
+                .file_name()
+                .and_then(|part| part.to_str())
+                .unwrap_or("");
+            let ordinal = filename
+                .strip_prefix(&format!("{name}_seg"))
+                .and_then(|part| part.strip_suffix(".wav"));
+            if !ordinal.is_some_and(|value| {
+                !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+            }) {
+                bail!("recording segment path is not confined to this session");
+            }
+            let expected = format!(".margins/recordings/{filename}");
+            let legacy = format!(".margins/{filename}");
+            if segment.wav_path != expected && segment.wav_path != legacy {
+                bail!("recording segment path is not confined to this session");
+            }
+            let disk_path = if segment.wav_path == expected {
+                recording_dir.join(filename)
+            } else {
+                self.margins_dir.join(filename)
+            };
+            remove_session_file(&disk_path)?;
+        }
+        remove_session_file(&recording_dir.join(format!("{name}_upload.webm")))?;
+        for suffix in [
+            ".md",
+            "_transcript.json",
+            "_live_transcript_snapshot.json",
+            "_aligned.md",
+            "_capture_context.md",
+            "_grounding.json",
+        ] {
+            remove_session_file(&self.margins_dir.join(format!("{name}{suffix}")))?;
+        }
+        let artifact_root = self.margins_dir.join("artifacts");
+        let artifact_dir = artifact_root.join(name);
+        if let Ok(metadata) = std::fs::symlink_metadata(&artifact_root) {
+            if metadata.file_type().is_symlink() {
+                bail!("session artifact root is a symlink");
+            }
+        }
+        match std::fs::symlink_metadata(&artifact_dir) {
+            Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&artifact_dir)?,
+            Ok(_) => bail!("session artifact directory is not a directory"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        self.runtime.storage().delete_session_blobs(name)?;
+        canonical::finalize_delete_session(&self.margins_dir, name)?;
+        Ok(())
+    }
+
     /// A provisional CoreML view from the active capture producer. Audio and
     /// final ONNX transcription remain authoritative; this view is replaceable.
     pub fn publish_live_checkpoint(
@@ -1313,6 +1413,14 @@ fn ensure_session(directory: &Path, session_id: &str) -> Result<()> {
         bail!("session not found");
     }
     Ok(())
+}
+
+fn remove_session_file(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("failed to remove {}", path.display())),
+    }
 }
 
 fn resolve_session_id(directory: &Path, requested: &str) -> Result<String> {

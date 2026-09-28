@@ -33319,6 +33319,13 @@ var workspaceMeetingResultSchema = external_exports2.discriminatedUnion("ok", [
   external_exports2.object({ ok: external_exports2.literal(false), error: hostErrorSchema }).strict()
 ]);
 var workspaceMeetingSummarySchema = workspaceMeetingSchema.omit({ notepad: true }).extend({
+  durationMs: external_exports2.number().nonnegative().nullable().default(null),
+  audioSource: external_exports2.string().nullable().default(null),
+  workspaceId: external_exports2.string().nullable().default(null),
+  workspaceName: external_exports2.string().nullable().default(null),
+  originProjectId: external_exports2.string().nullable().default(null),
+  originProjectName: external_exports2.string().nullable().default(null),
+  archived: external_exports2.boolean().default(false),
   notePath: external_exports2.string().nullable(),
   noteFile: external_exports2.object({ hostId: external_exports2.string().min(1), path: external_exports2.string().min(1) }).strict().nullable().default(null),
   threadIds: external_exports2.array(external_exports2.string()).default([]),
@@ -33327,6 +33334,14 @@ var workspaceMeetingSummarySchema = workspaceMeetingSchema.omit({ notepad: true 
 }).strict();
 var workspaceMeetingsResultSchema = external_exports2.discriminatedUnion("ok", [
   external_exports2.object({ ok: external_exports2.literal(true), meetings: external_exports2.array(workspaceMeetingSummarySchema) }).strict(),
+  external_exports2.object({ ok: external_exports2.literal(false), error: hostErrorSchema }).strict()
+]);
+var workspaceMeetingActionResultSchema = external_exports2.discriminatedUnion("ok", [
+  external_exports2.object({ ok: external_exports2.literal(true) }).strict(),
+  external_exports2.object({ ok: external_exports2.literal(false), error: hostErrorSchema }).strict()
+]);
+var workspaceTranscriptResultSchema = external_exports2.discriminatedUnion("ok", [
+  external_exports2.object({ ok: external_exports2.literal(true), body: external_exports2.string() }).strict(),
   external_exports2.object({ ok: external_exports2.literal(false), error: hostErrorSchema }).strict()
 ]);
 var hostResultSchema = external_exports2.discriminatedUnion("ok", [
@@ -33382,6 +33397,18 @@ var marginsHostContract = defineRpcContract2({
       text: external_exports2.string().max(1e5)
     }).strict(),
     output: workspaceMeetingResultSchema
+  },
+  renameWorkspaceMeeting: {
+    input: external_exports2.object({ target: projectTargetSchema, sessionId: external_exports2.string().min(1), title: external_exports2.string().trim().min(1).max(160) }).strict(),
+    output: workspaceMeetingActionResultSchema
+  },
+  discardWorkspaceMeeting: {
+    input: external_exports2.object({ target: projectTargetSchema, sessionId: external_exports2.string().min(1) }).strict(),
+    output: workspaceMeetingActionResultSchema
+  },
+  readWorkspaceTranscript: {
+    input: external_exports2.object({ target: projectTargetSchema, sessionId: external_exports2.string().min(1) }).strict(),
+    output: workspaceTranscriptResultSchema
   },
   sessionExists: {
     input: external_exports2.object({ target: projectTargetSchema, recordingId: external_exports2.string().min(1) }).strict(),
@@ -33484,6 +33511,7 @@ var marginsRpcContract = defineRpcContract2({
     input: external_exports2.object({ projectId: external_exports2.string().min(1) }).strict(),
     output: external_exports2.object({
       defaultWorkspaceId: external_exports2.string().nullable(),
+      resolvedWorkspaceId: external_exports2.string().nullable(),
       autoSelected: external_exports2.boolean(),
       workspaces: external_exports2.array(external_exports2.object({ id: external_exports2.string(), name: external_exports2.string().nullable() }).strict())
     }).strict()
@@ -33526,6 +33554,26 @@ var marginsRpcContract = defineRpcContract2({
       text: external_exports2.string().max(1e5)
     }).strict(),
     output: workspaceMeetingResultSchema
+  },
+  renameWorkspaceMeeting: {
+    input: external_exports2.object({ projectId: external_exports2.string().min(1), sessionId: external_exports2.string().min(1), title: external_exports2.string().trim().min(1).max(160) }).strict(),
+    output: workspaceMeetingActionResultSchema
+  },
+  archiveWorkspaceMeeting: {
+    input: external_exports2.object({ projectId: external_exports2.string().min(1), sessionId: external_exports2.string().min(1), archived: external_exports2.boolean() }).strict(),
+    output: workspaceMeetingActionResultSchema
+  },
+  recordMeetingOrigin: {
+    input: external_exports2.object({ projectId: external_exports2.string().min(1), sessionId: external_exports2.string().min(1) }).strict(),
+    output: workspaceMeetingActionResultSchema
+  },
+  discardWorkspaceMeeting: {
+    input: external_exports2.object({ projectId: external_exports2.string().min(1), sessionId: external_exports2.string().min(1) }).strict(),
+    output: workspaceMeetingActionResultSchema
+  },
+  readWorkspaceTranscript: {
+    input: external_exports2.object({ projectId: external_exports2.string().min(1), sessionId: external_exports2.string().min(1) }).strict(),
+    output: workspaceTranscriptResultSchema
   },
   captureAuthority: {
     input: external_exports2.object({ threadId: external_exports2.string().min(1).optional(), projectId: external_exports2.string().min(1).optional() }).strict(),
@@ -34010,11 +34058,15 @@ var ProjectMarginsTransport = class {
       const homeRoot = handle.child && rows.some(({ note }) => note?.relative_path) ? await localHomeRoot(handle.workspaceId) : null;
       const meetings = await Promise.all(rows.map(async ({ summary, note }) => {
         const noteFilePath = await associatedNoteFile(homeRoot, note?.relative_path);
+        const laneLabels = (summary.capture_lanes || []).flatMap((lane) => [lane.label || "", ...lane.source_ids || []]).join(" ").toLowerCase();
+        const audioSource = laneLabels.includes("system") || laneLabels.includes("computer") || (summary.capture_lanes?.length || 0) > 1 ? "Microphone + computer audio" : summary.segment_count === 0 ? null : "Microphone";
         return {
           sessionId: summary.session_id,
           title: summary.title,
           startedAt: summary.started_at,
           inputFinalized: summary.input_finalized,
+          durationMs: summary.capture_duration_ms ?? null,
+          audioSource,
           notePath: note?.relative_path || null,
           noteFile: noteFilePath ? { hostId: target.hostId, path: noteFilePath } : null,
           threadIds: note?.bb_thread_ids || [],
@@ -34077,6 +34129,33 @@ var ProjectMarginsTransport = class {
       return this.readWorkspaceMeeting(target, dataDir, sessionId);
     } catch (cause) {
       return { ok: false, error: hostError("workspace_memo_save_failed", cause instanceof Error ? cause.message : String(cause)) };
+    }
+  }
+  async renameWorkspaceMeeting(target, dataDir, sessionId, title) {
+    try {
+      const handle = await this.manager.ensure(target, dataDir);
+      await this.request(handle, `sessions/${encodeURIComponent(sessionId)}/title`, "PUT", { request_id: randomUUID(), title });
+      return { ok: true };
+    } catch (cause) {
+      return { ok: false, error: hostError("workspace_meeting_rename_failed", cause instanceof Error ? cause.message : String(cause)) };
+    }
+  }
+  async discardWorkspaceMeeting(target, dataDir, sessionId) {
+    try {
+      const handle = await this.manager.ensure(target, dataDir);
+      await this.request(handle, `sessions/${encodeURIComponent(sessionId)}`, "DELETE");
+      return { ok: true };
+    } catch (cause) {
+      return { ok: false, error: hostError("workspace_meeting_discard_failed", cause instanceof Error ? cause.message : String(cause)) };
+    }
+  }
+  async readWorkspaceTranscript(target, dataDir, sessionId) {
+    try {
+      const handle = await this.manager.ensure(target, dataDir);
+      const transcript = await this.request(handle, `sessions/${encodeURIComponent(sessionId)}/transcript`, "GET");
+      return { ok: true, body: transcript.body };
+    } catch (cause) {
+      return { ok: false, error: hostError("workspace_transcript_unavailable", cause instanceof Error ? cause.message : String(cause)) };
     }
   }
   async authority(target, dataDir) {
@@ -34314,6 +34393,18 @@ function createMarginsHostEntry(transport) {
           input2.expectedRevision,
           input2.text
         );
+      },
+      renameWorkspaceMeeting(input2, context) {
+        retain(context);
+        return transport.renameWorkspaceMeeting(input2.target, context.experimental_paths.dataDir, input2.sessionId, input2.title);
+      },
+      discardWorkspaceMeeting(input2, context) {
+        retain(context);
+        return transport.discardWorkspaceMeeting(input2.target, context.experimental_paths.dataDir, input2.sessionId);
+      },
+      readWorkspaceTranscript(input2, context) {
+        retain(context);
+        return transport.readWorkspaceTranscript(input2.target, context.experimental_paths.dataDir, input2.sessionId);
       },
       sessionExists(input2, context) {
         retain(context);

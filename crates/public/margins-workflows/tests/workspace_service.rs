@@ -136,6 +136,79 @@ fn finalize(session: &str) -> ClientMessageV1 {
 }
 
 #[test]
+fn discard_finished_session_removes_source_material_and_preserves_home_note() {
+    let temp = tempfile::tempdir().unwrap();
+    let notes = temp.path().join("notes");
+    let captures = temp.path().join("captures");
+    std::fs::create_dir_all(&notes).unwrap();
+    let workspace =
+        ensure_service_workspace(&temp.path().join("state"), "team", None, &notes, &captures)
+            .unwrap();
+    let service = WorkspaceService::open("host-a", workspace).unwrap();
+    let owner = ServicePrincipal::full("producer", "team");
+    let session = SessionId("to-discard".into());
+    let reservation = service
+        .reserve_session(&owner, create(session.as_ref()))
+        .unwrap();
+    assert!(service.discard_session(&owner, &session).is_err());
+    for lane in ["mic", "system"] {
+        for sequence in 0..2 {
+            service
+                .execute_capture(
+                    &owner,
+                    &reservation.producer_token,
+                    chunk(
+                        session.as_ref(),
+                        &format!("{lane}-{sequence}"),
+                        lane,
+                        sequence,
+                    ),
+                )
+                .unwrap();
+        }
+    }
+    service
+        .execute_capture(&owner, &reservation.producer_token, close(session.as_ref()))
+        .unwrap();
+    service
+        .execute_capture(
+            &owner,
+            &reservation.producer_token,
+            finalize(session.as_ref()),
+        )
+        .unwrap();
+    let note = notes.join("linked.md");
+    std::fs::write(&note, "Connected note remains").unwrap();
+    let artifact = service.margins_dir().join("artifacts/to-discard");
+    assert!(artifact.exists());
+    assert!(service
+        .margins_dir()
+        .join("meeting-blobs")
+        .read_dir()
+        .unwrap()
+        .next()
+        .is_some());
+    service.discard_session(&owner, &session).unwrap();
+    assert!(service
+        .sessions(&owner, None, 10)
+        .unwrap()
+        .sessions
+        .is_empty());
+    assert!(!artifact.exists());
+    assert!(service
+        .margins_dir()
+        .join("meeting-blobs")
+        .read_dir()
+        .unwrap()
+        .next()
+        .is_none());
+    assert_eq!(
+        std::fs::read_to_string(note).unwrap(),
+        "Connected note remains"
+    );
+}
+
+#[test]
 fn workspace_reader_can_follow_an_unclosed_capture_without_producer_access() {
     let temp = tempfile::tempdir().unwrap();
     let notes = temp.path().join("notes");
@@ -346,7 +419,10 @@ fn composed_service_is_the_same_canonical_store_across_retry_and_restart() {
     );
     assert_eq!(associated.relative_path, "meetings/capture-a.md");
     assert_eq!(associated.bb_thread_ids, vec!["thr-distill"]);
-    assert_eq!(associated.distilled_memo_revision.as_deref(), Some("memo-v1"));
+    assert_eq!(
+        associated.distilled_memo_revision.as_deref(),
+        Some("memo-v1")
+    );
     assert!(service
         .latest_job(&owner, &SessionId("capture-a".into()))
         .unwrap()
