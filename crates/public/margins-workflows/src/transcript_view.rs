@@ -243,37 +243,26 @@ fn render_remote_offline_transcript(body: &str, memo: &str) -> Option<String> {
             0,
         ));
     }
-    words.sort_by_key(|entry| (entry.start_ms, entry.channel));
-    let mut spoken = words.into_iter().peekable();
-    let mut rows = Vec::new();
-    let mut timed_memos = Vec::new();
-    let mut untimed = Vec::new();
-    for (seq, line) in memo.lines().map(str::trim).enumerate() {
-        if line.is_empty() || line == "---" || line.starts_with('#') {
-            continue;
-        }
-        if let Some((ms, text)) = memo_line(line) {
-            timed_memos.push((ms, seq, text));
-        } else {
-            untimed.push(line);
-        }
-    }
-    timed_memos.sort_by_key(|row| (row.0, row.1));
-    for (ms, seq, text) in timed_memos {
-        let mut window = Vec::new();
-        while spoken.peek().is_some_and(|entry| entry.start_ms <= ms) {
-            window.push(spoken.next().expect("peeked spoken entry"));
-        }
-        append_spoken_rows(&mut rows, window, &labels);
-        rows.push((ms, 1, seq, format!("[{}] memo: {text}", format_elapsed(ms))));
-    }
-    append_spoken_rows(&mut rows, spoken.collect(), &labels);
+    let (memos, untimed) = crate::alignment::parse_timed_memo_lines(memo);
+    let rows = crate::alignment::interleave_timeline(&words, &memos, 2_000);
     let mut rendered = format!("{header}## Timeline\n\n");
     if rows.is_empty() {
         rendered.push_str("_No timestamped transcript or memo entries were available._\n");
     } else {
-        for (_, _, _, line) in rows {
-            rendered.push_str(&line);
+        for row in rows {
+            match row {
+                crate::alignment::TimelineEvent::Transcript(entry) => rendered.push_str(&format!(
+                    "[{}] {}: {}",
+                    format_elapsed(entry.start_ms),
+                    labels[&entry.channel],
+                    entry.text.trim()
+                )),
+                crate::alignment::TimelineEvent::Memo(memo) => rendered.push_str(&format!(
+                    "[{}] memo: {}",
+                    format_elapsed(memo.at_ms),
+                    memo.text
+                )),
+            }
             rendered.push('\n');
         }
     }
@@ -281,31 +270,11 @@ fn render_remote_offline_transcript(body: &str, memo: &str) -> Option<String> {
         rendered.push_str("\n## Untimed memo / reflection lines\n\n");
         for line in untimed {
             rendered.push_str("- memo: ");
-            rendered.push_str(line);
+            rendered.push_str(&line);
             rendered.push('\n');
         }
     }
     Some(rendered)
-}
-
-fn append_spoken_rows(
-    rows: &mut Vec<(u64, u8, usize, String)>,
-    entries: Vec<margins_media::transcript::TranscriptWordEntry>,
-    labels: &BTreeMap<u32, String>,
-) {
-    for entry in margins_media::transcript::merge_word_entries_to_phrases(entries, 2_000) {
-        rows.push((
-            entry.start_ms,
-            0,
-            rows.len(),
-            format!(
-                "[{}] {}: {}",
-                format_elapsed(entry.start_ms),
-                labels[&entry.channel],
-                entry.text.trim()
-            ),
-        ));
-    }
 }
 
 fn read_terminal_checkpoint_body(
@@ -386,10 +355,7 @@ fn read_checkpoint_body_at(
             .get("terminal")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-    let entries = margins_media::transcript::merge_word_entries_to_phrases(
-        crate::processing::read_transcript_entries(&path)?,
-        2_000,
-    );
+    let entries = crate::processing::read_transcript_entries(&path)?;
     let Some(meta) = meta else {
         return Ok(None);
     };

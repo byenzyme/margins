@@ -3,6 +3,7 @@ use margins_meeting_protocol::{
     AudioCodecV1, AudioContainerV1, SessionId, WorkspaceProcessingJobV1,
 };
 use margins_workflows::{
+    alignment::{interleave_timeline, parse_timed_memo_lines, TimelineEvent},
     remote_workspace::{remote_opus_packet_stream_for_asr, remote_pcm_s16le_for_asr},
     workspace_service::{ServicePrincipal, WorkspaceService},
 };
@@ -239,48 +240,29 @@ fn transcribe_remote_session(
 }
 
 fn render_remote_timeline(
-    mut entries: Vec<margins::asr::TranscriptWordEntry>,
+    entries: Vec<margins::asr::TranscriptWordEntry>,
     channel_labels: &BTreeMap<u32, String>,
     memo: &str,
 ) -> String {
-    entries.sort_by_key(|entry| (entry.start_ms, entry.channel));
-    let mut entries = entries.into_iter().peekable();
-    let mut boundaries = memo
-        .lines()
-        .filter_map(|line| crate::parse_context_line_ms(line.trim()))
-        .collect::<Vec<_>>();
-    boundaries.sort_unstable();
-    let mut lines = Vec::new();
-    for boundary in boundaries {
-        let mut window = Vec::new();
-        while entries
-            .peek()
-            .is_some_and(|entry| entry.start_ms <= boundary)
-        {
-            window.push(entries.next().expect("peeked transcript entry"));
-        }
-        append_remote_phrases(&mut lines, window, channel_labels);
-    }
-    append_remote_phrases(&mut lines, entries.collect(), channel_labels);
-    lines.join("\n")
-}
-
-fn append_remote_phrases(
-    lines: &mut Vec<String>,
-    entries: Vec<margins::asr::TranscriptWordEntry>,
-    channel_labels: &BTreeMap<u32, String>,
-) {
-    for entry in margins::asr::merge_word_entries_to_phrases(entries, 2_000) {
-        let label = channel_labels
-            .get(&entry.channel)
-            .map(String::as_str)
-            .unwrap_or("speaker");
-        lines.push(format!(
-            "[{}] {label}: {}",
-            elapsed(entry.start_ms),
-            entry.text.trim()
-        ));
-    }
+    let (memos, _) = parse_timed_memo_lines(memo);
+    interleave_timeline(&entries, &memos, 2_000)
+        .into_iter()
+        .filter_map(|row| match row {
+            TimelineEvent::Transcript(entry) => {
+                let label = channel_labels
+                    .get(&entry.channel)
+                    .map(String::as_str)
+                    .unwrap_or("speaker");
+                Some(format!(
+                    "[{}] {label}: {}",
+                    elapsed(entry.start_ms),
+                    entry.text.trim()
+                ))
+            }
+            TimelineEvent::Memo(_) => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn elapsed(ms: u64) -> String {
