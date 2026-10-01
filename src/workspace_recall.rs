@@ -122,7 +122,7 @@ pub(crate) fn prepare(
         .bindings
         .iter()
         .filter_map(|(name, binding)| match binding {
-            WorkspaceBinding::NativeMarkdown { path, role } => Some(
+            WorkspaceBinding::NativeMarkdown { path, role, .. } => Some(
                 native_markdown_collection_namespace(path).map(|document_ref_prefix| {
                     NotesRootConfig {
                         name: name.clone(),
@@ -1160,6 +1160,7 @@ mod tests {
             WorkspaceBinding::NativeMarkdown {
                 path: reference,
                 role: SourceRole::Reference,
+                note_folder: None,
             },
         )
         .unwrap();
@@ -1258,6 +1259,7 @@ mod tests {
             WorkspaceBinding::NativeMarkdown {
                 path: reference.clone(),
                 role: SourceRole::Reference,
+                note_folder: None,
             },
         )
         .unwrap();
@@ -1323,6 +1325,7 @@ mod tests {
             WorkspaceBinding::NativeMarkdown {
                 path: reference,
                 role: SourceRole::Reference,
+                note_folder: None,
             },
         )
         .unwrap();

@@ -510,9 +510,9 @@ fn reconnect_replays_original_envelopes_and_rejects_future_cursors_deterministic
     for (sequence, event) in snapshot.events().iter().enumerate() {
         assert_eq!(sequence as u64, event.sequence);
     }
-    let encoded = serde_json::to_vec(&snapshot).unwrap();
+    let encoded = serde_json::to_vec(snapshot.session()).unwrap();
     let decoded: StoredSessionV1 = serde_json::from_slice(&encoded).unwrap();
-    assert_eq!(decoded, snapshot);
+    assert_eq!(&decoded, snapshot.session());
 }
 
 #[test]

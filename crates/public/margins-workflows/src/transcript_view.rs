@@ -2,9 +2,9 @@
 
 use crate::artifacts::{artifact_registry_disk_path, confined_session_artifact_access_disk_path};
 use anyhow::{bail, Context, Result};
-use margins_store::legacy;
+use margins_store::canonical;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -54,10 +54,10 @@ pub fn preferred_transcript_path(margins_dir: &Path, name: &str) -> Option<PathB
     if artifact.exists() {
         return Some(artifact);
     }
-    if let Some(path) = legacy::list_session_artifacts(margins_dir, name)
+    if let Some(path) = canonical::list_session_artifacts(margins_dir, name)
         .unwrap_or_default()
         .into_iter()
-        .filter(|artifact| artifact.kind == legacy::SESSION_ARTIFACT_KIND_TRANSCRIPT)
+        .filter(|artifact| artifact.kind == canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT)
         .find_map(|artifact| {
             confined_session_artifact_access_disk_path(margins_dir, name, &artifact.path)
         })
@@ -80,7 +80,7 @@ pub fn resolve_session_name(margins_dir: &Path, requested: &str) -> Result<Strin
     if requested != "latest" {
         return Ok(requested.to_string());
     }
-    if let Some(name) = legacy::list_sessions(margins_dir)?
+    if let Some(name) = canonical::list_sessions(margins_dir)?
         .first()
         .map(|s| s.name.clone())
     {
@@ -98,34 +98,71 @@ pub fn load_transcript_view(
     requested: &str,
 ) -> Result<TranscriptView> {
     let name = resolve_session_name(margins_dir, requested)?;
-    let meta = legacy::get_session_meta(margins_dir, &name).ok();
-    let (source, view) =
-        if let Some(source) = read_freshest_live_transcript(work_dir, margins_dir, &name)? {
-            (source, "full")
-        } else if let Some(source) =
-            read_terminal_checkpoint_body(work_dir, margins_dir, &name, meta.as_ref())?
-        {
-            (source, "full")
-        } else {
-            let (path, body) = read_registered_or_fallback(work_dir, margins_dir, &name)?;
-            (
-                TranscriptSource {
-                    source_path: path,
-                    body,
-                    decoded_until_ms: 0,
-                    committed_until_ms: 0,
-                    terminal: true,
-                    live_checkpoint: false,
-                },
-                "aligned",
-            )
-        };
+    let meta = canonical::get_session_meta(margins_dir, &name).ok();
+    let final_path = transcript_artifact_path(margins_dir, &name);
+    let final_source = if meta
+        .as_ref()
+        .and_then(|value| value.processing_state.as_deref())
+        == Some("done")
+    {
+        std::fs::read_to_string(&final_path)
+            .ok()
+            .filter(|body| !body.trim().is_empty())
+            .map(|body| TranscriptSource {
+                source_path: final_path.clone(),
+                body,
+                decoded_until_ms: 0,
+                committed_until_ms: 0,
+                terminal: true,
+                live_checkpoint: false,
+            })
+    } else {
+        None
+    };
+    let (source, view) = if let Some(source) = final_source {
+        (source, "aligned")
+    } else if let Some(source) =
+        read_remote_live_checkpoint(work_dir, margins_dir, &name, meta.as_ref())?
+    {
+        (source, "full")
+    } else if let Some(source) = read_freshest_live_transcript(work_dir, margins_dir, &name)? {
+        (source, "full")
+    } else if let Some(source) =
+        read_terminal_checkpoint_body(work_dir, margins_dir, &name, meta.as_ref())?
+    {
+        (source, "full")
+    } else {
+        let (path, body) = read_registered_or_fallback(work_dir, margins_dir, &name)?;
+        (
+            TranscriptSource {
+                source_path: path,
+                body,
+                decoded_until_ms: 0,
+                committed_until_ms: 0,
+                terminal: true,
+                live_checkpoint: false,
+            },
+            "aligned",
+        )
+    };
     // The public store has no process-level capture status. A current session
     // with a non-terminal live source is the strongest honest available signal.
     let live =
         source.live_checkpoint && !source.terminal && current_session_matches(margins_dir, &name);
     let speaker_alias = speaker_alias_from_meta(meta.as_ref());
-    let body = apply_speaker_alias(&source.body, speaker_alias.as_deref());
+    let body = if source.source_path == final_path {
+        meta.as_ref()
+            .and_then(|meta| {
+                let path = artifact_registry_disk_path(work_dir, margins_dir, &meta.notes_path);
+                std::fs::read_to_string(path)
+                    .ok()
+                    .and_then(|memo| render_remote_offline_transcript(&source.body, &memo))
+            })
+            .unwrap_or_else(|| source.body.clone())
+    } else {
+        source.body.clone()
+    };
+    let body = apply_speaker_alias(&body, speaker_alias.as_deref());
     let saved_note_path = saved_note_path_for_session(margins_dir, &name);
     let updated_at_unix_ms = source_modified_unix_ms(&source.source_path);
     Ok(TranscriptView {
@@ -164,11 +201,87 @@ pub fn load_transcript_view(
     })
 }
 
+/// Remote ASR artifacts retain the spoken timeline. Rebuild their readable
+/// view with the current memo so bb and `margins transcript` share the same
+/// phrase grouping and memo placement, including for older word-per-row files.
+fn render_remote_offline_transcript(body: &str, memo: &str) -> Option<String> {
+    let (header, original_timeline) = body.split_once("## Timeline")?;
+    if !header
+        .contains("Source: Margins remote offline Parakeet TDT ONNX transcript and memo context.")
+    {
+        return None;
+    }
+    let mut channels = HashMap::<String, u32>::new();
+    let mut labels = BTreeMap::<u32, String>::new();
+    let mut words = Vec::new();
+    for line in original_timeline.lines() {
+        let Some(ms) = elapsed_line_ms(line) else {
+            continue;
+        };
+        let rest = line.split_once(']')?.1.trim();
+        let (speaker, text) = rest.split_once(':')?;
+        if speaker.trim() == "memo" {
+            continue;
+        }
+        let speaker = speaker.trim();
+        let channel = match channels.get(speaker) {
+            Some(channel) => *channel,
+            None => {
+                let channel = channels.len() as u32;
+                channels.insert(speaker.to_string(), channel);
+                labels.insert(channel, speaker.to_string());
+                channel
+            }
+        };
+        words.extend(margins_media::transcript::words_to_transcript_entries(
+            &[margins_media::transcript::WordTiming {
+                start_ms: ms,
+                end_ms: ms,
+                text: text.trim().to_string(),
+            }],
+            channel,
+            0,
+        ));
+    }
+    let (memos, untimed) = crate::alignment::parse_timed_memo_lines(memo);
+    let rows = crate::alignment::interleave_timeline(&words, &memos, 2_000);
+    let mut rendered = format!("{header}## Timeline\n\n");
+    if rows.is_empty() {
+        rendered.push_str("_No timestamped transcript or memo entries were available._\n");
+    } else {
+        for row in rows {
+            match row {
+                crate::alignment::TimelineEvent::Transcript(entry) => rendered.push_str(&format!(
+                    "[{}] {}: {}",
+                    format_elapsed(entry.start_ms),
+                    labels[&entry.channel],
+                    entry.text.trim()
+                )),
+                crate::alignment::TimelineEvent::Memo(memo) => rendered.push_str(&format!(
+                    "[{}] memo: {}",
+                    format_elapsed(memo.at_ms),
+                    memo.text
+                )),
+            }
+            rendered.push('\n');
+        }
+    }
+    if !untimed.is_empty() {
+        rendered.push_str("\n## Untimed memo / reflection lines\n\n");
+        for line in untimed {
+            rendered.push_str("- memo: ");
+            rendered.push_str(&line);
+            rendered.push('\n');
+        }
+    }
+    Some(rendered)
+}
+
 fn read_terminal_checkpoint_body(
     work_dir: &Path,
     margins_dir: &Path,
     name: &str,
-    meta: Option<&legacy::SessionMeta>,
+    meta: Option<&canonical::SessionMeta>,
 ) -> Result<Option<TranscriptSource>> {
     let checkpoint = meta
         .and_then(|meta| {
@@ -185,10 +298,10 @@ fn read_terminal_checkpoint_body(
                 .map(|(_, path)| path)
         })
         .or_else(|| {
-            legacy::list_session_artifacts(margins_dir, name)
+            canonical::list_session_artifacts(margins_dir, name)
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|artifact| artifact.kind == legacy::SESSION_ARTIFACT_KIND_TRANSCRIPT)
+                .filter(|artifact| artifact.kind == canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT)
                 .filter(|artifact| artifact.path.ends_with(".live-transcript.json"))
                 .find_map(|artifact| {
                     confined_session_artifact_access_disk_path(margins_dir, name, &artifact.path)
@@ -197,6 +310,30 @@ fn read_terminal_checkpoint_body(
     let Some(path) = checkpoint else {
         return Ok(None);
     };
+    read_checkpoint_body_at(work_dir, margins_dir, name, meta, path, false)
+}
+
+fn read_remote_live_checkpoint(
+    work_dir: &Path,
+    margins_dir: &Path,
+    name: &str,
+    meta: Option<&canonical::SessionMeta>,
+) -> Result<Option<TranscriptSource>> {
+    let path = margins_dir.join(format!("{name}_remote.live-transcript.json"));
+    if !path.is_file() {
+        return Ok(None);
+    }
+    read_checkpoint_body_at(work_dir, margins_dir, name, meta, path, true)
+}
+
+fn read_checkpoint_body_at(
+    work_dir: &Path,
+    margins_dir: &Path,
+    name: &str,
+    meta: Option<&canonical::SessionMeta>,
+    path: PathBuf,
+    provisional: bool,
+) -> Result<Option<TranscriptSource>> {
     let raw = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
     let checkpoint: Value = serde_json::from_str(&raw)
@@ -213,18 +350,16 @@ fn read_terminal_checkpoint_body(
         .and_then(Value::as_u64)
         .unwrap_or(decoded_until_ms)
         .min(decoded_until_ms);
-    let terminal = checkpoint
-        .get("terminal")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let entries = margins_media::transcript::merge_word_entries_to_phrases(
-        crate::processing::read_transcript_entries(&path)?,
-        2_000,
-    );
+    let terminal = !provisional
+        && checkpoint
+            .get("terminal")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    let entries = crate::processing::read_transcript_entries(&path)?;
     let Some(meta) = meta else {
         return Ok(None);
     };
-    let started_at = legacy::get_session_start_time(margins_dir, name)?;
+    let started_at = canonical::get_session_start_time(margins_dir, name)?;
     let memo_path = artifact_registry_disk_path(work_dir, margins_dir, &meta.notes_path);
     let memo = std::fs::read_to_string(memo_path).unwrap_or_default();
     let body = crate::alignment::render_aligned_markdown(name, &started_at, &memo, &entries);
@@ -243,10 +378,10 @@ pub fn read_registered_or_fallback(
     margins_dir: &Path,
     name: &str,
 ) -> Result<(PathBuf, String)> {
-    let registered = legacy::list_session_artifacts(margins_dir, name)
+    let registered = canonical::list_session_artifacts(margins_dir, name)
         .unwrap_or_default()
         .into_iter()
-        .filter(|artifact| artifact.kind == legacy::SESSION_ARTIFACT_KIND_TRANSCRIPT)
+        .filter(|artifact| artifact.kind == canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT)
         .filter(|artifact| !artifact.path.ends_with(".live-transcript.json"))
         .filter_map(|artifact| {
             confined_session_artifact_access_disk_path(margins_dir, name, &artifact.path)
@@ -480,7 +615,7 @@ fn read_live_transcript_body(
 }
 
 fn read_live_memo(work_dir: &Path, dir: &Path, name: &str) -> String {
-    legacy::get_session_meta(dir, name)
+    canonical::get_session_meta(dir, name)
         .ok()
         .and_then(|meta| {
             let path = PathBuf::from(meta.notes_path);
@@ -603,7 +738,7 @@ fn format_elapsed(ms: u64) -> String {
     }
 }
 
-pub fn speaker_alias_from_meta(meta: Option<&legacy::SessionMeta>) -> Option<String> {
+pub fn speaker_alias_from_meta(meta: Option<&canonical::SessionMeta>) -> Option<String> {
     let people = &meta?.people;
     (people.len() == 1)
         .then(|| people[0].trim().to_string())
@@ -628,17 +763,17 @@ pub fn saved_note_path_for_session(dir: &Path, id: &str) -> Option<String> {
             .filter(|p| !p.trim().is_empty() && Path::new(p).is_file())
             .map(str::to_string)
     };
-    if let Ok(meta) = legacy::get_session_meta(dir, id) {
+    if let Ok(meta) = canonical::get_session_meta(dir, id) {
         if let Some(path) = available(meta.vault_note_path.as_deref()) {
             return Some(path);
         }
     }
-    if let Ok(Some(path)) = legacy::vault_note_path_by_id(dir, id) {
+    if let Ok(Some(path)) = canonical::vault_note_path_by_id(dir, id) {
         if let Some(path) = available(Some(&path)) {
             return Some(path);
         }
     }
-    legacy::list_vault_notes(dir)
+    canonical::list_vault_notes(dir)
         .ok()?
         .into_iter()
         .find(|note| note.source_session_name.as_deref() == Some(id))
@@ -695,11 +830,93 @@ mod tests {
     use chrono::Local;
 
     #[test]
+    fn completed_remote_transcript_groups_words_and_interleaves_current_memo() {
+        let temp = tempfile::tempdir().unwrap();
+        let work_dir = temp.path();
+        let margins_dir = work_dir.join(".margins");
+        canonical::create_session(&margins_dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
+        std::fs::write(
+            margins_dir.join("meet.md"),
+            "[00:02] Current memo\nA later reflection",
+        )
+        .unwrap();
+        let final_path = transcript_artifact_path(&margins_dir, "meet");
+        std::fs::create_dir_all(final_path.parent().unwrap()).unwrap();
+        std::fs::write(&final_path, "# Transcript\n\nSession: `meet`\nSource: Margins remote offline Parakeet TDT ONNX transcript and memo context.\nTranscript source: `offline`\n\n## Timeline\n\n[00:01] you (mic): Nice\n[00:02] you (mic): .\n[00:02] memo: Stale memo\n[00:03] you (mic): To\n[00:03] you (mic): find\n[00:04] you (mic): the\n[00:04] you (mic): recording\n[00:05] you (mic): suite\n[00:05] you (mic): .\n").unwrap();
+        let job =
+            canonical::begin_processing_job(&margins_dir, "meet", "job-1", "transcribe", "input-1")
+                .unwrap();
+        canonical::update_processing_job(
+            &margins_dir,
+            "job-1",
+            job.attempt,
+            "complete",
+            Some(1.0),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let view = load_transcript_view(work_dir, &margins_dir, "meet").unwrap();
+        assert!(view.body.contains("[00:01] you (mic): Nice."));
+        assert!(view
+            .body
+            .contains("[00:03] you (mic): To find the recording suite."));
+        assert!(view.body.find("Nice.").unwrap() < view.body.find("Current memo").unwrap());
+        assert!(view.body.find("Current memo").unwrap() < view.body.find("To find").unwrap());
+        assert!(view.body.contains("- memo: A later reflection"));
+        assert!(!view.body.contains("Stale memo"));
+    }
+
+    #[test]
+    fn provisional_remote_words_yield_to_completed_final_transcript() {
+        let temp = tempfile::tempdir().unwrap();
+        let work_dir = temp.path();
+        let margins_dir = work_dir.join(".margins");
+        canonical::create_session(&margins_dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
+        std::fs::write(margins_dir.join("meet.md"), "").unwrap();
+        std::fs::write(
+            margins_dir.join("meet_remote.live-transcript.json"),
+            serde_json::json!({
+                "version":2,"terminal":true,"decoded_until_ms":1000,"committed_until_ms":900,
+                "transcripts":[{"words":[{"channel":0,"start_ms":100,"end_ms":500,"text":" provisional"}]}]
+            }).to_string(),
+        ).unwrap();
+        let interim = load_transcript_view(work_dir, &margins_dir, "meet").unwrap();
+        assert!(interim.body.contains("provisional"));
+        assert!(!interim.terminal);
+
+        let final_path = transcript_artifact_path(&margins_dir, "meet");
+        std::fs::create_dir_all(final_path.parent().unwrap()).unwrap();
+        std::fs::write(&final_path, "# Final\n\nrecognized remotely\n").unwrap();
+        let job =
+            canonical::begin_processing_job(&margins_dir, "meet", "job-1", "transcribe", "input-1")
+                .unwrap();
+        canonical::update_processing_job(
+            &margins_dir,
+            "job-1",
+            job.attempt,
+            "complete",
+            Some(1.0),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let final_view = load_transcript_view(work_dir, &margins_dir, "meet").unwrap();
+        assert_eq!(final_view.view, "aligned");
+        assert!(final_view.terminal);
+        assert!(final_view.body.contains("recognized remotely"));
+        assert!(!final_view.body.contains("provisional"));
+    }
+
+    #[test]
     fn empty_segment_journal_falls_back_to_filtered_legacy_checkpoints() {
         let temp = tempfile::tempdir().unwrap();
         let work_dir = temp.path();
         let margins_dir = work_dir.join(".margins");
-        legacy::create_session(&margins_dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
+        canonical::create_session(&margins_dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
         std::fs::write(margins_dir.join("meet.md"), "[00:02] memo").unwrap();
         std::fs::write(
             margins_dir.join("meet_live_transcript_segments.jsonl"),
@@ -731,7 +948,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let work_dir = temp.path();
         let margins_dir = work_dir.join(".margins");
-        legacy::create_session(&margins_dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
+        canonical::create_session(&margins_dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
         std::fs::write(margins_dir.join("meet.md"), "[00:02] memo").unwrap();
         std::fs::write(margins_dir.join("current"), "meet\n").unwrap();
         std::fs::write(
@@ -758,7 +975,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let work_dir = temp.path();
         let margins_dir = work_dir.join(".margins");
-        legacy::create_session(&margins_dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
+        canonical::create_session(&margins_dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
         std::fs::write(margins_dir.join("meet.md"), "[00:02] memo").unwrap();
         std::fs::write(margins_dir.join("current"), "meet\n").unwrap();
         std::fs::write(
@@ -794,13 +1011,13 @@ mod tests {
         let work_dir = temp.path();
         let margins_dir = work_dir.join(".margins");
         let secret = work_dir.join("secret.md");
-        legacy::create_session(&margins_dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
+        canonical::create_session(&margins_dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
         std::fs::write(&secret, "secret outside root").unwrap();
         std::fs::write(margins_dir.join("meet_aligned.md"), "safe fallback").unwrap();
-        legacy::upsert_session_artifact(
+        canonical::upsert_session_artifact(
             &margins_dir,
             "meet",
-            legacy::SESSION_ARTIFACT_KIND_TRANSCRIPT,
+            canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT,
             0,
             &secret.to_string_lossy(),
             "durable",

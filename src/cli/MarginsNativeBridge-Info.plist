@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>com.byenzyme.margins.capture</string>
+  <key>CFBundleName</key>
+  <string>Margins Capture</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Margins records your microphone for the meeting you start in bb and saves it to your selected Margins Workspace.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>Margins records conversation audio playing on this Mac for the meeting you start in bb and saves it to your selected Margins Workspace.</string>
+</dict>
+</plist>

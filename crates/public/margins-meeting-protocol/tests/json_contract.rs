@@ -7,6 +7,310 @@ fn as_json<T: serde::Serialize>(value: &T) -> Value {
 }
 
 #[test]
+fn desktop_live_golden_fixture_is_emitted_by_the_rust_contract() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/desktop-live-v1.json")).unwrap();
+
+    let discovery = LiveDiscoveryV1 {
+        protocol_version: ProtocolVersionV1,
+        runtime: LiveRuntimeV1::MarginsCli,
+        profile: "default".to_string(),
+        pid: 42,
+        base_url: "http://127.0.0.1:49152".to_string(),
+        token: "a".repeat(64),
+        permissions: LivePermissionsV1 {
+            loopback_only: true,
+            private_file: true,
+        },
+        endpoints: LiveEndpointsV1 {
+            snapshot: "/v1/live/snapshot".to_string(),
+            start: "/v1/live/start".to_string(),
+            pause: "/v1/live/pause".to_string(),
+            resume: "/v1/live/resume".to_string(),
+            stop: "/v1/live/stop".to_string(),
+            update_notepad: "/v1/live/notepad".to_string(),
+        },
+        generated_at_unix_ms: UnixMillis(1_800_000_000_000),
+    };
+    let snapshot = LiveSnapshotV1 {
+        protocol_version: ProtocolVersionV1,
+        server_unix_ms: UnixMillis(1_800_000_000_100),
+        session: Some(LiveSessionV1 {
+            session_id: "customer-call".into(),
+            status: LiveSessionStatusV1::Recording,
+            elapsed_ms: DurationMillis(12_345),
+            generation: 2,
+        }),
+        health: LiveHealthV1 {
+            capture_phase: "recording".to_string(),
+            tap_status: "ok".to_string(),
+            tap_warning: None,
+            system_audio_expected: true,
+            system_audio_observed: true,
+            microphone_peak_milli: None,
+            transcript_freshness: Some(LiveTranscriptFreshnessV1 {
+                decoded_until_ms: DurationMillis(11_000),
+                committed_until_ms: DurationMillis(10_000),
+                updated_at_unix_ms: UnixMillis(1_800_000_000_000),
+                age_ms: DurationMillis(100),
+            }),
+        },
+        rolling_transcript: vec![LiveTranscriptLineV1 {
+            at_ms: Some(SessionMillis(10_000)),
+            text: "[00:10] user: hello".to_string(),
+        }],
+        memo_lines: vec![LiveMemoLineV1 {
+            index: 0,
+            at_ms: Some(SessionMillis(12_345)),
+            text: "Follow up".to_string(),
+        }],
+        notepad_revision: "v1-abc".to_string(),
+    };
+    let idle = LiveSnapshotV1 {
+        protocol_version: ProtocolVersionV1,
+        server_unix_ms: UnixMillis(1_800_000_000_100),
+        session: None,
+        health: LiveHealthV1 {
+            capture_phase: "idle".to_string(),
+            tap_status: "not_expected".to_string(),
+            tap_warning: None,
+            system_audio_expected: false,
+            system_audio_observed: false,
+            microphone_peak_milli: None,
+            transcript_freshness: None,
+        },
+        rolling_transcript: Vec::new(),
+        memo_lines: Vec::new(),
+        notepad_revision: "v1-empty".to_string(),
+    };
+
+    assert_eq!(as_json(&discovery), fixture["discovery"]);
+    assert_eq!(as_json(&snapshot), fixture["recording_snapshot"]);
+    assert_eq!(as_json(&idle), fixture["idle_snapshot"]);
+    assert_eq!(
+        as_json(&LiveStartRequestV1 {
+            operation_id: "op_start_1".into(),
+            name: "Customer call".to_string(),
+            project_id: Some("project-1".to_string()),
+        }),
+        fixture["start_request"]
+    );
+    assert_eq!(
+        as_json(&LiveSessionRequestV1 {
+            operation_id: "pause-1".into(),
+            session_id: "customer-call".into(),
+            expected_generation: Some(2),
+        }),
+        fixture["session_request"]
+    );
+    assert_eq!(
+        as_json(&LiveUpdateNotepadRequestV1 {
+            operation_id: "notepad-1".into(),
+            session_id: "customer-call".into(),
+            expected_generation: Some(2),
+            expected_notepad_revision: "v1-abc".to_string(),
+            text: "Follow up\nSend details".to_string(),
+        }),
+        fixture["notepad_request"]
+    );
+}
+
+#[test]
+fn desktop_live_discovery_json_shape_is_stable() {
+    let discovery = LiveDiscoveryV1 {
+        protocol_version: ProtocolVersionV1,
+        runtime: LiveRuntimeV1::MarginsDesktop,
+        profile: "default".to_string(),
+        pid: 42,
+        base_url: "http://127.0.0.1:49152".to_string(),
+        token: "a".repeat(64),
+        permissions: LivePermissionsV1 {
+            loopback_only: true,
+            private_file: true,
+        },
+        endpoints: LiveEndpointsV1 {
+            snapshot: "/v1/live/snapshot".to_string(),
+            start: "/v1/live/start".to_string(),
+            pause: "/v1/live/pause".to_string(),
+            resume: "/v1/live/resume".to_string(),
+            stop: "/v1/live/stop".to_string(),
+            update_notepad: "/v1/live/notepad".to_string(),
+        },
+        generated_at_unix_ms: UnixMillis(1_800_000_000_000),
+    };
+
+    assert_eq!(
+        as_json(&discovery),
+        json!({
+            "protocol_version": 1,
+            "runtime": "margins_desktop",
+            "profile": "default",
+            "pid": 42,
+            "base_url": "http://127.0.0.1:49152",
+            "token": "a".repeat(64),
+            "permissions": {
+                "loopback_only": true,
+                "private_file": true
+            },
+            "endpoints": {
+                "snapshot": "/v1/live/snapshot",
+                "start": "/v1/live/start",
+                "pause": "/v1/live/pause",
+                "resume": "/v1/live/resume",
+                "stop": "/v1/live/stop",
+                "update_notepad": "/v1/live/notepad"
+            },
+            "generated_at_unix_ms": 1_800_000_000_000_u64
+        })
+    );
+}
+
+#[test]
+fn desktop_live_snapshot_json_shape_is_stable_and_bounded_fields_are_plain() {
+    let snapshot = LiveSnapshotV1 {
+        protocol_version: ProtocolVersionV1,
+        server_unix_ms: UnixMillis(1_800_000_000_100),
+        session: Some(LiveSessionV1 {
+            session_id: "customer-call".into(),
+            status: LiveSessionStatusV1::Recording,
+            elapsed_ms: DurationMillis(12_345),
+            generation: 2,
+        }),
+        health: LiveHealthV1 {
+            capture_phase: "recording".to_string(),
+            tap_status: "ok".to_string(),
+            tap_warning: None,
+            system_audio_expected: true,
+            system_audio_observed: true,
+            microphone_peak_milli: None,
+            transcript_freshness: Some(LiveTranscriptFreshnessV1 {
+                decoded_until_ms: DurationMillis(11_000),
+                committed_until_ms: DurationMillis(10_000),
+                updated_at_unix_ms: UnixMillis(1_800_000_000_000),
+                age_ms: DurationMillis(100),
+            }),
+        },
+        rolling_transcript: vec![LiveTranscriptLineV1 {
+            at_ms: Some(SessionMillis(10_000)),
+            text: "[00:10] user: hello".to_string(),
+        }],
+        memo_lines: vec![LiveMemoLineV1 {
+            index: 0,
+            at_ms: Some(SessionMillis(12_345)),
+            text: "Follow up".to_string(),
+        }],
+        notepad_revision: "v1-abc".to_string(),
+    };
+
+    assert_eq!(
+        as_json(&snapshot),
+        json!({
+            "protocol_version": 1,
+            "server_unix_ms": 1_800_000_000_100_u64,
+            "session": {
+                "session_id": "customer-call",
+                "status": "recording",
+                "elapsed_ms": 12_345,
+                "generation": 2
+            },
+            "health": {
+                "capture_phase": "recording",
+                "tap_status": "ok",
+                "system_audio_expected": true,
+                "system_audio_observed": true,
+                "transcript_freshness": {
+                    "decoded_until_ms": 11_000,
+                    "committed_until_ms": 10_000,
+                    "updated_at_unix_ms": 1_800_000_000_000_u64,
+                    "age_ms": 100
+                }
+            },
+            "rolling_transcript": [{
+                "at_ms": 10_000,
+                "text": "[00:10] user: hello"
+            }],
+            "memo_lines": [{
+                "index": 0,
+                "at_ms": 12_345,
+                "text": "Follow up"
+            }],
+            "notepad_revision": "v1-abc"
+        })
+    );
+}
+
+#[test]
+fn desktop_live_idle_snapshot_keeps_required_null_session() {
+    let snapshot = LiveSnapshotV1 {
+        protocol_version: ProtocolVersionV1,
+        server_unix_ms: UnixMillis(1_800_000_000_100),
+        session: None,
+        health: LiveHealthV1 {
+            capture_phase: "idle".to_string(),
+            tap_status: "not_expected".to_string(),
+            tap_warning: None,
+            system_audio_expected: false,
+            system_audio_observed: false,
+            microphone_peak_milli: None,
+            transcript_freshness: None,
+        },
+        rolling_transcript: Vec::new(),
+        memo_lines: Vec::new(),
+        notepad_revision: "v1-empty".to_string(),
+    };
+
+    assert_eq!(
+        as_json(&snapshot),
+        json!({
+            "protocol_version": 1,
+            "server_unix_ms": 1_800_000_000_100_u64,
+            "session": null,
+            "health": {
+                "capture_phase": "idle",
+                "tap_status": "not_expected",
+                "system_audio_expected": false,
+                "system_audio_observed": false
+            },
+            "notepad_revision": "v1-empty"
+        })
+    );
+}
+
+#[test]
+fn desktop_live_requests_validate_ids_generation_and_text() {
+    LiveStartRequestV1 {
+        operation_id: "op".into(),
+        name: "meeting".to_string(),
+        project_id: None,
+    }
+    .validate()
+    .unwrap();
+    assert!(LiveStartRequestV1 {
+        operation_id: "".into(),
+        name: "meeting".to_string(),
+        project_id: None,
+    }
+    .validate()
+    .is_err());
+    assert!(LiveSessionRequestV1 {
+        operation_id: "op".into(),
+        session_id: "session".into(),
+        expected_generation: Some(MAX_SAFE_JSON_INTEGER + 1),
+    }
+    .validate()
+    .is_err());
+    LiveUpdateNotepadRequestV1 {
+        operation_id: "op".into(),
+        session_id: "session".into(),
+        expected_generation: None,
+        expected_notepad_revision: "v1-abc".to_string(),
+        text: String::new(),
+    }
+    .validate()
+    .unwrap();
+}
+
+#[test]
 fn create_session_json_shape_is_stable() {
     let message = ClientMessageV1 {
         protocol_version: ProtocolVersionV1,

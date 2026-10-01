@@ -347,6 +347,7 @@ fn all_closed_enums_roundtrip() {
         AudioContainerV1::Webm,
         AudioContainerV1::Ogg,
         AudioContainerV1::Mp4,
+        AudioContainerV1::PacketStream,
     ] {
         roundtrip(&value);
     }
@@ -389,6 +390,109 @@ fn all_closed_enums_roundtrip() {
     ] {
         roundtrip(&value);
     }
+}
+
+fn opus_block(start: bool, end: bool, source_start: u64, source_frames: u32) -> OpusPacketBlockV1 {
+    OpusPacketBlockV1 {
+        stream_start: start,
+        stream_end: end,
+        pre_skip_48k: if start { 312 } else { 0 },
+        sample_rate_hz: OPUS_PACKET_STREAM_SAMPLE_RATE_HZ_V1,
+        source_start_frame: source_start,
+        source_frame_count: source_frames,
+        frame_samples: OPUS_PACKET_FRAME_SAMPLES_V1,
+        packets: vec![vec![0xf8, 0xff, 0xfe]],
+    }
+}
+
+#[test]
+fn opus_packet_stream_framing_roundtrips_and_rejects_hostile_counts_before_allocation() {
+    let encoded = opus_block(true, true, 0, 216).encode().unwrap();
+    let decoded = decode_opus_packet_blocks_v1(&encoded).unwrap();
+    assert_eq!(decoded, vec![opus_block(true, true, 0, 216)]);
+    let summary = validate_opus_packet_stream_v1(&encoded).unwrap();
+    assert_eq!(summary.source_frame_count, 216);
+    assert_eq!(summary.pre_skip_48k, 312);
+
+    let mut hostile = encoded.clone();
+    hostile[28..30].copy_from_slice(&u16::MAX.to_le_bytes());
+    let error = decode_opus_packet_blocks_v1(&hostile).unwrap_err();
+    assert!(error.contains("packet count"));
+
+    let mut truncated = encoded;
+    truncated.pop();
+    assert!(decode_opus_packet_blocks_v1(&truncated).is_err());
+
+    let mut bad_magic = opus_block(true, true, 0, 216).encode().unwrap();
+    bad_magic[0] ^= 0xff;
+    assert!(decode_opus_packet_blocks_v1(&bad_magic)
+        .unwrap_err()
+        .contains("magic/version"));
+
+    let mut packet_length_bomb = opus_block(true, true, 0, 216).encode().unwrap();
+    packet_length_bomb[32..34].copy_from_slice(&u16::MAX.to_le_bytes());
+    assert!(decode_opus_packet_blocks_v1(&packet_length_bomb)
+        .unwrap_err()
+        .contains("packet payload"));
+}
+
+#[test]
+fn opus_complete_stream_rejects_gaps_missing_markers_and_terminal_overrun() {
+    let first = opus_block(true, false, 0, 320).encode().unwrap();
+    let mut second = opus_block(false, true, 321, 216);
+    let mut bytes = first.clone();
+    bytes.extend(second.encode().unwrap());
+    assert!(validate_opus_packet_stream_v1(&bytes)
+        .unwrap_err()
+        .contains("gap or overlap"));
+
+    second.source_start_frame = 319;
+    let mut overlap = first.clone();
+    overlap.extend(second.encode().unwrap());
+    assert!(validate_opus_packet_stream_v1(&overlap)
+        .unwrap_err()
+        .contains("gap or overlap"));
+
+    second.source_start_frame = 320;
+    let mut missing_start = opus_block(false, true, 0, 216);
+    missing_start.pre_skip_48k = 0;
+    assert!(validate_opus_packet_stream_v1(&missing_start.encode().unwrap()).is_err());
+
+    assert!(validate_opus_packet_stream_v1(&first)
+        .unwrap_err()
+        .contains("missing END"));
+
+    let mut after_end = opus_block(true, true, 0, 216).encode().unwrap();
+    after_end.extend(second.encode().unwrap());
+    assert!(validate_opus_packet_stream_v1(&after_end)
+        .unwrap_err()
+        .contains("after END"));
+}
+
+#[test]
+fn binary_audio_batch_keeps_json_metadata_separate_from_payloads() {
+    let command = client(
+        ClientMessageBodyV1::AudioChunk(AudioChunkV1 {
+            segment_id: "segment-1".into(),
+            lane_id: "mic".into(),
+            sequence: 0,
+            starts_at_ms: SessionMillis(0),
+            duration_ms: DurationMillis(20),
+            payload_digest: digest(),
+            payload: vec![7, 8, 9],
+        }),
+        20,
+    );
+    let batch = AudioChunkBatchV1 {
+        commands: vec![command],
+    };
+    let encoded = batch.encode(8, 1024).unwrap();
+    let decoded = AudioChunkBatchV1::decode(&encoded, 8, 1024).unwrap();
+    assert_eq!(decoded, batch);
+
+    let mut trailing = encoded;
+    trailing.push(0);
+    assert!(AudioChunkBatchV1::decode(&trailing, 8, 1024).is_err());
 }
 
 #[test]

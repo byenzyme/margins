@@ -1,7 +1,7 @@
 use chrono::{Duration, Local};
 use margins_core::{AsrBackend, AsrRequest, AsrResult, TranscriptError, TranscriptWord};
 use margins_media::audio::write_interleaved_wav;
-use margins_store::legacy;
+use margins_store::canonical;
 use margins_workflows::processing::{
     process_session, transcribe_audio, ProcessRequest, TranscribeRequest,
 };
@@ -105,12 +105,12 @@ fn multipart_offsets_apply_once_and_align_only_makes_no_asr_calls() {
     let work = temp.path();
     let dir = work.join(".margins");
     let started = Local::now() - Duration::minutes(5);
-    legacy::create_session(&dir, "meet", &started, ".margins/meet.md").unwrap();
+    canonical::create_session(&dir, "meet", &started, ".margins/meet.md").unwrap();
     std::fs::write(dir.join("meet.md"), "[01:30] boundary memo\n").unwrap();
     for ordinal in [1, 0] {
         let rel = format!(".margins/meet_seg{ordinal}.wav");
         write_interleaved_wav(work.join(&rel), &[0.0; 16_000], 16_000, 1).unwrap();
-        legacy::add_segment(
+        canonical::add_segment(
             &dir,
             "meet",
             ordinal,
@@ -151,7 +151,7 @@ fn multipart_offsets_apply_once_and_align_only_makes_no_asr_calls() {
     let aligned = std::fs::read_to_string(second.aligned_path).unwrap();
     assert!(aligned.find("part-0").unwrap() < aligned.find("boundary memo").unwrap());
     assert!(aligned.find("boundary memo").unwrap() < aligned.find("part-1").unwrap());
-    let artifacts = legacy::list_session_artifacts(&dir, "meet").unwrap();
+    let artifacts = canonical::list_session_artifacts(&dir, "meet").unwrap();
     assert_eq!(artifacts.len(), 1);
-    assert_eq!(artifacts[0].kind, legacy::SESSION_ARTIFACT_KIND_TRANSCRIPT);
+    assert_eq!(artifacts[0].kind, canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT);
 }

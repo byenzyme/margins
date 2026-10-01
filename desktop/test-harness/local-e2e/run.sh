@@ -42,6 +42,8 @@ STATE_ROOT="${MARGINS_E2E_STATE:-/tmp/margins-e2e}"
 HOME_DIR="$STATE_ROOT/home"
 DATA_DIR="$STATE_ROOT/data"
 VAULT_DIR="$HOME_DIR/Documents/margins"
+MARGINS_HOME_DIR="$STATE_ROOT/margins-home"
+WORKSPACE_ID="${MARGINS_E2E_WORKSPACE:-e2e}"
 SERVER_BIN="$CARGO_TARGET_DIR/debug/margins-server"
 SERVER_FEATURES="${MARGINS_E2E_SERVER_FEATURES:-hosted-web}"
 
@@ -106,6 +108,9 @@ echo "==> starting margins-server on 127.0.0.1:$PORT"
 HOME="$HOME_DIR" PATH="$SERVER_PATH" \
 MARGINS_HOST=127.0.0.1 MARGINS_PORT="$PORT" \
 MARGINS_DATA_DIR="$DATA_DIR" MARGINS_PROFILE=e2e \
+MARGINS_HOME="$MARGINS_HOME_DIR" MARGINS_WORKSPACE="$WORKSPACE_ID" \
+MARGINS_WORK_DIR="$VAULT_DIR" MARGINS_INSTANCE_ID=e2e-headless \
+MARGINS_SERVICE_PROVISION=1 \
 MARGINS_DISABLE_KEYCHAIN=1 \
   "$SERVER_BIN" &
 pids+=("$!")
@@ -146,7 +151,7 @@ cat <<EOF
    agent-browser screenshot /tmp/margins.png
 
  Seeded vault : $VAULT_DIR
- Distill skill: $SKILL_PATH
+ Workspace    : $WORKSPACE_ID
  State dir    : $STATE_ROOT  (--keep-state to preserve)
 ============================================================
 

@@ -1,12 +1,12 @@
 use serde::Serialize;
-#[cfg(feature = "tauri-app")]
+#[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-#[cfg(feature = "tauri-app")]
+#[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
 use cpal::traits::DeviceTrait;
-#[cfg(feature = "tauri-app")]
+#[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
 use margins::recorder;
 
 pub(crate) const DEVICES_CHANGED_EVENT: &str = "devices-changed";
@@ -107,7 +107,7 @@ impl DeviceRegistry {
         next
     }
 
-    #[cfg(feature = "tauri-app")]
+    #[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
     pub(crate) fn resolve_live_device(
         &self,
         device_uid: Option<&str>,
@@ -130,7 +130,7 @@ impl DeviceRegistry {
         )
     }
 
-    #[cfg(not(feature = "tauri-app"))]
+    #[cfg(not(any(feature = "tauri-app", feature = "live-runtime")))]
     pub(crate) fn resolve_live_device(
         &self,
         _device_uid: Option<&str>,
@@ -146,7 +146,10 @@ pub(crate) fn run_device_watcher(
     let initial = registry.refresh();
     publish(initial);
 
-    #[cfg(all(target_os = "macos", feature = "tauri-app"))]
+    #[cfg(all(
+        target_os = "macos",
+        any(feature = "tauri-app", feature = "live-runtime")
+    ))]
     {
         let (tx, rx) = std::sync::mpsc::sync_channel(16);
         let _watcher = match recorder::InputDeviceWatcher::start(tx) {
@@ -167,7 +170,10 @@ pub(crate) fn run_device_watcher(
         }
     }
 
-    #[cfg(not(all(target_os = "macos", feature = "tauri-app")))]
+    #[cfg(not(all(
+        target_os = "macos",
+        any(feature = "tauri-app", feature = "live-runtime")
+    )))]
     loop {
         std::thread::sleep(Duration::from_secs(5));
         let previous_generation = registry.snapshot().generation;
@@ -178,12 +184,12 @@ pub(crate) fn run_device_watcher(
     }
 }
 
-#[cfg(feature = "tauri-app")]
+#[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
 fn stable_uid(name: &str, occurrence: usize) -> Option<String> {
     recorder::input_device_uid_at(name, occurrence).or_else(|| Some(name.to_string()))
 }
 
-#[cfg(feature = "tauri-app")]
+#[cfg(any(feature = "tauri-app", feature = "live-runtime"))]
 fn enumerate_devices() -> Vec<DeviceInfo> {
     let default_name = recorder::default_input_device_name();
     let mut occurrences = HashMap::<String, usize>::new();
@@ -210,7 +216,7 @@ fn enumerate_devices() -> Vec<DeviceInfo> {
         .collect()
 }
 
-#[cfg(not(feature = "tauri-app"))]
+#[cfg(not(any(feature = "tauri-app", feature = "live-runtime")))]
 fn enumerate_devices() -> Vec<DeviceInfo> {
     Vec::new()
 }

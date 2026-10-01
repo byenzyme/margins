@@ -62,11 +62,56 @@ fn run_inner(
 ) -> Result<(), CliError> {
     let (workspace_selector, args) = args::strip_workspace_arg(args).map_err(CliError::usage)?;
     let (project_selector, args) = args::strip_project_arg(args).map_err(CliError::usage)?;
-    let args = Args::try_parse_from(args).map_err(|error| CliError::usage(error.to_string()))?;
+    let mut args =
+        Args::try_parse_from(args).map_err(|error| CliError::usage(error.to_string()))?;
     let env_workspace = std::env::var("MARGINS_WORKSPACE")
         .ok()
         .filter(|value| !value.trim().is_empty());
     let workspace_selected = workspace_selector.is_some() || env_workspace.is_some();
+    if workspace_selected && project_selector.is_some() {
+        return Err(CliError::new(
+            "invalid_arguments",
+            "`--project` cannot be combined with an explicit Workspace selection",
+        ));
+    }
+
+    let remote = if args.local {
+        None
+    } else {
+        args.remote.clone().or_else(|| {
+            std::env::var("MARGINS_REMOTE")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+    };
+
+    if matches!(args.command, Some(Command::Service { .. })) {
+        let Some(Command::Service { command }) = args.command.take() else {
+            unreachable!()
+        };
+        return commands::remote::service(command, workspace_selector.as_deref(), stdout);
+    }
+    if matches!(args.command, Some(Command::Transfers { .. })) {
+        let Some(Command::Transfers { command }) = args.command.take() else {
+            unreachable!()
+        };
+        return commands::remote::transfers(command, stdout);
+    }
+    if let Some(remote) = remote {
+        let workspace = workspace_selector
+            .as_deref()
+            .or(env_workspace.as_deref())
+            .ok_or_else(|| {
+                CliError::usage("remote commands require --workspace <id> or MARGINS_WORKSPACE")
+            })?;
+        let command = args.command.ok_or_else(|| {
+            CliError::new(
+                "remote_command_unsupported",
+                "bare remote capture is not available; use `margins new`",
+            )
+        })?;
+        return commands::remote::run(&remote, workspace, command, stdout);
+    }
 
     match args.command {
         Some(Command::Retention { command }) => {
@@ -139,6 +184,30 @@ fn run_inner(
             };
         }
         Some(Command::Workspace {
+            command: WorkspaceCommand::Remove { id, json },
+        }) => {
+            return commands::workspace::remove(&id, json, stdout);
+        }
+        Some(Command::Workspace {
+            command: WorkspaceCommand::List { json },
+        }) => {
+            return commands::workspace::list(json, stdout);
+        }
+        Some(Command::Workspace {
+            command: WorkspaceCommand::Default { set, json },
+        }) => {
+            return commands::workspace::default(set.as_deref(), json, stdout);
+        }
+        Some(Command::Workspace {
+            command: WorkspaceCommand::Destination { .. },
+        }) => {
+            return commands::workspace::destination(
+                workspace_selector.as_deref(),
+                invocation_dir,
+                stdout,
+            );
+        }
+        Some(Command::Workspace {
             command:
                 WorkspaceCommand::New {
                     id,
@@ -160,6 +229,14 @@ fn run_inner(
                 stdout,
                 stderr,
             );
+        }
+        Some(Command::Workspace {
+            command: WorkspaceCommand::Compile { .. },
+        }) => {
+            return Err(CliError::new(
+                "workspace_compile_unavailable",
+                "this build does not include the Workspace compiler",
+            ));
         }
         Some(Command::Workspace {
             command: WorkspaceCommand::Plan { desired, .. },
@@ -253,7 +330,7 @@ fn run_inner(
                 invocation_dir,
                 stderr,
             )?;
-            return commands::transcript::recent(&workspace.captures_dir(), stdout);
+            return commands::transcript::recent(&workspace_capture_root(&workspace)?, stdout);
         }
         Some(Command::Transcript { meeting_id, format }) if workspace_selected => {
             let workspace = commands::workspace::resolve(
@@ -262,7 +339,7 @@ fn run_inner(
                 stderr,
             )?;
             return commands::transcript::transcript(
-                &workspace.captures_dir(),
+                &workspace_capture_root(&workspace)?,
                 meeting_id.as_deref().unwrap_or("latest"),
                 format,
                 stdout,
@@ -274,7 +351,11 @@ fn run_inner(
                 invocation_dir,
                 stderr,
             )?;
-            return commands::artifacts::list(&workspace.captures_dir(), &meeting_id, stdout);
+            return commands::artifacts::list(
+                &workspace_capture_root(&workspace)?,
+                &meeting_id,
+                stdout,
+            );
         }
         Some(Command::Import {
             command: ImportCommand::Granola { path },
@@ -432,7 +513,7 @@ fn run_inner(
             let started_at = audio_start_time(&audio_path).unwrap_or_else(|| services.clock.now());
             return commands::process::transcribe(
                 services,
-                &workspace.captures_dir(),
+                &workspace_capture_root(&workspace)?,
                 &audio_path,
                 name.as_deref(),
                 memo_path.as_deref(),
@@ -452,6 +533,61 @@ fn run_inner(
             return commands::guide::note_handoff(workspace, print, stdout);
         }
         _ => {}
+    }
+
+    if workspace_selected {
+        let workspace =
+            commands::workspace::resolve(workspace_selector.as_deref(), invocation_dir, stderr)?;
+        let capture_root = workspace_capture_root(&workspace)?;
+        return match args.command {
+            None => commands::capture::run(services, &capture_root, None, None, false, true),
+            Some(Command::New { title }) => {
+                commands::capture::run(services, &capture_root, None, title.as_deref(), true, false)
+            }
+            Some(Command::Attach { session }) => commands::capture::run(
+                services,
+                &capture_root,
+                session.as_deref(),
+                None,
+                false,
+                false,
+            ),
+            Some(Command::Current) => {
+                commands::sessions::show_current(services, &capture_root, stdout)
+            }
+            Some(Command::Ls) => commands::sessions::list(services, &capture_root, stderr),
+            Some(Command::Rename { title }) => {
+                commands::sessions::rename(services, &capture_root, &title, stdout)
+            }
+            Some(command @ Command::Memo { .. })
+            | Some(command @ Command::NoteAssociation { .. })
+            | Some(command @ Command::ProcessingStatus { .. }) => {
+                commands::application::run(workspace, command, stdout)
+            }
+            Some(Command::Process {
+                session,
+                speakers,
+                align_only,
+            }) => commands::process::process_session(
+                services,
+                &capture_root,
+                &session,
+                speakers.unwrap_or(1),
+                align_only,
+                stdout,
+            ),
+            Some(Command::ArtifactsPrune) => {
+                commands::artifacts::prune(&capture_root, services.clock.now(), stdout)
+            }
+            Some(Command::Archive { command }) => match command {
+                ArchiveCommand::On => commands::archive::set(&capture_root, true, stdout),
+                ArchiveCommand::Off => commands::archive::set(&capture_root, false, stdout),
+                ArchiveCommand::Status => commands::archive::status(&capture_root, stdout),
+            },
+            Some(unsupported) => Err(CliError::usage(format!(
+                "command {unsupported:?} does not support an explicit Workspace"
+            ))),
+        };
     }
 
     let project = services
@@ -490,6 +626,11 @@ fn run_inner(
         Some(Command::Rename { title }) => {
             commands::sessions::rename(services, work_dir, &title, stdout)
         }
+        Some(Command::Memo { .. })
+        | Some(Command::NoteAssociation { .. })
+        | Some(Command::ProcessingStatus { .. }) => Err(CliError::usage(
+            "memo, note-association, and processing-status require an explicit Workspace",
+        )),
         Some(Command::Recent { all }) => {
             if all {
                 let vaults = services.projects.list().map_err(CliError::from_anyhow)?;
@@ -586,7 +727,9 @@ fn run_inner(
         }
         Some(Command::Workspace { .. })
         | Some(Command::Source { .. })
-        | Some(Command::Retention { .. }) => {
+        | Some(Command::Retention { .. })
+        | Some(Command::Transfers { .. })
+        | Some(Command::Service { .. }) => {
             unreachable!("handled before project resolution")
         }
     }
@@ -612,6 +755,12 @@ fn workspace_project_adapter(
         root_dir: workspace.home_dir.clone(),
         work_dir: workspace.state_dir.clone(),
     }
+}
+
+fn workspace_capture_root(
+    workspace: &margins_workflows::workspace::ResolvedWorkspace,
+) -> Result<PathBuf, CliError> {
+    workspace.capture_store_dir().map_err(CliError::from_anyhow)
 }
 
 /// Resolve a concrete meeting id across registered vaults for read-only

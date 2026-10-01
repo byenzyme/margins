@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::note_artifacts::read_note_frontmatter;
-use margins_store::legacy as session;
+use margins_store::canonical as session;
 
 /// `(year, month, day, hour, minute, second)` — the second-precision key shared
 /// between a session's `start_time` and a note filename's leading timestamp.
@@ -147,8 +147,9 @@ pub fn list_sessions_with_notes(
                     if path_buf.is_file() {
                         Some(path.clone())
                     } else {
-                        let _ = session::clear_vault_note_path(&margins_dir, &s.name);
-                        let _ = session::remove_vault_note_by_path(&margins_dir, path);
+                        // Availability is derived from the filesystem. Keep the
+                        // durable association so a temporarily unavailable or
+                        // later-restored synced note retains its identity.
                         None
                     }
                 });
@@ -205,14 +206,28 @@ pub fn list_sessions_with_notes(
                     || (frontmatter.people_present && m.people != frontmatter.people)
             });
             if should_sync {
-                let _ = session::sync_session_note_metadata(
-                    &margins_dir,
-                    &s.name,
-                    path,
-                    frontmatter_title.as_deref(),
-                    &frontmatter.people,
-                    frontmatter.people_present,
-                );
+                if let Ok(relative) = Path::new(path).strip_prefix(work_dir) {
+                    if let Some(relative) = relative.to_str() {
+                        let expected = session::get_note_association(&margins_dir, &s.name)
+                            .ok()
+                            .flatten()
+                            .map_or(0, |association| association.revision);
+                        let _ = session::link_note(
+                            &margins_dir,
+                            &s.name,
+                            "workspace",
+                            relative,
+                            None,
+                            expected,
+                        );
+                    }
+                }
+                if let Some(title) = frontmatter_title.clone() {
+                    let _ = session::set_title(&margins_dir, &s.name, Some(title));
+                }
+                if frontmatter.people_present {
+                    let _ = session::set_people(&margins_dir, &s.name, frontmatter.people.clone());
+                }
             }
         }
         let display_status = if is_recording {
@@ -706,8 +721,6 @@ pub fn note_path_for_session_or_capture(
             if path_buf.is_file() {
                 return Ok(path_buf);
             }
-            let _ = session::clear_vault_note_path(margins_dir, name);
-            let _ = session::remove_vault_note_by_path(margins_dir, path);
         }
         if let Some(work_dir) = margins_dir.parent() {
             let index = build_recon_index(work_dir);
@@ -742,64 +755,6 @@ fn session_ts_collisions(margins_dir: &Path) -> HashMap<TsKey, u32> {
         }
     }
     out
-}
-
-/// Names of sessions whose stored vault note file was *genuinely* deleted — the
-/// link cannot be recovered by the durable `margins_session:` frontmatter
-/// backlink or a unique exact-timestamp filename match. These are the sessions
-/// the sidebar refresh should purge: the user removed the note, so the recording
-/// and its DB rows are cruft.
-///
-/// Excludes:
-/// - Sessions that never had a note (never distilled) — legit pending work.
-/// - Sessions whose note was merely renamed/moved — reconciliation recovers those.
-pub fn sessions_with_deleted_notes(work_dir: &std::path::Path) -> Vec<String> {
-    let margins_dir = work_dir.join(".margins");
-    if !margins_dir.exists() {
-        return Vec::new();
-    }
-    let sessions = match session::list_sessions(&margins_dir) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    // Per-second collision counts across all sessions (the timestamp-match guard),
-    // plus the candidates whose stored note path no longer points at a file.
-    let mut ts_collisions: HashMap<TsKey, u32> = HashMap::new();
-    let mut candidates: Vec<(String, String)> = Vec::new();
-    for s in &sessions {
-        if let Some(key) = session_ts_key(&s.start_time) {
-            *ts_collisions.entry(key).or_insert(0) += 1;
-        }
-        if let Ok(meta) = session::get_session_meta(&margins_dir, &s.name) {
-            let missing_linked_note = meta
-                .vault_note_path
-                .as_ref()
-                .is_some_and(|path| !PathBuf::from(path).is_file());
-            // Ordinary session listing clears stale note paths. Preserve the
-            // ability to prune afterward by treating a completed session with
-            // no remaining link as a deletion candidate. Never-distilled
-            // sessions remain in processing_state `none` and are kept.
-            let completed_without_note =
-                meta.vault_note_path.is_none() && meta.processing_state.as_deref() == Some("done");
-            if missing_linked_note || completed_without_note {
-                candidates.push((s.name.clone(), s.start_time.clone()));
-            }
-        }
-    }
-    if candidates.is_empty() {
-        return Vec::new();
-    }
-    // A candidate is only a genuine deletion when read-time reconciliation fails
-    // to find a replacement note anywhere in the vault.
-    let index = build_recon_index(work_dir);
-    let claimed = claimed_note_paths(&margins_dir);
-    candidates
-        .into_iter()
-        .filter(|(name, start_time)| {
-            reconcile_unprocessed_note(name, start_time, &index, &ts_collisions, &claimed).is_none()
-        })
-        .map(|(name, _)| name)
-        .collect()
 }
 
 fn claimed_note_paths(margins_dir: &Path) -> BTreeSet<String> {
@@ -857,6 +812,41 @@ mod tests {
         path
     }
 
+    fn link_test_note(work_dir: &Path, margins_dir: &Path, name: &str, path: &Path) {
+        if session::get_session_meta(margins_dir, name).is_ok() {
+            let relative = path.strip_prefix(work_dir).unwrap().to_str().unwrap();
+            let expected = session::get_note_association(margins_dir, name)
+                .unwrap()
+                .map_or(0, |association| association.revision);
+            session::link_note(margins_dir, name, "workspace", relative, None, expected).unwrap();
+        } else {
+            session::register_capture_note(margins_dir, path.to_str().unwrap(), Some(name))
+                .unwrap();
+        }
+    }
+
+    fn fail_test_job(margins_dir: &Path, name: &str, message: &str) {
+        let job = session::begin_processing_job(
+            margins_dir,
+            name,
+            &format!("note:{name}"),
+            "distill_note",
+            "test-input",
+        )
+        .unwrap();
+        session::update_processing_job(
+            margins_dir,
+            &job.job_id,
+            job.attempt,
+            "failed",
+            None,
+            None,
+            Some(message),
+            Some("distill"),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn empty_work_dir_lists_no_sessions_or_placeholder_notes() {
         let work_dir = temp_work_dir("empty");
@@ -868,13 +858,12 @@ mod tests {
     }
 
     #[test]
-    fn stale_session_vault_note_is_cleared_and_listed_as_unprocessed() {
+    fn unavailable_session_note_is_preserved_and_listed_as_unprocessed() {
         let work_dir = temp_work_dir("stale-session-note");
         let margins_dir = work_dir.join(".margins");
         session::create_session(&margins_dir, "meet", &Local::now(), "meet.md").unwrap();
         let missing_note = work_dir.join("vault").join("missing.md");
-        session::set_vault_note_path(&margins_dir, "meet", &missing_note.to_string_lossy())
-            .unwrap();
+        link_test_note(&work_dir, &margins_dir, "meet", &missing_note);
 
         let sessions = list_sessions_with_notes(&work_dir, None, None).unwrap();
 
@@ -883,7 +872,7 @@ mod tests {
         assert_eq!(sessions[0].status, "unprocessed");
         assert_eq!(sessions[0].vault_note_path, None);
         let meta = session::get_session_meta(&margins_dir, "meet").unwrap();
-        assert_eq!(meta.vault_note_path, None);
+        assert_eq!(meta.vault_note_path.as_deref(), missing_note.to_str());
         let _ = std::fs::remove_dir_all(work_dir);
     }
 
@@ -892,8 +881,7 @@ mod tests {
         let work_dir = temp_work_dir("missing-capture-note");
         let margins_dir = work_dir.join(".margins");
         let missing_note = work_dir.join("vault").join("missing.md");
-        session::set_vault_note_path(&margins_dir, "ghost", &missing_note.to_string_lossy())
-            .unwrap();
+        link_test_note(&work_dir, &margins_dir, "ghost", &missing_note);
 
         let sessions = list_sessions_with_notes(&work_dir, None, None).unwrap();
 
@@ -907,7 +895,7 @@ mod tests {
         let work_dir = temp_work_dir("failed-session");
         let margins_dir = work_dir.join(".margins");
         session::create_session(&margins_dir, "meet", &Local::now(), "meet.md").unwrap();
-        session::set_note_error(&margins_dir, "meet", "AI note distillation failed").unwrap();
+        fail_test_job(&margins_dir, "meet", "AI note distillation failed");
 
         let sessions = list_sessions_with_notes(&work_dir, None, None).unwrap();
 
@@ -930,7 +918,7 @@ mod tests {
         std::fs::create_dir_all(&vault).unwrap();
         let note_path = vault.join("daily.md");
         std::fs::write(&note_path, "# Daily\n\nBody").unwrap();
-        session::set_vault_note_path(&margins_dir, "ghost", &note_path.to_string_lossy()).unwrap();
+        link_test_note(&work_dir, &margins_dir, "ghost", &note_path);
 
         let sessions = list_sessions_with_notes(&work_dir, None, None).unwrap();
 
@@ -950,7 +938,7 @@ mod tests {
         std::fs::create_dir_all(&vault).unwrap();
         let note_path = vault.join("deleted.md");
         std::fs::write(&note_path, "# Deleted\n\nBody").unwrap();
-        session::set_vault_note_path(&margins_dir, "ghost", &note_path.to_string_lossy()).unwrap();
+        link_test_note(&work_dir, &margins_dir, "ghost", &note_path);
         session::begin_delete_session(&margins_dir, "ghost").unwrap();
         session::finalize_delete_session(&margins_dir, "ghost").unwrap();
 
@@ -968,7 +956,7 @@ mod tests {
         std::fs::create_dir_all(&vault).unwrap();
         let note_path = vault.join("deleted-by-id.md");
         std::fs::write(&note_path, "# Deleted by id\n\nBody").unwrap();
-        session::set_vault_note_path(&margins_dir, "ghost", &note_path.to_string_lossy()).unwrap();
+        link_test_note(&work_dir, &margins_dir, "ghost", &note_path);
         let note_id = session::list_vault_notes(&margins_dir).unwrap()[0]
             .id
             .clone();
@@ -989,7 +977,7 @@ mod tests {
         std::fs::create_dir_all(&vault).unwrap();
         let note_path = vault.join("2026-05-18-13-31-09 wedge before memory.md");
         std::fs::write(&note_path, "Body without title metadata").unwrap();
-        session::set_vault_note_path(&margins_dir, "ghost", &note_path.to_string_lossy()).unwrap();
+        link_test_note(&work_dir, &margins_dir, "ghost", &note_path);
 
         let sessions = list_sessions_with_notes(&work_dir, None, None).unwrap();
 
@@ -1031,8 +1019,7 @@ mod tests {
         // Register a vault note for this session (simulating process_session's distillation).
         let note_path = vault.join("imported_2024.md");
         std::fs::write(&note_path, "# Imported Audio\n\nDistilled notes").unwrap();
-        session::set_vault_note_path(&margins_dir, "imported_audio", &note_path.to_string_lossy())
-            .unwrap();
+        link_test_note(&work_dir, &margins_dir, "imported_audio", &note_path);
 
         // List sessions: the imported session should appear exactly once with source=="session".
         let sessions = list_sessions_with_notes(&work_dir, None, None).unwrap();
@@ -1131,7 +1118,7 @@ mod tests {
         std::fs::write(&note, "# Standup\n\nBody").unwrap();
 
         session::create_session(&margins_dir, "owner", &fixed_dt(7, 0, 0), "owner.md").unwrap();
-        session::set_vault_note_path(&margins_dir, "owner", &note.to_string_lossy()).unwrap();
+        link_test_note(&work_dir, &margins_dir, "owner", &note);
         session::create_session(&margins_dir, "other", &dt, "other.md").unwrap();
 
         let sessions = list_sessions_with_notes(&work_dir, None, None).unwrap();
@@ -1255,8 +1242,7 @@ mod tests {
         )
         .unwrap();
         let note = inbox.join("call.md");
-        session::set_vault_note_path(&margins_dir, "empty-people", &note.to_string_lossy())
-            .unwrap();
+        link_test_note(&work_dir, &margins_dir, "empty-people", &note);
         std::fs::write(&note, "---\ntitle: 'Call'\npeople:\n---\n# Call\n").unwrap();
 
         let sessions = list_sessions_with_notes(&work_dir, None, None).unwrap();
@@ -1279,7 +1265,7 @@ mod tests {
         session::create_session(&margins_dir, "willie", &fixed_dt(12, 5, 38), "willie.md").unwrap();
         let old_note = vault.join("untitled.md");
         let renamed_note = vault.join("wedge before memory.md");
-        session::set_vault_note_path(&margins_dir, "willie", &old_note.to_string_lossy()).unwrap();
+        link_test_note(&work_dir, &margins_dir, "willie", &old_note);
         std::fs::write(
             &renamed_note,
             "---\nmargins_session: 'willie'\ncreated: '[[2026-05-29]]'\n---\nBody\n",
@@ -1298,77 +1284,6 @@ mod tests {
         let meta = session::get_session_meta(&margins_dir, "willie").unwrap();
         assert_eq!(meta.vault_note_path.as_deref(), renamed_note.to_str());
         assert!(sessions.iter().all(|s| s.source != "capture_note"));
-        let _ = std::fs::remove_dir_all(work_dir);
-    }
-
-    // --- Deleted-note detection (sidebar refresh prune) -------------------
-
-    #[test]
-    fn deleted_note_flags_session_for_prune() {
-        let work_dir = temp_work_dir("prune-deleted-note");
-        let margins_dir = work_dir.join(".margins");
-        session::create_session(&margins_dir, "gone", &fixed_dt(9, 0, 0), "gone.md").unwrap();
-        // Stored link points at a note that no longer exists on disk.
-        let missing = work_dir.join("inbox").join("gone.md");
-        session::set_vault_note_path(&margins_dir, "gone", &missing.to_string_lossy()).unwrap();
-
-        let deleted = sessions_with_deleted_notes(&work_dir);
-
-        assert_eq!(deleted, vec!["gone".to_string()]);
-        let _ = std::fs::remove_dir_all(work_dir);
-    }
-
-    #[test]
-    fn never_distilled_session_is_not_flagged_for_prune() {
-        let work_dir = temp_work_dir("prune-never-distilled");
-        let margins_dir = work_dir.join(".margins");
-        // No vault_note_path ever set — legit pending work, must be kept.
-        session::create_session(&margins_dir, "pending", &fixed_dt(9, 0, 0), "pending.md").unwrap();
-
-        let deleted = sessions_with_deleted_notes(&work_dir);
-
-        assert!(deleted.is_empty());
-        let _ = std::fs::remove_dir_all(work_dir);
-    }
-
-    #[test]
-    fn completed_session_is_flagged_after_listing_clears_deleted_note_path() {
-        let work_dir = temp_work_dir("prune-after-list");
-        let margins_dir = work_dir.join(".margins");
-        session::create_session(&margins_dir, "gone", &fixed_dt(9, 0, 0), "gone.md").unwrap();
-        let missing = work_dir.join("inbox").join("gone.md");
-        session::set_vault_note_path(&margins_dir, "gone", &missing.to_string_lossy()).unwrap();
-        session::set_processing_state(&margins_dir, "gone", "done", None).unwrap();
-
-        // Rendering the sidebar first clears the stale vault_note_path.
-        let _ = list_sessions_with_notes(&work_dir, None, None).unwrap();
-        assert_eq!(
-            session::get_session_meta(&margins_dir, "gone")
-                .unwrap()
-                .vault_note_path,
-            None
-        );
-
-        let deleted = sessions_with_deleted_notes(&work_dir);
-
-        assert_eq!(deleted, vec!["gone".to_string()]);
-        let _ = std::fs::remove_dir_all(work_dir);
-    }
-
-    #[test]
-    fn renamed_note_is_not_flagged_for_prune() {
-        let work_dir = temp_work_dir("prune-renamed-note");
-        let margins_dir = work_dir.join(".margins");
-        session::create_session(&margins_dir, "willie", &fixed_dt(12, 5, 38), "willie.md").unwrap();
-        // Stored path is stale, but a note with the durable backlink still exists.
-        let stale = work_dir.join("inbox").join("untitled.md");
-        session::set_vault_note_path(&margins_dir, "willie", &stale.to_string_lossy()).unwrap();
-        let renamed = work_dir.join("renamed-note.md");
-        std::fs::write(&renamed, "---\nmargins_session: 'willie'\n---\n# Willie\n").unwrap();
-
-        let deleted = sessions_with_deleted_notes(&work_dir);
-
-        assert!(deleted.is_empty());
         let _ = std::fs::remove_dir_all(work_dir);
     }
 }

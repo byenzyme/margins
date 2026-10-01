@@ -1,6 +1,6 @@
 [package]
 name = "margins-cli"
-version = "0.4.9"
+version = "0.4.10"
 edition = "2021"
 license = "Apache-2.0"
 description = "Standalone public command-line interface for Margins"
@@ -26,11 +26,13 @@ anyhow = "1"
 argon2 = "0.5"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
 chacha20poly1305 = "0.10"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
 margins-core = { version = "0.1.0", path = "../margins-core" }
 margins-media = { version = "0.1.0", path = "../margins-media" }
+margins-meeting-protocol = { version = "0.1.0", path = "../margins-meeting-protocol" }
 margins-store = { version = "0.1.0", path = "../margins-store" }
 margins-workflows = { version = "0.1.0", path = "../margins-workflows" }
 ratatui = "0.30"
@@ -44,6 +46,7 @@ zeroize = { version = "1", features = ["derive"] }
 rusqlite = { package = "libsql-rusqlite", version = "=0.9.30" }
 
 [dev-dependencies]
+margins-meeting-protocol = { version = "0.1.0", path = "../margins-meeting-protocol" }
 tempfile = "3"
 
 [build-dependencies]

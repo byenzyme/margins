@@ -1,6 +1,6 @@
 [package]
 name = "margins"
-version = "0.4.9"
+version = "0.4.10"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -69,6 +69,7 @@ margins-media = { path = "crates/public/margins-media" }
 margins-cli = { path = "crates/public/margins-cli" }
 margins-store = { path = "crates/public/margins-store" }
 margins-workflows = { path = "crates/public/margins-workflows" }
+margins-meeting-protocol = { path = "crates/public/margins-meeting-protocol" }
 rusqlite.workspace = true
 recall-engine = { path = "crates/private/recall-engine", package = "enzyme-core", features = ["embedder-compat"], optional = true }
 tokio = { version = "1", features = ["rt-multi-thread"], optional = true }

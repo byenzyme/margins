@@ -47,7 +47,9 @@ Before drafting, audit people and speakers:
 - Merge transcript-evidenced people only when useful; never drop supplied names.
 - Mark uncertainty instead of guessing.
 
-People-page enrichment is state-dependent. Never create a `people/` folder or any configured people folder. If the folder already exists, maintain missing person pages there using the configured person-note template. If the folder is absent, do nothing.
+Discover participants from configured attendees, the memo, and clear transcript evidence such as a self-introduction or an unambiguous addressed name. A diarization label or a name merely mentioned in conversation does not identify a participant. Carry confirmed participants into the meeting note's `people` frontmatter; leave uncertain identities as plain text in the body when relevant.
+
+After the meeting note is approved and saved, reuse an existing People folder and person note when one exists. If no People folder exists but at least one participant is confirmed, create `people/` under the Workspace Home and a minimal note for each missing participant. Each person note needs only the person's name and a link to the meeting note; do not invent a biography or merge people who share a name. If a configured person-note template exists, use it. Do not create a People folder during Workspace setup or for an unnamed speaker.
 
 ## Vault Evidence
 

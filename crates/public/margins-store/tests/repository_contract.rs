@@ -4,7 +4,7 @@ use margins_core::{
     SampleFormat, SegmentId, SessionArtifact, SessionErrorCode, SessionId, SessionLifecycle,
     SessionQuery, SessionRepository, UnixMillis,
 };
-use margins_store::{legacy, SqliteSessionRepository};
+use margins_store::{canonical, SqliteSessionRepository};
 use rusqlite::{params, Connection};
 use std::sync::{Arc, Barrier};
 use tempfile::tempdir;
@@ -69,7 +69,7 @@ fn revisions_are_durable_cas_and_legacy_rows_remain_readable() {
         .unwrap_err();
     assert_eq!(stale.code, SessionErrorCode::Conflict);
     assert_eq!(
-        legacy::get_session_meta(&margins_dir, "session-a")
+        canonical::get_session_meta(&margins_dir, "session-a")
             .unwrap()
             .segments
             .len(),
@@ -130,7 +130,7 @@ fn revisions_are_durable_cas_and_legacy_rows_remain_readable() {
         .unwrap_err();
     assert_eq!(stale_artifact.code, SessionErrorCode::Conflict);
     assert_eq!(
-        legacy::list_session_artifacts(&margins_dir, "session-a")
+        canonical::list_session_artifacts(&margins_dir, "session-a")
             .unwrap()
             .len(),
         1
@@ -150,8 +150,8 @@ fn revisions_are_durable_cas_and_legacy_rows_remain_readable() {
     let tombstoned = reopened.get(&created.id).unwrap().unwrap();
     assert_eq!(tombstoned.revision, 4);
     assert_eq!(tombstoned.lifecycle, SessionLifecycle::Tombstoned);
-    assert!(legacy::list_sessions(&margins_dir).unwrap().is_empty());
-    assert!(legacy::is_session_tombstoned(&margins_dir, "session-a").unwrap());
+    assert!(canonical::list_sessions(&margins_dir).unwrap().is_empty());
+    assert!(canonical::is_session_tombstoned(&margins_dir, "session-a").unwrap());
     assert!(reopened.create(new_session("session-a")).is_err());
 }
 
@@ -185,19 +185,19 @@ fn legacy_segments_remain_indexable_but_are_not_fabricated_as_core_contracts() {
     let temporary = tempdir().unwrap();
     let margins_dir = temporary.path().join(".margins");
     let started = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
-    legacy::create_session(&margins_dir, "legacy", &started.into(), "legacy.md").unwrap();
-    legacy::add_segment(&margins_dir, "legacy", 0, "legacy.wav", 0, Some(1.0)).unwrap();
+    canonical::create_session(&margins_dir, "canonical", &started.into(), "canonical.md").unwrap();
+    canonical::add_segment(&margins_dir, "canonical", 0, "canonical.wav", 0, Some(1.0)).unwrap();
 
     let repository = SqliteSessionRepository::open(&margins_dir).unwrap();
     let summaries = repository.list(SessionQuery::default()).unwrap();
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries[0].segment_count, 1);
     let error = repository
-        .get(&SessionId::from("legacy"))
+        .get(&SessionId::from("canonical"))
         .expect_err("missing rich segment facts must not be invented");
     assert_eq!(error.code, SessionErrorCode::CorruptData);
     assert_eq!(
-        legacy::get_session_meta(&margins_dir, "legacy")
+        canonical::get_session_meta(&margins_dir, "canonical")
             .unwrap()
             .segments
             .len(),
@@ -232,7 +232,7 @@ fn tombstones_reject_artifact_writes_and_path_like_session_ids() {
         .unwrap_err();
     assert_eq!(error.code, SessionErrorCode::InvalidTransition);
     assert!(
-        legacy::list_session_artifacts(temporary.path(), "tombstoned")
+        canonical::list_session_artifacts(temporary.path(), "tombstoned")
             .unwrap()
             .is_empty()
     );
@@ -247,7 +247,7 @@ fn sidecar_divergence_is_reported_as_corrupt_data() {
         .append_segment(&created.id, 0, new_segment("segment", 0, 0))
         .unwrap();
 
-    let connection = Connection::open(legacy::database_path(temporary.path())).unwrap();
+    let connection = Connection::open(canonical::database_path(temporary.path())).unwrap();
     connection
         .execute(
             "UPDATE session_segment_contracts SET segment_id = 'wrong' WHERE session_name = ?1",

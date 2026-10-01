@@ -6,5 +6,8 @@
 // ---------------------------------------------------------------------------
 
 fn main() -> anyhow::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--prepare-asr") {
+        return margins_desktop::server::prepare_asr();
+    }
     margins_desktop::server::run()
 }

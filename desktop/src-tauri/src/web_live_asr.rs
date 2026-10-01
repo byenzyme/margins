@@ -7,9 +7,7 @@
 //! chunk increments that channel's drop counter and disqualifies reuse.
 
 #[cfg(any(feature = "parakeet-asr", test))]
-use crate::live_asr_worker::{
-    LiveAsrTrace, STARTUP_TIMEOUT, WORKER_LOOP_POLL,
-};
+use crate::live_asr_worker::{LiveAsrTrace, STARTUP_TIMEOUT, WORKER_LOOP_POLL};
 use crate::live_asr_worker::{WorkerHealth, REQUEST_TIMEOUT, WORKER_STOPPED, WORKER_WARMING};
 use crate::live_backchannel::{LiveTranscriptContext, LiveTranscriptTiming};
 use margins::asr::{AsrBackend, WordTiming};
@@ -628,6 +626,35 @@ where
         thread: Some(thread),
         reaper_tx,
     })
+}
+
+#[cfg(test)]
+pub(crate) fn start_stalled_test_worker(
+    margins_dir: PathBuf,
+    session_name: String,
+    loader_entered: mpsc::Sender<()>,
+    loader_release: mpsc::Receiver<()>,
+) -> Result<WebLiveAsrHandle, String> {
+    struct EmptyDecoder;
+    impl WordDecoder for EmptyDecoder {
+        fn transcribe_words(&mut self, _samples: &[f32]) -> anyhow::Result<Vec<WordTiming>> {
+            Ok(Vec::new())
+        }
+    }
+    start_worker(
+        session_name.clone(),
+        LiveAsrTrace::new(margins_dir, session_name, "stalled_test"),
+        None,
+        Duration::from_millis(10),
+        Duration::from_millis(50),
+        worker_reaper()?.clone(),
+        None,
+        move || {
+            let _ = loader_entered.send(());
+            let _ = loader_release.recv();
+            Ok(EmptyDecoder)
+        },
+    )
 }
 
 #[cfg(not(feature = "parakeet-asr"))]
@@ -1788,11 +1815,17 @@ mod tests {
         let queued = Arc::new(AtomicU64::new(0));
         // Pre-fill exactly to budget using direct channel sends (no gate needed).
         audio_tx
-            .send(injected(LiveAudioChannel::System, ms_to_samples_floor(5_000)))
+            .send(injected(
+                LiveAudioChannel::System,
+                ms_to_samples_floor(5_000),
+            ))
             .unwrap();
         queued.fetch_add(ms_to_samples_floor(5_000) as u64, Ordering::Relaxed);
         audio_tx
-            .send(injected(LiveAudioChannel::System, ms_to_samples_floor(5_000)))
+            .send(injected(
+                LiveAudioChannel::System,
+                ms_to_samples_floor(5_000),
+            ))
             .unwrap();
         queued.fetch_add(ms_to_samples_floor(5_000) as u64, Ordering::Relaxed);
         // At the hosted ceiling, the next chunk is rejected and accounted for.
@@ -2014,13 +2047,18 @@ mod tests {
         )
         .expect("start_worker must succeed immediately (non-blocking)");
         // Verify loader is running but handle is already available.
-        loader_entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        loader_entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
         // Worker is not ready yet.
         let client = handle.client();
         assert!(!client.is_ready());
         // snapshot fast-returns WORKER_WARMING.
         let snap_err = client.snapshot(0, false).unwrap_err();
-        assert!(snap_err.contains("warming"), "expected warming, got: {snap_err}");
+        assert!(
+            snap_err.contains("warming"),
+            "expected warming, got: {snap_err}"
+        );
         // Release the loader and wait for worker to become ready.
         loader_release_tx.send(()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -2054,7 +2092,9 @@ mod tests {
             },
         )
         .unwrap();
-        loader_entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        loader_entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
         let client = handle.client();
         // Inject 5 s of audio while the worker is still loading — must not drop.
         client

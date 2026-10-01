@@ -7,6 +7,13 @@
 /homebrew-aside/
 CLAUDE.md
 docs/
+!/docs/
+/docs/*
+!/docs/remote-workspace-implementation.md
+!/docs/capture-refactor-and-testing.md
+!/docs/ssh-remote-onboarding.md
+!/docs/mac-audio-transport-verification.md
+!/docs/remote-integration-status.md
 .enzyme/
 .enzyme-embeddings/
 node_modules/
@@ -33,5 +40,6 @@ __pycache__/
 /desktop/src-tauri/binaries/
 /target-linux-server/
 /desktop/ux-shots-real/
+/integrations/bb-plugin-margins/e2e-artifacts/
 /.worktrees/
 !public-repository/docs/

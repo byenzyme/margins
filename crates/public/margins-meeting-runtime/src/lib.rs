@@ -6,13 +6,15 @@
 #![forbid(unsafe_code)]
 
 use margins_meeting_protocol::{
-    AppendProvenanceHopV1, AudioAcknowledgementV1, AudioChunkV1, CaptureDiscontinuityV1,
-    CaptureHealthV1, CaptureProvenanceHopV1, ClientMessageBodyV1, ClientMessageV1, CloseSegmentV1,
-    CommandRejectedV1, CreateSessionV1, DigestAlgorithmV1, DurationMillis, FinalizeSessionV1,
-    LaneId, MessageId, ProtocolVersionV1, ProvenanceHopRecordedV1, ReplayCompletedV1,
-    SegmentFinalizedV1, SequenceRangeV1, ServerMessageBodyV1, ServerMessageV1, SessionCreatedV1,
-    SessionFinalizedV1, SessionId, SessionMillis, UnixMillis, ValidationErrorV1,
-    MAX_SAFE_JSON_INTEGER,
+    AppendProvenanceHopV1, AudioAcknowledgementV1, AudioChunkV1, BeginCaptureGenerationV1,
+    CaptureDiscontinuityV1, CaptureGenerationStartedV1, CaptureHealthV1, CaptureProvenanceHopV1,
+    ClientMessageBodyV1, ClientMessageV1, CloseSegmentV1, CommandRejectedV1, CreateSessionV1,
+    DigestAlgorithmV1, DurationMillis, FinalizeSessionV1, LaneId, LiveErrorV1,
+    LiveMutationResponseV1, LiveOperationId, LiveSessionRequestV1, LiveSnapshotV1,
+    LiveStartRequestV1, LiveUpdateNotepadRequestV1, MessageId, ProtocolVersionV1,
+    ProvenanceHopRecordedV1, ReplayCompletedV1, SegmentFinalizedV1, SequenceRangeV1,
+    ServerMessageBodyV1, ServerMessageV1, SessionCreatedV1, SessionFinalizedV1, SessionId,
+    SessionMillis, UnixMillis, ValidationErrorV1, MAX_SAFE_JSON_INTEGER,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -20,10 +22,55 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
+    future::Future,
+    pin::Pin,
     sync::Mutex,
 };
 
+/// One typed mutation for the process that owns the active local session.
+/// Binary ingress deliberately remains on the streaming storage path below.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveRuntimeCommandV1 {
+    Start(LiveStartRequestV1),
+    Pause(LiveSessionRequestV1),
+    Resume(LiveSessionRequestV1),
+    Stop(LiveSessionRequestV1),
+    UpdateNotepad(LiveUpdateNotepadRequestV1),
+}
+
+impl LiveRuntimeCommandV1 {
+    pub fn operation_id(&self) -> &LiveOperationId {
+        match self {
+            Self::Start(request) => &request.operation_id,
+            Self::Pause(request) | Self::Resume(request) | Self::Stop(request) => {
+                &request.operation_id
+            }
+            Self::UpdateNotepad(request) => &request.operation_id,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ValidationErrorV1> {
+        match self {
+            Self::Start(request) => request.validate(),
+            Self::Pause(request) | Self::Resume(request) | Self::Stop(request) => {
+                request.validate()
+            }
+            Self::UpdateNotepad(request) => request.validate(),
+        }
+    }
+}
+
+pub type LiveRuntimeFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<LiveMutationResponseV1, LiveErrorV1>> + Send + 'a>>;
+
+/// The single command/snapshot control port for the process owning capture.
+pub trait LiveRuntime: Send + Sync {
+    fn snapshot(&self, session_id: Option<&str>) -> Result<LiveSnapshotV1, LiveErrorV1>;
+    fn execute(&self, command: LiveRuntimeCommandV1) -> LiveRuntimeFuture<'_>;
+}
+
 const MAX_COMMIT_ATTEMPTS: usize = 64;
+const MAX_REPLAY_EVENTS: usize = 512;
 
 /// Result of an atomic storage write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,13 +79,25 @@ pub enum StorageCommit {
     Conflict,
 }
 
-/// Persistence seam used by [`MeetingRuntime`].
-///
-/// Implementations must make `create_session` and `replace_session` atomic.
-/// A create must enforce uniqueness of both session ID and create idempotency
-/// key. A replace commits only when the stored revision equals
-/// `expected_revision`. Returning `Conflict` asks the runtime to reload and
-/// deterministically retry the transition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredCommandReceiptV1 {
+    pub message_id: MessageId,
+    pub fingerprint: String,
+    pub response_range: SequenceRangeV1,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionDeltaV1 {
+    pub expected_revision: u64,
+    pub session: StoredSessionV1,
+    pub receipt: StoredCommandReceiptV1,
+    pub events: Vec<ServerMessageV1>,
+    pub audio_chunk: Option<AudioChunkV1>,
+}
+
+/// Bounded persistence seam used by [`MeetingRuntime`]. Payloads, receipts,
+/// and event pages are separate rows. Session loads therefore never clone
+/// accumulated audio or command/event history.
 pub trait MeetingRuntimeStorage: Send + Sync {
     type Error;
 
@@ -49,13 +108,26 @@ pub trait MeetingRuntimeStorage: Send + Sync {
         idempotency_key: &str,
     ) -> Result<Option<StoredSessionV1>, Self::Error>;
 
-    fn create_session(&self, session: StoredSessionV1) -> Result<StorageCommit, Self::Error>;
-
-    fn replace_session(
+    fn load_command_receipts(
         &self,
-        expected_revision: u64,
-        session: StoredSessionV1,
-    ) -> Result<StorageCommit, Self::Error>;
+        session_id: &SessionId,
+        message_id: &MessageId,
+    ) -> Result<Vec<StoredCommandReceiptV1>, Self::Error>;
+    fn load_events(
+        &self,
+        session_id: &SessionId,
+        range: SequenceRangeV1,
+        limit: usize,
+    ) -> Result<Vec<ServerMessageV1>, Self::Error>;
+    fn load_audio_chunk(
+        &self,
+        session_id: &SessionId,
+        segment_id: &str,
+        lane_id: &LaneId,
+        sequence: u64,
+    ) -> Result<Option<AudioChunkV1>, Self::Error>;
+    fn create_session(&self, delta: SessionDeltaV1) -> Result<StorageCommit, Self::Error>;
+    fn apply_delta(&self, delta: SessionDeltaV1) -> Result<StorageCommit, Self::Error>;
 }
 
 /// Error from the in-memory storage implementation.
@@ -74,6 +146,9 @@ impl Error for InMemoryStorageError {}
 struct InMemoryState {
     sessions: BTreeMap<SessionId, StoredSessionV1>,
     create_keys: BTreeMap<String, SessionId>,
+    receipts: BTreeMap<(SessionId, MessageId), Vec<StoredCommandReceiptV1>>,
+    events: BTreeMap<SessionId, Vec<ServerMessageV1>>,
+    chunks: BTreeMap<(SessionId, String, LaneId, u64), AudioChunkV1>,
 }
 
 /// Thread-safe, optimistic-concurrency in-memory persistence for tests and
@@ -88,12 +163,42 @@ impl InMemoryMeetingRuntimeStorage {
         Self::default()
     }
 
-    /// Returns a durable snapshot without exposing the storage lock.
     pub fn snapshot(
         &self,
         session_id: &SessionId,
-    ) -> Result<Option<StoredSessionV1>, InMemoryStorageError> {
-        self.load_session(session_id)
+    ) -> Result<Option<InMemoryRuntimeSnapshot>, InMemoryStorageError> {
+        let state = self.inner.lock().map_err(|_| InMemoryStorageError)?;
+        let Some(session) = state.sessions.get(session_id).cloned() else {
+            return Ok(None);
+        };
+        Ok(Some(InMemoryRuntimeSnapshot {
+            session,
+            events: state.events.get(session_id).cloned().unwrap_or_default(),
+            audio_chunk_count: state
+                .chunks
+                .keys()
+                .filter(|(id, _, _, _)| id == session_id)
+                .count(),
+        }))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct InMemoryRuntimeSnapshot {
+    session: StoredSessionV1,
+    events: Vec<ServerMessageV1>,
+    audio_chunk_count: usize,
+}
+
+impl InMemoryRuntimeSnapshot {
+    pub fn session(&self) -> &StoredSessionV1 {
+        &self.session
+    }
+    pub fn events(&self) -> &[ServerMessageV1] {
+        &self.events
+    }
+    pub fn audio_chunk_count(&self) -> usize {
+        self.audio_chunk_count
     }
 }
 
@@ -117,8 +222,68 @@ impl MeetingRuntimeStorage for InMemoryMeetingRuntimeStorage {
             .cloned())
     }
 
-    fn create_session(&self, session: StoredSessionV1) -> Result<StorageCommit, Self::Error> {
+    fn load_command_receipts(
+        &self,
+        session_id: &SessionId,
+        message_id: &MessageId,
+    ) -> Result<Vec<StoredCommandReceiptV1>, Self::Error> {
+        let state = self.inner.lock().map_err(|_| InMemoryStorageError)?;
+        Ok(state
+            .receipts
+            .get(&(session_id.clone(), message_id.clone()))
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    fn load_events(
+        &self,
+        session_id: &SessionId,
+        range: SequenceRangeV1,
+        limit: usize,
+    ) -> Result<Vec<ServerMessageV1>, Self::Error> {
+        let state = self.inner.lock().map_err(|_| InMemoryStorageError)?;
+        let events = state
+            .events
+            .get(session_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let start = usize::try_from(range.start)
+            .unwrap_or(usize::MAX)
+            .min(events.len());
+        let end = usize::try_from(range.end_exclusive)
+            .unwrap_or(usize::MAX)
+            .min(events.len())
+            .min(start.saturating_add(limit));
+        Ok(events[start..end].to_vec())
+    }
+
+    fn load_audio_chunk(
+        &self,
+        session_id: &SessionId,
+        segment_id: &str,
+        lane_id: &LaneId,
+        sequence: u64,
+    ) -> Result<Option<AudioChunkV1>, Self::Error> {
+        let state = self.inner.lock().map_err(|_| InMemoryStorageError)?;
+        Ok(state
+            .chunks
+            .get(&(
+                session_id.clone(),
+                segment_id.to_string(),
+                lane_id.clone(),
+                sequence,
+            ))
+            .cloned())
+    }
+
+    fn create_session(&self, delta: SessionDeltaV1) -> Result<StorageCommit, Self::Error> {
         let mut state = self.inner.lock().map_err(|_| InMemoryStorageError)?;
+        let SessionDeltaV1 {
+            session,
+            receipt,
+            events,
+            ..
+        } = delta;
         if state.sessions.contains_key(&session.session_id)
             || state
                 .create_keys
@@ -130,24 +295,50 @@ impl MeetingRuntimeStorage for InMemoryMeetingRuntimeStorage {
             session.create.idempotency_key.clone(),
             session.session_id.clone(),
         );
-        state.sessions.insert(session.session_id.clone(), session);
+        let session_id = session.session_id.clone();
+        state.sessions.insert(session_id.clone(), session);
+        state
+            .receipts
+            .entry((session_id.clone(), receipt.message_id.clone()))
+            .or_default()
+            .push(receipt);
+        state.events.insert(session_id, events);
         Ok(StorageCommit::Committed)
     }
 
-    fn replace_session(
-        &self,
-        expected_revision: u64,
-        session: StoredSessionV1,
-    ) -> Result<StorageCommit, Self::Error> {
+    fn apply_delta(&self, delta: SessionDeltaV1) -> Result<StorageCommit, Self::Error> {
         let mut state = self.inner.lock().map_err(|_| InMemoryStorageError)?;
+        let session = delta.session;
         let Some(current) = state.sessions.get(&session.session_id) else {
             return Ok(StorageCommit::Conflict);
         };
-        if current.revision != expected_revision
+        if current.revision != delta.expected_revision
             || current.create.idempotency_key != session.create.idempotency_key
         {
             return Ok(StorageCommit::Conflict);
         }
+        let session_id = session.session_id.clone();
+        if let Some(chunk) = delta.audio_chunk {
+            state.chunks.insert(
+                (
+                    session_id.clone(),
+                    chunk.segment_id.as_ref().to_string(),
+                    chunk.lane_id.clone(),
+                    chunk.sequence,
+                ),
+                chunk,
+            );
+        }
+        state
+            .receipts
+            .entry((session_id.clone(), delta.receipt.message_id.clone()))
+            .or_default()
+            .push(delta.receipt);
+        state
+            .events
+            .entry(session_id.clone())
+            .or_default()
+            .extend(delta.events);
         state.sessions.insert(session.session_id.clone(), session);
         Ok(StorageCommit::Committed)
     }
@@ -191,7 +382,7 @@ impl<E: fmt::Display> fmt::Display for RuntimeError<E> {
 impl<E: Error + 'static> Error for RuntimeError<E> {}
 
 /// Output for one accepted command.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeResponseV1 {
     /// Original envelopes to deliver. Exact command retries return the same
     /// envelopes with the same message IDs, sequences, and timestamps.
@@ -212,14 +403,12 @@ pub struct StoredSessionV1 {
     create_message: ClientMessageV1,
     create: CreateSessionV1,
     provenance: Vec<CaptureProvenanceHopV1>,
-    commands: BTreeMap<MessageId, CommandRecord>,
-    conflicting_commands: Vec<CommandRecord>,
     provenance_hops: BTreeMap<String, AppendProvenanceHopV1>,
     discontinuities: BTreeMap<String, CaptureDiscontinuityV1>,
     segments: BTreeMap<String, SegmentState>,
     last_health_at_ms: Option<SessionMillis>,
     finalize: Option<FinalizeRecord>,
-    events: Vec<ServerMessageV1>,
+    next_event_sequence: u64,
 }
 
 impl StoredSessionV1 {
@@ -239,27 +428,26 @@ impl StoredSessionV1 {
         &self.provenance
     }
 
-    pub fn events(&self) -> &[ServerMessageV1] {
-        &self.events
-    }
-
-    /// Opaque encoded chunks, ordered by segment ID, lane ID, then sequence.
-    pub fn audio_chunks(&self) -> impl Iterator<Item = &AudioChunkV1> {
-        self.segments
-            .values()
-            .flat_map(|segment| segment.lanes.values())
-            .flat_map(|lane| lane.chunks.values())
-    }
-
     pub fn discontinuities(&self) -> impl Iterator<Item = &CaptureDiscontinuityV1> {
         self.discontinuities.values()
     }
-}
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct CommandRecord {
-    message: ClientMessageV1,
-    response_range: SequenceRangeV1,
+    pub fn input_finalized(&self) -> bool {
+        self.finalize
+            .as_ref()
+            .is_some_and(|record| record.finalized)
+    }
+
+    pub fn finalized_input(&self) -> Option<(&MessageId, SessionMillis)> {
+        self.finalize
+            .as_ref()
+            .filter(|record| record.finalized)
+            .map(|record| (&record.message_id, record.command.ended_at_ms))
+    }
+
+    pub fn next_event_sequence(&self) -> u64 {
+        self.next_event_sequence
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -270,8 +458,8 @@ struct SegmentState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct LaneState {
-    chunks: BTreeMap<u64, AudioChunkV1>,
     coverage: RangeSet,
+    latest_end_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -347,6 +535,18 @@ impl RangeSet {
                 .first()
                 .is_some_and(|range| range.start == 0 && range.end_exclusive >= boundary)
     }
+
+    fn overlaps(&self, candidate: SequenceRangeV1) -> bool {
+        self.ranges
+            .iter()
+            .any(|range| ranges_overlap(*range, candidate))
+    }
+
+    fn has_at_or_after(&self, sequence: u64) -> bool {
+        self.ranges
+            .iter()
+            .any(|range| range.end_exclusive > sequence)
+    }
 }
 
 /// Synchronous state machine. Transport code validates/framing/authenticates
@@ -421,14 +621,12 @@ where
                 create_message: message.clone(),
                 create: create.clone(),
                 provenance: create.provenance.hops.clone(),
-                commands: BTreeMap::new(),
-                conflicting_commands: Vec::new(),
                 provenance_hops: BTreeMap::new(),
                 discontinuities: BTreeMap::new(),
                 segments: BTreeMap::new(),
                 last_health_at_ms: None,
                 finalize: None,
-                events: Vec::new(),
+                next_event_sequence: 0,
             };
             let created = append_event(
                 &mut session,
@@ -439,10 +637,16 @@ where
                 }),
             );
             let response = vec![created];
-            record_command(&mut session, message.clone(), response.clone());
+            let receipt = command_receipt(&message, &response);
             match self
                 .storage
-                .create_session(session)
+                .create_session(SessionDeltaV1 {
+                    expected_revision: 0,
+                    session,
+                    receipt,
+                    events: response.clone(),
+                    audio_chunk: None,
+                })
                 .map_err(RuntimeError::Storage)?
             {
                 StorageCommit::Committed => {
@@ -480,56 +684,115 @@ where
         mut session: StoredSessionV1,
         message: ClientMessageV1,
     ) -> Result<ApplyResult, RuntimeError<S::Error>> {
-        if let Some(record) = session.commands.get(&message.message_id) {
-            if record.message == message {
-                return Ok(ApplyResult::Done(RuntimeResponseV1 {
-                    messages: command_response(&session, record),
-                    idempotent_replay: true,
-                }));
-            }
-            if let Some(record) = session
-                .conflicting_commands
-                .iter()
-                .find(|record| record.message == message)
-            {
-                return Ok(ApplyResult::Done(RuntimeResponseV1 {
-                    messages: command_response(&session, record),
-                    idempotent_replay: true,
-                }));
-            }
-            if let Some(record) = session
-                .conflicting_commands
-                .iter()
-                .find(|record| record.message.message_id == message.message_id)
-            {
-                return Ok(ApplyResult::Done(RuntimeResponseV1 {
-                    messages: command_response(&session, record),
-                    idempotent_replay: false,
-                }));
-            }
+        let fingerprint = command_fingerprint(&message);
+        let receipts = self
+            .storage
+            .load_command_receipts(&message.session_id, &message.message_id)
+            .map_err(RuntimeError::Storage)?;
+        if let Some(record) = receipts
+            .iter()
+            .find(|record| record.fingerprint == fingerprint)
+        {
+            let messages = self
+                .storage
+                .load_events(
+                    &message.session_id,
+                    record.response_range,
+                    MAX_REPLAY_EVENTS,
+                )
+                .map_err(RuntimeError::Storage)?;
+            return Ok(ApplyResult::Done(RuntimeResponseV1 {
+                messages,
+                idempotent_replay: true,
+            }));
+        }
+        if !receipts.is_empty() {
+            let event_start = session.next_event_sequence;
             let response = reject(
                 &mut session,
                 &message,
                 "conflict",
                 "message_id was already used for different content",
             );
-            let response_range = response_range(&response);
-            session.conflicting_commands.push(CommandRecord {
-                message,
-                response_range,
-            });
-            return self.commit_existing(session, response, false);
+            return self.commit_existing(session, message, response, None, event_start, false);
         }
 
-        let response = apply_command(&mut session, &message);
-        record_command(&mut session, message, response.clone());
-        self.commit_existing(session, response, false)
+        let existing_chunk = match &message.body {
+            ClientMessageBodyV1::AudioChunk(chunk) => self
+                .storage
+                .load_audio_chunk(
+                    &message.session_id,
+                    chunk.segment_id.as_ref(),
+                    &chunk.lane_id,
+                    chunk.sequence,
+                )
+                .map_err(RuntimeError::Storage)?,
+            _ => None,
+        };
+        let replay_events = match &message.body {
+            ClientMessageBodyV1::ResumeSession(resume) => {
+                let start = resume
+                    .after_server_sequence
+                    .map_or(0, |value| value.saturating_add(1));
+                self.storage
+                    .load_events(
+                        &message.session_id,
+                        SequenceRangeV1 {
+                            start,
+                            end_exclusive: session.next_event_sequence,
+                        },
+                        MAX_REPLAY_EVENTS,
+                    )
+                    .map_err(RuntimeError::Storage)?
+            }
+            _ => Vec::new(),
+        };
+        let known_close_commands = match &message.body {
+            ClientMessageBodyV1::FinalizeSession(finalize) => {
+                let mut known = BTreeSet::new();
+                for reference in &finalize.segment_closes {
+                    if !self
+                        .storage
+                        .load_command_receipts(&message.session_id, &reference.close_message_id)
+                        .map_err(RuntimeError::Storage)?
+                        .is_empty()
+                    {
+                        known.insert(reference.close_message_id.clone());
+                    }
+                }
+                known
+            }
+            _ => BTreeSet::new(),
+        };
+        let event_start = session.next_event_sequence;
+        let response = apply_command(
+            &mut session,
+            &message,
+            existing_chunk.as_ref(),
+            replay_events,
+            &known_close_commands,
+        );
+        let audio_chunk = match &message.body {
+            ClientMessageBodyV1::AudioChunk(chunk)
+                if existing_chunk.is_none()
+                    && response.iter().any(|event| {
+                        matches!(event.body, ServerMessageBodyV1::AudioAcknowledged(_))
+                    }) =>
+            {
+                Some(chunk.clone())
+            }
+            _ => None,
+        };
+        self.commit_existing(session, message, response, audio_chunk, event_start, false)
     }
 
     fn commit_existing(
         &self,
         mut session: StoredSessionV1,
+        message: ClientMessageV1,
         response: Vec<ServerMessageV1>,
+        audio_chunk: Option<AudioChunkV1>,
+        event_start: u64,
         idempotent_replay: bool,
     ) -> Result<ApplyResult, RuntimeError<S::Error>> {
         let expected_revision = session.revision;
@@ -539,7 +802,17 @@ where
             .ok_or(RuntimeError::Contention)?;
         match self
             .storage
-            .replace_session(expected_revision, session)
+            .apply_delta(SessionDeltaV1 {
+                expected_revision,
+                receipt: command_receipt(&message, &response),
+                session,
+                events: response
+                    .iter()
+                    .filter(|event| event.sequence >= event_start)
+                    .cloned()
+                    .collect(),
+                audio_chunk,
+            })
             .map_err(RuntimeError::Storage)?
         {
             StorageCommit::Committed => Ok(ApplyResult::Done(RuntimeResponseV1 {
@@ -556,19 +829,31 @@ enum ApplyResult {
     Retry,
 }
 
-fn record_command(
-    session: &mut StoredSessionV1,
-    message: ClientMessageV1,
-    response: Vec<ServerMessageV1>,
-) {
-    let response_range = response_range(&response);
-    session.commands.insert(
-        message.message_id.clone(),
-        CommandRecord {
-            message,
-            response_range,
-        },
-    );
+fn command_receipt(
+    message: &ClientMessageV1,
+    response: &[ServerMessageV1],
+) -> StoredCommandReceiptV1 {
+    StoredCommandReceiptV1 {
+        message_id: message.message_id.clone(),
+        fingerprint: command_fingerprint(message),
+        response_range: response_range(response),
+    }
+}
+
+fn command_fingerprint(message: &ClientMessageV1) -> String {
+    struct HashWriter(blake3::Hasher);
+    impl std::io::Write for HashWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = HashWriter(blake3::Hasher::new());
+    serde_json::to_writer(&mut writer, message).expect("validated protocol messages serialize");
+    writer.0.finalize().to_hex().to_string()
 }
 
 fn response_range(response: &[ServerMessageV1]) -> SequenceRangeV1 {
@@ -587,16 +872,13 @@ fn response_range(response: &[ServerMessageV1]) -> SequenceRangeV1 {
     }
 }
 
-fn command_response(session: &StoredSessionV1, record: &CommandRecord) -> Vec<ServerMessageV1> {
-    if record.response_range.is_empty() {
-        return Vec::new();
-    }
-    session.events
-        [record.response_range.start as usize..record.response_range.end_exclusive as usize]
-        .to_vec()
-}
-
-fn apply_command(session: &mut StoredSessionV1, message: &ClientMessageV1) -> Vec<ServerMessageV1> {
+fn apply_command(
+    session: &mut StoredSessionV1,
+    message: &ClientMessageV1,
+    existing_chunk: Option<&AudioChunkV1>,
+    replay_events: Vec<ServerMessageV1>,
+    known_close_commands: &BTreeSet<MessageId>,
+) -> Vec<ServerMessageV1> {
     match &message.body {
         ClientMessageBodyV1::CreateSession(_) => reject(
             session,
@@ -604,8 +886,11 @@ fn apply_command(session: &mut StoredSessionV1, message: &ClientMessageV1) -> Ve
             "conflict",
             "session_id or create idempotency key was already used",
         ),
+        ClientMessageBodyV1::BeginCaptureGeneration(begin) => {
+            apply_begin_capture_generation(session, message, begin)
+        }
         ClientMessageBodyV1::ResumeSession(resume) => {
-            let watermark = session.events.last().map(|event| event.sequence);
+            let watermark = session.next_event_sequence.checked_sub(1);
             if resume
                 .after_server_sequence
                 .is_some_and(|cursor| watermark.is_none_or(|last| cursor > last))
@@ -617,16 +902,7 @@ fn apply_command(session: &mut StoredSessionV1, message: &ClientMessageV1) -> Ve
                     "replay cursor is beyond the retained event log",
                 );
             }
-            let replayed: Vec<_> = session
-                .events
-                .iter()
-                .filter(|event| {
-                    resume
-                        .after_server_sequence
-                        .is_none_or(|cursor| event.sequence > cursor)
-                })
-                .cloned()
-                .collect();
+            let replayed = replay_events;
             let completed = append_event(
                 session,
                 message.sent_at_unix_ms,
@@ -676,22 +952,66 @@ fn apply_command(session: &mut StoredSessionV1, message: &ClientMessageV1) -> Ve
                 }),
             )]
         }
-        ClientMessageBodyV1::AudioChunk(chunk) => apply_chunk(session, message, chunk),
+        ClientMessageBodyV1::AudioChunk(chunk) => {
+            apply_chunk(session, message, chunk, existing_chunk)
+        }
         ClientMessageBodyV1::CaptureDiscontinuity(discontinuity) => {
             apply_discontinuity(session, message, discontinuity)
         }
         ClientMessageBodyV1::CaptureHealth(health) => apply_health(session, message, health),
         ClientMessageBodyV1::CloseSegment(close) => apply_close(session, message, close),
         ClientMessageBodyV1::FinalizeSession(finalize) => {
-            apply_finalize(session, message, finalize)
+            apply_finalize(session, message, finalize, known_close_commands)
         }
     }
+}
+
+fn apply_begin_capture_generation(
+    session: &mut StoredSessionV1,
+    message: &ClientMessageV1,
+    begin: &BeginCaptureGenerationV1,
+) -> Vec<ServerMessageV1> {
+    let Some(prior) = session.finalize.as_ref() else {
+        return reject(
+            session,
+            message,
+            "invalid_transition",
+            "capture generation can begin only after durable finalization",
+        );
+    };
+    if !prior.finalized || prior.message_id != begin.prior_finalize_message_id {
+        return reject(
+            session,
+            message,
+            "generation_mismatch",
+            "prior finalize identity does not match the durable session generation",
+        );
+    }
+    if begin.started_at_ms < prior.command.ended_at_ms {
+        return reject(
+            session,
+            message,
+            "invalid_transition",
+            "new capture generation starts before the prior finalized boundary",
+        );
+    }
+    session.finalize = None;
+    vec![append_event(
+        session,
+        message.sent_at_unix_ms,
+        ServerMessageBodyV1::CaptureGenerationStarted(CaptureGenerationStartedV1 {
+            begin_message_id: message.message_id.clone(),
+            prior_finalize_message_id: begin.prior_finalize_message_id.clone(),
+            started_at_ms: begin.started_at_ms,
+        }),
+    )]
 }
 
 fn apply_chunk(
     session: &mut StoredSessionV1,
     message: &ClientMessageV1,
     chunk: &AudioChunkV1,
+    existing_chunk: Option<&AudioChunkV1>,
 ) -> Vec<ServerMessageV1> {
     if !declares_lane(session, &chunk.lane_id) {
         return reject(
@@ -734,8 +1054,7 @@ fn apply_chunk(
         );
     }
     let segment = session.segments.get(chunk.segment_id.as_ref());
-    let lane = segment.and_then(|segment| segment.lanes.get(&chunk.lane_id));
-    if let Some(existing) = lane.and_then(|lane| lane.chunks.get(&chunk.sequence)) {
+    if let Some(existing) = existing_chunk {
         if existing == chunk {
             return Vec::new();
         }
@@ -809,11 +1128,11 @@ fn apply_chunk(
     ensure_segment(session, chunk.segment_id.as_ref());
     let segment = session.segments.get_mut(chunk.segment_id.as_ref()).unwrap();
     let lane = segment.lanes.get_mut(&chunk.lane_id).unwrap();
-    lane.chunks.insert(chunk.sequence, chunk.clone());
     lane.coverage.add(SequenceRangeV1 {
         start: chunk.sequence,
         end_exclusive: chunk.sequence + 1,
     });
+    lane.latest_end_ms = lane.latest_end_ms.max(chunk_end);
     let ack = lane
         .coverage
         .acknowledgement(chunk.segment_id.as_ref(), &chunk.lane_id);
@@ -937,11 +1256,7 @@ fn apply_discontinuity(
     if !discontinuity.sequence_range.is_empty()
         && (segment
             .and_then(|segment| segment.lanes.get(&discontinuity.lane_id))
-            .is_some_and(|lane| {
-                lane.chunks
-                    .keys()
-                    .any(|sequence| discontinuity.sequence_range.contains(*sequence))
-            })
+            .is_some_and(|lane| lane.coverage.overlaps(discontinuity.sequence_range))
             || session.discontinuities.values().any(|existing| {
                 existing.segment_id == discontinuity.segment_id
                     && existing.lane_id == discontinuity.lane_id
@@ -1101,11 +1416,7 @@ fn apply_close(
     for boundary in &close.lane_boundaries {
         if segment
             .and_then(|segment| segment.lanes.get(&boundary.lane_id))
-            .is_some_and(|lane| {
-                lane.chunks
-                    .keys()
-                    .any(|sequence| *sequence >= boundary.next_sequence)
-            })
+            .is_some_and(|lane| lane.coverage.has_at_or_after(boundary.next_sequence))
         {
             return reject(
                 session,
@@ -1131,8 +1442,7 @@ fn apply_close(
     let latest_chunk_end = segment
         .into_iter()
         .flat_map(|segment| segment.lanes.values())
-        .flat_map(|lane| lane.chunks.values())
-        .filter_map(|chunk| chunk.starts_at_ms.0.checked_add(chunk.duration_ms.0))
+        .map(|lane| lane.latest_end_ms)
         .max()
         .unwrap_or(0);
     let latest_discontinuity_end = session
@@ -1180,6 +1490,7 @@ fn apply_finalize(
     session: &mut StoredSessionV1,
     message: &ClientMessageV1,
     finalize: &FinalizeSessionV1,
+    known_close_commands: &BTreeSet<MessageId>,
 ) -> Vec<ServerMessageV1> {
     if session.finalize.is_some() {
         return reject(
@@ -1199,11 +1510,10 @@ fn apply_finalize(
             )
         })
         .collect();
-    if session
-        .segments
-        .keys()
-        .any(|segment_id| !declared.contains_key(segment_id.as_str()))
-    {
+    if session.segments.iter().any(|(segment_id, segment)| {
+        !segment.close.as_ref().is_some_and(|close| close.finalized)
+            && !declared.contains_key(segment_id.as_str())
+    }) {
         return reject(
             session,
             message,
@@ -1220,7 +1530,7 @@ fn apply_finalize(
                 "finalize_session cannot reserve its own message ID for a close",
             );
         }
-        if session.commands.contains_key(&reference.close_message_id) {
+        if known_close_commands.contains(&reference.close_message_id) {
             let exact_close_exists = session
                 .segments
                 .get(reference.segment_id.as_ref())
@@ -1238,6 +1548,9 @@ fn apply_finalize(
     }
     for (segment_id, segment) in &session.segments {
         if let Some(close) = &segment.close {
+            if close.finalized && !declared.contains_key(segment_id.as_str()) {
+                continue;
+            }
             if declared.get(segment_id.as_str()).copied() != Some(close.message_id.as_ref()) {
                 return reject(
                     session,
@@ -1260,8 +1573,7 @@ fn apply_finalize(
         .segments
         .values()
         .flat_map(|segment| segment.lanes.values())
-        .flat_map(|lane| lane.chunks.values())
-        .filter_map(|chunk| chunk.starts_at_ms.0.checked_add(chunk.duration_ms.0))
+        .map(|lane| lane.latest_end_ms)
         .max()
         .unwrap_or(0);
     let latest_discontinuity_end = session
@@ -1300,8 +1612,8 @@ fn ensure_segment(session: &mut StoredSessionV1, segment_id: &str) {
             (
                 lane.lane_id.clone(),
                 LaneState {
-                    chunks: BTreeMap::new(),
                     coverage: RangeSet::default(),
+                    latest_end_ms: 0,
                 },
             )
         })
@@ -1442,7 +1754,7 @@ fn append_event(
     sent_at_unix_ms: UnixMillis,
     body: ServerMessageBodyV1,
 ) -> ServerMessageV1 {
-    let sequence = session.events.len() as u64;
+    let sequence = session.next_event_sequence;
     assert!(
         sequence <= MAX_SAFE_JSON_INTEGER,
         "V1 server sequence exhausted"
@@ -1460,6 +1772,6 @@ fn append_event(
         body,
     };
     debug_assert!(event.validate().is_ok());
-    session.events.push(event.clone());
+    session.next_event_sequence += 1;
     event
 }

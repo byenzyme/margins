@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Margins meeting</title>
+  <style>
+    :root { color-scheme: light dark; font: 14px system-ui, sans-serif; }
+    body { margin: 0; padding: 16px; color: CanvasText; background: Canvas; }
+    main { max-width: 720px; margin: auto; }
+    header { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    small { color: GrayText; overflow-wrap: anywhere; }
+    button { font: inherit; padding: 6px 10px; border: 1px solid GrayText; border-radius: 7px; cursor: pointer; }
+    #status { margin: 14px 0 4px; font-weight: 600; }
+    #detail { margin: 0 0 12px; color: GrayText; }
+    #transcript { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; margin: 0; padding: 12px; border: 1px solid GrayText; border-radius: 8px; font: inherit; line-height: 1.5; }
+    #error { min-height: 18px; color: #b3261e; }
+    @media (prefers-color-scheme: dark) { #error { color: #ffb4ab; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header><div><h1 id="title">Meeting status</h1><small id="session">Waiting for meeting…</small></div><button id="float" type="button">Keep visible</button></header>
+    <p id="status" role="status" aria-live="polite">Loading…</p>
+    <p id="detail">The Mac menu app controls recording.</p>
+    <pre id="transcript" aria-label="Meeting transcript">Transcript not available yet.</pre>
+    <small id="error" role="alert"></small>
+  </main>
+  <script>
+    (() => {
+      const titleEl = document.getElementById("title");
+      const sessionEl = document.getElementById("session");
+      const statusEl = document.getElementById("status");
+      const detailEl = document.getElementById("detail");
+      const transcriptEl = document.getElementById("transcript");
+      const errorEl = document.getElementById("error");
+      const pending = new Map();
+      let nextId = 1;
+      let sessionId;
+      let polling = false;
+
+      function request(method, params) {
+        const id = nextId++;
+        return new Promise((resolve, reject) => {
+          pending.set(id, { resolve, reject });
+          window.parent.postMessage({ jsonrpc: "2.0", id, method, params }, "*");
+        });
+      }
+      function render(data) {
+        if (!data || typeof data.session_id !== "string") throw new Error("Invalid meeting response");
+        if (sessionId && sessionId !== data.session_id) throw new Error("Meeting changed; open a new view");
+        sessionId = data.session_id;
+        sessionEl.textContent = sessionId;
+        titleEl.textContent = data.title || "Meeting status";
+        const transcript = data.transcript;
+        if (!data.input_finalized && transcript?.body) {
+          statusEl.textContent = "Live transcript draft";
+          detailEl.textContent = "On-device words may change. The Linux transcript replaces this draft after Stop.";
+        } else if (!data.input_finalized) {
+          statusEl.textContent = "Capture not finalized";
+          detailEl.textContent = "Audio may still be uploading. Waiting for on-device words; Linux transcription begins after Stop.";
+        } else if (!transcript) {
+          statusEl.textContent = "Waiting for transcription";
+          detailEl.textContent = "Recording is saved; the Linux service has not published a transcript yet.";
+        } else if (transcript.terminal) {
+          statusEl.textContent = "Transcript ready";
+          detailEl.textContent = "The saved transcript is available in this Workspace.";
+        } else {
+          statusEl.textContent = "Transcript updating";
+          detailEl.textContent = "Showing the latest available transcript checkpoint.";
+        }
+        transcriptEl.textContent = transcript?.body || "Transcript not available yet.";
+        errorEl.textContent = "";
+      }
+      function hydrate(output) {
+        const data = output?.structuredContent?.data ?? output?.data ?? output;
+        if (!data) return;
+        try { render(data); } catch (error) { errorEl.textContent = error.message; }
+      }
+      async function refresh() {
+        if (!sessionId || polling) return;
+        polling = true;
+        try {
+          const result = await request("tools/call", { name: "read_live_meeting", arguments: { sessionId } });
+          if (result?.isError) throw new Error(result.content?.[0]?.text || "Could not refresh meeting");
+          hydrate(result);
+        } catch (error) { errorEl.textContent = `Refresh failed: ${error.message}`; }
+        finally { polling = false; }
+      }
+      window.addEventListener("message", event => {
+        if (event.source !== window.parent) return;
+        const message = event.data;
+        if (!message || message.jsonrpc !== "2.0") return;
+        if (message.id !== undefined && pending.has(message.id)) {
+          const callback = pending.get(message.id);
+          pending.delete(message.id);
+          if (message.error) callback.reject(new Error(message.error.message || "Host request failed"));
+          else callback.resolve(message.result);
+        } else if (message.method === "ui/notifications/tool-result") hydrate(message.params);
+      });
+      window.addEventListener("openai:set_globals", event => hydrate(event.detail?.globals?.toolOutput));
+      document.getElementById("float").addEventListener("click", async () => {
+        try {
+          if (!window.openai?.requestDisplayMode) throw new Error("This host does not offer a floating view");
+          await window.openai.requestDisplayMode({ mode: "pip" });
+        } catch (error) { errorEl.textContent = error.message; }
+      });
+
+      request("ui/initialize", {
+        appCapabilities: {},
+        appInfo: { name: "margins-live-meeting", version: "0.1.0" },
+        protocolVersion: "2026-01-26",
+      }).then(() => {
+        window.parent.postMessage({ jsonrpc: "2.0", method: "ui/notifications/initialized" }, "*");
+        hydrate(window.openai?.toolOutput);
+      }).catch(error => {
+        if (window.openai?.toolOutput) hydrate(window.openai.toolOutput);
+        else errorEl.textContent = `Unable to initialize meeting view: ${error.message}`;
+      });
+      window.setInterval(refresh, 3000);
+    })();
+  </script>
+</body>
+</html>

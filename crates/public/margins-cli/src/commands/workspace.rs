@@ -69,6 +69,124 @@ pub fn new(
     render_workspace(&resolved, json, &BTreeMap::new(), stdout)
 }
 
+pub fn list(json: bool, stdout: &mut dyn Write) -> Result<(), CliError> {
+    let home = workspace::margins_home().map_err(CliError::from_anyhow)?;
+    let workspaces = workspace::list_workspaces(&home).map_err(CliError::from_anyhow)?;
+    let default = workspace::default_workspace(&home).map_err(CliError::from_anyhow)?;
+    if json {
+        let entries = workspaces
+            .iter()
+            .map(|item| {
+                serde_json::json!({
+                    "id": item.config.id, "name": item.config.name,
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_writer(
+            &mut *stdout,
+            &serde_json::json!({
+                "default_workspace": default, "workspaces": entries,
+            }),
+        )
+        .map_err(|error| CliError::from_anyhow(error.into()))?;
+        writeln!(stdout).map_err(|error| CliError::from_anyhow(error.into()))
+    } else {
+        for item in workspaces {
+            writeln!(
+                stdout,
+                "{}\t{}",
+                item.config.id,
+                item.config.name.as_deref().unwrap_or("")
+            )
+            .map_err(|error| CliError::from_anyhow(error.into()))?;
+        }
+        Ok(())
+    }
+}
+
+pub fn remove(id: &str, json: bool, stdout: &mut dyn Write) -> Result<(), CliError> {
+    let home = workspace::margins_home().map_err(CliError::from_anyhow)?;
+    workspace::remove_empty_workspace(&home, id).map_err(CliError::from_anyhow)?;
+    if json {
+        serde_json::to_writer(
+            &mut *stdout,
+            &serde_json::json!({ "removed_workspace": id }),
+        )
+        .map_err(|error| CliError::from_anyhow(error.into()))?;
+        writeln!(stdout).map_err(|error| CliError::from_anyhow(error.into()))
+    } else {
+        writeln!(
+            stdout,
+            "Removed Workspace {id}; Source folders were preserved."
+        )
+        .map_err(|error| CliError::from_anyhow(error.into()))
+    }
+}
+
+pub fn default(set: Option<&str>, json: bool, stdout: &mut dyn Write) -> Result<(), CliError> {
+    let home = workspace::margins_home().map_err(CliError::from_anyhow)?;
+    if let Some(id) = set {
+        workspace::set_default_workspace(&home, id).map_err(CliError::from_anyhow)?;
+    }
+    let selected = workspace::default_workspace(&home).map_err(CliError::from_anyhow)?;
+    if json {
+        serde_json::to_writer(
+            &mut *stdout,
+            &serde_json::json!({ "default_workspace": selected }),
+        )
+        .map_err(|error| CliError::from_anyhow(error.into()))?;
+        writeln!(stdout).map_err(|error| CliError::from_anyhow(error.into()))
+    } else {
+        writeln!(
+            stdout,
+            "Default Workspace: {}",
+            selected.as_deref().unwrap_or("none")
+        )
+        .map_err(|error| CliError::from_anyhow(error.into()))
+    }
+}
+
+pub fn destination(
+    selector: Option<&str>,
+    cwd: &Path,
+    stdout: &mut dyn Write,
+) -> Result<(), CliError> {
+    let home = workspace::margins_home().map_err(CliError::from_anyhow)?;
+    let selected = selector
+        .map(str::to_string)
+        .or(workspace::default_workspace(&home).map_err(CliError::from_anyhow)?)
+        .ok_or_else(|| {
+            CliError::new(
+                "workspace_required",
+                "choose a Workspace with --workspace or set a machine default",
+            )
+        })?;
+    let resolved = resolve_existing(Some(&selected), cwd)?;
+    let (source_id, folder) = resolved
+        .config
+        .bindings
+        .iter()
+        .find_map(|(source_id, binding)| match binding {
+            WorkspaceBinding::NativeMarkdown {
+                role: SourceRole::Home,
+                note_folder,
+                ..
+            } => Some((source_id, note_folder)),
+            _ => None,
+        })
+        .ok_or_else(|| CliError::new("workspace_invalid", "Workspace has no Home binding"))?;
+    let destination = resolved.note_destination().map_err(CliError::from_anyhow)?;
+    serde_json::to_writer(
+        &mut *stdout,
+        &serde_json::json!({
+            "workspace_id": resolved.config.id, "home_root": resolved.home_dir,
+            "home_source_id": source_id, "note_folder": folder, "destination": destination,
+        }),
+    )
+    .map_err(|error| CliError::from_anyhow(error.into()))?;
+    writeln!(stdout).map_err(|error| CliError::from_anyhow(error.into()))
+}
+
 pub fn status(
     selector: Option<&str>,
     cwd: &Path,
@@ -119,6 +237,7 @@ fn validate_desired_home_folder_entities(desired: &WorkspaceConfig) -> Result<()
             WorkspaceBinding::NativeMarkdown {
                 path,
                 role: SourceRole::Home,
+                ..
             } => Some(path.as_path()),
             _ => None,
         })
@@ -255,10 +374,11 @@ pub fn require_explicit_workspace(selector: Option<&str>) -> Result<&str, CliErr
 pub fn render_status(
     workspace: &ResolvedWorkspace,
     json: bool,
+    recall: margins_workflows::local_recall::LocalRecallStatus,
     source_refresh_staleness: &BTreeMap<String, SourceRefreshStalenessView>,
     stdout: &mut dyn Write,
 ) -> Result<(), CliError> {
-    render_runtime_workspace(workspace, json, source_refresh_staleness, stdout)
+    render_runtime_workspace(workspace, json, recall, source_refresh_staleness, stdout)
 }
 
 pub fn add_source(
@@ -378,6 +498,7 @@ pub fn add_source(
                 .map(source_role)
                 .with_context(|| "notes sources require --role home or reference")
                 .map_err(CliError::from_anyhow)?,
+            note_folder: None,
         },
         SourceKind::Captures => WorkspaceBinding::Captures {
             path: path
@@ -512,6 +633,7 @@ fn render_workspace(
 fn render_runtime_workspace(
     workspace: &ResolvedWorkspace,
     json: bool,
+    recall: margins_workflows::local_recall::LocalRecallStatus,
     source_refresh_staleness: &BTreeMap<String, SourceRefreshStalenessView>,
     stdout: &mut dyn Write,
 ) -> Result<(), CliError> {
@@ -527,8 +649,7 @@ fn render_runtime_workspace(
         index: workspace.recall_path().to_string_lossy().into_owned(),
         ledger: workspace.ledger_path().to_string_lossy().into_owned(),
         catalyst: selected_status(&margins_home),
-        recall: margins_workflows::local_recall::status(workspace)
-            .map_err(CliError::from_anyhow)?,
+        recall,
         source_refresh_staleness,
         build: crate::build_info::get(),
     };
@@ -633,6 +754,7 @@ mod tests {
                 WorkspaceBinding::NativeMarkdown {
                     path: home.to_path_buf(),
                     role: SourceRole::Home,
+                    note_folder: None,
                 },
             )]),
         }
@@ -658,6 +780,7 @@ mod tests {
             WorkspaceBinding::NativeMarkdown {
                 path: reference.path().to_path_buf(),
                 role: SourceRole::Reference,
+                note_folder: None,
             },
         );
 

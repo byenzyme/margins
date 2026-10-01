@@ -1,4 +1,5 @@
 pub mod archive;
+pub mod application;
 pub mod artifacts;
 pub mod capabilities;
 pub mod capture;
@@ -9,6 +10,7 @@ pub mod integrations;
 pub mod process;
 pub mod projects;
 pub mod recall;
+pub mod remote;
 pub mod retention;
 pub mod sessions;
 pub mod transcript;

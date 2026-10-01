@@ -75,3 +75,27 @@ fn transcript_timing_phrase_and_json_output_match_golden_fixture() {
     assert_eq!(entries, fixture.expected_entries);
     assert_eq!(transcript_json(&entries), fixture.expected_json);
 }
+
+#[test]
+fn transcript_standalone_punctuation_attaches_to_the_preceding_word() {
+    let words = [
+        WordTiming {
+            start_ms: 1_000,
+            end_ms: 1_200,
+            text: "Nice".into(),
+        },
+        WordTiming {
+            start_ms: 1_250,
+            end_ms: 1_300,
+            text: ".".into(),
+        },
+        WordTiming {
+            start_ms: 1_400,
+            end_ms: 1_600,
+            text: "meeting".into(),
+        },
+    ];
+    let phrases = merge_and_dedupe_entries(words_to_transcript_entries(&words, 0, 0), 2_000);
+    assert_eq!(phrases.len(), 1);
+    assert_eq!(phrases[0].text.trim(), "Nice. meeting");
+}

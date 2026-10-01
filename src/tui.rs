@@ -87,6 +87,8 @@ fn clear_system_audio_warning_after_recovery(
 
 pub enum TuiAction {
     Quit,
+    Pause,
+    Resume,
     SwitchDevice(usize),
 }
 
@@ -104,22 +106,16 @@ pub fn run_tui(
 
     let result = event_loop(&mut terminal, app, &stop_flag);
 
+    // The producer sees Pause/Stop before terminal cleanup, memo persistence,
+    // ASR finalization, or any network work performed by the caller.
+    stop_flag.store(true, Ordering::SeqCst);
+
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
         DisableMouseCapture
     )?;
-
-    // Auto-save on exit
-    if app.lines.iter().any(|l| !l.trim().is_empty()) {
-        app.save()?;
-        let count = app.export().lines().count();
-        eprintln!("Saved {} lines to {}", count, app.output_path);
-    }
-
-    // Signal recorder to stop
-    stop_flag.store(true, Ordering::SeqCst);
 
     result
 }
@@ -244,6 +240,16 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Option<TuiAction> {
         // Quit
         KeyCode::Char('c') if ctrl => return Some(TuiAction::Quit),
 
+        // Pause/resume. The caller retires native devices before re-entering
+        // the editor in paused mode.
+        KeyCode::Char('p') if ctrl => {
+            return Some(if app.capture_paused {
+                TuiAction::Resume
+            } else {
+                TuiAction::Pause
+            })
+        }
+
         // Save
         KeyCode::Char('s') if ctrl => {
             let _ = app.save();
@@ -340,7 +346,7 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
 
     // Build visible lines
     let mut display_lines: Vec<Line> = Vec::new();
-    let end = (app.scroll + visible_lines).min(app.lines.len());
+    let end = (app.scroll + visible_lines).min(app.memo.len());
 
     for i in app.scroll..end {
         let (gutter, edited) = app.gutter_label(i);
@@ -361,7 +367,7 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
 
         display_lines.push(Line::from(vec![
             Span::styled(gutter, gutter_style),
-            Span::styled(&app.lines[i], text_style),
+            Span::styled(&app.memo.line(i).unwrap().text, text_style),
         ]));
     }
 
@@ -409,13 +415,32 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
         }
     }
 
+    let remote_delivery = match app.remote_delivery_state.load(Ordering::Relaxed) {
+        crate::app::REMOTE_DELIVERY_CURRENT => " | delivery current".to_string(),
+        crate::app::REMOTE_DELIVERY_PENDING => format!(
+            " | connection lost; {} chunks / {} KiB saved locally",
+            app.remote_pending_chunks.load(Ordering::Relaxed),
+            app.remote_pending_bytes
+                .load(Ordering::Relaxed)
+                .div_ceil(1024)
+        ),
+        _ => String::new(),
+    };
     let status_text = if let Some(ref msg) = app.message {
         format!(" {} | {}", time, msg)
+    } else if app.capture_paused {
+        format!(
+            " {} | PAUSED{} | {} lines |  ^P resume  ^S save  ^C stop",
+            time,
+            remote_delivery,
+            app.memo.len(),
+        )
     } else {
         format!(
-            " {} | {} lines | mic {} spk {} |{}  ^D device  ^S save  ^C quit",
+            " {} | {} lines{} | mic {} spk {} |{}  ^P pause  ^D device  ^S save  ^C stop",
             time,
-            app.lines.len(),
+            app.memo.len(),
+            remote_delivery,
             level_meter(mic_peak, 8),
             level_meter(spk_peak, 8),
             warnings,

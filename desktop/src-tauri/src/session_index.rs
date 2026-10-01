@@ -29,16 +29,6 @@ pub(crate) fn recent_people_candidates(
     )
 }
 
-pub(crate) fn sessions_with_deleted_notes(
-    work_dir: &Path,
-    settings: &Settings,
-    project_id: Option<&str>,
-) -> Vec<String> {
-    margins::session_index::sessions_with_deleted_notes(&session_index_work_dir(
-        work_dir, settings, project_id,
-    ))
-}
-
 pub(crate) fn note_path_for_session_or_capture(
     margins_dir: &Path,
     name: &str,

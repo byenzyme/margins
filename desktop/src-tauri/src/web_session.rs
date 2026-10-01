@@ -11,6 +11,7 @@ use crate::{settings::Settings, AppState, MemoLine};
 use margins::session;
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Write as _};
@@ -25,6 +26,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 pub const WEB_OWNER_LEASE_TIMEOUT_MS: u64 = 75_000;
 pub const WEB_TRANSPORT_OWNER_EVIDENCE_MS: u64 = 10_000;
 pub const HOSTED_CAPTURE_PROTOCOL_VERSION: u8 = 2;
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
 
 // ---------------------------------------------------------------------------
 // State struct
@@ -622,6 +627,8 @@ pub fn handle_audio_chunk(
         .ok_or("Web recording file is already closed")?;
     file.write_all(bytes)
         .map_err(|e| format!("Failed to write audio chunk: {e}"))?;
+    file.sync_data()
+        .map_err(|e| format!("Failed to durably sync audio chunk: {e}"))?;
     ws.webm_receipts
         .insert(sequence, (bytes.len() as u64, fingerprint));
     ws.next_webm_sequence = ws.next_webm_sequence.saturating_add(1);
@@ -971,6 +978,91 @@ pub fn sync_web_recording_memo(
                 .unwrap_or("Hosted finalization is recoverable.");
             persist_recovery_manifest(ws, WebRecoveryPhase::Failed, message)
         })
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebNotepadSnapshot {
+    pub text: String,
+    pub revision: String,
+}
+
+fn web_notepad_snapshot(lines: &[MemoLine]) -> WebNotepadSnapshot {
+    let document = margins::core::TimedMemoDocument::from_committed(lines.to_vec());
+    WebNotepadSnapshot {
+        text: document.plain_text(),
+        revision: document.revision(),
+    }
+}
+
+pub fn get_web_recording_notepad(
+    state: &Arc<AppState>,
+    recording_id: &str,
+    owner_id: &str,
+) -> Result<WebNotepadSnapshot, String> {
+    let active = state.web_sessions.lock().unwrap();
+    let ws = active
+        .get(recording_id)
+        .ok_or_else(|| format!("No active web recording for ID '{recording_id}'"))?;
+    ensure_owner(ws, owner_id)?;
+    let authority =
+        margins::session::SqliteWorkspaceAuthorityStorage::open(ws.work_dir.join(".margins"))
+            .map_err(|error| error.to_string())?;
+    let memo = authority
+        .memo(&ws.session_name)
+        .map_err(|error| error.to_string())?;
+    Ok(web_notepad_snapshot(&memo.lines))
+}
+
+/// Reconcile the whole hosted notepad through the same timestamp-preserving
+/// model used by the TUI and local live bridge.
+pub fn update_web_recording_notepad(
+    state: &Arc<AppState>,
+    recording_id: &str,
+    owner_id: &str,
+    expected_revision: &str,
+    text: &str,
+) -> Result<WebNotepadSnapshot, String> {
+    let update = |ws: &mut WebRecordingState| {
+        ensure_owner(ws, owner_id)?;
+        let authority =
+            margins::session::SqliteWorkspaceAuthorityStorage::open(ws.work_dir.join(".margins"))
+                .map_err(|error| error.to_string())?;
+        let current_memo = authority
+            .memo(&ws.session_name)
+            .map_err(|error| error.to_string())?;
+        let current = web_notepad_snapshot(&current_memo.lines);
+        if current.revision != expected_revision {
+            return Err(
+                "The notepad changed somewhere else. Review the latest text and try again."
+                    .to_string(),
+            );
+        }
+        let elapsed = ws.started_at.elapsed().unwrap_or_default().as_secs_f64();
+        let observed_at_ms = (elapsed * 1000.0).round().max(0.0) as u64;
+        let request_id = format!(
+            "web-{}",
+            sha256_hex(format!("{}\0{}\0{text}", ws.owner_id, expected_revision).as_bytes())
+        );
+        let receipt = authority
+            .update_memo(
+                &ws.session_name,
+                &ws.owner_id,
+                &request_id,
+                expected_revision,
+                observed_at_ms,
+                ws.paused,
+                text,
+            )
+            .map_err(|error| error.to_string())?;
+        ws.memo_lines = receipt.lines;
+        Ok(web_notepad_snapshot(&ws.memo_lines))
+    };
+    let mut active = state.web_sessions.lock().unwrap();
+    active
+        .get_mut(recording_id)
+        .ok_or_else(|| format!("No active web recording for ID '{recording_id}'"))
+        .and_then(update)
 }
 
 pub fn active_web_recording_status(
@@ -1445,13 +1537,17 @@ where
             .map_err(|e| e.to_string())
     );
 
-    // Write memo file
+    // Commit the final memo through the same revisioned authority used while
+    // capture was live; it owns the Markdown projection.
+    let authority = retain_on_error!(margins::session::SqliteWorkspaceAuthorityStorage::open(
+        work_dir.join(".margins")
+    )
+    .map_err(|error| error.to_string()));
+    let latest_memo = retain_on_error!(authority.memo(name).map_err(|error| error.to_string()));
+    ws.memo_lines = latest_memo.lines;
     let memo_content = crate::recording::export_memo(&ws.memo_lines);
+    retain_on_error!(crate::persist_live_memo(work_dir, name, &ws.memo_lines));
     let notes_path = crate::session_memo_path(work_dir, name);
-    if let Some(parent) = notes_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    retain_on_error!(std::fs::write(&notes_path, &memo_content).map_err(|e| e.to_string()));
 
     if let Some(transcript) = qualified_live_transcript.as_deref() {
         let publication = crate::write_qualified_headless_live_transcript_artifact(
@@ -1489,6 +1585,8 @@ where
         &margins_dir,
         &meta,
     ));
+
+    retain_on_error!(session::mark_session_ended(&margins_dir, name));
 
     append_capture_finish_trace(
         work_dir,
@@ -1942,9 +2040,9 @@ fn probe_wav_duration(wav: &std::path::Path) -> Result<f64, String> {
 mod tests {
     use super::*;
     use crate::{build_app_state, settings::load_settings};
-    use std::io::Read as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Barrier;
+    use std::sync::{mpsc, Barrier};
+    use std::time::Duration;
 
     fn make_test_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -1969,7 +2067,17 @@ mod tests {
         owner_id: &str,
         memo_lines: Vec<MemoLine>,
     ) {
-        let recordings_dir = work_dir.join(".margins").join("recordings");
+        let margins_dir = work_dir.join(".margins");
+        std::fs::create_dir_all(&margins_dir).unwrap();
+        session::create_session(
+            &margins_dir,
+            session_name,
+            &chrono::Local::now(),
+            &format!(".margins/{session_name}.md"),
+        )
+        .unwrap();
+        crate::persist_live_memo(work_dir, session_name, &memo_lines).unwrap();
+        let recordings_dir = margins_dir.join("recordings");
         std::fs::create_dir_all(&recordings_dir).unwrap();
         let webm_path = recordings_dir.join(format!("{session_name}_upload.webm"));
         let file = File::create(&webm_path).unwrap();
@@ -2100,6 +2208,95 @@ mod tests {
 
         // Cleanup
         let _ = std::fs::remove_dir_all(&work_dir);
+    }
+
+    #[test]
+    fn stalled_asr_does_not_serialize_durable_audio_status_or_memo() {
+        let work_dir = make_test_dir("stalled-asr-isolation");
+        let state = make_state(work_dir.clone());
+        insert_test_recording(&state, &work_dir, "isolated", "owner", Vec::new());
+        hydrate_web_recording_memo(&state, "isolated", Some("owner")).unwrap();
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker = crate::web_live_asr::start_stalled_test_worker(
+            work_dir.join(".margins"),
+            "isolated".to_string(),
+            entered_tx,
+            release_rx,
+        )
+        .unwrap();
+        state
+            .web_sessions
+            .lock()
+            .unwrap()
+            .get_mut("isolated")
+            .unwrap()
+            .live_asr = Some(worker);
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let barrier = Arc::new(Barrier::new(4));
+        let (done_tx, done_rx) = mpsc::channel();
+        let audio_state = state.clone();
+        let audio_barrier = barrier.clone();
+        let audio_done = done_tx.clone();
+        let audio = std::thread::spawn(move || {
+            audio_barrier.wait();
+            let result = handle_audio_chunk(&audio_state, "isolated", "owner", 0, b"durable");
+            let _ = audio_done.send(("audio", result.is_ok()));
+        });
+        let status_state = state.clone();
+        let status_barrier = barrier.clone();
+        let status_done = done_tx.clone();
+        let status = std::thread::spawn(move || {
+            status_barrier.wait();
+            let result = active_web_recording_status(&status_state).is_some();
+            let _ = status_done.send(("status", result));
+        });
+        let memo_state = state.clone();
+        let memo_barrier = barrier.clone();
+        let memo = std::thread::spawn(move || {
+            memo_barrier.wait();
+            let result = sync_web_recording_memo(
+                &memo_state,
+                "isolated",
+                "owner",
+                vec![MemoLine {
+                    text: "memo while ASR is stalled".to_string(),
+                    created_secs: 1.0,
+                    edited_secs: None,
+                    draft_started_secs: None,
+                    audio_pending_at_mark: false,
+                    block_ordinal: None,
+                }],
+            );
+            let _ = done_tx.send(("memo", result.is_ok()));
+        });
+        barrier.wait();
+
+        let mut completed = std::collections::BTreeSet::new();
+        for _ in 0..3 {
+            let (name, ok) = done_rx.recv_timeout(Duration::from_secs(1)).expect(
+                "audio, status, and memo must complete before the stalled ASR loader is released",
+            );
+            assert!(ok, "{name} failed while ASR was stalled");
+            completed.insert(name);
+        }
+        assert_eq!(completed, ["audio", "memo", "status"].into_iter().collect());
+        release_tx.send(()).unwrap();
+        audio.join().unwrap();
+        status.join().unwrap();
+        memo.join().unwrap();
+        assert_eq!(
+            std::fs::read(
+                state.web_sessions.lock().unwrap()["isolated"]
+                    .webm_path
+                    .clone()
+            )
+            .unwrap(),
+            b"durable"
+        );
+        let _ = std::fs::remove_dir_all(work_dir);
     }
 
     #[test]
@@ -2372,6 +2569,52 @@ mod tests {
     }
 
     #[test]
+    fn whole_notepad_updates_reuse_the_shared_timed_memo_model() {
+        let work_dir = make_test_dir("whole-notepad");
+        let state = make_state(work_dir.clone());
+        let original = MemoLine {
+            text: "Keep this anchor".to_string(),
+            created_secs: 3.0,
+            edited_secs: None,
+            draft_started_secs: None,
+            audio_pending_at_mark: false,
+            block_ordinal: None,
+        };
+        insert_test_recording(
+            &state,
+            &work_dir,
+            "notepad-owned",
+            "notepad-owner",
+            vec![original.clone()],
+        );
+        let before = get_web_recording_notepad(&state, "notepad-owned", "notepad-owner").unwrap();
+        let after = update_web_recording_notepad(
+            &state,
+            "notepad-owned",
+            "notepad-owner",
+            &before.revision,
+            "Keep this anchor\nA new thought",
+        )
+        .unwrap();
+        assert_eq!(after.text, "Keep this anchor\nA new thought");
+        let active = state.web_sessions.lock().unwrap();
+        assert_eq!(active["notepad-owned"].memo_lines[0], original);
+        assert!(active["notepad-owned"].memo_lines[1].created_secs >= 0.0);
+        drop(active);
+        assert!(update_web_recording_notepad(
+            &state,
+            "notepad-owned",
+            "notepad-owner",
+            &before.revision,
+            "stale",
+        )
+        .unwrap_err()
+        .contains("changed somewhere else"));
+        discard_web_recording(&state, "notepad-owned", "notepad-owner").unwrap();
+        let _ = std::fs::remove_dir_all(&work_dir);
+    }
+
+    #[test]
     fn finishing_before_first_webm_is_honest_and_explicitly_discardable() {
         let work_dir = make_test_dir("empty-finish");
         let state = make_state(work_dir.clone());
@@ -2559,6 +2802,103 @@ mod tests {
         drop(sessions);
 
         discard_web_recording(&state, &first.recording_id, "owner-first").unwrap();
+        let _ = std::fs::remove_dir_all(&work_dir);
+    }
+
+    #[test]
+    fn hosted_writer_and_workspace_service_share_session_title_artifact_and_memo_facts() {
+        let work_dir = make_test_dir("workspace-authority-parity");
+        let state = make_state(work_dir.clone());
+        let workspace_home = work_dir.join("workspace-state");
+        let workspace = margins_workflows::workspace::ensure_service_workspace(
+            &workspace_home,
+            "hosted",
+            None,
+            &work_dir,
+            &work_dir,
+        )
+        .unwrap();
+        let service =
+            margins_workflows::workspace_service::WorkspaceService::open("test-host", workspace)
+                .unwrap();
+        let principal =
+            margins_workflows::workspace_service::ServicePrincipal::full("browser-test", "hosted");
+        let started = start_web_recording(
+            &state,
+            work_dir.clone(),
+            "browser-session".to_string(),
+            "browser-owner".to_string(),
+        )
+        .unwrap();
+
+        let page = service.sessions(&principal, None, 10).unwrap();
+        assert_eq!(page.sessions.len(), 1);
+        assert_eq!(page.sessions[0].session_id.as_ref(), "browser-session");
+        margins::session::set_title(
+            &work_dir.join(".margins"),
+            "browser-session",
+            Some("Canonical title".to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            service.sessions(&principal, None, 10).unwrap().sessions[0]
+                .title
+                .as_deref(),
+            Some("Canonical title")
+        );
+        let artifact_dir = work_dir.join(".margins/artifacts/browser-session");
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        std::fs::write(artifact_dir.join("proof.bin"), b"proof").unwrap();
+        margins::session::upsert_session_artifact(
+            &work_dir.join(".margins"),
+            "browser-session",
+            "proof",
+            0,
+            ".margins/artifacts/browser-session/proof.bin",
+            "durable",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            service.artifacts(&principal, "browser-session").unwrap()[0].size_bytes,
+            Some(5)
+        );
+
+        let first =
+            get_web_recording_notepad(&state, &started.recording_id, "browser-owner").unwrap();
+        update_web_recording_notepad(
+            &state,
+            &started.recording_id,
+            "browser-owner",
+            &first.revision,
+            "Browser note",
+        )
+        .unwrap();
+        let shared = service
+            .memo(
+                &principal,
+                &margins_meeting_protocol::SessionId("browser-session".to_string()),
+            )
+            .unwrap();
+        assert_eq!(shared.lines[0].text, "Browser note");
+        service
+            .update_memo(
+                &principal,
+                &margins_meeting_protocol::SessionId("browser-session".to_string()),
+                &margins_meeting_protocol::WorkspaceMemoUpdateV1 {
+                    request_id: "service-edit".to_string(),
+                    expected_revision: shared.revision,
+                    observed_at_ms: margins_meeting_protocol::SessionMillis(2_000),
+                    paused: false,
+                    text: "Browser note\nService note".to_string(),
+                },
+            )
+            .unwrap();
+        let reflected =
+            get_web_recording_notepad(&state, &started.recording_id, "browser-owner").unwrap();
+        assert_eq!(reflected.text, "Browser note\nService note");
+
+        discard_web_recording(&state, &started.recording_id, "browser-owner").unwrap();
         let _ = std::fs::remove_dir_all(&work_dir);
     }
 

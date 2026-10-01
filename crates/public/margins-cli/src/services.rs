@@ -61,10 +61,8 @@ pub trait ProjectService: Send + Sync {
     ) -> anyhow::Result<ResolvedProject>;
 }
 
-/// Path-scoped compatibility store used by the public CLI while the richer
-/// aggregate repository remains available to embedders through `margins-core`.
-/// Keeping this port injected prevents parser/dispatch tests from depending on
-/// process globals or a particular database owner.
+/// Injectable view of the canonical Workspace session owner. Paths identify a
+/// resolved capture store; callers never infer them inside this port.
 pub trait SessionStore: Send + Sync {
     fn current(&self, margins_dir: &Path) -> anyhow::Result<Option<String>>;
     fn set_current(&self, margins_dir: &Path, session_id: &str) -> anyhow::Result<()>;
@@ -73,8 +71,11 @@ pub trait SessionStore: Send + Sync {
         &self,
         margins_dir: &Path,
         session_id: &str,
-    ) -> anyhow::Result<margins_store::legacy::SessionMeta>;
-    fn list(&self, margins_dir: &Path) -> anyhow::Result<Vec<margins_store::legacy::SessionInfo>>;
+    ) -> anyhow::Result<margins_store::canonical::SessionMeta>;
+    fn list(
+        &self,
+        margins_dir: &Path,
+    ) -> anyhow::Result<Vec<margins_store::canonical::SessionInfo>>;
     fn set_title(
         &self,
         margins_dir: &Path,
@@ -133,19 +134,22 @@ impl SessionStore for LocalSessionStore {
     }
 
     fn exists(&self, margins_dir: &Path, session_id: &str) -> anyhow::Result<bool> {
-        margins_store::legacy::session_exists(margins_dir, session_id)
+        margins_store::canonical::session_exists(margins_dir, session_id)
     }
 
     fn get(
         &self,
         margins_dir: &Path,
         session_id: &str,
-    ) -> anyhow::Result<margins_store::legacy::SessionMeta> {
-        margins_store::legacy::get_session_meta(margins_dir, session_id)
+    ) -> anyhow::Result<margins_store::canonical::SessionMeta> {
+        margins_store::canonical::get_session_meta(margins_dir, session_id)
     }
 
-    fn list(&self, margins_dir: &Path) -> anyhow::Result<Vec<margins_store::legacy::SessionInfo>> {
-        margins_store::legacy::list_sessions(margins_dir)
+    fn list(
+        &self,
+        margins_dir: &Path,
+    ) -> anyhow::Result<Vec<margins_store::canonical::SessionInfo>> {
+        margins_store::canonical::list_sessions(margins_dir)
     }
 
     fn set_title(
@@ -154,15 +158,15 @@ impl SessionStore for LocalSessionStore {
         session_id: &str,
         title: Option<String>,
     ) -> anyhow::Result<Option<String>> {
-        margins_store::legacy::set_title(margins_dir, session_id, title)
+        margins_store::canonical::set_title(margins_dir, session_id, title)
     }
 
     fn start_time(&self, margins_dir: &Path, session_id: &str) -> anyhow::Result<DateTime<Local>> {
-        margins_store::legacy::get_session_start_time(margins_dir, session_id)
+        margins_store::canonical::get_session_start_time(margins_dir, session_id)
     }
 
     fn next_segment_ordinal(&self, margins_dir: &Path, session_id: &str) -> anyhow::Result<i64> {
-        margins_store::legacy::next_segment_index(margins_dir, session_id)
+        margins_store::canonical::next_segment_index(margins_dir, session_id)
     }
 
     fn create(
@@ -172,7 +176,7 @@ impl SessionStore for LocalSessionStore {
         started_at: &DateTime<Local>,
         memo_uri: &str,
     ) -> anyhow::Result<()> {
-        margins_store::legacy::create_session(margins_dir, session_id, started_at, memo_uri)
+        margins_store::canonical::create_session(margins_dir, session_id, started_at, memo_uri)
     }
 
     fn append_segment(
@@ -183,7 +187,7 @@ impl SessionStore for LocalSessionStore {
         audio_uri: &str,
         offset_ms: i64,
     ) -> anyhow::Result<()> {
-        margins_store::legacy::add_segment(
+        margins_store::canonical::add_segment(
             margins_dir,
             session_id,
             ordinal,
@@ -200,7 +204,7 @@ impl SessionStore for LocalSessionStore {
         ordinal: i64,
         duration_secs: f64,
     ) -> anyhow::Result<()> {
-        margins_store::legacy::update_segment_duration(
+        margins_store::canonical::update_segment_duration(
             margins_dir,
             session_id,
             ordinal,
@@ -216,7 +220,7 @@ impl SessionStore for LocalSessionStore {
         ordinal: i64,
         uri: &str,
     ) -> anyhow::Result<()> {
-        margins_store::legacy::upsert_session_artifact(
+        margins_store::canonical::upsert_session_artifact(
             margins_dir,
             session_id,
             kind,

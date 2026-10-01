@@ -8,12 +8,28 @@ use std::path::PathBuf;
     about = "Record meetings and work with their notes and transcripts"
 )]
 pub struct Args {
+    /// Select an opt-in remote Margins instance (ssh://alias or https://host)
+    #[arg(long, global = true, conflicts_with = "local")]
+    pub remote: Option<String>,
+    /// Force the direct local adapter even when MARGINS_REMOTE is set
+    #[arg(long, global = true, conflicts_with = "remote")]
+    pub local: bool,
     #[command(subcommand)]
     pub command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Inspect and recover opt-in remote capture transfers
+    Transfers {
+        #[command(subcommand)]
+        command: TransfersCommand,
+    },
+    /// Administer or discover the local Workspace service
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
     /// Define and inspect the memory boundary for one practice
     Workspace {
         #[command(subcommand)]
@@ -65,6 +81,60 @@ pub enum Command {
     Ls,
     /// Change the current session's display title
     Rename { title: String },
+    /// Read or revision-check an edit to the remote timed memo
+    Memo {
+        /// Stable meeting id; defaults to the client-scoped current session
+        meeting_id: Option<String>,
+        /// Whole notepad text to reconcile at the observed capture time
+        #[arg(long, requires = "expected_revision")]
+        text: Option<String>,
+        /// Revision returned by the preceding memo read
+        #[arg(long)]
+        expected_revision: Option<String>,
+        /// Stable retry identity; generated when omitted
+        #[arg(long)]
+        request_id: Option<String>,
+        /// Capture-timeline observation time for this edit
+        #[arg(long)]
+        observed_at_ms: Option<u64>,
+        /// Record this edit as occurring while capture was paused
+        #[arg(long)]
+        paused: bool,
+    },
+    /// Read, link, or unlink a Source-relative session note reference
+    NoteAssociation {
+        /// Stable meeting id; defaults to the client-scoped current session
+        meeting_id: Option<String>,
+        /// Declared logical Source id for a new association
+        #[arg(long, requires = "path")]
+        source: Option<String>,
+        /// Source-relative Markdown path; note bytes stay in native sync
+        #[arg(long, requires = "source")]
+        path: Option<String>,
+        /// Optional hash observed by the client that wrote the note
+        #[arg(long)]
+        hash: Option<String>,
+        /// Remove the current association
+        #[arg(long, conflicts_with_all = ["source", "path", "hash"])]
+        unlink: bool,
+        /// Revision returned by the preceding association read
+        #[arg(long)]
+        expected_revision: Option<u64>,
+        /// Stable retry identity for a link operation
+        #[arg(long)]
+        request_id: Option<String>,
+        /// bb distillation thread id recorded with a linked note
+        #[arg(long, requires_all = ["memo_revision", "source", "path"], conflicts_with = "unlink")]
+        bb_thread_id: Option<String>,
+        /// Memo revision used to produce the linked note
+        #[arg(long, requires = "bb_thread_id", conflicts_with = "unlink")]
+        memo_revision: Option<String>,
+    },
+    /// Show the latest Margins processing job independently of note links
+    ProcessingStatus {
+        /// Stable meeting id; defaults to the client-scoped current session
+        meeting_id: Option<String>,
+    },
     /// List recent Margins meetings as XML
     Recent {
         /// List meetings across every registered vault, not just this one
@@ -172,6 +242,42 @@ pub enum Command {
     Init,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum TransfersCommand {
+    /// List locally recoverable remote transfers
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Retry delivery of one recoverable transfer
+    Retry { transfer_id: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ServiceCommand {
+    /// Print SSH-safe discovery metadata and a short-lived scoped credential
+    Discover {
+        #[arg(long, required = true)]
+        json: bool,
+        /// Explicit service state directory for isolated provisioning/verification
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+    /// Issue a revocable upload-only credential for a Shortcut installation
+    PairShortcut {
+        #[arg(long)]
+        principal: String,
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Revoke all credentials for a principal
+    Revoke {
+        principal: String,
+        #[arg(long, required = true)]
+        json: bool,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum SetupStepArg {
     Catalyst,
@@ -192,6 +298,31 @@ pub enum SetupLocalModelPolicyArg {
 
 #[derive(Debug, Subcommand)]
 pub enum WorkspaceCommand {
+    /// Remove a Workspace declaration only when it has no stored data
+    Remove {
+        /// Workspace id to remove; declared Source folders are preserved
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List Workspaces and the machine default
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read or set the machine's default Workspace
+    Default {
+        /// Set the default to an existing Workspace id
+        #[arg(long)]
+        set: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read the selected Workspace's reviewed Home note destination
+    Destination {
+        #[arg(long, required = true)]
+        json: bool,
+    },
     /// Create a workspace with one writable home notes source
     New {
         /// Stable lowercase workspace id
@@ -218,6 +349,15 @@ pub enum WorkspaceCommand {
         #[arg(long)]
         desired: PathBuf,
         /// Emit margins.workspace.plan.v1 JSON
+        #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Propose Workspace recall settings from the declared Home Source
+    Compile {
+        /// Optional relative folder for approved notes under Home
+        #[arg(long)]
+        note_folder: Option<String>,
+        /// Emit a machine-readable proposal and complete desired TOML
         #[arg(long, required = true)]
         json: bool,
     },

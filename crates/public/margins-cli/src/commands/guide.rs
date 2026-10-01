@@ -3,8 +3,9 @@ use crate::output::line;
 use std::io::Write;
 
 pub fn workspace_setup(stdout: &mut dyn Write) -> Result<(), CliError> {
+    let guide = margins_workflows::resources::margins_workspace_setup_guide();
     stdout
-        .write_all(margins_workflows::resources::MARGINS_WORKSPACE_SETUP_GUIDE.as_bytes())
+        .write_all(guide.as_bytes())
         .map_err(|error| CliError::from_anyhow(error.into()))
 }
 

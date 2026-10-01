@@ -13,6 +13,7 @@ mod audio_devices;
 mod backchannel_ai;
 mod calendar;
 pub mod ctx;
+mod desktop_live;
 mod device_registry;
 mod dispatch;
 mod editor;
@@ -336,20 +337,7 @@ impl Drop for DistillCancelGuard {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-struct MemoLine {
-    text: String,
-    created_secs: f64,
-    edited_secs: Option<f64>,
-    #[serde(default)]
-    draft_started_secs: Option<f64>,
-    #[serde(default)]
-    audio_pending_at_mark: bool,
-    /// null = timed (clock was running); 0 = prep block; N = pause block after segment N.
-    /// When non-null, created_secs is NOT a timeline mark.
-    #[serde(default)]
-    block_ordinal: Option<u32>,
-}
+type MemoLine = margins::core::TimedMemoLine;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct BackchannelSuggestionEvent {
@@ -476,7 +464,7 @@ fn session_artifact_dir(margins_dir: &Path, session_name: &str) -> PathBuf {
     margins_dir.join("artifacts").join(session_name)
 }
 
-fn session_transcript_artifact_path(margins_dir: &Path, session_name: &str) -> PathBuf {
+pub(crate) fn session_transcript_artifact_path(margins_dir: &Path, session_name: &str) -> PathBuf {
     session_artifact_dir(margins_dir, session_name).join("transcript.md")
 }
 
@@ -494,7 +482,7 @@ fn recording_combined_rel_path(session_name: &str) -> String {
     format!(".margins/recordings/{session_name}_combined.wav")
 }
 
-fn session_transcript_artifact_registry_path(session_name: &str) -> String {
+pub(crate) fn session_transcript_artifact_registry_path(session_name: &str) -> String {
     format!(".margins/artifacts/{session_name}/transcript.md")
 }
 
@@ -514,7 +502,10 @@ fn temporary_artifact_expires_at() -> String {
     (Local::now() + ChronoDuration::days(7)).to_rfc3339()
 }
 
-fn register_transcript_artifact(margins_dir: &Path, session_name: &str) -> Result<(), String> {
+pub(crate) fn register_transcript_artifact(
+    margins_dir: &Path,
+    session_name: &str,
+) -> Result<(), String> {
     session::upsert_session_artifact(
         margins_dir,
         session_name,
@@ -593,7 +584,7 @@ fn is_valid_session_transcript_checkpoint(content: &str, session_name: &str) -> 
 /// record. We therefore validate only genuineness: non-empty content whose
 /// `Session:` header names this session. This is the fix for the
 /// silent / memo-only / capture-without-model finish flow.
-fn is_valid_terminal_transcript_checkpoint(content: &str, session_name: &str) -> bool {
+pub(crate) fn is_valid_terminal_transcript_checkpoint(content: &str, session_name: &str) -> bool {
     !content.trim().is_empty()
         && session_transcript_checkpoint_session_name(content) == Some(session_name)
 }
@@ -607,7 +598,7 @@ fn read_valid_session_transcript_checkpoint(
     is_valid_session_transcript_checkpoint(&content, session_name).then_some(content)
 }
 
-fn write_atomic_utf8(path: &Path, content: &str) -> Result<(), String> {
+pub(crate) fn write_atomic_utf8(path: &Path, content: &str) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("invalid path {}", path.display()))?;
@@ -625,8 +616,22 @@ fn write_atomic_utf8(path: &Path, content: &str) -> Result<(), String> {
         std::process::id(),
         Local::now().timestamp_nanos_opt().unwrap_or_default()
     ));
-    std::fs::write(&temp, content)
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temp)
+        .map_err(|e| {
+            format!(
+                "failed to create temporary artifact {}: {e}",
+                temp.display()
+            )
+        })?;
+    use std::io::Write as _;
+    file.write_all(content.as_bytes())
         .map_err(|e| format!("failed to write temporary artifact {}: {e}", temp.display()))?;
+    file.sync_all()
+        .map_err(|e| format!("failed to sync temporary artifact {}: {e}", temp.display()))?;
+    drop(file);
     std::fs::rename(&temp, path).map_err(|e| {
         let _ = std::fs::remove_file(&temp);
         format!(
@@ -634,7 +639,17 @@ fn write_atomic_utf8(path: &Path, content: &str) -> Result<(), String> {
             path.display(),
             temp.display()
         )
-    })
+    })?;
+    #[cfg(unix)]
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|e| {
+            format!(
+                "failed to sync artifact directory {}: {e}",
+                parent.display()
+            )
+        })?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -930,52 +945,6 @@ mod tests {
         }
         assert_eq!(refresh_calls, 4);
 
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn qualified_live_transcript_retains_audio_fallback() {
-        initialize_test_sqlite_runtime();
-        let root = std::env::temp_dir().join(format!(
-            "margins-live-audio-retention-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let margins_dir = root.join(".margins");
-        let recordings = margins_dir.join("recordings");
-        std::fs::create_dir_all(&recordings).unwrap();
-        session::create_session(
-            &margins_dir,
-            "live-retention",
-            &Local::now(),
-            ".margins/live-retention.md",
-        )
-        .unwrap();
-        session::add_segment(
-            &margins_dir,
-            "live-retention",
-            0,
-            ".margins/recordings/live-retention_seg0.wav",
-            0,
-            Some(1.0),
-        )
-        .unwrap();
-        let audio = recordings.join("live-retention_seg0.wav");
-        std::fs::write(&audio, b"fallback").unwrap();
-        let transcript = session_transcript_artifact_path(&margins_dir, "live-retention");
-        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-        std::fs::write(
-            &transcript,
-            "# Transcript\n\nSession: `live-retention`\nTranscript source: `live_qualified`\n\n[00:01] user: words\n",
-        )
-        .unwrap();
-        let meta = session::get_session_meta(&margins_dir, "live-retention").unwrap();
-
-        delete_audio_after_aligned_transcript(&root, &margins_dir, "live-retention", &meta);
-        assert!(audio.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2167,7 +2136,7 @@ fn provision_recall(vault: &Path) -> Result<margins::recall::SearchHandle, Strin
         .map_err(|e| format!("recall provisioning failed: {e:#}"))
 }
 
-#[cfg(feature = "recall")]
+#[cfg(any(feature = "recall", feature = "live-runtime", feature = "server"))]
 fn resolve_recall_workspace(
     path: &Path,
 ) -> Result<margins_workflows::workspace::ResolvedWorkspace, String> {
@@ -2737,13 +2706,8 @@ fn update_session_title(
             let renamed_path_string = renamed_path.to_string_lossy().to_string();
             let current_path_string = current_path.to_string_lossy().to_string();
             if session::get_session_meta(&margins_dir, &name).is_ok() {
-                session::move_session_vault_note_path(
-                    &margins_dir,
-                    &name,
-                    &current_path_string,
-                    &renamed_path_string,
-                )
-                .map_err(|e| e.to_string())?;
+                link_workspace_note(&margins_dir, &name, &renamed_path_string)?;
+                let _ = session::remove_vault_note_by_path(&margins_dir, &current_path_string);
             } else {
                 session::move_vault_note_path_by_id(
                     &margins_dir,
@@ -3638,7 +3602,6 @@ fn reconcile_project_notes(
     project_id: Option<String>,
 ) -> Result<Vec<SessionInfoDto>, String> {
     let work_dir = work_dir_for_project_id(&state, project_id.as_deref());
-    let margins_dir = work_dir.join(".margins");
     let settings = state.settings.lock().unwrap().clone();
     let resolved_project_id = project_id
         .clone()
@@ -3649,17 +3612,8 @@ fn reconcile_project_notes(
         .unwrap()
         .as_ref()
         .map(|r| r.session_name.clone());
-    for name in session_index::sessions_with_deleted_notes(
-        &work_dir,
-        &settings,
-        resolved_project_id.as_deref(),
-    ) {
-        if recording_name.as_deref() == Some(name.as_str()) {
-            continue;
-        }
-        cancel_distill_for_session(&state, &name);
-        let _ = delete_session_fully(&work_dir, &margins_dir, &name);
-    }
+    // A missing linked note is an availability fact, not permission to remove
+    // the session or its audio. Removal remains an explicit delete operation.
     session_index::list_sessions_with_notes(
         &work_dir,
         &settings,
@@ -3813,31 +3767,6 @@ fn delete_session_artifacts(
     Ok(())
 }
 
-fn delete_audio_after_aligned_transcript(
-    work_dir: &Path,
-    margins_dir: &Path,
-    name: &str,
-    meta: &session::SessionMeta,
-) {
-    let transcript_path = session_transcript_artifact_path(margins_dir, name);
-    let Ok(transcript) = std::fs::read_to_string(&transcript_path) else {
-        return;
-    };
-    // A qualified live transcript is safe for immediate note generation, but
-    // retain WAV audio as the durable repair/retranscription fallback. Only an
-    // independently rebuilt offline/import transcript permits audio cleanup.
-    if transcript.contains("Transcript source: `live_qualified`") {
-        return;
-    }
-
-    for seg in &meta.segments {
-        let _ = std::fs::remove_file(work_dir.join(&seg.wav_path));
-    }
-    let _ = std::fs::remove_file(work_dir.join(recording_combined_rel_path(name)));
-    let _ = std::fs::remove_file(margins_dir.join(format!("{name}_combined.wav")));
-    let _ = std::fs::remove_dir(margins_dir.join("recordings"));
-}
-
 pub(crate) fn verify_capture_ready_for_processing(
     work_dir: &Path,
     margins_dir: &Path,
@@ -3912,10 +3841,7 @@ async fn start_recording(
 
 #[cfg(feature = "tauri-app")]
 #[tauri::command]
-fn cancel_recording_startup(
-    app: AppHandle,
-    state: tauri::State<'_, Arc<AppState>>,
-) -> bool {
+fn cancel_recording_startup(app: AppHandle, state: tauri::State<'_, Arc<AppState>>) -> bool {
     let result = cancel_recording_startup_impl(&state);
     aux_windows::reconcile_from_state(&app, &state);
     result
@@ -4085,30 +4011,13 @@ fn append_active_pad_line(
     text: String,
 ) -> Result<(), String> {
     validate_session_name(&session_name)?;
-    let text = text.trim().to_string();
-    if text.is_empty() {
-        return Err("A Pad mark cannot be empty.".to_string());
-    }
-
-    let mut guard = state.recording.lock().unwrap();
-    let recording = guard.as_mut().ok_or("There is no active capture.")?;
-    ensure_memo_session(&session_name, &recording.session_name)?;
-    let status = recording_status_from_state(recording);
-    let block_ordinal = recording
-        .paused
-        .then(|| recording.segment_index.saturating_add(1) as u32);
-    let mut lines = recording.memo_lines.clone();
-    lines.push(MemoLine {
-        text,
-        created_secs: status.elapsed_secs,
-        edited_secs: None,
-        draft_started_secs: None,
-        audio_pending_at_mark: false,
-        block_ordinal,
-    });
-    persist_live_memo(&recording.work_dir, &recording.session_name, &lines)?;
-    recording.memo_lines = lines;
-    Ok(())
+    desktop_live::append_active_memo_text(&state, &session_name, text).map_err(|error| {
+        if error == "Memo text cannot be empty." {
+            "A Pad mark cannot be empty.".to_string()
+        } else {
+            error
+        }
+    })
 }
 
 #[cfg(feature = "tauri-app")]
@@ -4751,14 +4660,36 @@ async fn run_backchannel_steer_request(
     }
 }
 
-fn persist_live_memo(
+pub(crate) fn persist_live_memo(
     work_dir: &std::path::Path,
     session_name: &str,
     lines: &[MemoLine],
 ) -> Result<(), String> {
-    let memo_content = export_memo(lines);
-    let notes_path = session_memo_path(work_dir, session_name);
-    std::fs::write(&notes_path, &memo_content).map_err(|e| e.to_string())
+    let authority =
+        margins::session::SqliteWorkspaceAuthorityStorage::open(work_dir.join(".margins"))
+            .map_err(|error| error.to_string())?;
+    let current = authority
+        .memo(session_name)
+        .map_err(|error| error.to_string())?;
+    if current.lines == lines {
+        return Ok(());
+    }
+    let desired = margins::core::TimedMemoDocument::from_committed(lines.to_vec()).revision();
+    use sha2::{Digest as _, Sha256};
+    let request_id = format!(
+        "desktop-memo-{:x}",
+        Sha256::digest(format!("{}\0{desired}", current.revision).as_bytes())
+    );
+    authority
+        .replace_memo_lines(
+            session_name,
+            "desktop-local",
+            &request_id,
+            &current.revision,
+            lines,
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 fn ensure_memo_session(expected: &str, active: &str) -> Result<(), String> {
@@ -6975,13 +6906,9 @@ fn import_transcript_for_state(
     let memo_content = args
         .memo
         .unwrap_or_else(|| format!("# {title}\n\nImported transcript captured through Margins.\n"));
+    let imported_memo = margins::core::TimedMemoDocument::parse_markdown(&memo_content);
+    persist_live_memo(&work_dir, &name, imported_memo.lines())?;
     let memo_path = session_memo_path(&work_dir, &name);
-    if let Some(parent) = memo_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create memo directory {}: {e}", parent.display()))?;
-    }
-    std::fs::write(&memo_path, &memo_content)
-        .map_err(|e| format!("failed to write memo {}: {e}", memo_path.display()))?;
 
     session::add_segment(
         &margins_dir,
@@ -7124,7 +7051,7 @@ fn recording_transcript_label(channel: u32, channel_semantics: Option<&str>) -> 
 /// and/or the tail of the conversation), this artifact is produced from the
 /// offline transcription of the recorded WAV, so it carries both the local mic
 /// and the remote/system channel in full.
-fn render_aligned_markdown(
+pub(crate) fn render_aligned_markdown(
     session_name: &str,
     source_label: &str,
     memo: &str,
@@ -7393,6 +7320,63 @@ fn write_aligned_sidecar_headless(
     }
     register_transcript_artifact(margins_dir, name)?;
     Ok(summary)
+}
+
+/// Prepare speech for an ended hosted browser capture without starting note
+/// generation. Browser WebM capture has a finalized local WAV but no remote
+/// producer authority record, so the remote-lane ASR job cannot read it.
+pub(crate) async fn transcribe_hosted_browser_session(
+    ctx: &ctx::Ctx,
+    name: String,
+) -> Result<String, String> {
+    #[cfg(feature = "parakeet-asr")]
+    {
+        let work_dir = ctx.state.work_dir.lock().unwrap().clone();
+        return tokio::task::spawn_blocking(move || {
+            validate_session_name(&name)?;
+            let margins_dir = work_dir.join(".margins");
+            let meta = session::get_session_meta(&margins_dir, &name)
+                .map_err(|error| error.to_string())?;
+            verify_capture_ready_for_processing(&work_dir, &margins_dir, &meta)?;
+            let memo_path = session_memo_path(&work_dir, &name);
+            let summary =
+                write_aligned_sidecar_headless(&work_dir, &margins_dir, &name, &memo_path)?;
+            let aligned = read_session_transcript_artifact(&margins_dir, &name)
+                .ok_or_else(|| "Prepared transcript could not be read".to_string())?;
+            if transcript_count_in_markdown(&aligned) == 0 {
+                return Err("No speech was detected in the captured audio".to_string());
+            }
+            let job_id = format!("transcribe-browser:{name}");
+            let input_revision = note_job_input_revision(&work_dir, &margins_dir, &meta);
+            let job = session::begin_processing_job(
+                &margins_dir,
+                &name,
+                &job_id,
+                "transcribe_session",
+                &input_revision,
+            )
+            .map_err(|error| error.to_string())?;
+            session::update_processing_job(
+                &margins_dir,
+                &job_id,
+                job.attempt,
+                "complete",
+                Some(1.0),
+                Some(&format!(".margins/artifacts/{name}/transcript.md")),
+                None,
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(summary)
+        })
+        .await
+        .map_err(|error| format!("Transcription worker stopped: {error}"))?;
+    }
+    #[cfg(not(feature = "parakeet-asr"))]
+    {
+        let _ = (ctx, name);
+        Err("Headless transcription is not enabled in this server build".to_string())
+    }
 }
 
 /// Parse the /tmp transcript JSON paths returned by `transcribe_segments` into
@@ -7724,8 +7708,8 @@ async fn import_audio_file(
             path,
             created.format("%Y-%m-%d %H:%M:%S")
         );
-        std::fs::write(session_memo_path(work_dir, name), &stub_memo)
-            .map_err(|e| format!("Failed to write stub memo: {e}"))?;
+        let imported_memo = margins::core::TimedMemoDocument::parse_markdown(&stub_memo);
+        persist_live_memo(work_dir, name, imported_memo.lines())?;
 
         let transcript = render_imported_transcript_markdown(name, path, &stub_memo, &timeline);
         let transcript_path = session_transcript_artifact_path(margins_dir, name);
@@ -7736,9 +7720,6 @@ async fn import_audio_file(
         std::fs::write(&transcript_path, transcript)
             .map_err(|e| format!("Failed to write transcript artifact: {e}"))?;
         register_transcript_artifact(margins_dir, name)?;
-        let meta = session::get_session_meta(margins_dir, name).map_err(|e| e.to_string())?;
-        delete_audio_after_aligned_transcript(work_dir, margins_dir, name, &meta);
-
         Ok(())
     })
     .await
@@ -7874,6 +7855,109 @@ fn parse_memo_line_for_context(line: &str) -> Option<(u64, String)> {
 // Commands: Processing pipeline
 // ---------------------------------------------------------------------------
 
+fn link_workspace_note(margins_dir: &Path, name: &str, note_path: &str) -> Result<(), String> {
+    let workspace = margins_dir
+        .parent()
+        .ok_or("Margins store has no workspace parent")?;
+    let note = Path::new(note_path);
+    let relative = note.strip_prefix(workspace).map_err(|_| {
+        format!(
+            "Saved note must remain inside the selected workspace: {}",
+            note.display()
+        )
+    })?;
+    let relative = relative
+        .to_str()
+        .ok_or("Saved note path is not valid UTF-8")?;
+    let expected = session::get_note_association(margins_dir, name)
+        .map_err(|error| error.to_string())?
+        .map_or(0, |association| association.revision);
+    session::link_note(margins_dir, name, "workspace", relative, None, expected)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn publish_workspace_note(
+    margins_dir: &Path,
+    name: &str,
+    note_path: &str,
+    job_id: &str,
+    attempt: u64,
+) -> Result<(), String> {
+    use sha2::{Digest as _, Sha256};
+    let workspace = margins_dir
+        .parent()
+        .ok_or("Margins store has no workspace parent")?;
+    let note = Path::new(note_path);
+    let relative = note.strip_prefix(workspace).map_err(|_| {
+        format!(
+            "Saved note must remain inside the selected workspace: {}",
+            note.display()
+        )
+    })?;
+    let relative = relative
+        .to_str()
+        .ok_or("Saved note path is not valid UTF-8")?;
+    let content_hash = std::fs::read(note)
+        .ok()
+        .map(|content| format!("sha256:{:x}", Sha256::digest(content)));
+    let expected = session::get_note_association(margins_dir, name)
+        .map_err(|error| error.to_string())?
+        .map_or(0, |association| association.revision);
+    session::complete_processing_job_with_note(
+        margins_dir,
+        job_id,
+        attempt,
+        "workspace",
+        relative,
+        content_hash.as_deref(),
+        expected,
+    )
+    .map(|_| ())
+    .map_err(|error| error.to_string())
+}
+
+fn note_job_input_revision(
+    work_dir: &Path,
+    margins_dir: &Path,
+    meta: &session::SessionMeta,
+) -> String {
+    use sha2::{Digest as _, Sha256};
+    let mut digest = Sha256::new();
+    if let Ok(encoded) = serde_json::to_vec(meta) {
+        digest.update(encoded);
+    }
+    for path in [
+        session_memo_path(work_dir, &meta.name),
+        session_transcript_artifact_path(margins_dir, &meta.name),
+    ]
+    .into_iter()
+    .chain(
+        meta.segments
+            .iter()
+            .map(|segment| work_dir.join(&segment.wav_path)),
+    ) {
+        digest.update(path.to_string_lossy().as_bytes());
+        if let Ok(metadata) = path.metadata() {
+            digest.update(metadata.len().to_le_bytes());
+            if let Ok(modified) = metadata.modified().and_then(|time| {
+                time.duration_since(UNIX_EPOCH)
+                    .map_err(std::io::Error::other)
+            }) {
+                digest.update(modified.as_nanos().to_le_bytes());
+            }
+        }
+        if path == session_memo_path(work_dir, &meta.name)
+            || path == session_transcript_artifact_path(margins_dir, &meta.name)
+        {
+            if let Ok(content) = std::fs::read(&path) {
+                digest.update(content);
+            }
+        }
+    }
+    format!("sha256:{:x}", digest.finalize())
+}
+
 #[cfg(feature = "tauri-app")]
 #[tauri::command]
 fn cancel_process_session(
@@ -7884,6 +7968,13 @@ fn cancel_process_session(
     validate_session_name(&name)?;
     if let Some(flag) = state.distill_cancel.lock().unwrap().get(&name) {
         flag.store(true, Ordering::SeqCst);
+    }
+    let work_dir = work_dir_for_project_id(&state, _project_id.as_deref());
+    let margins_dir = work_dir.join(".margins");
+    if let Some(job) =
+        session::latest_processing_job(&margins_dir, &name).map_err(|e| e.to_string())?
+    {
+        let _ = session::cancel_processing_job(&margins_dir, &job.job_id, job.attempt);
     }
     Ok(())
 }
@@ -7898,7 +7989,13 @@ fn clear_session_note_error(
     validate_session_name(&name)?;
     let work_dir = work_dir_for_project_id(&state, project_id.as_deref());
     let margins_dir = work_dir.join(".margins");
-    session::clear_note_error(&margins_dir, &name).map_err(|e| e.to_string())
+    if let Some(job) =
+        session::latest_processing_job(&margins_dir, &name).map_err(|e| e.to_string())?
+    {
+        session::dismiss_processing_job_failure(&margins_dir, &job.job_id)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[cfg(feature = "tauri-app")]
@@ -7944,9 +8041,17 @@ async fn process_session(
     let trace_dir = settings_trace_margins_dir(&settings, &work_dir);
     let _ = std::fs::create_dir_all(&margins_dir);
     let _ = std::fs::create_dir_all(&trace_dir);
-    let _ = session::clear_note_error(&margins_dir, &name);
-    // Advisory progress only: terminal UI status must come from note_error and saved-note state.
-    let _ = session::set_processing_state(&margins_dir, &name, "none", None);
+    let meta = session::get_session_meta(&margins_dir, &name).map_err(|e| e.to_string())?;
+    let input_revision = note_job_input_revision(&work_dir, &margins_dir, &meta);
+    let job_id = format!("note:{name}");
+    let job = session::begin_processing_job(
+        &margins_dir,
+        &name,
+        &job_id,
+        "distill_note",
+        &input_revision,
+    )
+    .map_err(|e| e.to_string())?;
     let trace_path = trace_dir.join(format!("{}_distill_trace.jsonl", name));
     let trace_file = std::fs::File::create(&trace_path)
         .ok()
@@ -8012,8 +8117,16 @@ async fn process_session(
                         } else {
                             clean
                         };
-                        let _ =
-                            session::set_note_failure(&margins_dir, &name, &saved, failed_stage);
+                        let _ = session::update_processing_job(
+                            &margins_dir,
+                            &job.job_id,
+                            job.attempt,
+                            "failed",
+                            None,
+                            None,
+                            Some(&saved),
+                            failed_stage,
+                        );
                         emit_lifecycle(ProcessingTrack::Note, "failed", "error", &saved, None);
                     }
                     return Err(message);
@@ -8040,7 +8153,6 @@ async fn process_session(
         "Preparing context from marks and capture.",
         Some(0.08),
     );
-    let meta = note_job!(session::get_session_meta(&margins_dir, &name).map_err(|e| e.to_string()));
     note_job!(verify_capture_ready_for_processing(
         &work_dir,
         &margins_dir,
@@ -8075,7 +8187,16 @@ async fn process_session(
         max_speakers,
         || {
             failed_stage = Some("transcribe");
-            let _ = session::set_processing_state(&margins_dir, &name, "transcribing", None);
+            let _ = session::update_processing_job(
+                &margins_dir,
+                &job.job_id,
+                job.attempt,
+                "running",
+                Some(0.3),
+                None,
+                None,
+                Some("transcribe"),
+            );
             let preparing_message = if refresh_transcript {
                 "Refreshing transcript before writing the note..."
             } else {
@@ -8167,7 +8288,16 @@ async fn process_session(
         Some(0.6),
     );
     failed_stage = Some("distill");
-    let _ = session::set_processing_state(&margins_dir, &name, "distilling", None);
+    let _ = session::update_processing_job(
+        &margins_dir,
+        &job.job_id,
+        job.attempt,
+        "running",
+        Some(0.62),
+        None,
+        None,
+        Some("distill"),
+    );
     emit_lifecycle(
         ProcessingTrack::Note,
         "writing",
@@ -8289,13 +8419,23 @@ async fn process_session(
             let _ = delete_file_if_present(np);
             return Err(DISTILL_CANCELLED_SENTINEL.to_string());
         }
-        if let Err(err) = session::set_vault_note_path(&margins_dir, &name, np) {
+        if let Err(err) = publish_workspace_note(&margins_dir, &name, np, &job.job_id, job.attempt)
+        {
             if session::is_session_tombstoned(&margins_dir, &name).unwrap_or(false) {
                 let _ = delete_file_if_present(np);
                 return Err(DISTILL_CANCELLED_SENTINEL.to_string());
             }
             let message = err.to_string();
-            let _ = session::set_note_failure(&margins_dir, &name, &message, failed_stage);
+            let _ = session::update_processing_job(
+                &margins_dir,
+                &job.job_id,
+                job.attempt,
+                "failed",
+                None,
+                None,
+                Some(&message),
+                failed_stage,
+            );
             emit_lifecycle(ProcessingTrack::Note, "failed", "error", &message, None);
             return Err(message);
         }
@@ -8324,11 +8464,18 @@ async fn process_session(
     if outcome.note_path.is_some() {
         schedule_background_enzyme_refresh(&app, &settings, project_id.as_deref());
     }
-    // Note is saved — now it is safe to reclaim the captured audio. Deferring the
-    // deletion to this point keeps audio available as a re-transcribe fallback for
-    // any earlier failure/retry.
-    delete_audio_after_aligned_transcript(&work_dir, &margins_dir, &name, &meta);
-    let _ = session::set_processing_state(&margins_dir, &name, "done", None);
+    if outcome.note_path.is_none() {
+        note_job!(session::update_processing_job(
+            &margins_dir,
+            &job.job_id,
+            job.attempt,
+            "complete",
+            Some(1.0),
+            None,
+            None,
+            None,
+        ));
+    }
     cancel_guard.release();
     Ok(())
 }
@@ -8407,7 +8554,7 @@ fn save_draft_note(
     })
     .map_err(|e| format!("failed to save draft note: {e}"))?;
     let note_path = note_path.to_string_lossy().to_string();
-    session::set_vault_note_path(&margins_dir, &name, &note_path).map_err(|e| e.to_string())?;
+    link_workspace_note(&margins_dir, &name, &note_path)?;
     pi_distill::remove_note_draft(&margins_dir, &name);
     pi_distill::remove_note_draft(&trace_dir, &name);
     Ok(note_path)
@@ -8819,7 +8966,7 @@ async fn refine_session(
             let _ = delete_file_if_present(np);
             return Err(DISTILL_CANCELLED_SENTINEL.to_string());
         }
-        if let Err(err) = session::set_vault_note_path(&margins_dir, &name, np) {
+        if let Err(err) = link_workspace_note(&margins_dir, &name, np) {
             if session::is_session_tombstoned(&margins_dir, &name).unwrap_or(false) {
                 let _ = delete_file_if_present(np);
                 return Err(DISTILL_CANCELLED_SENTINEL.to_string());
@@ -9620,13 +9767,8 @@ pub(crate) fn update_session_title_impl(
             let renamed_path_string = renamed_path.to_string_lossy().to_string();
             let current_path_string = current_path.to_string_lossy().to_string();
             if session::get_session_meta(&margins_dir, &name).is_ok() {
-                session::move_session_vault_note_path(
-                    &margins_dir,
-                    &name,
-                    &current_path_string,
-                    &renamed_path_string,
-                )
-                .map_err(|e| e.to_string())?;
+                link_workspace_note(&margins_dir, &name, &renamed_path_string)?;
+                let _ = session::remove_vault_note_by_path(&margins_dir, &current_path_string);
             } else {
                 session::move_vault_note_path_by_id(
                     &margins_dir,
@@ -9947,40 +10089,14 @@ pub(crate) fn delete_session_impl(
     delete_session_fully(&work_dir, &margins_dir, &name)
 }
 
-/// Re-scan the project's notes, purge any sessions whose note file was genuinely
-/// deleted (recording + DB rows and all), and return the fresh session list.
-/// Renamed/moved notes are recovered by reconciliation, so only truly-removed
-/// notes are pruned. Procured capture-notes with missing files are dropped by
-/// `list_sessions_impl` itself.
+/// Re-scan the project's notes and return the fresh session list. Availability
+/// is derived without deleting the association, capture, or audio.
 pub(crate) fn reconcile_project_notes_impl(
     ctx: &ctx::Ctx,
     project_id: Option<String>,
 ) -> Result<Vec<session_index::SessionInfoDto>, String> {
-    let work_dir = work_dir_for_project_id(&ctx.state, project_id.as_deref());
-    let margins_dir = work_dir.join(".margins");
-    let settings = ctx.state.settings.lock().unwrap().clone();
-    let resolved_project_id = project_id
-        .clone()
-        .or_else(|| project_id_for_work_dir(&settings, &work_dir));
-    // Never purge the session that is currently recording.
-    let recording_name = ctx
-        .state
-        .recording
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|r| r.session_name.clone());
-    for name in session_index::sessions_with_deleted_notes(
-        &work_dir,
-        &settings,
-        resolved_project_id.as_deref(),
-    ) {
-        if recording_name.as_deref() == Some(name.as_str()) {
-            continue;
-        }
-        cancel_distill_for_session(&ctx.state, &name);
-        let _ = delete_session_fully(&work_dir, &margins_dir, &name);
-    }
+    // A missing linked note is an availability fact, not permission to remove
+    // the session or its audio. Removal remains an explicit delete operation.
     list_sessions_impl(ctx, project_id)
 }
 
@@ -10761,8 +10877,8 @@ pub(crate) async fn stop_recording_impl(ctx: &ctx::Ctx) -> Result<String, String
         let live_finalize_ms = live_started.elapsed().as_millis();
         let artifacts_started = Instant::now();
         let memo_content = export_memo(&rec.memo_lines);
+        persist_live_memo(&work_dir, &rec.session_name, &rec.memo_lines)?;
         let notes_path = session_memo_path(&work_dir, &rec.session_name);
-        std::fs::write(&notes_path, &memo_content).map_err(|e| e.to_string())?;
         if let Some(transcript) = qualified_live_transcript.as_deref() {
             if let Err(error) = write_qualified_live_transcript_artifact(
                 &margins_dir,
@@ -12282,7 +12398,7 @@ pub(crate) fn save_draft_note_impl(
     })
     .map_err(|e| format!("failed to save draft note: {e}"))?;
     let note_path = note_path.to_string_lossy().to_string();
-    session::set_vault_note_path(&margins_dir, &name, &note_path).map_err(|e| e.to_string())?;
+    link_workspace_note(&margins_dir, &name, &note_path)?;
     pi_distill::remove_note_draft(&margins_dir, &name);
     pi_distill::remove_note_draft(&trace_dir, &name);
     Ok(note_path)
@@ -12308,6 +12424,13 @@ pub(crate) fn cancel_process_session_impl(
     if let Some(flag) = ctx.state.distill_cancel.lock().unwrap().get(&name) {
         flag.store(true, Ordering::SeqCst);
     }
+    let work_dir = work_dir_for_project_id(&ctx.state, _project_id.as_deref());
+    let margins_dir = work_dir.join(".margins");
+    if let Some(job) =
+        session::latest_processing_job(&margins_dir, &name).map_err(|e| e.to_string())?
+    {
+        let _ = session::cancel_processing_job(&margins_dir, &job.job_id, job.attempt);
+    }
     Ok(())
 }
 
@@ -12319,7 +12442,13 @@ pub(crate) fn clear_session_note_error_impl(
     validate_session_name(&name)?;
     let work_dir = work_dir_for_project_id(&ctx.state, project_id.as_deref());
     let margins_dir = work_dir.join(".margins");
-    session::clear_note_error(&margins_dir, &name).map_err(|e| e.to_string())
+    if let Some(job) =
+        session::latest_processing_job(&margins_dir, &name).map_err(|e| e.to_string())?
+    {
+        session::dismiss_processing_job_failure(&margins_dir, &job.job_id)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn import_audio_file_impl(
@@ -12548,6 +12677,11 @@ pub fn run() {
         )
         .setup(move |app| {
             apply_macos_window_material(app);
+            if let Some(state) = app.try_state::<Arc<AppState>>() {
+                if let Err(error) = desktop_live::start_loopback_api(Arc::clone(&*state)) {
+                    eprintln!("margins: could not start local companion service: {error}");
+                }
+            }
             let toggle = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyN);
             if let Err(e) = app.global_shortcut().register(toggle) {
                 eprintln!("margins: could not register global shortcut CmdShiftN (another app may have claimed it): {e}");
@@ -12799,8 +12933,65 @@ pub fn run() {
             open_note_target_in_obsidian,
             get_capabilities,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running margins desktop");
+        .build(tauri::generate_context!())
+        .expect("error while building margins desktop")
+        .run(|_, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                desktop_live::shutdown_loopback_api();
+            }
+        });
+}
+
+/// Run the native recorder as a small local service with no application
+/// window. Local integrations discover it through the same private V1 file as
+/// the desktop compatibility adapter.
+#[cfg(feature = "live-runtime")]
+pub fn run_live_runtime() -> anyhow::Result<()> {
+    configure_pi_agent_dir();
+    let settings = load_settings();
+    let fallback_work_dir = default_work_dir();
+    let work_dir = settings_work_dir(&settings, &fallback_work_dir);
+    let state = build_app_state(work_dir, settings.clone());
+
+    let registry = Arc::clone(&state.device_registry);
+    std::thread::Builder::new()
+        .name("margins-device-watcher".to_string())
+        .spawn(move || device_registry::run_device_watcher(registry, |_| {}))?;
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async move {
+            desktop_live::start_cli_loopback_api(Arc::clone(&state)).map_err(anyhow::Error::msg)?;
+            live_backchannel::prewarm_live_models(settings);
+            eprintln!("margins-live: ready");
+
+            wait_for_live_runtime_shutdown().await?;
+            if state.recording.lock().unwrap().is_some() {
+                let ctx = ctx::Ctx::no_emit(Arc::clone(&state));
+                if let Err(error) = stop_recording_impl(&ctx).await {
+                    eprintln!("margins-live: could not finish the active meeting: {error}");
+                }
+            }
+            desktop_live::shutdown_loopback_api();
+            Ok(())
+        })
+}
+
+#[cfg(all(feature = "live-runtime", unix))]
+async fn wait_for_live_runtime_shutdown() -> anyhow::Result<()> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result?,
+        _ = terminate.recv() => {},
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "live-runtime", not(unix)))]
+async fn wait_for_live_runtime_shutdown() -> anyhow::Result<()> {
+    tokio::signal::ctrl_c().await?;
+    Ok(())
 }
 
 #[cfg(all(feature = "tauri-app", target_os = "macos"))]

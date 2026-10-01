@@ -24,6 +24,8 @@ pub mod publish;
 pub mod recall;
 #[cfg(feature = "recall")]
 pub mod scan;
+#[cfg(feature = "recall")]
+mod setup_compile;
 mod speech_model_setup;
 #[cfg(feature = "recall")]
 mod workspace_recall;

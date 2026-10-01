@@ -2,7 +2,7 @@
 
 use crate::artifacts::confined_session_artifact_access_disk_path;
 use anyhow::{bail, Context, Result};
-use margins_store::legacy::{self, SessionArtifactPathUpdate, SESSION_ARTIFACT_KIND_TRANSCRIPT};
+use margins_store::canonical::{self, SessionArtifactPathUpdate, SESSION_ARTIFACT_KIND_TRANSCRIPT};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
@@ -99,7 +99,7 @@ pub fn set_enabled(work_dir: &Path, enabled: bool) -> Result<ArchiveReport> {
         completed.push(planned.clone());
     }
 
-    if let Err(error) = legacy::rewrite_session_artifact_paths(&margins_dir, &updates) {
+    if let Err(error) = canonical::rewrite_session_artifact_paths(&margins_dir, &updates) {
         rollback_moves(&completed);
         return Err(error).context("failed to update transcript artifact registry");
     }
@@ -115,7 +115,7 @@ pub fn set_enabled(work_dir: &Path, enabled: bool) -> Result<ArchiveReport> {
                 new_path: update.old_path.clone(),
             })
             .collect::<Vec<_>>();
-        let _ = legacy::rewrite_session_artifact_paths(&margins_dir, &reverse);
+        let _ = canonical::rewrite_session_artifact_paths(&margins_dir, &reverse);
         rollback_moves(&completed);
         return Err(error);
     }
@@ -137,9 +137,9 @@ fn plan_enable(
 ) -> Result<(Vec<PlannedMove>, Vec<SessionArtifactPathUpdate>)> {
     let mut by_target = BTreeMap::<PathBuf, PathBuf>::new();
     let mut updates = Vec::new();
-    for session in legacy::list_sessions(margins_dir)? {
+    for session in canonical::list_sessions(margins_dir)? {
         validate_session_name(&session.name)?;
-        for artifact in legacy::list_session_artifacts(margins_dir, &session.name)? {
+        for artifact in canonical::list_session_artifacts(margins_dir, &session.name)? {
             if artifact.kind != SESSION_ARTIFACT_KIND_TRANSCRIPT
                 || artifact.path.ends_with(".live-transcript.json")
                 || !artifact.path.ends_with(".md")
@@ -206,10 +206,10 @@ fn plan_disable(
     }
 
     let mut updates = Vec::new();
-    for session in legacy::list_sessions(margins_dir)? {
+    for session in canonical::list_sessions(margins_dir)? {
         validate_session_name(&session.name)?;
         let archived_path = format!("{ARCHIVE_DIR_NAME}/{}_aligned.md", session.name);
-        for artifact in legacy::list_session_artifacts(margins_dir, &session.name)? {
+        for artifact in canonical::list_session_artifacts(margins_dir, &session.name)? {
             if artifact.kind == SESSION_ARTIFACT_KIND_TRANSCRIPT
                 && artifact.path == archived_path
                 && (archive_dir

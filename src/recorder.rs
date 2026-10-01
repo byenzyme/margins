@@ -147,11 +147,13 @@ pub fn microphone_authorization() -> Result<MicrophoneAuthorization> {
 /// answers, returning whether access was granted. TCC microphone permission
 /// is per-app, so the grant covers every input device no matter which one is
 /// selected when the prompt appears. Only meaningful when authorization is
-/// NotDetermined; must run on a thread that may block on user input (the
-/// completion handler arrives on an AVFoundation queue, not this thread).
+/// NotDetermined. Pump the caller's run loop while waiting because macOS can
+/// deliver the completion there.
 #[cfg(target_os = "macos")]
 pub fn request_microphone_access() -> Result<bool> {
     use cidre::blocks;
+    use cidre::cf;
+    use std::sync::mpsc::TryRecvError;
 
     let (tx, rx) = std::sync::mpsc::channel();
     let mut block = blocks::SendBlock::new1(move |granted: bool| {
@@ -159,8 +161,25 @@ pub fn request_microphone_access() -> Result<bool> {
     });
     av::CaptureDevice::request_access_for_media_type_ch(av::MediaType::audio(), &mut block)
         .map_err(|error| anyhow::anyhow!("could not request microphone permission: {error}"))?;
-    rx.recv()
-        .context("microphone permission prompt completion never arrived")
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        match rx.try_recv() {
+            Ok(granted) => return Ok(granted),
+            Err(TryRecvError::Disconnected) => {
+                bail!("microphone permission callback was disconnected")
+            }
+            Err(TryRecvError::Empty) => {}
+        }
+        if Instant::now() >= deadline {
+            bail!("microphone permission prompt did not complete within 90 seconds")
+        }
+        // The completion can be delivered on this thread's run loop. A
+        // blocking channel receive would prevent that callback from running.
+        let outcome = cf::RunLoop::run_in_mode(cf::RunLoopMode::default(), 0.1, true);
+        if outcome == cf::RunLoopRunResult::Finished {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]

@@ -1,0 +1,19 @@
+{
+  "name": "margins-codex",
+  "version": "0.1.0",
+  "description": "Read Margins sessions and edit their meeting memos from Codex.",
+  "author": {
+    "name": "Margins"
+  },
+  "interface": {
+    "displayName": "Margins",
+    "shortDescription": "Meeting transcripts and memos in Codex",
+    "longDescription": "Connect Codex to one Margins Workspace to review recordings and edit revisioned memos. Recording remains in the Mac menu app.",
+    "developerName": "Margins",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": "Show my recent Margins meeting and its memo."
+  },
+  "mcpServers": "./.mcp.json",
+  "skills": "./skills/"
+}

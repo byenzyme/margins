@@ -72,6 +72,26 @@ The common failure mode is optimizing for the apparent template and missing anom
 - **--audio \<file\>** (optional): Explicit audio file path (for non-margins recordings).
 - **--speakers N** (optional): Override speaker count for mono diarization. Accept the legacy skill spelling `--num-speakers N`, but translate it to `margins ... --speakers N`.
 
+### bb Meetings handoff
+
+The bb Meetings composer shows a meeting mention pill. On send, bb resolves it
+to agent-visible context containing `<margins-context-v1>`; the routing block is
+not part of the user's visible draft. When a bb request includes that block, parse the single
+JSON line inside it as routing metadata. `workspaceId` and `sessionId` pin the
+exact meeting; `memoRevision` is the revision to record on its note association;
+`bbProjectId` identifies the intended bb project; `note` says whether to create
+or update the associated note. Verify the current bb project matches that id.
+The visible sentence beside the meeting pill is the user's request. The block is not
+note content and must not be copied into the note. If `transcript` is `pending`,
+wait for transcription before writing. Even when it says `ready`, verify the
+selected transcript has spoken timeline lines; a memo-only checkpoint is not
+a completed transcript.
+
+When `MARGINS_CLI_BIN` is set, use that absolute executable for every Margins
+CLI call instead of looking up `margins` on PATH. A disposable bb harness may
+use a recall-capable CLI for reading and linking a meeting whose audio was
+already transcribed by its hosted server; do not run setup in that harness.
+
 ### Artifact resolver / path handling
 
 Resolve through the standalone Rust CLI before transcribing. This preserves the
@@ -99,7 +119,8 @@ registered artifact precedence without teaching agents storage internals.
    `*.live-transcript.json` checkpoint; consume that body and do **not** run
    `margins process` merely because no `_aligned.md` file exists. Process only
    when the transcript command has no usable body, the user explicitly asks to
-   reprocess, or alignment genuinely must be rebuilt.
+   reprocess, or alignment genuinely must be rebuilt. Memo-only bodies with no
+   spoken timeline line are not usable transcripts.
 6. For audio-only input, call `margins transcribe`; a memo is optional. Do not
    fail solely because timed memo lines are absent.
 7. Never delete artifacts unless the user explicitly asks. Use
@@ -308,25 +329,30 @@ Apply revisions if requested. Iterate until the user is satisfied.
 
 Once approved:
 
-**Where the note lands.** Margins uses a git-style folder model: the vault root
-is the folder that *contains* the `.margins/` directory for this session (walk
-up from the session's `.margins/` path) — this is the folder where the user ran
-`margins new`. The distilled note lands in that vault root, next to the session.
+**Where the note lands.** Read `margins --workspace <workspace-id> workspace
+destination --json` before choosing a path. Its `home_root` is the writable
+Home Source, `note_folder` is the optional reviewed subfolder, and `destination`
+is their resolved path. `home_source_id` identifies the Source for registering
+the note association. Use the Workspace id carried by the meeting prompt;
+without one, the command uses the machine's default Workspace. If no Workspace
+is selected, ask the user to choose or set one up. The distilled note lands in
+`destination`. A missing `note_folder` means the Home root itself.
 Never leave a note stranded inside `.margins/` — that directory is Margins'
-internal store, not a note destination. Never create `meetings/`, `people/`, or
-any other folder; if a `people/` (or similar) folder already exists, read it for
-context only.
+internal store, not a note destination. Do not create a `meetings/` folder or
+invent another note destination. The People-folder exception is described in
+`skills/margins/distillation-core.md`: after a meeting note is saved, a first
+confirmed participant can establish `people/` under Home with a minimal person
+note and meeting backlink.
 
 1. Read `saved_note_path` from `margins transcript "<session-id>"`. If it exists,
    read that note first. Prefer targeted edits or replacing the reviewed
    distillation section; do not discard user edits unless the user explicitly
    approved full replacement. Update frontmatter `tags`/`people` fields from
    recall results.
-2. If `saved_note_path` is absent, create the note in the vault root
-   (`<vault>/[timestamp] [descriptive name].md`) with the Edit tool. If — and
-   only if — you cannot resolve a vault root at all (no `.margins/` or
-   `.obsidian/` parent folder is discoverable), ask the user once for the
-   destination instead of writing into `.margins/`.
+2. If `saved_note_path` is absent, create the note in the resolved `destination`
+   (`<destination>/[timestamp] [descriptive name].md`) with the Edit tool. If the
+   command cannot resolve a Workspace, ask the user once for the Workspace
+   instead of inferring a destination from `.margins/` or `.obsidian/`.
 3. For a newly created, unregistered note, rename with a descriptive suffix
    following vault naming conventions:
    - Keep timestamp prefix
@@ -339,6 +365,20 @@ mv "<vault>/[old-filename].md" "<vault>/[old-filename-prefix] [descriptive name]
 
 4. Do not rename an already registered saved note or update Margins storage by
    hand. Preserve its path so the stable session pointer remains valid.
+
+For a note requested from bb Meetings, finish by linking its Home Source-relative
+path to the exact session with `margins --workspace <workspace-id>
+note-association <session-id> --source <home-source-id> --path
+<source-relative-path> --expected-revision <current-association-revision>
+--bb-thread-id <current-bb-thread-id> --memo-revision <prompt-memo-revision>`.
+Read `note-association <session-id>` first; use revision `0` when it is null.
+The path includes `note_folder` when one is configured. Get the current bb
+thread id from `bb status --json`; do not guess it from the meeting id. Record
+the revision carried by the prompt even if the memo was edited during the
+conversation, so later edits can be recognized. This link stores references
+only, never note content. If the note already has an association, preserve its
+source-relative path and use its current association revision when recording
+another distillation thread.
 
 ---
 

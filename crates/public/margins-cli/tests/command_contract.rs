@@ -9,11 +9,13 @@ use margins_core::{
     CaptureLaneSnapshot, CaptureLaneState, CaptureObserver, CaptureProvider, CaptureRequest,
     CaptureSnapshot, CaptureState, PermissionState, TranscriptError,
 };
-use margins_store::legacy;
+use margins_meeting_protocol::{SessionId, SessionMillis, WorkspaceMemoUpdateV1};
+use margins_store::canonical;
 use margins_workflows::project::{ProjectSource, ResolvedProject};
 use margins_workflows::workspace::{
     self, GmailCollectionSelector, GranolaTimeRange, WorkspaceBinding,
 };
+use margins_workflows::workspace_service::{ServicePrincipal, WorkspaceService};
 use std::io::{Read, Write as IoWrite};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -25,6 +27,148 @@ use std::thread;
 use std::time::Duration;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+#[test]
+fn workspace_default_and_destination_are_explicit_json_reads() {
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let machine = temp.path().join("machine");
+    let vault = temp.path().join("vault");
+    let code = temp.path().join("code");
+    std::fs::create_dir_all(&vault).unwrap();
+    std::fs::create_dir_all(&code).unwrap();
+    let old = std::env::var_os("MARGINS_HOME");
+    std::env::set_var("MARGINS_HOME", &machine);
+    let service = services(&code);
+    let (missing, _, _) = invoke(
+        &service,
+        &code,
+        &["margins", "workspace", "destination", "--json"],
+    );
+    assert!(missing.is_err());
+    let workspace = workspace::create_workspace(&machine, "practice", None, &vault).unwrap();
+    let (listed, output, _) = invoke(&service, &code, &["margins", "workspace", "list", "--json"]);
+    assert!(listed.is_ok(), "{output}");
+    let listing: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(listing["default_workspace"], serde_json::Value::Null);
+    assert_eq!(listing["workspaces"][0]["id"], "practice");
+    let mut desired = workspace.config.clone();
+    let WorkspaceBinding::NativeMarkdown { note_folder, .. } =
+        desired.bindings.get_mut("home").unwrap()
+    else {
+        panic!()
+    };
+    *note_folder = Some(PathBuf::from("inbox"));
+    let plan = workspace::plan_workspace_config(&workspace.config, desired).unwrap();
+    let mut workspace = workspace;
+    workspace::apply_workspace_plan(&mut workspace, &plan).unwrap();
+    let (set, output, _) = invoke(
+        &service,
+        &code,
+        &[
+            "margins",
+            "workspace",
+            "default",
+            "--set",
+            "practice",
+            "--json",
+        ],
+    );
+    assert!(set.is_ok(), "{output}");
+    let (read, output, _) = invoke(
+        &service,
+        &code,
+        &["margins", "workspace", "destination", "--json"],
+    );
+    assert!(read.is_ok(), "{output}");
+    let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(json["workspace_id"], "practice");
+    assert_eq!(json["home_source_id"], "home");
+    assert_eq!(json["note_folder"], "inbox");
+    assert_eq!(
+        json["destination"],
+        vault.join("inbox").to_string_lossy().as_ref()
+    );
+    restore_env("MARGINS_HOME", old.as_ref());
+}
+
+#[test]
+fn workspace_remove_only_accepts_a_non_default_config_only_workspace() {
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let machine = temp.path().join("machine");
+    let vault = temp.path().join("vault");
+    let code = temp.path().join("code");
+    std::fs::create_dir_all(&vault).unwrap();
+    std::fs::create_dir_all(&code).unwrap();
+    let source_note = vault.join("keep.md");
+    std::fs::write(&source_note, "source stays").unwrap();
+    let old = std::env::var_os("MARGINS_HOME");
+    std::env::set_var("MARGINS_HOME", &machine);
+    let service = services(&code);
+    workspace::create_workspace(&machine, "default", None, &vault).unwrap();
+    workspace::set_default_workspace(&machine, "default").unwrap();
+    let candidate = workspace::create_workspace(&machine, "unused", None, &vault).unwrap();
+
+    let (default_result, _, _) = invoke(
+        &service,
+        &code,
+        &["margins", "workspace", "remove", "default", "--json"],
+    );
+    assert!(default_result.is_err());
+    assert!(machine.join("workspaces/default/config.toml").exists());
+
+    let (data_result, _, _) = invoke(
+        &service,
+        &code,
+        &["margins", "workspace", "remove", "unused", "--json"],
+    );
+    assert!(data_result.is_err());
+    assert!(candidate.config_path.exists());
+
+    std::fs::remove_dir(candidate.state_dir.join("captures")).unwrap();
+    let (removed, output, _) = invoke(
+        &service,
+        &code,
+        &["margins", "workspace", "remove", "unused", "--json"],
+    );
+    assert!(removed.is_ok(), "{output}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&output).unwrap()["removed_workspace"],
+        "unused"
+    );
+    assert!(!candidate.state_dir.exists());
+    assert_eq!(
+        std::fs::read_to_string(source_note).unwrap(),
+        "source stays"
+    );
+    assert_eq!(
+        workspace::default_workspace(&machine).unwrap().as_deref(),
+        Some("default")
+    );
+    restore_env("MARGINS_HOME", old.as_ref());
+}
+
+#[test]
+fn embedded_build_commit_matches_checkout_head_when_git_is_available() {
+    let output = match std::process::Command::new("git")
+        .args(["-C", env!("CARGO_MANIFEST_DIR"), "rev-parse", "HEAD"])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return,
+    };
+    let head = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        margins_cli::build_info::get().commit,
+        head.trim(),
+        "Cargo reused build metadata from a different checkout revision"
+    );
+}
 
 #[derive(Clone)]
 struct FixedProject(PathBuf);
@@ -128,6 +272,74 @@ fn clap_help_preserves_the_prior_argument_contract() {
     let help = error.to_string();
     assert!(help.contains("Stable session id from `margins recent`, or `current`/`latest`"));
     assert!(help.contains("Rebuild alignment from the existing transcript without running ASR"));
+}
+
+#[test]
+fn unsupported_remote_command_fails_before_transport_or_local_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let services = services(temp.path());
+    let (result, stdout, stderr) = invoke(
+        &services,
+        temp.path(),
+        &[
+            "margins",
+            "--remote",
+            "http://127.0.0.1:9",
+            "--workspace",
+            "practice",
+            "process",
+            "must-not-connect",
+        ],
+    );
+    let error = result.unwrap_err();
+    assert_eq!(error.code(), "remote_command_unsupported");
+    assert!(stdout.is_empty());
+    assert!(stderr.contains("not supported by the remote adapter"));
+    assert!(!temp.path().join(".margins").exists());
+}
+
+#[test]
+fn unsupported_remote_flags_fail_before_transport_or_file_intake() {
+    let temp = tempfile::tempdir().unwrap();
+    let services = services(temp.path());
+    let audio = temp.path().join("must-not-read.wav");
+    std::fs::write(&audio, b"not audio").unwrap();
+    let base = [
+        "margins",
+        "--remote",
+        "http://127.0.0.1:9",
+        "--workspace",
+        "practice",
+    ];
+    let cases = [
+        (vec!["recent", "--all"], "remote_option_unsupported"),
+        (
+            vec!["memo", "session-a", "--expected-revision", "memo-1"],
+            "usage",
+        ),
+        (
+            vec![
+                "note-association",
+                "session-a",
+                "--source",
+                "notes",
+                "--path",
+                "meeting.md",
+            ],
+            "usage",
+        ),
+        (
+            vec!["transcribe", audio.to_str().unwrap(), "--speakers", "2"],
+            "remote_option_unsupported",
+        ),
+    ];
+    for (suffix, expected) in cases {
+        let args = base.into_iter().chain(suffix).collect::<Vec<_>>();
+        let (result, stdout, _stderr) = invoke(&services, temp.path(), &args);
+        assert_eq!(result.unwrap_err().code(), expected);
+        assert!(stdout.is_empty());
+    }
+    assert_eq!(std::fs::read(&audio).unwrap(), b"not audio");
 }
 
 #[test]
@@ -642,6 +854,7 @@ fn source_list_json_serializes_typed_bindings_without_irrelevant_nulls() {
         WorkspaceBinding::NativeMarkdown {
             path: reference,
             role: SourceRole::Reference,
+            note_folder: None,
         },
     )
     .unwrap();
@@ -1238,6 +1451,7 @@ fn forget_leaves_notes_source_named_google_mail_untouched() {
         WorkspaceBinding::NativeMarkdown {
             path: temp.path().join("reference"),
             role: SourceRole::Reference,
+            note_folder: None,
         },
     )
     .unwrap();
@@ -2093,8 +2307,9 @@ fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only()
     assert!(result.is_ok(), "{stderr}");
     assert_eq!(
         stdout,
-        margins_workflows::resources::MARGINS_WORKSPACE_SETUP_GUIDE
+        margins_workflows::resources::margins_workspace_setup_guide()
     );
+    assert!(stdout.contains("# Knowledge Practice Review Contract"));
     assert!(stdout.contains("margins workspace new practice"));
     assert!(stdout.contains("margins init"));
     assert!(stdout.contains("margins sync --json"));
@@ -2103,6 +2318,8 @@ fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only()
     assert!(stdout.contains("Run these commands from the notes folder"));
     assert!(stdout.contains("cd \"/absolute/path/to/notes\""));
     assert!(stdout.contains("`recall.scan: true`"));
+    assert!(stdout.contains("scan as soon as the explicit named Workspace"));
+    assert!(stdout.contains("There is no `margins workspace scan` subcommand"));
     assert!(stdout.contains("Read the complete saved `scan.v2` result"));
     assert!(stdout.contains("Show the user an understanding, not scan output"));
     assert!(stdout.contains("The field names below are for your analysis"));
@@ -2112,16 +2329,16 @@ fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only()
     assert!(stdout.contains("Do not run recall before `margins init`"));
     assert!(stdout.contains("margins setup --only catalyst"));
     assert!(stdout.contains("If `actions` is empty"));
-    assert!(stdout.contains("ask for explicit consent"));
-    assert!(stdout.contains("it is not advance consent"));
-    assert!(stdout.contains("Never infer plan consent from the opening setup request"));
     assert!(stdout.contains("apply the saved plan unchanged"));
     assert!(stdout.contains("workspace plan"));
     assert!(stdout.contains("Never hand-edit plan JSON"));
-    assert!(stdout.contains("Only make settings the user consented to"));
+    assert!(stdout.contains("Do not ask for a second “apply this plan” confirmation"));
     assert!(stdout.contains("machine-level catalyst mode"));
     assert!(stdout.contains("not an exact-phrase boundary proof"));
     assert!(stdout.contains("contiguous, verbatim phrase"));
+    assert!(stdout.contains("one universal discovery question"));
+    assert!(stdout.contains("universal pause."));
+    assert!(stdout.contains("Do not ask the user to design `[policy].entities`"));
     assert!(stdout.contains("Never declare setup complete while"));
     assert!(stdout.contains("Use exactly the spellings surfaced by scan"));
     assert!(stdout.contains("folder:<path>"));
@@ -2169,14 +2386,17 @@ fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only()
         );
     }
     let normalized_guide = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(normalized_guide.contains("Any fallback policy change requires a fresh desired config"));
+    assert!(normalized_guide.contains("A fallback policy change after failure is not part"));
     assert!(normalized_guide.contains("Do not run unsupported discovery commands"));
     assert!(normalized_guide.contains("Do not provision a hosted lease at the start"));
     assert!(normalized_guide.contains("short-lived lease should begin as late as possible"));
     assert!(normalized_guide.contains("do not run `init` repeatedly"));
     assert!(normalized_guide.contains("earlier setup attempts as hypotheses"));
-    assert!(normalized_guide.contains("preserve that approved policy"));
+    assert!(normalized_guide.contains("preserve that policy"));
     assert!(normalized_guide.contains("`live_lexical` status only confirms that an index exists"));
+    assert!(normalized_guide.contains("portable live Markdown coverage"));
+    assert!(normalized_guide.contains("Never relabel that number as “indexed documents.”"));
+    assert!(normalized_guide.contains("`mode = \"indexed\"` reports the persisted engine index"));
     assert!(normalized_guide.contains("`entity_curation_candidates[].spec`"));
     assert!(normalized_guide.contains("`entity_curation_candidates[].expansion`"));
     assert!(normalized_guide
@@ -2189,6 +2409,13 @@ fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only()
     assert!(normalized_guide.contains("Leave an ambiguous entity without a profile"));
     assert!(normalized_guide.contains("one note per person is an optional practice"));
     assert!(normalized_guide.contains("Do not create, reorganize, or configure those notes"));
+    assert!(normalized_guide.contains("at most two future capture habits"));
+    assert!(normalized_guide.contains("name the question that habit would make answerable"));
+    assert!(normalized_guide.contains("Do not prescribe a generic folder taxonomy"));
+    assert!(normalized_guide.contains("Lead the final handoff with what the proof revealed"));
+    assert!(normalized_guide.contains("Do not mistake a successful command"));
+    assert!(normalized_guide.contains("operational receipt"));
+    assert!(normalized_guide.contains("revision hashes, similarity scores"));
     assert!(stdout.contains("Do not begin connected-note distillation as part of setup"));
     let declaration = stdout.find("margins workspace new practice").unwrap();
     let scan = stdout.find("margins --workspace practice scan").unwrap();
@@ -2298,7 +2525,7 @@ fn public_capabilities_report_only_supported_workflows() {
 }
 
 #[test]
-fn guided_onboarding_ends_setup_before_distillation() {
+fn guided_onboarding_routes_without_duplicating_setup_protocol() {
     let temp = tempfile::tempdir().unwrap();
     let services = services(temp.path());
 
@@ -2306,27 +2533,35 @@ fn guided_onboarding_ends_setup_before_distillation() {
         invoke(&services, temp.path(), &["margins", "guide", "onboarding"]);
 
     assert!(result.is_ok(), "{stderr}");
-    assert!(stdout.contains("Setup ends when"));
-    assert!(stdout.contains("Connected-note distillation is a separate workflow"));
-    assert!(stdout.contains("from that folder"));
-    assert!(stdout.contains("complete `scan.v2` result"));
-    let normalized_onboarding = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(normalized_onboarding.contains("coverage entities, curation candidates"));
-    assert!(stdout.contains("If the plan has no actions"));
-    assert!(stdout.contains("skip both consent and apply"));
-    assert!(normalized_onboarding.contains("show its actions, obtain explicit consent"));
-    assert!(stdout.contains("apply the saved plan unchanged"));
-    assert!(stdout.contains("evidence—not as a script"));
-    assert!(stdout.contains("`current_config.config_path`"));
-    let declaration = stdout.find("3. Otherwise create").unwrap();
-    let scan = stdout.find("4. When `recall.scan: true`").unwrap();
-    let initialize = stdout.find("5. Run `init`").unwrap();
-    assert!(declaration < scan && scan < initialize);
-    assert!(!stdout.contains("transcribe"));
-    assert!(!stdout.contains("audio"));
-    assert!(!stdout.contains("fallback"));
-    assert!(!stdout.contains("official composition"));
-    assert!(!stdout.contains("private reveal"));
+    assert_eq!(
+        stdout,
+        margins_workflows::resources::MARGINS_GUIDED_ONBOARDING
+    );
+    let normalized = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(stdout.contains("`margins guide workspace-setup`"));
+    assert!(normalized.contains("sole source of truth for setup"));
+    assert!(stdout.contains("Setup and distillation are separate"));
+    assert!(
+        normalized.contains("Speak about their notes, work, and questions in ordinary language")
+    );
+    assert!(normalized.contains("End with the useful thing Margins surfaced"));
+    assert!(normalized.contains("setup result brief and secondary"));
+    assert!(stdout.split_whitespace().count() < 300);
+    for duplicated_detail in [
+        "scan.v2",
+        "workspace plan",
+        "workspace apply",
+        "current_config",
+        "catalyst",
+        "profile =",
+        "margins init",
+        "margins sync",
+    ] {
+        assert!(
+            !stdout.contains(duplicated_detail),
+            "onboarding duplicated setup detail: {duplicated_detail}"
+        );
+    }
 }
 
 #[test]
@@ -2559,17 +2794,17 @@ fn seed_inspectable_session(vault: &Path, meeting_id: &str, marker: &str) {
         format!("# {marker}"),
     )
     .unwrap();
-    legacy::create_session(
+    canonical::create_session(
         &margins_dir,
         meeting_id,
         &Local::now(),
         &format!(".margins/{meeting_id}.md"),
     )
     .unwrap();
-    legacy::upsert_session_artifact(
+    canonical::upsert_session_artifact(
         &margins_dir,
         meeting_id,
-        legacy::SESSION_ARTIFACT_KIND_TRANSCRIPT,
+        canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT,
         0,
         &format!(".margins/{meeting_id}_aligned.md"),
         "durable",
@@ -2582,14 +2817,14 @@ fn seed_checkpoint_session(vault: &Path, meeting_id: &str, terminal: bool, decod
     let margins_dir = vault.join(".margins");
     std::fs::create_dir_all(&margins_dir).unwrap();
     std::fs::write(margins_dir.join(format!("{meeting_id}.md")), "[00:01] memo").unwrap();
-    legacy::create_session(
+    canonical::create_session(
         &margins_dir,
         meeting_id,
         &Local::now(),
         &format!(".margins/{meeting_id}.md"),
     )
     .unwrap();
-    legacy::add_segment(
+    canonical::add_segment(
         &margins_dir,
         meeting_id,
         0,
@@ -2996,6 +3231,43 @@ fn workspace_transcribe_keeps_generated_artifacts_out_of_notes_sources() {
         &invocation,
         &["margins", "--workspace", "practice", "recent"],
     );
+    let resolved =
+        workspace::resolve_workspace(&margins_home, Some("practice"), &invocation).unwrap();
+    let service = WorkspaceService::open("same-process-service", resolved).unwrap();
+    let principal = ServicePrincipal::full("service-reader", "practice");
+    let service_sessions = service.sessions(&principal, None, 10).unwrap();
+    assert_eq!(
+        service_sessions.sessions[0].session_id.as_ref(),
+        "public-input"
+    );
+    let service_artifacts = service.artifacts(&principal, "public-input").unwrap();
+    assert!(service_artifacts
+        .iter()
+        .any(|artifact| artifact.kind == "transcript"));
+    let service_memo = service
+        .memo(&principal, &SessionId("public-input".into()))
+        .unwrap();
+    let service_edit = service
+        .update_memo(
+            &principal,
+            &SessionId("public-input".into()),
+            &WorkspaceMemoUpdateV1 {
+                request_id: "service-edit-after-cli-create".into(),
+                expected_revision: service_memo.revision,
+                observed_at_ms: SessionMillis(500),
+                paused: false,
+                text: "public memo\nservice-visible edit".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(service_edit.lines[1].text, "service-visible edit");
+    assert_eq!(
+        service
+            .memo(&principal, &SessionId("public-input".into()))
+            .unwrap()
+            .revision,
+        service_edit.revision
+    );
     restore_env("MARGINS_HOME", old_margins_home.as_ref());
 
     let capture_store = margins_home.join("workspaces/practice/captures/.margins");
@@ -3013,6 +3285,11 @@ fn workspace_transcribe_keeps_generated_artifacts_out_of_notes_sources() {
     assert!(artifacts_stdout.contains(capture_store.to_string_lossy().as_ref()));
     assert!(recent_result.is_ok(), "{recent_stderr}");
     assert!(recent_stdout.contains("id=\"public-input\""));
+    assert!(
+        std::fs::read_to_string(capture_store.join("public-input.md"))
+            .unwrap()
+            .contains("service-visible edit")
+    );
     assert!(capture_store.join("public-input.md").is_file());
     assert!(capture_store.join("public-input_transcript.json").is_file());
     assert!(!notes.join(".margins").exists());
@@ -3046,6 +3323,80 @@ fn unavailable_capture_is_stable_and_precedes_all_mutation() {
         );
         assert!(!temp.path().join(".margins").exists());
     }
+}
+
+#[test]
+fn explicit_workspace_new_uses_declared_capture_store_from_unrelated_cwd() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let margins_home = temp.path().join("state");
+    let notes = temp.path().join("notes");
+    let unrelated = temp.path().join("unrelated");
+    let legacy_project = temp.path().join("legacy-project");
+    std::fs::create_dir_all(&notes).unwrap();
+    std::fs::create_dir_all(&unrelated).unwrap();
+    std::fs::create_dir_all(&legacy_project).unwrap();
+    let old_margins_home = std::env::var_os("MARGINS_HOME");
+    std::env::set_var("MARGINS_HOME", &margins_home);
+    workspace::create_workspace(&margins_home, "practice", None, &notes).unwrap();
+    let mut services = services(&legacy_project);
+    services.capture = Arc::new(FakeCapture);
+
+    let (result, _stdout, stderr) = invoke(
+        &services,
+        &unrelated,
+        &[
+            "margins",
+            "--workspace",
+            "practice",
+            "new",
+            "--title",
+            "Remote parity",
+        ],
+    );
+    restore_env("MARGINS_HOME", old_margins_home.as_ref());
+
+    assert!(result.is_ok(), "{stderr}");
+    let canonical = margins_home.join("workspaces/practice/captures/.margins");
+    assert!(canonical.join("2026-08-10-12-00-00.md").is_file());
+    assert!(canonical.join("sessions.sqlite").is_file());
+    assert!(!unrelated.join(".margins").exists());
+    assert!(!legacy_project.join(".margins").exists());
+    assert!(!notes.join(".margins").exists());
+}
+
+#[test]
+fn explicit_workspace_rejects_project_before_capture_side_effects() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let margins_home = temp.path().join("state");
+    let notes = temp.path().join("notes");
+    std::fs::create_dir_all(&notes).unwrap();
+    let old_margins_home = std::env::var_os("MARGINS_HOME");
+    std::env::set_var("MARGINS_HOME", &margins_home);
+    workspace::create_workspace(&margins_home, "practice", None, &notes).unwrap();
+    let mut services = services(temp.path());
+    services.capture = Arc::new(FakeCapture);
+
+    let (result, _stdout, stderr) = invoke(
+        &services,
+        temp.path(),
+        &[
+            "margins",
+            "--workspace",
+            "practice",
+            "--project",
+            "test",
+            "new",
+        ],
+    );
+    restore_env("MARGINS_HOME", old_margins_home.as_ref());
+
+    assert_eq!(result.unwrap_err().code(), "invalid_arguments");
+    assert!(stderr.contains("cannot be combined"));
+    assert!(!margins_home
+        .join("workspaces/practice/captures/.margins")
+        .exists());
 }
 
 #[derive(Default)]
@@ -3234,7 +3585,7 @@ fn injected_capture_keeps_one_stable_id_across_attaches() {
     let current = std::fs::read_to_string(margins_dir.join("current")).unwrap();
     let id = current.trim();
     assert_eq!(id, "2026-08-10-12-00-00");
-    let meta = legacy::get_session_meta(&margins_dir, id).unwrap();
+    let meta = canonical::get_session_meta(&margins_dir, id).unwrap();
     assert_eq!(meta.title.as_deref(), Some("Stable"));
     assert_eq!(
         meta.segments
@@ -3243,7 +3594,7 @@ fn injected_capture_keeps_one_stable_id_across_attaches() {
             .collect::<Vec<_>>(),
         vec![0, 1, 2]
     );
-    assert_eq!(legacy::list_sessions(&margins_dir).unwrap().len(), 1);
+    assert_eq!(canonical::list_sessions(&margins_dir).unwrap().len(), 1);
 }
 
 #[test]
@@ -3337,8 +3688,8 @@ fn unavailable_process_backends_do_not_replace_existing_outputs() {
     let margins_dir = project.join(".margins");
     std::fs::create_dir_all(&margins_dir).unwrap();
     let started = Local.with_ymd_and_hms(2026, 8, 10, 10, 0, 0).unwrap();
-    legacy::create_session(&margins_dir, "meeting", &started, ".margins/meeting.md").unwrap();
-    legacy::add_segment(
+    canonical::create_session(&margins_dir, "meeting", &started, ".margins/meeting.md").unwrap();
+    canonical::add_segment(
         &margins_dir,
         "meeting",
         0,
@@ -3374,8 +3725,8 @@ fn xml_and_json_presenters_escape_user_controlled_values() {
     let services = services(temp.path());
     let margins_dir = temp.path().join(".margins");
     let started = Local.with_ymd_and_hms(2026, 8, 10, 10, 0, 0).unwrap();
-    legacy::create_session(&margins_dir, "meeting", &started, ".margins/meeting.md").unwrap();
-    legacy::set_title(
+    canonical::create_session(&margins_dir, "meeting", &started, ".margins/meeting.md").unwrap();
+    canonical::set_title(
         &margins_dir,
         "meeting",
         Some("A <title> & \"quote\"".into()),
@@ -3414,14 +3765,14 @@ fn align_only_does_not_consult_unavailable_asr() {
     let margins_dir = temp.path().join(".margins");
     let memo = temp.path().join("memo.md");
     std::fs::write(&memo, "[00:01] checkpoint").unwrap();
-    legacy::create_session(
+    canonical::create_session(
         &margins_dir,
         "meeting",
         &Local::now(),
         &memo.to_string_lossy(),
     )
     .unwrap();
-    legacy::add_segment(
+    canonical::add_segment(
         &margins_dir,
         "meeting",
         0,
@@ -3453,14 +3804,14 @@ fn archive_commands_route_new_aligned_output_to_visible_default_folder() {
     let memo = margins_dir.join("meeting.md");
     std::fs::create_dir_all(&margins_dir).unwrap();
     std::fs::write(&memo, "[00:01] checkpoint").unwrap();
-    legacy::create_session(
+    canonical::create_session(
         &margins_dir,
         "meeting",
         &Local::now(),
         ".margins/meeting.md",
     )
     .unwrap();
-    legacy::add_segment(
+    canonical::add_segment(
         &margins_dir,
         "meeting",
         0,
@@ -3490,7 +3841,7 @@ fn archive_commands_route_new_aligned_output_to_visible_default_folder() {
     assert!(temp.path().join("_margins/meeting_aligned.md").is_file());
     assert!(!margins_dir.join("meeting_aligned.md").exists());
     assert_eq!(
-        legacy::list_session_artifacts(&margins_dir, "meeting").unwrap()[0].path,
+        canonical::list_session_artifacts(&margins_dir, "meeting").unwrap()[0].path,
         "_margins/meeting_aligned.md"
     );
 
@@ -3521,17 +3872,17 @@ fn session_catalog_and_artifact_commands_emit_vault_anchored_paths() {
         r#"{"terminal":true,"transcripts":[{"words":[{"channel":0,"start_ms":500,"end_ms":900,"text":" hello"}]}]}"#,
     )
     .unwrap();
-    legacy::create_session(
+    canonical::create_session(
         &margins_dir,
         "meeting",
         &Local::now(),
         ".margins/meeting.md",
     )
     .unwrap();
-    legacy::upsert_session_artifact(
+    canonical::upsert_session_artifact(
         &margins_dir,
         "meeting",
-        legacy::SESSION_ARTIFACT_KIND_TRANSCRIPT,
+        canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT,
         0,
         ".margins/meeting_seg0.live-transcript.json",
         "durable",
@@ -3591,7 +3942,7 @@ fn bare_margins_creates_without_a_current_session_then_resumes_it() {
     let margins_dir = temp.path().join(".margins");
     let current = std::fs::read_to_string(margins_dir.join("current")).unwrap();
     let id = current.trim();
-    let first_meta = legacy::get_session_meta(&margins_dir, id).unwrap();
+    let first_meta = canonical::get_session_meta(&margins_dir, id).unwrap();
     assert_eq!(first_meta.segments.len(), 1);
 
     let (second, _, second_stderr) = invoke(&services, temp.path(), &["margins"]);
@@ -3599,7 +3950,7 @@ fn bare_margins_creates_without_a_current_session_then_resumes_it() {
 
     let second_current = std::fs::read_to_string(margins_dir.join("current")).unwrap();
     assert_eq!(second_current.trim(), id);
-    let resumed_meta = legacy::get_session_meta(&margins_dir, id).unwrap();
+    let resumed_meta = canonical::get_session_meta(&margins_dir, id).unwrap();
     assert_eq!(
         resumed_meta
             .segments
@@ -3608,7 +3959,7 @@ fn bare_margins_creates_without_a_current_session_then_resumes_it() {
             .collect::<Vec<_>>(),
         vec![0, 1]
     );
-    assert_eq!(legacy::list_sessions(&margins_dir).unwrap().len(), 1);
+    assert_eq!(canonical::list_sessions(&margins_dir).unwrap().len(), 1);
 }
 
 #[test]

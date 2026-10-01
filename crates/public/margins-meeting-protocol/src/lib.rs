@@ -26,6 +26,12 @@ pub const PROTOCOL_VERSION_V1: u16 = 1;
 /// contract safe for browsers while retaining `u64` storage in Rust.
 pub const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
 
+/// V1 path prefix for the desktop live loopback API.
+pub const DESKTOP_LIVE_API_PREFIX_V1: &str = "/v1/live";
+/// Versioned Workspace authority routes. This surface is deliberately
+/// separate from desktop SPA dispatch and generic invoke commands.
+pub const WORKSPACE_API_PREFIX_V1: &str = "/v1";
+
 /// A local, message-level V1 validation failure.
 ///
 /// Validation that needs durable session state (idempotency conflicts, prior
@@ -144,6 +150,13 @@ string_id!(/// Stable ID for a generated memo.
     MemoId);
 string_id!(/// Stable ID for a generated artifact.
     ArtifactId);
+string_id!(/// Stable identity returned by one Margins authority.
+    InstanceId);
+string_id!(/// Stable Workspace identity resolved by the authority.
+    WorkspaceId);
+
+string_id!(/// Stable idempotency key for one live API write.
+    LiveOperationId);
 
 /// Milliseconds since the Unix epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -159,6 +172,219 @@ pub struct SessionMillis(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct DurationMillis(pub u64);
+
+/// Endpoint metadata written by the process that owns local meeting capture.
+///
+/// This is intentionally distinct from the hosted `margins-server` process.
+/// The token is only safe because the discovery file is written with private
+/// file permissions by the local runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveDiscoveryV1 {
+    pub protocol_version: ProtocolVersionV1,
+    pub runtime: LiveRuntimeV1,
+    pub profile: String,
+    pub pid: u32,
+    pub base_url: String,
+    pub token: String,
+    pub permissions: LivePermissionsV1,
+    pub endpoints: LiveEndpointsV1,
+    pub generated_at_unix_ms: UnixMillis,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveRuntimeV1 {
+    MarginsDesktop,
+    MarginsCli,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LivePermissionsV1 {
+    pub loopback_only: bool,
+    pub private_file: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveEndpointsV1 {
+    pub snapshot: String,
+    pub start: String,
+    pub pause: String,
+    pub resume: String,
+    pub stop: String,
+    pub update_notepad: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveSessionStatusV1 {
+    Idle,
+    Starting,
+    Recording,
+    Paused,
+    Finalizing,
+    NeedsAttention,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveSnapshotV1 {
+    pub protocol_version: ProtocolVersionV1,
+    pub server_unix_ms: UnixMillis,
+    pub session: Option<LiveSessionV1>,
+    pub health: LiveHealthV1,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rolling_transcript: Vec<LiveTranscriptLineV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memo_lines: Vec<LiveMemoLineV1>,
+    /// Opaque identity for the complete timestamped memo behind `memo_lines`.
+    /// Clients send it back when replacing the visible notepad text so an old
+    /// browser view cannot silently overwrite newer notes.
+    pub notepad_revision: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveSessionV1 {
+    pub session_id: SessionId,
+    pub status: LiveSessionStatusV1,
+    pub elapsed_ms: DurationMillis,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveHealthV1 {
+    pub capture_phase: String,
+    pub tap_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tap_warning: Option<String>,
+    pub system_audio_expected: bool,
+    pub system_audio_observed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub microphone_peak_milli: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_freshness: Option<LiveTranscriptFreshnessV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveTranscriptFreshnessV1 {
+    pub decoded_until_ms: DurationMillis,
+    pub committed_until_ms: DurationMillis,
+    pub updated_at_unix_ms: UnixMillis,
+    pub age_ms: DurationMillis,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveTranscriptLineV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_ms: Option<SessionMillis>,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveMemoLineV1 {
+    pub index: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_ms: Option<SessionMillis>,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveStartRequestV1 {
+    pub operation_id: LiveOperationId,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+}
+
+impl LiveStartRequestV1 {
+    pub fn validate(&self) -> Result<(), ValidationErrorV1> {
+        validate_id("operation_id", self.operation_id.as_ref())?;
+        if self.name.trim().is_empty() {
+            Err(invalid("name", "must not be empty"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveSessionRequestV1 {
+    pub operation_id: LiveOperationId,
+    pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_generation: Option<u64>,
+}
+
+impl LiveSessionRequestV1 {
+    pub fn validate(&self) -> Result<(), ValidationErrorV1> {
+        validate_id("operation_id", self.operation_id.as_ref())?;
+        validate_id("session_id", self.session_id.as_ref())?;
+        if let Some(generation) = self.expected_generation {
+            validate_json_integer("expected_generation", generation)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveUpdateNotepadRequestV1 {
+    pub operation_id: LiveOperationId,
+    pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_generation: Option<u64>,
+    pub expected_notepad_revision: String,
+    pub text: String,
+}
+
+impl LiveUpdateNotepadRequestV1 {
+    pub fn validate(&self) -> Result<(), ValidationErrorV1> {
+        validate_id("operation_id", self.operation_id.as_ref())?;
+        validate_id("session_id", self.session_id.as_ref())?;
+        if let Some(generation) = self.expected_generation {
+            validate_json_integer("expected_generation", generation)?;
+        }
+        validate_id("expected_notepad_revision", &self.expected_notepad_revision)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveMutationResponseV1 {
+    pub protocol_version: ProtocolVersionV1,
+    pub idempotent_replay: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_session_id: Option<SessionId>,
+    pub snapshot: LiveSnapshotV1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveErrorCodeV1 {
+    Unauthorized,
+    BadRequest,
+    NoActiveSession,
+    SessionMismatch,
+    GenerationMismatch,
+    NotepadChanged,
+    AlreadyRecording,
+    Busy,
+    NotReady,
+    Internal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveErrorV1 {
+    pub code: LiveErrorCodeV1,
+    pub message: String,
+    pub retryable: bool,
+}
+
+impl LiveErrorV1 {
+    pub fn new(code: LiveErrorCodeV1, message: impl Into<String>, retryable: bool) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            retryable,
+        }
+    }
+}
 
 /// A client-to-runtime message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +411,7 @@ impl ClientMessageV1 {
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum ClientMessageBodyV1 {
     CreateSession(CreateSessionV1),
+    BeginCaptureGeneration(BeginCaptureGenerationV1),
     ResumeSession(ResumeSessionV1),
     AppendProvenanceHop(AppendProvenanceHopV1),
     AudioChunk(AudioChunkV1),
@@ -198,6 +425,7 @@ impl ClientMessageBodyV1 {
     fn validate(&self) -> Result<(), ValidationErrorV1> {
         match self {
             Self::CreateSession(value) => value.validate(),
+            Self::BeginCaptureGeneration(value) => value.validate(),
             Self::ResumeSession(value) => value.validate(),
             Self::AppendProvenanceHop(value) => value.validate(),
             Self::AudioChunk(value) => value.validate(),
@@ -237,6 +465,7 @@ impl ServerMessageV1 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerMessageBodyV1 {
     SessionCreated(SessionCreatedV1),
+    CaptureGenerationStarted(CaptureGenerationStartedV1),
     ReplayCompleted(ReplayCompletedV1),
     ProvenanceHopRecorded(ProvenanceHopRecordedV1),
     CommandRejected(CommandRejectedV1),
@@ -274,6 +503,7 @@ impl ServerMessageBodyV1 {
                 validate_id("create_message_id", value.create_message_id.as_ref())?;
                 validate_json_integer("created_at_unix_ms", value.created_at_unix_ms.0)
             }
+            Self::CaptureGenerationStarted(value) => value.validate(),
             Self::ReplayCompleted(value) => value.validate(),
             Self::ProvenanceHopRecorded(value) => value.validate(),
             Self::CommandRejected(value) => value.validate(),
@@ -295,6 +525,7 @@ impl Serialize for ServerMessageBodyV1 {
         }
         match self {
             Self::SessionCreated(value) => known!("session_created", value),
+            Self::CaptureGenerationStarted(value) => known!("capture_generation_started", value),
             Self::ReplayCompleted(value) => known!("replay_completed", value),
             Self::ProvenanceHopRecorded(value) => known!("provenance_hop_recorded", value),
             Self::CommandRejected(value) => known!("command_rejected", value),
@@ -338,6 +569,7 @@ impl<'de> Deserialize<'de> for ServerMessageBodyV1 {
         let wire = WireBody::deserialize(deserializer)?;
         Ok(match wire.message_type.as_str() {
             "session_created" => Self::SessionCreated(payload(wire.payload)?),
+            "capture_generation_started" => Self::CaptureGenerationStarted(payload(wire.payload)?),
             "replay_completed" => Self::ReplayCompleted(payload(wire.payload)?),
             "provenance_hop_recorded" => Self::ProvenanceHopRecorded(payload(wire.payload)?),
             "command_rejected" => Self::CommandRejected(payload(wire.payload)?),
@@ -423,6 +655,43 @@ impl CreateSessionV1 {
 pub struct SessionCreatedV1 {
     pub create_message_id: MessageId,
     pub created_at_unix_ms: UnixMillis,
+}
+
+/// Starts another capture generation for a session whose prior input was
+/// durably finalized. This is distinct from `ResumeSessionV1`, which only
+/// replays the event stream after a transport reconnect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeginCaptureGenerationV1 {
+    pub prior_finalize_message_id: MessageId,
+    pub started_at_ms: SessionMillis,
+}
+
+impl BeginCaptureGenerationV1 {
+    pub fn validate(&self) -> Result<(), ValidationErrorV1> {
+        validate_id(
+            "prior_finalize_message_id",
+            self.prior_finalize_message_id.as_ref(),
+        )?;
+        validate_json_integer("started_at_ms", self.started_at_ms.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureGenerationStartedV1 {
+    pub begin_message_id: MessageId,
+    pub prior_finalize_message_id: MessageId,
+    pub started_at_ms: SessionMillis,
+}
+
+impl CaptureGenerationStartedV1 {
+    fn validate(&self) -> Result<(), ValidationErrorV1> {
+        validate_id("begin_message_id", self.begin_message_id.as_ref())?;
+        validate_id(
+            "prior_finalize_message_id",
+            self.prior_finalize_message_id.as_ref(),
+        )?;
+        validate_json_integer("started_at_ms", self.started_at_ms.0)
+    }
 }
 
 /// Requests replay of server events after a reconnect.
@@ -561,6 +830,242 @@ pub enum AudioContainerV1 {
     Webm,
     Ogg,
     Mp4,
+    /// Concatenated, independently durable Margins Opus packet blocks.
+    /// Packet framing, source-frame counts, and codec delay are explicit so
+    /// upload chunking never changes the decoded timeline.
+    PacketStream,
+}
+
+pub const OPUS_PACKET_STREAM_SAMPLE_RATE_HZ_V1: u32 = 16_000;
+pub const OPUS_PACKET_FRAME_SAMPLES_V1: u16 = 320;
+pub const OPUS_PACKET_STREAM_HEADER_BYTES_V1: usize = 32;
+pub const OPUS_PACKET_STREAM_MAX_PACKETS_PER_BLOCK_V1: usize = 64;
+pub const OPUS_PACKET_MAX_BYTES_V1: usize = 1_275;
+pub const OPUS_PACKET_STREAM_MAX_BLOCK_BYTES_V1: usize = OPUS_PACKET_STREAM_HEADER_BYTES_V1
+    + OPUS_PACKET_STREAM_MAX_PACKETS_PER_BLOCK_V1 * (2 + OPUS_PACKET_MAX_BYTES_V1);
+const OPUS_PACKET_STREAM_MAGIC_V1: &[u8; 4] = b"MOP1";
+const OPUS_PACKET_STREAM_START_V1: u8 = 1;
+const OPUS_PACKET_STREAM_END_V1: u8 = 2;
+
+/// One concatenation-safe durable block in the native remote Opus stream.
+/// `source_frame_count` excludes codec lookahead and final padding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpusPacketBlockV1 {
+    pub stream_start: bool,
+    pub stream_end: bool,
+    /// RFC 7845 Opus pre-skip units (always the 48 kHz Opus clock).
+    pub pre_skip_48k: u16,
+    pub sample_rate_hz: u32,
+    pub source_start_frame: u64,
+    pub source_frame_count: u32,
+    pub frame_samples: u16,
+    pub packets: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpusPacketStreamSummaryV1 {
+    pub source_frame_count: u64,
+    pub packet_count: u64,
+    pub block_count: u64,
+    pub pre_skip_48k: u16,
+}
+
+impl OpusPacketBlockV1 {
+    pub fn encode(&self) -> Result<Vec<u8>, String> {
+        validate_opus_packet_block_structure_v1(self)?;
+        let payload_bytes = self.packets.iter().try_fold(0usize, |total, packet| {
+            total
+                .checked_add(2 + packet.len())
+                .ok_or_else(|| "Opus packet block length overflowed".to_string())
+        })?;
+        let block_bytes = OPUS_PACKET_STREAM_HEADER_BYTES_V1
+            .checked_add(payload_bytes)
+            .ok_or_else(|| "Opus packet block length overflowed".to_string())?;
+        let block_bytes_u32 =
+            u32::try_from(block_bytes).map_err(|_| "Opus packet block is too large")?;
+        let packet_count =
+            u16::try_from(self.packets.len()).map_err(|_| "too many Opus packets")?;
+        let mut encoded = Vec::with_capacity(block_bytes);
+        encoded.extend_from_slice(OPUS_PACKET_STREAM_MAGIC_V1);
+        encoded.extend_from_slice(&block_bytes_u32.to_le_bytes());
+        encoded.push(
+            u8::from(self.stream_start) * OPUS_PACKET_STREAM_START_V1
+                | u8::from(self.stream_end) * OPUS_PACKET_STREAM_END_V1,
+        );
+        encoded.push(0);
+        encoded.extend_from_slice(&self.pre_skip_48k.to_le_bytes());
+        encoded.extend_from_slice(&self.sample_rate_hz.to_le_bytes());
+        encoded.extend_from_slice(&self.source_start_frame.to_le_bytes());
+        encoded.extend_from_slice(&self.source_frame_count.to_le_bytes());
+        encoded.extend_from_slice(&packet_count.to_le_bytes());
+        encoded.extend_from_slice(&self.frame_samples.to_le_bytes());
+        for packet in &self.packets {
+            encoded.extend_from_slice(&(packet.len() as u16).to_le_bytes());
+            encoded.extend_from_slice(packet);
+        }
+        Ok(encoded)
+    }
+}
+
+/// Parse block framing without requiring a complete stream. This is used to
+/// reject malformed upload chunks before they become durable.
+pub fn decode_opus_packet_blocks_v1(bytes: &[u8]) -> Result<Vec<OpusPacketBlockV1>, String> {
+    let mut blocks = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        let remaining = bytes.len() - cursor;
+        if remaining < OPUS_PACKET_STREAM_HEADER_BYTES_V1 {
+            return Err("truncated Opus packet block header".to_string());
+        }
+        let header = &bytes[cursor..cursor + OPUS_PACKET_STREAM_HEADER_BYTES_V1];
+        if &header[..4] != OPUS_PACKET_STREAM_MAGIC_V1 {
+            return Err("Opus packet block magic/version mismatch".to_string());
+        }
+        let block_bytes = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+        if block_bytes < OPUS_PACKET_STREAM_HEADER_BYTES_V1
+            || block_bytes > OPUS_PACKET_STREAM_MAX_BLOCK_BYTES_V1
+            || block_bytes > remaining
+        {
+            return Err("truncated or invalid Opus packet block length".to_string());
+        }
+        let flags = header[8];
+        if flags & !(OPUS_PACKET_STREAM_START_V1 | OPUS_PACKET_STREAM_END_V1) != 0 || header[9] != 0
+        {
+            return Err("Opus packet block uses unsupported flags".to_string());
+        }
+        let packet_count = u16::from_le_bytes(header[28..30].try_into().unwrap()) as usize;
+        if packet_count == 0 || packet_count > OPUS_PACKET_STREAM_MAX_PACKETS_PER_BLOCK_V1 {
+            return Err("Opus packet block has an invalid packet count".to_string());
+        }
+        let mut packet_cursor = cursor + OPUS_PACKET_STREAM_HEADER_BYTES_V1;
+        let block_end = cursor + block_bytes;
+        let mut packets =
+            Vec::with_capacity(packet_count.min(OPUS_PACKET_STREAM_MAX_PACKETS_PER_BLOCK_V1));
+        for _ in 0..packet_count {
+            if block_end.saturating_sub(packet_cursor) < 2 {
+                return Err("truncated Opus packet length".to_string());
+            }
+            let packet_bytes =
+                u16::from_le_bytes(bytes[packet_cursor..packet_cursor + 2].try_into().unwrap())
+                    as usize;
+            packet_cursor += 2;
+            if packet_bytes == 0
+                || packet_bytes > OPUS_PACKET_MAX_BYTES_V1
+                || block_end.saturating_sub(packet_cursor) < packet_bytes
+            {
+                return Err("invalid or truncated Opus packet payload".to_string());
+            }
+            packets.push(bytes[packet_cursor..packet_cursor + packet_bytes].to_vec());
+            packet_cursor += packet_bytes;
+        }
+        if packet_cursor != block_end {
+            return Err("Opus packet block has trailing bytes".to_string());
+        }
+        let block = OpusPacketBlockV1 {
+            stream_start: flags & OPUS_PACKET_STREAM_START_V1 != 0,
+            stream_end: flags & OPUS_PACKET_STREAM_END_V1 != 0,
+            pre_skip_48k: u16::from_le_bytes(header[10..12].try_into().unwrap()),
+            sample_rate_hz: u32::from_le_bytes(header[12..16].try_into().unwrap()),
+            source_start_frame: u64::from_le_bytes(header[16..24].try_into().unwrap()),
+            source_frame_count: u32::from_le_bytes(header[24..28].try_into().unwrap()),
+            frame_samples: u16::from_le_bytes(header[30..32].try_into().unwrap()),
+            packets,
+        };
+        validate_opus_packet_block_structure_v1(&block)?;
+        blocks.push(block);
+        cursor = block_end;
+    }
+    if blocks.is_empty() {
+        return Err("Opus packet stream is empty".to_string());
+    }
+    Ok(blocks)
+}
+
+/// Validate one complete segment stream, including ordering, terminal framing,
+/// and enough decoded tail to cover source frames after pre-skip.
+pub fn validate_opus_packet_stream_v1(bytes: &[u8]) -> Result<OpusPacketStreamSummaryV1, String> {
+    let blocks = decode_opus_packet_blocks_v1(bytes)?;
+    let mut expected_source_start = 0u64;
+    let mut packet_count = 0u64;
+    let mut pre_skip_48k = 0u16;
+    for (index, block) in blocks.iter().enumerate() {
+        if index == 0 {
+            if !block.stream_start || block.pre_skip_48k == 0 {
+                return Err("Opus packet stream is missing its START/pre-skip".to_string());
+            }
+            if block.pre_skip_48k % 3 != 0 {
+                return Err("16 kHz Opus pre-skip is not integral in the 48 kHz clock".to_string());
+            }
+            pre_skip_48k = block.pre_skip_48k;
+        } else if block.stream_start || block.pre_skip_48k != 0 {
+            return Err("Opus packet stream has a repeated START/pre-skip".to_string());
+        }
+        if block.source_start_frame != expected_source_start {
+            return Err("Opus packet stream source frames contain a gap or overlap".to_string());
+        }
+        expected_source_start = expected_source_start
+            .checked_add(u64::from(block.source_frame_count))
+            .ok_or_else(|| "Opus packet stream source frame count overflowed".to_string())?;
+        if expected_source_start > MAX_SAFE_JSON_INTEGER {
+            return Err("Opus packet stream source frame count exceeds V1".to_string());
+        }
+        packet_count = packet_count
+            .checked_add(block.packets.len() as u64)
+            .ok_or_else(|| "Opus packet count overflowed".to_string())?;
+        if block.stream_end && index + 1 != blocks.len() {
+            return Err("Opus packet stream has bytes after END".to_string());
+        }
+        if !block.stream_end
+            && u64::from(block.source_frame_count)
+                != block.packets.len() as u64 * u64::from(block.frame_samples)
+        {
+            return Err("non-terminal Opus block does not fully represent its packets".to_string());
+        }
+    }
+    if !blocks.last().is_some_and(|block| block.stream_end) {
+        return Err("Opus packet stream is missing END".to_string());
+    }
+    let decoded_capacity = packet_count
+        .checked_mul(u64::from(OPUS_PACKET_FRAME_SAMPLES_V1))
+        .ok_or_else(|| "Opus decoded frame capacity overflowed".to_string())?;
+    let pre_skip_frames = u64::from(pre_skip_48k / 3);
+    if decoded_capacity < expected_source_start.saturating_add(pre_skip_frames) {
+        return Err(
+            "Opus packet stream tail cannot cover source frames after pre-skip".to_string(),
+        );
+    }
+    Ok(OpusPacketStreamSummaryV1 {
+        source_frame_count: expected_source_start,
+        packet_count,
+        block_count: blocks.len() as u64,
+        pre_skip_48k,
+    })
+}
+
+fn validate_opus_packet_block_structure_v1(block: &OpusPacketBlockV1) -> Result<(), String> {
+    if block.sample_rate_hz != OPUS_PACKET_STREAM_SAMPLE_RATE_HZ_V1
+        || block.frame_samples != OPUS_PACKET_FRAME_SAMPLES_V1
+    {
+        return Err("unsupported Opus packet stream rate or frame size".to_string());
+    }
+    if block.packets.is_empty() || block.packets.len() > OPUS_PACKET_STREAM_MAX_PACKETS_PER_BLOCK_V1
+    {
+        return Err("Opus packet block has an invalid packet count".to_string());
+    }
+    if block.source_frame_count == 0
+        || u64::from(block.source_frame_count)
+            > block.packets.len() as u64 * u64::from(block.frame_samples)
+    {
+        return Err("Opus packet block has an invalid source frame count".to_string());
+    }
+    if block
+        .packets
+        .iter()
+        .any(|packet| packet.is_empty() || packet.len() > OPUS_PACKET_MAX_BYTES_V1)
+    {
+        return Err("Opus packet block has an invalid packet size".to_string());
+    }
+    Ok(())
 }
 
 /// Dependency-free representation of a content digest.
@@ -686,6 +1191,120 @@ mod audio_payload {
         } else {
             deserializer.deserialize_byte_buf(AudioPayloadVisitor)
         }
+    }
+}
+
+pub const AUDIO_CHUNK_BATCH_CONTENT_TYPE_V1: &str = "application/vnd.margins.audio-chunk-batch.v1";
+const AUDIO_CHUNK_BATCH_MAGIC_V1: &[u8; 4] = b"MAB1";
+const AUDIO_CHUNK_BATCH_HEADER_BYTES_V1: usize = 8;
+const AUDIO_CHUNK_BATCH_ENTRY_HEADER_BYTES_V1: usize = 8;
+const AUDIO_CHUNK_BATCH_MAX_METADATA_BYTES_V1: usize = 64 * 1024;
+
+/// Binary HTTP envelope that amortizes request latency while preserving each
+/// durable audio command's independent identity, digest, and receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioChunkBatchV1 {
+    pub commands: Vec<ClientMessageV1>,
+}
+
+impl AudioChunkBatchV1 {
+    pub fn encode(&self, max_commands: usize, max_chunk_bytes: u64) -> Result<Vec<u8>, String> {
+        validate_audio_chunk_batch_count_v1(self.commands.len(), max_commands)?;
+        let count = u16::try_from(self.commands.len())
+            .map_err(|_| "audio chunk batch contains too many commands")?;
+        let mut output = Vec::new();
+        output.extend_from_slice(AUDIO_CHUNK_BATCH_MAGIC_V1);
+        output.extend_from_slice(&count.to_le_bytes());
+        output.extend_from_slice(&0u16.to_le_bytes());
+        for command in &self.commands {
+            let ClientMessageBodyV1::AudioChunk(chunk) = &command.body else {
+                return Err("audio chunk batch contains a non-audio command".to_string());
+            };
+            if chunk.payload.len() as u64 > max_chunk_bytes {
+                return Err("audio chunk batch payload exceeds the advertised maximum".to_string());
+            }
+            let mut metadata = command.clone();
+            let ClientMessageBodyV1::AudioChunk(metadata_chunk) = &mut metadata.body else {
+                unreachable!();
+            };
+            metadata_chunk.payload.clear();
+            let metadata = serde_json::to_vec(&metadata)
+                .map_err(|error| format!("audio chunk metadata encoding failed: {error}"))?;
+            if metadata.len() > AUDIO_CHUNK_BATCH_MAX_METADATA_BYTES_V1 {
+                return Err("audio chunk batch metadata exceeds its bound".to_string());
+            }
+            let metadata_len = u32::try_from(metadata.len())
+                .map_err(|_| "audio chunk metadata length overflowed")?;
+            let payload_len = u32::try_from(chunk.payload.len())
+                .map_err(|_| "audio chunk payload length overflowed")?;
+            output.extend_from_slice(&metadata_len.to_le_bytes());
+            output.extend_from_slice(&payload_len.to_le_bytes());
+            output.extend_from_slice(&metadata);
+            output.extend_from_slice(&chunk.payload);
+        }
+        Ok(output)
+    }
+
+    pub fn decode(bytes: &[u8], max_commands: usize, max_chunk_bytes: u64) -> Result<Self, String> {
+        if bytes.len() < AUDIO_CHUNK_BATCH_HEADER_BYTES_V1
+            || &bytes[..4] != AUDIO_CHUNK_BATCH_MAGIC_V1
+        {
+            return Err("audio chunk batch magic/version mismatch".to_string());
+        }
+        let count = u16::from_le_bytes(bytes[4..6].try_into().unwrap()) as usize;
+        if bytes[6..8] != [0, 0] {
+            return Err("audio chunk batch uses unsupported flags".to_string());
+        }
+        validate_audio_chunk_batch_count_v1(count, max_commands)?;
+        let mut cursor = AUDIO_CHUNK_BATCH_HEADER_BYTES_V1;
+        let mut commands = Vec::with_capacity(count);
+        for _ in 0..count {
+            if bytes.len().saturating_sub(cursor) < AUDIO_CHUNK_BATCH_ENTRY_HEADER_BYTES_V1 {
+                return Err("truncated audio chunk batch entry".to_string());
+            }
+            let metadata_len =
+                u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
+            let payload_len =
+                u32::from_le_bytes(bytes[cursor + 4..cursor + 8].try_into().unwrap()) as usize;
+            cursor += AUDIO_CHUNK_BATCH_ENTRY_HEADER_BYTES_V1;
+            if metadata_len == 0 || metadata_len > AUDIO_CHUNK_BATCH_MAX_METADATA_BYTES_V1 {
+                return Err("audio chunk batch metadata length is invalid".to_string());
+            }
+            if payload_len == 0 || payload_len as u64 > max_chunk_bytes {
+                return Err("audio chunk batch payload length is invalid".to_string());
+            }
+            let entry_len = metadata_len
+                .checked_add(payload_len)
+                .ok_or_else(|| "audio chunk batch entry length overflowed".to_string())?;
+            if bytes.len().saturating_sub(cursor) < entry_len {
+                return Err("truncated audio chunk batch entry bytes".to_string());
+            }
+            let mut command: ClientMessageV1 =
+                serde_json::from_slice(&bytes[cursor..cursor + metadata_len])
+                    .map_err(|error| format!("invalid audio chunk batch metadata: {error}"))?;
+            cursor += metadata_len;
+            let ClientMessageBodyV1::AudioChunk(chunk) = &mut command.body else {
+                return Err("audio chunk batch contains a non-audio command".to_string());
+            };
+            if !chunk.payload.is_empty() {
+                return Err("audio chunk batch metadata duplicates payload bytes".to_string());
+            }
+            chunk.payload = bytes[cursor..cursor + payload_len].to_vec();
+            cursor += payload_len;
+            commands.push(command);
+        }
+        if cursor != bytes.len() {
+            return Err("audio chunk batch has trailing bytes".to_string());
+        }
+        Ok(Self { commands })
+    }
+}
+
+fn validate_audio_chunk_batch_count_v1(count: usize, max_commands: usize) -> Result<(), String> {
+    if count == 0 || count > max_commands || count > u16::MAX as usize {
+        Err("audio chunk batch command count is outside its bound".to_string())
+    } else {
+        Ok(())
     }
 }
 
@@ -899,6 +1518,194 @@ impl CaptureProvenanceHopV1 {
         }
         Ok(())
     }
+}
+
+/// Negotiated limits for the Workspace authority API. Values are advertised
+/// so clients can bound queues and reject unsupported capture before devices
+/// start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceLimitsV1 {
+    pub max_chunk_bytes: u64,
+    pub max_in_flight_chunks: u32,
+    pub max_event_page: u32,
+    pub max_import_bytes: u64,
+    pub spool_reserve_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCapabilitiesV1 {
+    pub protocol_version: ProtocolVersionV1,
+    pub instance_id: InstanceId,
+    pub workspace_id: WorkspaceId,
+    pub limits: WorkspaceLimitsV1,
+    pub capture_formats: Vec<AudioFormatV1>,
+    pub operations: Vec<String>,
+    pub asr_available: bool,
+    pub recall_available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSummaryV1 {
+    pub instance_id: InstanceId,
+    pub workspace_id: WorkspaceId,
+    pub display_name: String,
+    pub source_ids: Vec<String>,
+    pub source_freshness: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSessionSummaryV1 {
+    pub session_id: SessionId,
+    pub title: Option<String>,
+    pub started_at: String,
+    /// Immutable lane declarations from the authoritative CreateSession. Empty
+    /// only for converted legacy sessions that predate capture authority.
+    pub capture_lanes: Vec<CaptureLaneV1>,
+    pub segment_count: u64,
+    pub input_finalized: bool,
+    pub capture_duration_ms: Option<DurationMillis>,
+    pub capture_finalize_message_id: Option<MessageId>,
+    pub processing_state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSessionPageV1 {
+    pub sessions: Vec<WorkspaceSessionSummaryV1>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceTranscriptV1 {
+    pub session_id: SessionId,
+    pub body: String,
+    pub view: String,
+    pub decoded_until_ms: u64,
+    pub committed_until_ms: u64,
+    pub updated_at_unix_ms: u64,
+    pub live: bool,
+    pub terminal: bool,
+    pub source_artifact: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceArtifactV1 {
+    pub artifact_id: ArtifactId,
+    pub session_id: SessionId,
+    pub kind: String,
+    pub ordinal: i64,
+    pub size_bytes: Option<u64>,
+    pub retention_class: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceMemoV1 {
+    pub session_id: SessionId,
+    pub revision: String,
+    pub lines: Vec<WorkspaceMemoLineV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceMemoLineV1 {
+    pub text: String,
+    pub created_secs: f64,
+    pub edited_secs: Option<f64>,
+    pub draft_started_secs: Option<f64>,
+    pub audio_pending_at_mark: bool,
+    pub block_ordinal: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceMemoUpdateV1 {
+    pub request_id: String,
+    pub expected_revision: String,
+    pub observed_at_ms: SessionMillis,
+    pub paused: bool,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceAttachV1 {
+    /// Stable, client-generated retry identity with at least UUID entropy.
+    pub request_id: String,
+    /// Fences the generation against a stale current/session snapshot.
+    pub prior_finalize_message_id: MessageId,
+    pub requested_at_unix_ms: UnixMillis,
+    /// Absolute offset on the existing session's capture timeline.
+    pub started_at_ms: SessionMillis,
+}
+
+/// Replaces a complete timestamped memo. Native capture records the timestamps
+/// on the device; the Workspace authority applies the replacement with CAS and
+/// a durable request identity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceMemoReplaceV1 {
+    pub request_id: String,
+    pub expected_revision: String,
+    pub lines: Vec<WorkspaceMemoLineV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRenameV1 {
+    pub request_id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceNoteAssociationV1 {
+    pub session_id: SessionId,
+    pub source_id: String,
+    pub relative_path: String,
+    pub observed_content_hash: Option<String>,
+    pub revision: u64,
+    #[serde(default)]
+    pub bb_thread_ids: Vec<String>,
+    #[serde(default)]
+    pub distilled_memo_revision: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceNoteAssociationUpdateV1 {
+    pub request_id: String,
+    pub source_id: String,
+    pub relative_path: String,
+    pub observed_content_hash: Option<String>,
+    pub expected_revision: u64,
+    #[serde(default)]
+    pub bb_thread_id: Option<String>,
+    #[serde(default)]
+    pub distilled_memo_revision: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceProcessingJobV1 {
+    pub job_id: String,
+    pub session_id: SessionId,
+    pub operation: String,
+    pub input_revision: String,
+    pub attempt: u64,
+    pub status: String,
+    pub progress: Option<f64>,
+    pub result_ref: Option<String>,
+    pub failure: Option<String>,
+    pub failed_stage: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceErrorV1 {
+    pub code: String,
+    pub retryable: bool,
+    pub request_id: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceResponseV1<T> {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<T>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<WorkspaceErrorV1>,
 }
 
 /// Appends relay lineage without rewriting an idempotent original command.

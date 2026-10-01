@@ -4,12 +4,12 @@
 ))]
 use crate::asr;
 use crate::asr::TranscriptWordEntry;
-use anyhow::{bail, Result};
 #[cfg(any(
     all(feature = "coreml-asr", target_os = "macos"),
     feature = "parakeet-asr"
 ))]
 use anyhow::Context;
+use anyhow::{bail, Result};
 #[cfg(any(
     all(feature = "coreml-asr", target_os = "macos"),
     feature = "parakeet-asr"
@@ -222,7 +222,7 @@ fn transcribe_mono_16k_parakeet(mono_16k: &[f32]) -> Result<OfflineTranscript> {
     not(all(feature = "coreml-asr", target_os = "macos")),
     feature = "parakeet-asr"
 ))]
-fn resolve_parakeet_model_dir() -> Result<(PathBuf, asr::AsrModelKind)> {
+pub fn resolve_parakeet_model_dir() -> Result<(PathBuf, asr::AsrModelKind)> {
     let dir = std::env::var("MARGINS_PARAKEET_MODEL_DIR")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -237,9 +237,11 @@ fn resolve_parakeet_model_dir() -> Result<(PathBuf, asr::AsrModelKind)> {
         .to_ascii_lowercase()
         .as_str()
     {
-        "tdt" | "tdt-v3" | "v3" => asr::AsrModelKind::Tdt,
+        "tdt" | "tdt-v2" | "v2" | "tdt-v3" | "v3" => asr::AsrModelKind::Tdt,
         "ctc" => asr::AsrModelKind::Ctc,
-        other => bail!("Unknown MARGINS_PARAKEET_MODEL_KIND `{other}`; use `tdt` or `ctc`."),
+        other => bail!(
+            "Unknown MARGINS_PARAKEET_MODEL_KIND `{other}`; use `tdt-v2`, `tdt-v3`, or `ctc`."
+        ),
     };
 
     let missing = asr::missing_model_files(&dir, kind);

@@ -21,8 +21,9 @@ VPS API / queue adapter
   |  authenticate, deserialize, validate, then MeetingRuntime::handle
   v
 MeetingRuntime<MeetingRuntimeStorage>
-  |-- atomic command state + append-only ServerMessageV1 event log
-  |-- opaque durable chunks/discontinuities via StoredSessionV1 snapshots
+  |-- bounded session metadata + immutable command receipts
+  |-- paginated append-only ServerMessageV1 event log
+  |-- targeted opaque chunk reads and transactional deltas
   v
 transcript worker / memo worker
   |  consume ordered opaque chunks and publish results through an application
@@ -38,14 +39,14 @@ IDs. A VPS transport adapter performs authentication and framing, calls
 validates again before state changes. It never interprets a payload as audio.
 
 `MeetingRuntimeStorage` is an optimistic compare-and-swap persistence contract.
-Production adapters should implement its create and replace operations as
-database transactions, including unique indexes for `session_id` and the create
-`idempotency_key`. `InMemoryMeetingRuntimeStorage` uses one mutex-protected map,
-implements the same conflicts atomically, is thread-safe, and is intended for
-tests and bounded single-process use.
+Production adapters implement targeted session, receipt, event-page, and chunk
+reads plus transactional create/delta operations, including unique indexes for
+`session_id` and the create `idempotency_key`. `InMemoryMeetingRuntimeStorage`
+uses normalized mutex-protected maps, implements the same conflicts atomically,
+is thread-safe, and is intended for tests and bounded single-process use.
 
-Workers can read `StoredSessionV1::audio_chunks` in deterministic
-segment/lane/sequence order and `discontinuities` as explicit gap coverage.
+Workers can page events and fetch individual chunks without loading prior audio
+or command bodies; discontinuities remain explicit gap coverage.
 Worker leasing, queue offsets, transcript inference, and publishing transcript,
 memo, or artifact events are intentionally outside this command state machine;
 an application should make those an outbox/worker adapter so inference retries

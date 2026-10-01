@@ -15,20 +15,41 @@ use margins_cli::args::{Args, Command, SetupLocalModelPolicyArg, SetupSkipArg, S
 use std::ffi::OsString;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::Path;
-#[cfg(feature = "audio-capture")]
+#[cfg(any(
+    feature = "audio-capture",
+    all(feature = "coreml-asr", target_os = "macos")
+))]
 use std::path::PathBuf;
-#[cfg(feature = "audio-capture")]
+#[cfg(any(test, feature = "audio-capture"))]
 use std::sync::atomic::AtomicBool;
-#[cfg(any(test, all(feature = "coreml-asr", target_os = "macos")))]
+#[cfg(feature = "audio-capture")]
+use std::sync::atomic::AtomicU32;
+#[cfg(any(
+    test,
+    feature = "audio-capture",
+    all(feature = "coreml-asr", target_os = "macos")
+))]
 use std::sync::atomic::AtomicU64;
 #[cfg(any(test, feature = "audio-capture"))]
 use std::sync::atomic::AtomicU8;
-#[cfg(any(test, feature = "audio-capture"))]
+#[cfg(any(
+    test,
+    feature = "audio-capture",
+    all(feature = "coreml-asr", target_os = "macos")
+))]
 use std::sync::atomic::Ordering;
 #[cfg(feature = "audio-capture")]
 use std::sync::Mutex;
-#[cfg(any(test, feature = "audio-capture"))]
+#[cfg(any(
+    test,
+    feature = "audio-capture",
+    all(feature = "coreml-asr", target_os = "macos")
+))]
 use std::sync::{mpsc, Arc};
+
+#[cfg(feature = "audio-capture")]
+#[path = "cli/native_bridge.rs"]
+mod native_bridge;
 
 trait InteractiveSession {
     fn create(&self, work_dir: &Path, title: Option<&str>) -> Result<()>;
@@ -100,7 +121,7 @@ fn ensure_capture_permissions(source: &dyn CapturePermissionSource) -> Result<()
         match permission_action(state) {
             PermissionAction::Proceed | PermissionAction::ProbeOnStart => {}
             PermissionAction::Blocked => match lane {
-                AudioLane::Microphone => bail!("Margins needs Microphone permission. Grant it to your terminal in System Settings > Privacy & Security > Microphone, then quit and reopen the terminal before running Margins again."),
+                AudioLane::Microphone => bail!("Margins needs Microphone permission. Grant access to the app or terminal running Margins in System Settings > Privacy & Security > Microphone, then restart it."),
                 AudioLane::System => bail!("{}", margins_cli::error::MACOS_SYSTEM_AUDIO_PERMISSION_DENIED_MESSAGE),
                 _ => bail!("Margins does not have the required capture permission."),
             },
@@ -229,6 +250,10 @@ where
     if let Some(code) = release_smoke(&args) {
         return code;
     }
+    #[cfg(feature = "audio-capture")]
+    if let Some(code) = native_bridge::maybe_main(&args) {
+        return code;
+    }
     let (workspace_selector, workspace_args) =
         match margins_cli::args::strip_workspace_arg(args.clone()) {
             Ok(value) => value,
@@ -246,6 +271,60 @@ where
             return error.exit_code();
         }
     };
+    let remote_selected = !parsed.local
+        && (parsed.remote.is_some()
+            || std::env::var("MARGINS_REMOTE")
+                .ok()
+                .is_some_and(|value| !value.trim().is_empty()));
+    if remote_selected {
+        #[cfg(feature = "audio-capture")]
+        if matches!(
+            parsed.command,
+            Some(Command::New { .. } | Command::Attach { .. })
+        ) {
+            let env_remote = std::env::var("MARGINS_REMOTE").ok();
+            let env_workspace = std::env::var("MARGINS_WORKSPACE")
+                .ok()
+                .filter(|value| !value.trim().is_empty());
+            let remote = parsed
+                .remote
+                .as_deref()
+                .or(env_remote.as_deref())
+                .map(str::to_string)
+                .expect("remote selection was already established");
+            let workspace = workspace_selector
+                .as_deref()
+                .or(env_workspace.as_deref())
+                .map(str::to_string);
+            let Some(workspace) = workspace else {
+                return report_error(
+                    "remote capture requires --workspace <id> or MARGINS_WORKSPACE",
+                );
+            };
+            return match run_remote_native_capture(
+                &remote,
+                &workspace,
+                &parsed.command,
+                None,
+                None,
+                None,
+                None,
+                false,
+            ) {
+                Ok(()) => 0,
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    let _ = report_error(&message);
+                    if message.contains("upload pending in transfer") {
+                        75
+                    } else {
+                        1
+                    }
+                }
+            };
+        }
+        return margins_cli::main_entry(args);
+    }
 
     // Intercept Setup before the interactive dispatch.
     if let Some(Command::Setup {
@@ -472,6 +551,14 @@ where
         return run_scan(workspace_selector.as_deref());
     }
 
+    #[cfg(feature = "recall")]
+    if let Some(Command::Workspace {
+        command: margins_cli::args::WorkspaceCommand::Compile { note_folder, .. },
+    }) = &parsed.command
+    {
+        return run_workspace_compile(workspace_selector.as_deref(), note_folder.as_deref());
+    }
+
     let interactive_command = match &parsed.command {
         None => Some((false, None, None, true)),
         Some(Command::New { title }) => Some((true, title.as_deref(), None, false)),
@@ -595,15 +682,33 @@ where
 
     let services = margins_cli::standalone_services();
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let project = match services
-        .projects
-        .resolve_vault(project_selector.as_deref(), &cwd)
-    {
-        Ok(project) => project,
-        Err(error) => return report_error(&error.to_string()),
+    let env_workspace = std::env::var("MARGINS_WORKSPACE")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let selected_workspace = workspace_selector.as_deref().or(env_workspace.as_deref());
+    if selected_workspace.is_some() && project_selector.is_some() {
+        return report_error("`--project` cannot be combined with an explicit Workspace selection");
+    }
+    let capture_root = if selected_workspace.is_some() {
+        let workspace = match resolve_workspace(selected_workspace) {
+            Ok(workspace) => workspace,
+            Err(error) => return report_error(&error.to_string()),
+        };
+        match workspace.capture_store_dir() {
+            Ok(path) => path,
+            Err(error) => return report_error(&error.to_string()),
+        }
+    } else {
+        match services
+            .projects
+            .resolve_vault(project_selector.as_deref(), &cwd)
+        {
+            Ok(project) => project.work_dir,
+            Err(error) => return report_error(&error.to_string()),
+        }
     };
     let create = if create_if_missing {
-        let margins_dir = project.work_dir.join(".margins");
+        let margins_dir = capture_root.join(".margins");
         let current = match services.sessions.current(&margins_dir) {
             Ok(current) => current,
             Err(error) => return report_error(&error.to_string()),
@@ -620,9 +725,9 @@ where
         create
     };
     let result = if create {
-        interactive.create(&project.work_dir, title)
+        interactive.create(&capture_root, title)
     } else {
-        interactive.attach(&project.work_dir, selected)
+        interactive.attach(&capture_root, selected)
     };
     match result {
         Ok(()) => 0,
@@ -907,6 +1012,23 @@ fn run_scan(workspace_selector: Option<&str>) -> i32 {
 }
 
 #[cfg(feature = "recall")]
+fn run_workspace_compile(workspace_selector: Option<&str>, note_folder: Option<&str>) -> i32 {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+    let workspace =
+        match margins_cli::commands::workspace::resolve_existing(workspace_selector, &cwd) {
+            Ok(workspace) => workspace,
+            Err(error) => return report_error(&error.to_string()),
+        };
+    match crate::setup_compile::compile(&workspace, note_folder) {
+        Ok(result) => {
+            println!("{result}");
+            0
+        }
+        Err(error) => report_error(&format!("compiling Workspace setup: {error:#}")),
+    }
+}
+
+#[cfg(feature = "recall")]
 fn run_init(workspace_selector: Option<&str>) -> i32 {
     let workspace = match resolve_workspace(workspace_selector) {
         Ok(workspace) => workspace,
@@ -969,9 +1091,14 @@ fn run_workspace_status(selector: Option<&str>) -> i32 {
                 return report_error(&format!("reading recall source freshness: {error:#}"))
             }
         };
+    let recall = match crate::recall::workspace_status_recall(&workspace) {
+        Ok(status) => status,
+        Err(error) => return report_error(&format!("reading recall index status: {error:#}")),
+    };
     match margins_cli::commands::workspace::render_status(
         &workspace,
         true,
+        recall,
         &source_refresh_staleness,
         &mut io::stdout(),
     ) {
@@ -1622,18 +1749,16 @@ fn create_native_session(work_dir: &Path, title: Option<&str>) -> Result<()> {
     std::fs::create_dir_all(&margins_dir).context("failed to create .margins directory")?;
     // Silent bookkeeping so desktop and `recent --all` can enumerate this folder.
     margins_workflows::project::register_vault_silently(work_dir);
-    std::fs::write(&memo_path, "")
-        .with_context(|| format!("failed to initialize memo {}", memo_path.display()))?;
-    margins_store::legacy::create_session(
+    margins_store::canonical::create_session(
         &margins_dir,
         &name,
         &started_at,
         &relative_artifact(&memo_path, work_dir),
     )?;
     if let Some(title) = title {
-        margins_store::legacy::set_title(&margins_dir, &name, Some(title.to_string()))?;
+        margins_store::canonical::set_title(&margins_dir, &name, Some(title.to_string()))?;
     }
-    margins_store::legacy::add_segment(
+    margins_store::canonical::add_segment(
         &margins_dir,
         &name,
         0,
@@ -1649,6 +1774,7 @@ fn create_native_session(work_dir: &Path, title: Option<&str>) -> Result<()> {
         started_at,
         mic_name,
     );
+    app.bind_workspace_authority(margins_dir.clone(), name.clone());
     app.live_transcription_status = live_status;
 
     let action = run_segment(
@@ -1692,20 +1818,15 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
             .trim()
             .to_string(),
     };
-    if name.is_empty() || !margins_store::legacy::session_exists(&margins_dir, &name)? {
+    if name.is_empty() || !margins_store::canonical::session_exists(&margins_dir, &name)? {
         bail!("Session '{name}' not found. Run `margins ls` to choose one.");
     }
-    let meta = margins_store::legacy::get_session_meta(&margins_dir, &name)?;
-    let started_at = margins_store::legacy::get_session_start_time(&margins_dir, &name)?;
+    let meta = margins_store::canonical::get_session_meta(&margins_dir, &name)?;
+    let started_at = margins_store::canonical::get_session_start_time(&margins_dir, &name)?;
     let memo_path = resolve_artifact(work_dir, &meta.notes_path);
-    if !memo_path.exists() && meta.vault_note_path.is_none() {
-        std::fs::write(&memo_path, "")?;
-    }
-    let parsed = crate::parser::parse_markdown(
-        &std::fs::read_to_string(&memo_path).context("failed to read memo")?,
-        &started_at,
-    );
-    let ordinal = margins_store::legacy::next_segment_index(&margins_dir, &name)?;
+    let authority = margins_store::SqliteWorkspaceAuthorityStorage::open(&margins_dir)?;
+    let parsed = margins_core::TimedMemoDocument::from_committed(authority.memo(&name)?.lines);
+    let ordinal = margins_store::canonical::next_segment_index(&margins_dir, &name)?;
     let audio_path = margins_dir.join(format!("{name}_seg{ordinal}.wav"));
     let offset_ms = (Local::now() - started_at).num_milliseconds().max(0);
     let live_artifact_ordinal = ordinal;
@@ -1727,7 +1848,7 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
         None,
         initial_live_sink,
     )?;
-    margins_store::legacy::add_segment(
+    margins_store::canonical::add_segment(
         &margins_dir,
         &name,
         ordinal,
@@ -1737,12 +1858,13 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
     )?;
     std::fs::write(margins_dir.join("current"), format!("{name}\n"))?;
     let mic_name = crate::recorder::default_input_device_name().unwrap_or_else(|| "Unknown".into());
-    let mut app = crate::app::App::from_parsed(
+    let mut app = crate::app::App::from_memo(
         parsed,
         memo_path.to_string_lossy().into_owned(),
         started_at,
         mic_name,
     );
+    app.bind_workspace_authority(margins_dir.clone(), name.clone());
     app.live_transcription_status = live_status;
 
     let action = run_segment(
@@ -1767,6 +1889,913 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
             Ok(())
         }
         PostCaptureAction::NotOffered => Ok(()),
+    }
+}
+
+#[cfg(any(test, feature = "audio-capture"))]
+fn cleanup_failed_remote_recorder_start<F>(
+    mut transfer: margins_workflows::remote_workspace::NativeRemoteTransfer,
+    ended_at_ms: u64,
+    reservation_intent: &mut Option<
+        margins_workflows::remote_workspace::CaptureReservationIntentV1,
+    >,
+    transfer_dir: &Path,
+    uploader_done: &AtomicBool,
+    uploader: std::thread::JoinHandle<()>,
+    deliver: F,
+) -> Vec<String>
+where
+    F: FnOnce(&mut margins_workflows::remote_workspace::DurableTransferSpool) -> Result<()>,
+{
+    let mut errors = Vec::new();
+    let abort_sealed = match transfer.seal_session(
+        ended_at_ms,
+        margins_meeting_protocol::SessionFinalizeReasonV1::Error,
+    ) {
+        Ok(_) => true,
+        Err(error) => {
+            errors.push(format!("could not persist abort intent: {error}"));
+            false
+        }
+    };
+    if let Some(intent) = reservation_intent.take() {
+        if let Err(error) = intent.remove(transfer_dir) {
+            errors.push(format!("could not dispose capture reservation: {error}"));
+        }
+    }
+    uploader_done.store(true, Ordering::Release);
+    if uploader.join().is_err() {
+        errors.push("remote delivery worker panicked during abort".into());
+    }
+    let mut spool = transfer.into_spool();
+    if abort_sealed {
+        if let Err(error) = deliver(&mut spool) {
+            errors.push(format!(
+                "abort delivery remains pending in transfer {}: {error}",
+                spool.manifest().transfer_id
+            ));
+        }
+    }
+    errors
+}
+
+#[cfg(feature = "audio-capture")]
+fn copy_remote_recovery_for_local_asr(
+    source: &Path,
+    directory: &Path,
+    transfer_id: &str,
+    segment_index: usize,
+) -> Result<std::path::PathBuf> {
+    use std::fs::OpenOptions;
+    use std::io::copy;
+
+    if !directory.is_absolute() {
+        bail!("local audio directory must be absolute");
+    }
+    std::fs::create_dir_all(directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+        let name = format!("{transfer_id}-seg{segment_index}.wav");
+        let destination = directory.join(name);
+        let temporary = destination.with_extension("wav.partial");
+        let mut input = std::fs::File::open(source)?;
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        copy(&mut input, &mut output)?;
+        output.sync_all()?;
+        std::fs::rename(&temporary, &destination)?;
+        return Ok(destination);
+    }
+    #[cfg(not(unix))]
+    {
+        let destination = directory.join(format!("{transfer_id}-seg{segment_index}.wav"));
+        let mut input = std::fs::File::open(source)?;
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)?;
+        copy(&mut input, &mut output)?;
+        output.sync_all()?;
+        Ok(destination)
+    }
+}
+
+#[cfg(feature = "audio-capture")]
+fn run_remote_native_capture(
+    remote: &str,
+    workspace_id: &str,
+    command: &Option<Command>,
+    controller: Option<native_bridge::CaptureController>,
+    local_audio_dir: Option<&Path>,
+    mic_device_name: Option<&str>,
+    prepared_connection: Option<margins_workflows::remote_workspace::RemoteConnection>,
+    permissions_verified: bool,
+) -> Result<()> {
+    use margins_meeting_protocol::{
+        SegmentCloseReasonV1, SessionFinalizeReasonV1, WorkspaceAttachV1, WorkspaceMemoLineV1,
+        WorkspaceMemoReplaceV1,
+    };
+    use margins_workflows::remote_workspace::{
+        deliver_available, deliver_transfer, list_transfers, native_create_session_command,
+        pending_capture_reservations, transfer_root, validate_native_opus_capture_lanes,
+        CaptureReservationIntentV1, CaptureReservationRequestV1, DurableTransferSpool,
+        NativeRemoteLane, NativeRemoteTransfer, RemoteConnection, NATIVE_REMOTE_RATE_HZ,
+    };
+
+    if !permissions_verified {
+        ensure_capture_permissions(&NativeCapturePermissionSource)?;
+    }
+    let mut selected_device = mic_device_name
+        .map(|name| {
+            crate::recorder::list_input_devices()
+                .into_iter()
+                .find(|(available, _)| available == name)
+                .map(|(_, device)| device)
+                .with_context(|| format!("microphone input device not found: {name}"))
+        })
+        .transpose()?;
+    let token = std::env::var("MARGINS_REMOTE_TOKEN").ok();
+    let connection = match prepared_connection {
+        Some(connection) => connection,
+        None => RemoteConnection::connect(remote, workspace_id, token.as_deref())?,
+    };
+    let capabilities = &connection.capabilities;
+    let opus_supported = capabilities.capture_formats.iter().any(|format| {
+        format.codec == margins_meeting_protocol::AudioCodecV1::Opus
+            && format.container == margins_meeting_protocol::AudioContainerV1::PacketStream
+            && format.sample_rate_hz == NATIVE_REMOTE_RATE_HZ
+            && format.channel_count == 1
+    });
+    if !opus_supported {
+        bail!("remote instance does not advertise native mono Opus packet-stream capture");
+    }
+
+    let transfer_dir = transfer_root()?;
+    std::fs::create_dir_all(&transfer_dir)?;
+    let mut reservation_intent;
+    let (spool, session_id, initial_offset_ms) = match command {
+        Some(Command::New { title }) => {
+            let pending = pending_capture_reservations(&transfer_dir)?
+                .into_iter()
+                .filter(|intent| {
+                    intent.instance_id == capabilities.instance_id.as_ref()
+                        && intent.remote_url == remote
+                        && intent.workspace_id == workspace_id
+                        && matches!(&intent.request, CaptureReservationRequestV1::Create { command }
+                            if matches!(&command.body, margins_meeting_protocol::ClientMessageBodyV1::CreateSession(create) if &create.title == title))
+                })
+                .collect::<Vec<_>>();
+            if pending.len() > 1 {
+                bail!("multiple unfinished remote session reservations match this command; inspect the transfer directory before retrying");
+            }
+            let intent = if let Some(intent) = pending.into_iter().next() {
+                intent
+            } else {
+                let session_id = format!(
+                    "remote-{}-{}",
+                    Local::now().format("%Y-%m-%d-%H-%M-%S"),
+                    &uuid::Uuid::new_v4().simple().to_string()[..8]
+                );
+                let transfer_id = uuid::Uuid::new_v4().to_string();
+                let command = native_create_session_command(
+                    &session_id,
+                    &format!("reserve-{transfer_id}"),
+                    title.clone(),
+                    "margins-native-cli",
+                );
+                CaptureReservationIntentV1 {
+                    schema: "margins.capture-reservation.v1".into(),
+                    transfer_id,
+                    instance_id: capabilities.instance_id.as_ref().into(),
+                    remote_url: remote.into(),
+                    workspace_id: workspace_id.into(),
+                    session_id,
+                    request: CaptureReservationRequestV1::Create { command },
+                }
+                .persist(&transfer_dir)?
+            };
+            let spool = remote_spool_from_reservation(
+                &connection,
+                &capabilities,
+                &transfer_dir,
+                remote,
+                workspace_id,
+                &intent,
+            )?;
+            let session_id = intent.session_id.clone();
+            reservation_intent = Some(intent);
+            (spool, session_id, 0)
+        }
+        Some(Command::Attach { session }) => {
+            let requested =
+                match session {
+                    Some(session) => session.clone(),
+                    None => connection
+                        .client
+                        .current()?
+                        .context(
+                            "no current remote capture is selected for this client and Workspace",
+                        )?
+                        .0,
+                };
+            let target_summary = connection
+                .client
+                .session_summary(&requested)?
+                .context("remote session was not found in the selected Workspace")?;
+            validate_native_opus_capture_lanes(&target_summary.capture_lanes)?;
+            let mut found = None;
+            for transfer_id in list_transfers(&transfer_dir)? {
+                let candidate = DurableTransferSpool::open(
+                    &transfer_dir,
+                    &transfer_id,
+                    capabilities.limits.spool_reserve_bytes,
+                )?;
+                let manifest = candidate.manifest();
+                if manifest.instance_id == capabilities.instance_id.as_ref()
+                    && manifest.workspace_id == workspace_id
+                    && manifest.session_id == requested
+                {
+                    found = Some(candidate);
+                    break;
+                }
+            }
+            if let Some(spool) = found {
+                if spool.manifest().finalize_command.is_some() {
+                    bail!(
+                        "remote transfer is already sealed; retry delivery instead of attaching audio"
+                    );
+                }
+                reservation_intent = pending_capture_reservations(&transfer_dir)?
+                    .into_iter()
+                    .find(|intent| intent.transfer_id == spool.manifest().transfer_id);
+                let offset = spool
+                    .manifest()
+                    .close_commands
+                    .iter()
+                    .filter_map(|command| match &command.body {
+                        margins_meeting_protocol::ClientMessageBodyV1::CloseSegment(close) => {
+                            Some(close.ended_at_ms.0)
+                        }
+                        _ => None,
+                    })
+                    .max()
+                    .unwrap_or(0);
+                (spool, requested, offset)
+            } else {
+                let pending = pending_capture_reservations(&transfer_dir)?
+                    .into_iter()
+                    .filter(|intent| {
+                        intent.instance_id == capabilities.instance_id.as_ref()
+                            && intent.remote_url == remote
+                            && intent.workspace_id == workspace_id
+                            && intent.session_id == requested
+                            && matches!(intent.request, CaptureReservationRequestV1::Attach { .. })
+                    })
+                    .collect::<Vec<_>>();
+                if pending.len() > 1 {
+                    bail!("multiple unfinished attach reservations match this session; inspect the transfer directory before retrying");
+                }
+                if let Some(intent) = pending.into_iter().next() {
+                    let spool = remote_spool_from_reservation(
+                        &connection,
+                        &capabilities,
+                        &transfer_dir,
+                        remote,
+                        workspace_id,
+                        &intent,
+                    )?;
+                    reservation_intent = Some(intent);
+                    let offset = match &reservation_intent.as_ref().unwrap().request {
+                        CaptureReservationRequestV1::Attach { request } => request.started_at_ms.0,
+                        _ => unreachable!(),
+                    };
+                    (spool, requested, offset)
+                } else {
+                    if !target_summary.input_finalized {
+                        bail!(
+                            "remote session has an active producer; recover it from its owning client"
+                        );
+                    }
+                    let offset = target_summary
+                        .capture_duration_ms
+                        .context("remote session lacks a durable capture boundary")?
+                        .0;
+                    let transfer_id = uuid::Uuid::new_v4().to_string();
+                    let attach = WorkspaceAttachV1 {
+                        request_id: uuid::Uuid::new_v4().to_string(),
+                        prior_finalize_message_id: target_summary
+                            .capture_finalize_message_id
+                            .context("remote session lacks a durable finalize identity")?,
+                        requested_at_unix_ms: margins_meeting_protocol::UnixMillis(
+                            Local::now().timestamp_millis().max(0) as u64,
+                        ),
+                        started_at_ms: margins_meeting_protocol::SessionMillis(offset),
+                    };
+                    let intent = CaptureReservationIntentV1 {
+                        schema: "margins.capture-reservation.v1".into(),
+                        transfer_id,
+                        instance_id: capabilities.instance_id.as_ref().into(),
+                        remote_url: remote.into(),
+                        workspace_id: workspace_id.into(),
+                        session_id: requested.clone(),
+                        request: CaptureReservationRequestV1::Attach { request: attach },
+                    }
+                    .persist(&transfer_dir)?;
+                    let spool = remote_spool_from_reservation(
+                        &connection,
+                        &capabilities,
+                        &transfer_dir,
+                        remote,
+                        workspace_id,
+                        &intent,
+                    )?;
+                    reservation_intent = Some(intent);
+                    (spool, requested, offset)
+                }
+            }
+        }
+        _ => bail!("remote native capture requires new or attach"),
+    };
+    let _capture_lease = spool.acquire_capture_lease()?;
+
+    // Recovery establishes the only truthful media boundary for the next
+    // generation. Do this before constructing the memo clock or capture origin;
+    // otherwise a recovered interrupted segment can overlap the new one.
+    let mut transfer = NativeRemoteTransfer::new(spool);
+    transfer.recover_interrupted_segment(SegmentCloseReasonV1::Error)?;
+    let initial_offset_ms = transfer
+        .last_closed_ended_at_ms()
+        .unwrap_or(initial_offset_ms)
+        .max(initial_offset_ms);
+
+    // The CoreML worker is optional. Its checkpoint stays inside this scoped
+    // transfer until a separate publisher sends a bounded copy to the service.
+    let checkpoint_path = transfer.spool().root().join("live-checkpoint.json");
+    let live_status = Arc::new(AtomicU8::new(crate::app::LIVE_TRANSCRIPTION_WARMING));
+    let live = start_live_transcript_worker(
+        checkpoint_path.clone(),
+        initial_offset_ms,
+        live_status.clone(),
+    );
+    let checkpoint_publisher = if live.is_some() {
+        let client = connection.client.clone();
+        let session = session_id.clone();
+        let producer_token = transfer.spool().producer_token()?;
+        let done = Arc::new(AtomicBool::new(false));
+        let thread_done = done.clone();
+        let join = std::thread::Builder::new()
+            .name("margins-remote-live-checkpoint".into())
+            .spawn(move || {
+                publish_remote_live_checkpoints(
+                    &client,
+                    &session,
+                    &producer_token,
+                    &checkpoint_path,
+                    &thread_done,
+                );
+            })?;
+        Some(RemoteCheckpointPublisher {
+            done,
+            join: Some(join),
+        })
+    } else {
+        None
+    };
+
+    let initial_memo = connection.client.memo(&session_id)?;
+    let initial_revision = initial_memo.revision.clone();
+    let initial_lines = initial_memo.lines.clone();
+    let started_at = Local::now()
+        - chrono::Duration::milliseconds(initial_offset_ms.min(i64::MAX as u64) as i64);
+    let draft_path = transfer.spool().root().join("memo-draft.md");
+    let document = if draft_path.is_file() {
+        margins_core::TimedMemoDocument::parse_markdown(&std::fs::read_to_string(&draft_path)?)
+    } else {
+        margins_core::TimedMemoDocument::from_committed(
+            initial_memo
+                .lines
+                .iter()
+                .cloned()
+                .map(|line| margins_core::TimedMemoLine {
+                    text: line.text,
+                    created_secs: line.created_secs,
+                    edited_secs: line.edited_secs,
+                    draft_started_secs: line.draft_started_secs,
+                    audio_pending_at_mark: line.audio_pending_at_mark,
+                    block_ordinal: line.block_ordinal,
+                })
+                .collect(),
+        )
+    };
+    let mic_name = crate::recorder::default_input_device_name().unwrap_or_else(|| "Unknown".into());
+    let mut app = crate::app::App::from_memo(
+        document,
+        draft_path.to_string_lossy().into_owned(),
+        started_at,
+        mic_name,
+    );
+    let uploader_done = Arc::new(AtomicBool::new(false));
+    let uploader_state = Arc::new(AtomicU8::new(crate::app::REMOTE_DELIVERY_CURRENT));
+    let uploader_pending_chunks = Arc::new(AtomicU64::new(0));
+    let uploader_pending_bytes = Arc::new(AtomicU64::new(0));
+    app.remote_delivery_state = uploader_state.clone();
+    app.remote_pending_chunks = uploader_pending_chunks.clone();
+    app.remote_pending_bytes = uploader_pending_bytes.clone();
+    app.live_transcription_status = live_status;
+    let uploader_parent = transfer
+        .spool()
+        .root()
+        .parent()
+        .context("remote transfer has no parent")?
+        .to_path_buf();
+    let uploader_id = transfer.spool().manifest().transfer_id.clone();
+    let uploader_client = connection.client.clone();
+    let uploader_reserve = capabilities.limits.spool_reserve_bytes;
+    let uploader_batch_limit = capabilities.limits.max_in_flight_chunks.max(1) as usize;
+    let uploader_done_flag = uploader_done.clone();
+    let uploader = std::thread::Builder::new()
+        .name("margins-remote-delivery".into())
+        .spawn(move || {
+            let mut backoff = std::time::Duration::from_millis(50);
+            loop {
+                if uploader_done_flag.load(Ordering::Acquire) {
+                    break;
+                }
+                let result = (|| -> Result<(bool, bool)> {
+                    let mut spool = DurableTransferSpool::open(
+                        &uploader_parent,
+                        &uploader_id,
+                        uploader_reserve,
+                    )?;
+                    let chunks = spool.pending_chunks()?;
+                    uploader_pending_chunks.store(chunks.len() as u64, Ordering::Release);
+                    uploader_pending_bytes.store(
+                        chunks.iter().map(|chunk| chunk.size_bytes).sum(),
+                        Ordering::Release,
+                    );
+                    let has_work = !chunks.is_empty() || !spool.pending_closes().is_empty();
+                    let catching_up = chunks.len() >= uploader_batch_limit;
+                    if has_work {
+                        deliver_available(&mut spool, &uploader_client)?;
+                    }
+                    Ok((has_work, catching_up))
+                })();
+                match result {
+                    Ok((_, catching_up)) => {
+                        uploader_state
+                            .store(crate::app::REMOTE_DELIVERY_CURRENT, Ordering::Release);
+                        // A full batch means durable ingress is outrunning the
+                        // last request. Continue promptly until below the
+                        // advertised catch-up threshold; partial/idle polling
+                        // remains relaxed and never busy-spins.
+                        backoff = if catching_up {
+                            std::time::Duration::from_millis(1)
+                        } else {
+                            std::time::Duration::from_millis(50)
+                        };
+                    }
+                    Err(error) => {
+                        uploader_state
+                            .store(crate::app::REMOTE_DELIVERY_PENDING, Ordering::Release);
+                        if remote_delivery_requires_credentials(&error) {
+                            // Preserve the spool and stop background retries until
+                            // the user repairs/reissues credentials. Final Stop
+                            // still releases devices first and makes one truthful
+                            // delivery attempt before returning the transfer id.
+                            break;
+                        }
+                        backoff = (backoff * 2).min(std::time::Duration::from_secs(2));
+                    }
+                }
+                std::thread::sleep(backoff);
+            }
+        })?;
+    let capture_started = std::time::Instant::now();
+    let mut announced_sources = false;
+    let mut local_segment_index = 0usize;
+    'capture: loop {
+        let offset_ms =
+            initial_offset_ms.saturating_add(capture_started.elapsed().as_millis() as u64);
+        let segment_id = format!("native-{}", uuid::Uuid::new_v4().simple());
+        let stop = Arc::new(AtomicBool::new(false));
+        let queued_samples = Arc::new(AtomicU64::new(0));
+        let (sender, receiver) = mpsc::channel();
+        let sink = crate::recorder::LiveAudioSink {
+            sender,
+            generation: 1,
+            generation_clock: Arc::new(Mutex::new(crate::recorder::LiveGenerationClock {
+                generation: 1,
+                session_offset_ms: offset_ms,
+            })),
+            mic_accepted_samples: Arc::new(AtomicU64::new(0)),
+            system_accepted_samples: Arc::new(AtomicU64::new(0)),
+            mic_dropped_samples: Arc::new(AtomicU64::new(0)),
+            system_dropped_samples: Arc::new(AtomicU64::new(0)),
+            queued_samples: queued_samples.clone(),
+            queue_max_samples: u64::from(NATIVE_REMOTE_RATE_HZ) * 10 * 2,
+        };
+        let recorder = match crate::recorder::RecorderHandle::start_with_live_audio(
+            stop.clone(),
+            selected_device.as_ref(),
+            Some(sink.clone()),
+        ) {
+            Ok(recorder) => recorder,
+            Err(error) => {
+                // A reservation is not a successful capture. Seal it aborted,
+                // retaining the transfer if the server cannot acknowledge. No
+                // cleanup step may short-circuit the later steps: in particular,
+                // stop/join the uploader and dispose the reservation even if the
+                // durable abort intent itself fails.
+                let cleanup_errors = cleanup_failed_remote_recorder_start(
+                    transfer,
+                    initial_offset_ms,
+                    &mut reservation_intent,
+                    &transfer_dir,
+                    &uploader_done,
+                    uploader,
+                    |spool| deliver_transfer(spool, &connection.client),
+                );
+                if cleanup_errors.is_empty() {
+                    return Err(error);
+                }
+                return Err(error.context(cleanup_errors.join("; ")));
+            }
+        };
+        if !announced_sources {
+            eprintln!(
+                "Recording on this Mac · Saving to {} / {} · Microphone + system audio enabled",
+                capabilities.instance_id.as_ref(),
+                workspace_id
+            );
+            announced_sources = true;
+        }
+        transfer.begin_segment(segment_id.clone(), offset_ms)?;
+        if let Some(intent) = reservation_intent.take() {
+            intent.remove(&transfer_dir)?;
+        }
+        let recovery_path = transfer.spool().recovery_path(&segment_id)?;
+        let active_transfer_id = transfer.spool().manifest().transfer_id.clone();
+        let worker_stop = stop.clone();
+        let live_sink = live.as_ref().map(|worker| {
+            let mut sink = worker.sink_for_offset(offset_ms);
+            // Native devices can deliver 48 kHz on both lanes. Bound the
+            // unresampled queue to roughly thirty seconds of those samples.
+            sink.queue_max_samples = 48_000 * 30 * 2;
+            sink
+        });
+        let worker = std::thread::Builder::new()
+            .name("margins-remote-spool".into())
+            .spawn(move || {
+                let mut transfer = transfer;
+                let result = (|| -> Result<()> {
+                    while let Ok(chunk) = receiver.recv() {
+                        let count = chunk.samples.len() as u64;
+                        let lane = match chunk.channel {
+                            crate::recorder::LiveAudioChannel::Mic => NativeRemoteLane::Microphone,
+                            crate::recorder::LiveAudioChannel::System => NativeRemoteLane::System,
+                        };
+                        let append = transfer.append_f32(lane, chunk.sample_rate, &chunk.samples);
+                        queued_samples.fetch_sub(count, Ordering::Relaxed);
+                        append?;
+                        if let Some(sink) = &live_sink {
+                            enqueue_remote_live_chunk(sink, &chunk);
+                        }
+                    }
+                    Ok(())
+                })();
+                if result.is_err() {
+                    worker_stop.store(true, Ordering::SeqCst);
+                }
+                (transfer, result)
+            })?;
+
+        app.mic_level = recorder.mic_peak();
+        app.spk_level = recorder.spk_peak();
+        app.mic_drops = recorder.mic_drops();
+        app.spk_drops = recorder.spk_drops();
+        app.spk_silence = recorder.spk_silence();
+        app.spk_frames = recorder.spk_frames();
+        app.spk_rate = recorder.spk_rate();
+        if let Some(controller) = &controller {
+            controller.recording(&session_id, &active_transfer_id, &sink, &recorder);
+        }
+        // The recorder owns the sender from here. Keeping this clone alive
+        // would prevent the spool worker's receive loop from closing on stop.
+        drop(sink);
+        let action = if let Some(controller) = &controller {
+            controller.wait_action(&stop)?
+        } else {
+            crate::tui::run_tui(&mut app, stop.clone())
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?
+        };
+        // run_tui set the stop flag before returning. This call synchronously
+        // retires both native devices before memo/network/ASR work begins.
+        recorder.stop_and_write(&recovery_path.to_string_lossy())?;
+        if let Some(directory) = local_audio_dir {
+            match copy_remote_recovery_for_local_asr(
+                &recovery_path,
+                directory,
+                &active_transfer_id,
+                local_segment_index,
+            ) {
+                Ok(path) => {
+                    if let Some(controller) = &controller {
+                        controller.local_audio_saved(&path);
+                    }
+                }
+                Err(error) => {
+                    if let Some(controller) = &controller {
+                        controller.local_audio_failed(&format!("{error:#}"));
+                    }
+                }
+            }
+            local_segment_index += 1;
+        }
+        let (returned, spool_result) = worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("remote spool worker panicked"))?;
+        transfer = returned;
+        spool_result.context("remote audio spool failed; local recovery WAV was retained")?;
+
+        match action {
+            crate::tui::TuiAction::Pause => {
+                transfer.close_segment(SegmentCloseReasonV1::Pause)?;
+                app.set_capture_paused(true);
+                if let Some(controller) = &controller {
+                    controller.paused();
+                }
+                app.mic_level = Arc::new(AtomicU32::new(0));
+                app.spk_level = Arc::new(AtomicU32::new(0));
+                loop {
+                    let paused_action = if let Some(controller) = &controller {
+                        controller.wait_paused_action()?
+                    } else {
+                        crate::tui::run_tui(&mut app, Arc::new(AtomicBool::new(false)))
+                            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+                    };
+                    match paused_action {
+                        crate::tui::TuiAction::Resume => {
+                            app.set_capture_paused(false);
+                            break;
+                        }
+                        crate::tui::TuiAction::Quit => break 'capture,
+                        crate::tui::TuiAction::SwitchDevice(index) => {
+                            let mut devices = crate::recorder::list_input_devices();
+                            if index >= devices.len() {
+                                bail!("selected audio input is no longer available");
+                            }
+                            let (name, device) = devices.swap_remove(index);
+                            app.current_mic_name = name;
+                            selected_device = Some(device);
+                        }
+                        crate::tui::TuiAction::Pause => {}
+                    }
+                }
+            }
+            crate::tui::TuiAction::SwitchDevice(index) => {
+                transfer.close_segment(SegmentCloseReasonV1::Rollover)?;
+                let mut devices = crate::recorder::list_input_devices();
+                if index >= devices.len() {
+                    bail!("selected audio input is no longer available");
+                }
+                let (name, device) = devices.swap_remove(index);
+                app.current_mic_name = name;
+                selected_device = Some(device);
+            }
+            crate::tui::TuiAction::Quit => {
+                transfer.close_segment(SegmentCloseReasonV1::Stop)?;
+                break 'capture;
+            }
+            crate::tui::TuiAction::Resume => bail!("resume requested while capture was active"),
+        }
+    }
+    // Pin the media boundary before any uploader join, memo write, or server
+    // work. Stop drain latency must never inflate recorded duration.
+    let final_ended_at_ms = transfer
+        .last_closed_ended_at_ms()
+        .context("remote capture stopped without a durable media boundary")?;
+    if let Some(controller) = &controller {
+        controller.saving();
+    }
+    if let Some(worker) = live {
+        let _ = worker
+            .begin_finish(final_ended_at_ms.saturating_sub(initial_offset_ms))
+            .complete();
+    }
+    drop(checkpoint_publisher);
+    uploader_done.store(true, Ordering::Release);
+    uploader
+        .join()
+        .map_err(|_| anyhow::anyhow!("remote delivery worker panicked"))?;
+    app.save().context("remote memo draft could not be saved")?;
+    let lines: Vec<WorkspaceMemoLineV1> = app
+        .memo
+        .lines()
+        .iter()
+        .cloned()
+        .map(|line| WorkspaceMemoLineV1 {
+            text: line.text,
+            created_secs: line.created_secs,
+            edited_secs: line.edited_secs,
+            draft_started_secs: line.draft_started_secs,
+            audio_pending_at_mark: line.audio_pending_at_mark,
+            block_ordinal: line.block_ordinal,
+        })
+        .collect();
+    // The native bridge has no memo editor. BB/Codex may have edited the
+    // Workspace memo during capture, so sending our initial snapshot here
+    // would overwrite it (or block finalization with a revision conflict).
+    if controller.is_none() && remote_memo_was_edited(&initial_lines, &lines) {
+        let memo_request_id = format!("native-memo-{}", transfer.spool().manifest().transfer_id);
+        transfer
+            .spool_mut()
+            .set_memo_intent(WorkspaceMemoReplaceV1 {
+                request_id: memo_request_id,
+                expected_revision: initial_revision,
+                lines,
+            })?;
+    }
+    transfer.seal_session(final_ended_at_ms, SessionFinalizeReasonV1::Completed)?;
+    let transfer_id = transfer.spool().manifest().transfer_id.clone();
+    let mut spool = transfer.into_spool();
+    match deliver_transfer(&mut spool, &connection.client) {
+        Ok(()) => {
+            eprintln!("Saved to remote Workspace; processing state is separate.");
+            Ok(())
+        }
+        Err(error) => bail!(
+            "recording stopped; upload pending in transfer {transfer_id}. Retry with `margins transfers retry {transfer_id}`: {error}"
+        ),
+    }
+}
+
+#[cfg(feature = "audio-capture")]
+fn remote_memo_was_edited(
+    initial: &[margins_meeting_protocol::WorkspaceMemoLineV1],
+    final_lines: &[margins_meeting_protocol::WorkspaceMemoLineV1],
+) -> bool {
+    // App::from_memo appends one empty TUI draft even if nobody types. A
+    // capture-only session must not turn that draft into a remote replacement.
+    let actual = if final_lines.len() == initial.len() + 1
+        && final_lines
+            .last()
+            .is_some_and(|line| line.text.trim().is_empty())
+    {
+        &final_lines[..initial.len()]
+    } else {
+        final_lines
+    };
+    actual != initial
+}
+
+#[cfg(feature = "audio-capture")]
+fn remote_spool_from_reservation(
+    connection: &margins_workflows::remote_workspace::RemoteConnection,
+    capabilities: &margins_meeting_protocol::WorkspaceCapabilitiesV1,
+    transfer_dir: &Path,
+    remote: &str,
+    workspace_id: &str,
+    intent: &margins_workflows::remote_workspace::CaptureReservationIntentV1,
+) -> Result<margins_workflows::remote_workspace::DurableTransferSpool> {
+    use margins_workflows::remote_workspace::{
+        promote_capture_reservation, CaptureReservationRequestV1,
+    };
+    if capabilities.instance_id.as_ref() != intent.instance_id
+        || intent.remote_url != remote
+        || intent.workspace_id != workspace_id
+    {
+        bail!("reservation intent does not match the selected remote instance and Workspace");
+    }
+    let spool = promote_capture_reservation(
+        intent,
+        transfer_dir,
+        capabilities.limits.spool_reserve_bytes,
+        || {
+            let reservation = match &intent.request {
+                CaptureReservationRequestV1::Create { command } => {
+                    connection.client.reserve(command)?
+                }
+                CaptureReservationRequestV1::Attach { request } => {
+                    connection.client.attach(&intent.session_id, request)?
+                }
+            };
+            Ok(reservation.producer_token)
+        },
+    )?;
+    if spool.manifest().finalize_command.is_some() {
+        bail!("reserved remote transfer is already sealed; retry its delivery instead of starting capture");
+    }
+    Ok(spool)
+}
+
+#[cfg(feature = "audio-capture")]
+fn remote_delivery_requires_credentials(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}").to_ascii_lowercase();
+    [
+        "unauthorized:",
+        "forbidden:",
+        "credential is invalid",
+        "credential is revoked or expired",
+        "producer token",
+        "producer_token",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+#[cfg(feature = "audio-capture")]
+struct RemoteCheckpointPublisher {
+    done: Arc<AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(feature = "audio-capture")]
+impl Drop for RemoteCheckpointPublisher {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Release);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+#[cfg(feature = "audio-capture")]
+fn enqueue_remote_live_chunk(
+    sink: &crate::recorder::LiveAudioSink,
+    chunk: &crate::recorder::LiveAudioChunk,
+) {
+    use crate::recorder::LiveAudioChannel;
+    let count = chunk.samples.len() as u64;
+    let dropped = match chunk.channel {
+        LiveAudioChannel::Mic => &sink.mic_dropped_samples,
+        LiveAudioChannel::System => &sink.system_dropped_samples,
+    };
+    let accepted = match chunk.channel {
+        LiveAudioChannel::Mic => &sink.mic_accepted_samples,
+        LiveAudioChannel::System => &sink.system_accepted_samples,
+    };
+    let reserved = sink
+        .queued_samples
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+            let next = queued.checked_add(count)?;
+            (next <= sink.queue_max_samples).then_some(next)
+        })
+        .is_ok();
+    if !reserved {
+        dropped.fetch_add(count, Ordering::Relaxed);
+        return;
+    }
+    let mut copy = chunk.clone();
+    copy.generation = sink.generation;
+    if sink.sender.send(copy).is_ok() {
+        accepted.fetch_add(count, Ordering::Relaxed);
+    } else {
+        sink.queued_samples.fetch_sub(count, Ordering::AcqRel);
+        dropped.fetch_add(count, Ordering::Relaxed);
+    }
+}
+
+#[cfg(feature = "audio-capture")]
+fn publish_remote_live_checkpoints(
+    client: &margins_workflows::remote_workspace::WorkspaceHttpClient,
+    session: &str,
+    producer_token: &str,
+    path: &Path,
+    done: &AtomicBool,
+) {
+    const MAX_BYTES: u64 = 256 * 1024;
+    let mut last_sent = Vec::new();
+    let mut last_attempt = std::time::Instant::now() - std::time::Duration::from_secs(3);
+    loop {
+        let closing = done.load(Ordering::Acquire);
+        if closing || last_attempt.elapsed() >= std::time::Duration::from_secs(3) {
+            if let Ok(metadata) = std::fs::metadata(path) {
+                if metadata.len() > 0 && metadata.len() <= MAX_BYTES {
+                    if let Ok(body) = std::fs::read(path) {
+                        if body != last_sent {
+                            last_attempt = std::time::Instant::now();
+                            match client.put_live_checkpoint(session, producer_token, body.clone())
+                            {
+                                Ok(()) => last_sent = body,
+                                Err(error) => crate::cli_log::event(
+                                    "remote_live_checkpoint_upload_failed",
+                                    crate::cli_log::error_summary(&error),
+                                ),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if closing {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }
 
@@ -1849,7 +2878,7 @@ fn run_segment(
         stop.store(true, Ordering::SeqCst);
         let duration = recorder.stop_and_write(&audio_path.to_string_lossy())?;
 
-        margins_store::legacy::update_segment_duration(
+        margins_store::canonical::update_segment_duration(
             margins_dir,
             session_name,
             ordinal,
@@ -1859,7 +2888,7 @@ fn run_segment(
             .strip_prefix(work_dir)
             .unwrap_or(&audio_path)
             .to_string_lossy();
-        margins_store::legacy::upsert_session_artifact(
+        margins_store::canonical::upsert_session_artifact(
             margins_dir,
             session_name,
             "audio",
@@ -1881,6 +2910,50 @@ fn run_segment(
                 break;
             }
             Ok(crate::tui::TuiAction::Quit) => break,
+            Ok(crate::tui::TuiAction::Pause) => {
+                app.set_capture_paused(true);
+                app.mic_level = Arc::new(AtomicU32::new(0));
+                app.spk_level = Arc::new(AtomicU32::new(0));
+                let resume = loop {
+                    let paused_stop = Arc::new(AtomicBool::new(false));
+                    match crate::tui::run_tui(app, paused_stop)
+                        .map_err(|error| anyhow::anyhow!(error.to_string()))?
+                    {
+                        crate::tui::TuiAction::Resume => break true,
+                        crate::tui::TuiAction::Quit => break false,
+                        crate::tui::TuiAction::SwitchDevice(index) => {
+                            let mut devices = crate::recorder::list_input_devices();
+                            if index >= devices.len() {
+                                return Err(anyhow::anyhow!(
+                                    "selected audio input is no longer available"
+                                ));
+                            }
+                            let (device_name, device) = devices.swap_remove(index);
+                            app.current_mic_name = device_name;
+                            selected_device = Some(device);
+                        }
+                        crate::tui::TuiAction::Pause => {}
+                    }
+                };
+                if !resume {
+                    break;
+                }
+                app.set_capture_paused(false);
+                ordinal = margins_store::canonical::next_segment_index(margins_dir, session_name)?;
+                audio_path = margins_dir.join(format!("{session_name}_seg{ordinal}.wav"));
+                let new_offset_ms = (Local::now() - started_at).num_milliseconds().max(0);
+                margins_store::canonical::add_segment(
+                    margins_dir,
+                    session_name,
+                    ordinal,
+                    &relative_artifact(&audio_path, work_dir),
+                    new_offset_ms,
+                    None,
+                )?;
+            }
+            Ok(crate::tui::TuiAction::Resume) => {
+                return Err(anyhow::anyhow!("resume requested while capture was active"));
+            }
             Ok(crate::tui::TuiAction::SwitchDevice(index)) => {
                 let mut devices = crate::recorder::list_input_devices();
                 if index >= devices.len() {
@@ -1891,10 +2964,10 @@ fn run_segment(
                 let (device_name, device) = devices.swap_remove(index);
                 app.current_mic_name = device_name;
                 selected_device = Some(device);
-                ordinal = margins_store::legacy::next_segment_index(margins_dir, session_name)?;
+                ordinal = margins_store::canonical::next_segment_index(margins_dir, session_name)?;
                 audio_path = margins_dir.join(format!("{session_name}_seg{ordinal}.wav"));
                 let new_offset_ms = (Local::now() - started_at).num_milliseconds().max(0);
-                margins_store::legacy::add_segment(
+                margins_store::canonical::add_segment(
                     margins_dir,
                     session_name,
                     ordinal,
@@ -1911,7 +2984,8 @@ fn run_segment(
     let mut live_finalizer = live.map(|worker| worker.begin_finish(live_timeline_duration_ms));
 
     // Save memo regardless of transcription result.
-    let memo_result = std::fs::write(&app.output_path, app.export())
+    let memo_result = app
+        .save()
         .with_context(|| format!("could not save memo {}", &app.output_path));
     if let Err(error) = memo_result {
         if let Some(finalizer) = live_finalizer.take() {
@@ -1938,7 +3012,7 @@ fn run_segment(
                 finalizer.complete()?
             };
             if completed {
-                margins_store::legacy::upsert_session_artifact(
+                margins_store::canonical::upsert_session_artifact(
                     margins_dir,
                     session_name,
                     "transcript",
@@ -2677,6 +3751,184 @@ mod tests {
 
     static PROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    #[cfg(feature = "audio-capture")]
+    #[test]
+    fn untouched_remote_memo_does_not_replace_concurrent_workspace_notes() {
+        use margins_meeting_protocol::WorkspaceMemoLineV1;
+
+        let line = |text: &str| WorkspaceMemoLineV1 {
+            text: text.into(),
+            created_secs: 0.0,
+            edited_secs: None,
+            draft_started_secs: None,
+            audio_pending_at_mark: false,
+            block_ordinal: None,
+        };
+        let initial = vec![line("Existing note")];
+        assert!(!remote_memo_was_edited(&initial, &initial));
+        assert!(!remote_memo_was_edited(
+            &initial,
+            &[line("Existing note"), line("")]
+        ));
+        assert!(!remote_memo_was_edited(&[], &[line("")]));
+        assert!(remote_memo_was_edited(
+            &initial,
+            &[line("Edited note"), line("")]
+        ));
+    }
+
+    #[cfg(feature = "audio-capture")]
+    #[test]
+    fn remote_live_tee_preserves_generation_and_drops_when_bounded() {
+        use crate::recorder::{
+            LiveAudioChannel, LiveAudioChunk, LiveAudioSink, LiveGenerationClock,
+        };
+        let (sender, receiver) = mpsc::channel();
+        let queued = Arc::new(AtomicU64::new(0));
+        let accepted = Arc::new(AtomicU64::new(0));
+        let dropped = Arc::new(AtomicU64::new(0));
+        let sink = LiveAudioSink {
+            sender,
+            generation: 7,
+            generation_clock: Arc::new(Mutex::new(LiveGenerationClock {
+                generation: 7,
+                session_offset_ms: 4_250,
+            })),
+            mic_accepted_samples: accepted.clone(),
+            system_accepted_samples: Arc::new(AtomicU64::new(0)),
+            mic_dropped_samples: dropped.clone(),
+            system_dropped_samples: Arc::new(AtomicU64::new(0)),
+            queued_samples: queued.clone(),
+            queue_max_samples: 3,
+        };
+        let chunk = LiveAudioChunk {
+            channel: LiveAudioChannel::Mic,
+            generation: 1,
+            session_offset_ms: 4_250,
+            sample_rate: 48_000,
+            samples: vec![0.2, 0.3],
+        };
+        enqueue_remote_live_chunk(&sink, &chunk);
+        enqueue_remote_live_chunk(&sink, &chunk);
+        let delivered = receiver.try_recv().unwrap();
+        assert_eq!(delivered.generation, 7);
+        assert_eq!(delivered.session_offset_ms, 4_250);
+        assert_eq!(delivered.samples, chunk.samples);
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(queued.load(Ordering::Acquire), 2);
+        assert_eq!(accepted.load(Ordering::Acquire), 2);
+        assert_eq!(dropped.load(Ordering::Acquire), 2);
+    }
+
+    #[cfg(feature = "audio-capture")]
+    #[test]
+    fn remote_recovery_copy_is_private_and_keeps_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("recovery.wav");
+        std::fs::write(&source, b"RIFF-test-audio").unwrap();
+        let directory = temp.path().join("local-audio");
+        let copied =
+            copy_remote_recovery_for_local_asr(&source, &directory, "transfer-a", 0).unwrap();
+        assert_eq!(std::fs::read(&copied).unwrap(), b"RIFF-test-audio");
+        assert_eq!(std::fs::read(&source).unwrap(), b"RIFF-test-audio");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&copied).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+    }
+
+    #[test]
+    fn remote_recorder_start_failure_seals_abort_removes_reservation_and_joins_uploader() {
+        use margins_meeting_protocol::{ClientMessageBodyV1, SessionFinalizeReasonV1};
+        use margins_workflows::remote_workspace::{
+            native_create_session_command, CaptureReservationIntentV1, CaptureReservationRequestV1,
+            DurableTransferSpool, NativeRemoteTransfer,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let intent = CaptureReservationIntentV1 {
+            schema: "margins.capture-reservation.v1".into(),
+            transfer_id: "start-failure".into(),
+            instance_id: "instance-a".into(),
+            remote_url: "https://example.test".into(),
+            workspace_id: "workspace-a".into(),
+            session_id: "session-a".into(),
+            request: CaptureReservationRequestV1::Create {
+                command: native_create_session_command(
+                    "session-a",
+                    "reserve-start-failure",
+                    Some("start failure".into()),
+                    "test",
+                ),
+            },
+        }
+        .persist(temp.path())
+        .unwrap();
+        let spool = DurableTransferSpool::create(
+            temp.path(),
+            "start-failure",
+            "instance-a",
+            "https://example.test",
+            "workspace-a",
+            "session-a",
+            "producer-secret",
+            0,
+        )
+        .unwrap();
+        let transfer = NativeRemoteTransfer::new(spool);
+        let done = Arc::new(AtomicBool::new(false));
+        let worker_done = done.clone();
+        let (joined_tx, joined_rx) = mpsc::channel();
+        let uploader = std::thread::spawn(move || {
+            while !worker_done.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            joined_tx.send(()).unwrap();
+        });
+        let mut reservation = Some(intent);
+        let delivered = Arc::new(AtomicBool::new(false));
+        let delivered_flag = delivered.clone();
+        let errors = cleanup_failed_remote_recorder_start(
+            transfer,
+            0,
+            &mut reservation,
+            temp.path(),
+            done.as_ref(),
+            uploader,
+            move |spool| {
+                let finalize = spool
+                    .manifest()
+                    .finalize_command
+                    .as_ref()
+                    .expect("no-media abort must be durable before delivery");
+                let ClientMessageBodyV1::FinalizeSession(finalize) = &finalize.body else {
+                    panic!("expected finalize");
+                };
+                assert_eq!(finalize.reason, SessionFinalizeReasonV1::Error);
+                assert_eq!(finalize.ended_at_ms.0, 0);
+                delivered_flag.store(true, Ordering::Release);
+                Ok(())
+            },
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(reservation.is_none());
+        assert!(done.load(Ordering::Acquire));
+        joined_rx.try_recv().unwrap();
+        assert!(delivered.load(Ordering::Acquire));
+        assert!(!temp.path().join("reservations/start-failure.json").exists());
+        let reopened = DurableTransferSpool::open(temp.path(), "start-failure", 0).unwrap();
+        assert!(reopened.manifest().finalize_command.is_some());
+        assert!(reopened.pending_chunks().unwrap().is_empty());
+    }
+
     #[test]
     fn cli_error_boundary_rewords_transport_and_engine_internals() {
         let output =
@@ -2946,13 +4198,13 @@ mod tests {
             std::fs::write(&memo, "test memo")?;
             std::fs::write(&audio, b"test wav fixture")?;
             std::fs::write(&checkpoint, br#"{"terminal":false,"transcripts":[]}"#)?;
-            margins_store::legacy::create_session(
+            margins_store::canonical::create_session(
                 &margins_dir,
                 name,
                 &chrono::Local::now(),
                 &format!(".margins/{name}.md"),
             )?;
-            margins_store::legacy::add_segment(
+            margins_store::canonical::add_segment(
                 &margins_dir,
                 name,
                 0,
@@ -2998,7 +4250,7 @@ mod tests {
             margins_dir.join("capture-root-regression.md"),
             margins_dir.join("capture-root-regression_seg0.wav"),
             margins_dir.join("capture-root-regression_seg0.live-transcript.json"),
-            margins_store::legacy::database_path(&margins_dir),
+            margins_store::canonical::database_path(&margins_dir),
         ] {
             assert_eq!(
                 path.is_file(),
@@ -3656,6 +4908,36 @@ mod tests {
     }
 
     #[test]
+    fn production_new_with_workspace_ignores_cwd_and_legacy_project() {
+        let _guard = PROCESS_ENV_LOCK.lock().unwrap();
+        let _settings = ScopedTestSettings::new();
+        let temp = tempfile::tempdir().unwrap();
+        let margins_home = temp.path().join("state");
+        let notes = temp.path().join("notes");
+        let unrelated = temp.path().join("unrelated");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::create_dir_all(&unrelated).unwrap();
+        let _restore = EnvRestore::capture(&["MARGINS_HOME", "MARGINS_WORKSPACE"]);
+        std::env::set_var("MARGINS_HOME", &margins_home);
+        std::env::remove_var("MARGINS_WORKSPACE");
+        margins_workflows::workspace::create_workspace(&margins_home, "practice", None, &notes)
+            .unwrap();
+        let old_cwd = std::env::current_dir().unwrap();
+
+        std::env::set_current_dir(&unrelated).unwrap();
+        let code = main_entry_with(
+            ["margins", "--workspace", "practice", "new"],
+            &ArtifactWritingInteractive,
+        );
+        std::env::set_current_dir(&old_cwd).unwrap();
+
+        assert_eq!(code, 0);
+        assert_capture_artifacts(&margins_home.join("workspaces/practice/captures"), true);
+        assert_capture_artifacts(&unrelated, false);
+        assert_capture_artifacts(&notes, false);
+    }
+
+    #[test]
     fn production_new_allows_launcher_temp_only_when_explicitly_selected() {
         let _guard = PROCESS_ENV_LOCK.lock().unwrap();
         let _settings = ScopedTestSettings::new();
@@ -3706,7 +4988,7 @@ mod tests {
 
             let margins_dir = temp.path().join(".margins");
             std::fs::create_dir_all(&margins_dir).unwrap();
-            margins_store::legacy::create_session(
+            margins_store::canonical::create_session(
                 &margins_dir,
                 "current-session",
                 &chrono::Local::now(),

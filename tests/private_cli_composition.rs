@@ -999,10 +999,14 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
         .output()
         .unwrap();
     assert!(status.status.success());
-    let revision = serde_json::from_slice::<serde_json::Value>(&status.stdout).unwrap()["revision"]
-        .as_str()
+    let status_json = serde_json::from_slice::<serde_json::Value>(&status.stdout).unwrap();
+    let indexed_documents: i64 = rusqlite::Connection::open(workspace.recall_path())
         .unwrap()
-        .to_string();
+        .query_row("SELECT COUNT(*) FROM docs", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(status_json["recall"]["mode"], "indexed");
+    assert_eq!(status_json["recall"]["documents"], indexed_documents);
+    let revision = status_json["revision"].as_str().unwrap().to_string();
 
     let preview = Command::new(env!("CARGO_BIN_EXE_margins-private"))
         .args([
@@ -1151,8 +1155,15 @@ fn packaged_binary_reports_private_native_composition() {
     assert_eq!(contract["capture_available"], true);
     assert_eq!(contract["capture_provider"], "native-recorder");
     assert_eq!(contract["tui_available"], true);
-    assert_eq!(contract["recall"]["scan"], true);
-    assert_eq!(contract["recall"]["indexing"], true);
-    assert_eq!(contract["recall"]["lookup"], true);
-    assert_eq!(contract["recall"]["local_model"], true);
+    for capability in ["available", "scan", "indexing", "lookup"] {
+        assert_eq!(
+            contract["recall"][capability],
+            cfg!(feature = "recall"),
+            "recall.{capability} must match the compiled feature matrix"
+        );
+    }
+    assert_eq!(
+        contract["recall"]["local_model"],
+        cfg!(feature = "recall-local-model")
+    );
 }
