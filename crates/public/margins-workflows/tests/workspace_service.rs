@@ -738,8 +738,12 @@ fn finalized_asr_capable_service_durably_admits_one_revision_stable_job() {
     )
     .unwrap();
     let service =
-        WorkspaceService::open_with_capabilities("host-a", workspace.clone(), true, false).unwrap();
+        WorkspaceService::open_with_capabilities("host-a", workspace.clone(), false, false)
+            .unwrap();
+    service.enable_deferred_asr();
     let owner = ServicePrincipal::full("client-a", "team");
+    assert!(!service.capabilities(&owner).unwrap().asr_available);
+    let observer = service.clone();
     let reservation = service.reserve_session(&owner, create("asr-a")).unwrap();
     for lane in ["mic", "system"] {
         for sequence in 0..2 {
@@ -771,6 +775,8 @@ fn finalized_asr_capable_service_durably_admits_one_revision_stable_job() {
     assert_eq!(admitted.operation, "transcribe_session");
     assert_eq!(admitted.status, "queued");
     assert_eq!(admitted.attempt, 1);
+    service.set_asr_available(true);
+    assert!(observer.capabilities(&owner).unwrap().asr_available);
 
     // A lost finalize ACK replays the same receipt and must not manufacture a
     // second processing attempt for an unchanged finalized input revision.

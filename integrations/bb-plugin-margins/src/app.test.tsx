@@ -124,7 +124,7 @@ describe("Margins recording panel", () => {
     slot.lifecycle.unmount();
   });
 
-  it("prefills a new-thread composer for an ended meeting without sending", async () => {
+  it("starts a note thread for an ended meeting in its project", async () => {
     const ended = { sessionId: "ended-2", title: "Review", startedAt: "2026-09-24T01:00:00Z", inputFinalized: true,
       notepad: { text: "Decision", revision: "memo-v3" }, notePath: null, threadIds: [], distilledMemoRevision: null };
     const slot = renderSlot(app.navPanels[0]!, { subPath: "project-1/ended-2" }, { context: { projectId: "project-1" }, rpc: {
@@ -139,6 +139,7 @@ describe("Margins recording panel", () => {
         memo: { revision: "memo-v3", lineCount: 1 }, artifacts: [], noteAssociation: null, instructions: "",
       } }),
       transcribePinnedSession: () => ({ ok: true, status: "queued", attempt: 1 }),
+      startConnectedNoteThread: () => ({ threadId: "thr-created" }),
     } });
     const screen = within(slot.container);
     const pad = await screen.findByRole("textbox", { name: "Meeting memo pad" });
@@ -146,19 +147,11 @@ describe("Margins recording panel", () => {
     expect(makeNote.closest("footer")?.querySelector(".margins-meeting-trail")).not.toBeNull();
     expect(pad.compareDocumentPosition(makeNote) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     fireEvent.click(makeNote);
-    await waitFor(() => expect(slot.inspection.navigateCalls.some((call) => call.method === "toCompose")).toBe(true));
-    const compose = slot.inspection.navigateCalls.find((call) => call.method === "toCompose");
-    expect(compose).toMatchObject({ options: { focusPrompt: true } });
-    expect(compose).toMatchObject({ options: { focusPrompt: true } });
-    expect((compose as { options: { initialPrompt?: string } }).options.initialPrompt).toBeUndefined();
-    expect(slot.inspection.composer.text).toBe("Make a connected note from this meeting: Review ");
-    expect(slot.inspection.composer.text).not.toContain("margins-context-v1");
-    const mention = slot.inspection.composer.mentions[0]!;
-    expect(mention).toMatchObject({ provider: "margins", label: "Review" });
-    expect(JSON.parse(decodeURIComponent(mention.id))).toEqual({ projectId: "project-1", workspaceId: "vault",
-      sessionId: "ended-2", memoRevision: "memo-v3", note: "create" });
+    await waitFor(() => expect(slot.inspection.navigateCalls.some((call) => call.method === "toThread" && call.threadId === "thr-created")).toBe(true));
+    expect(slot.inspection.rpcCalls).toContainEqual(expect.objectContaining({ method: "startConnectedNoteThread",
+      input: { projectId: "project-1", sessionId: "ended-2" } }));
     expect(slot.inspection.rpcCalls.some((call) => call.method === "transcribePinnedSession")).toBe(true);
-    expect(slot.inspection.rpcCalls.some((call) => call.method === "threads.spawn")).toBe(false);
+    expect(slot.inspection.composer.text).toBe("");
     slot.lifecycle.unmount();
   });
 
@@ -178,6 +171,7 @@ describe("Margins recording panel", () => {
         transcript: { available: true, terminal: true, live: false, updatedAtUnixMs: 1 }, memo: { revision: "memo-v2", lineCount: 1 },
         artifacts: [], noteAssociation: { sourceId: "home", relativePath: linked.notePath, revision: 1 }, instructions: "",
       } }),
+      startConnectedNoteThread: () => ({ threadId: "thr-update" }),
     } });
     const screen = within(slot.container);
     const pad = await screen.findByRole("textbox", { name: "Meeting memo pad" }) as HTMLTextAreaElement;
@@ -185,13 +179,11 @@ describe("Margins recording panel", () => {
     expect(screen.queryByRole("button", { name: "Update note →" })).toBeNull();
     fireEvent.change(pad, { target: { value: "Revised decision" } });
     fireEvent.click(await screen.findByRole("button", { name: "Update note →" }));
-    await waitFor(() => expect(slot.inspection.navigateCalls.some((call) => call.method === "toCompose")).toBe(true));
+    await waitFor(() => expect(slot.inspection.navigateCalls.some((call) => call.method === "toThread" && call.threadId === "thr-update")).toBe(true));
     expect(slot.inspection.rpcCalls).toContainEqual(expect.objectContaining({ method: "saveWorkspaceMemo",
       input: expect.objectContaining({ expectedRevision: "memo-v1", text: "Revised decision" }) }));
-    expect(slot.inspection.composer.text).toBe("Update the connected note from this meeting: Review ");
-    expect(JSON.parse(decodeURIComponent(slot.inspection.composer.mentions[0]!.id))).toMatchObject({
-      memoRevision: "memo-v2", note: "update",
-    });
+    expect(slot.inspection.rpcCalls).toContainEqual(expect.objectContaining({ method: "startConnectedNoteThread",
+      input: { projectId: "project-1", sessionId: "ended-linked" } }));
     slot.lifecycle.unmount();
   });
 

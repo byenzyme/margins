@@ -257,6 +257,7 @@ import { registerNavigationActions, type NavigationActionsContext } from "./acti
 import type { SessionTab, View } from "./actions/types";
 import { installCaptureShortcuts, captureShortcutHints } from "./lib/keyboard";
 import {
+  memoLinesWithPendingDraft,
   pendingMemoDraftForSession,
   type PendingMemoDraft,
 } from "./lib/memo-ownership";
@@ -824,6 +825,7 @@ let reviewSessionName = "";
 // Polling intervals
 let statusInterval: number | null = null;
 let memoSyncInterval: number | null = null;
+let lastPeriodicMemoSync: { sessionName: string; signature: string } | null = null;
 
 // ---------------------------------------------------------------------------
 // Render engine
@@ -4763,9 +4765,12 @@ async function refreshProjectFilesState(options: { force?: boolean; renderIfChan
       activeSessionTab = defaultTabForSession(active);
     }
 
-    if (options.renderIfChanged ?? true) render();
-    if (activeSessionName) {
-      await loadArtifacts(activeSessionName, { renderLoading: false });
+    const preserveCaptureEditor = isCaptureSurfaceVisible() && Boolean(document.getElementById("memo-editor"));
+    if (!preserveCaptureEditor) {
+      if (options.renderIfChanged ?? true) render();
+      if (activeSessionName) {
+        await loadArtifacts(activeSessionName, { renderLoading: false });
+      }
     }
   } finally {
     projectFilesRefreshInFlight = false;
@@ -7838,8 +7843,9 @@ function startPolling() {
   }, 250);
 
   memoSyncInterval = window.setInterval(async () => {
-    const sessionName = memoCaptureSessionName();
-    if (!recordingStatus.is_recording || !sessionName) return;
+    const sessionName = memoCaptureSessionName() || prepSessionName;
+    if (!sessionName || !isCaptureSurfaceVisible()) return;
+
     const recordingId = recordingStatus.web_recording_id;
     const selectedId = hostedRecoveryState.selectedRecordingId();
     if (isHostedWeb() && !hostedMemoSyncAllowed({
@@ -7848,8 +7854,22 @@ function startPolling() {
       selectedRecoveryHydrated: hostedRecoveryState.selectedMemoReady(recordingId),
       locallyOwned: currentTabOwnsHostedCapture(),
     })) return;
+
+    const textarea = document.getElementById("memo-input-new") as HTMLTextAreaElement | null;
+    const draft = textarea
+      ? (textarea.value ? { sessionName, text: textarea.value, startSecs: pendingLineStartSecs } : null)
+      : pendingMemoDraftForSession(pendingDraftRestore, sessionName);
+    const lines = memoLinesWithPendingDraft(memoLines, draft, sessionName, {
+      createdSecs: displayElapsedSecs(),
+      blockOrdinal: isClockStopped() ? currentBlockOrdinal : null,
+      audioPendingAtMark: recordingStartup?.phase === "starting",
+    });
+    const signature = JSON.stringify(lines);
+    if (lastPeriodicMemoSync?.sessionName === sessionName && lastPeriodicMemoSync.signature === signature) return;
+
     try {
-      await syncMemo(memoLines, sessionName, recordingId);
+      await syncMemo(lines, sessionName, recordingId);
+      lastPeriodicMemoSync = { sessionName, signature };
     } catch { /* ignore */ }
   }, 5000);
 }

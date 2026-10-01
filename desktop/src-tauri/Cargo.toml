@@ -1,6 +1,6 @@
 [package]
 name = "margins-desktop"
-version = "0.4.9"
+version = "0.4.10"
 edition = "2021"
 license = "Apache-2.0"
 default-run = "margins-desktop"
@@ -94,6 +94,7 @@ base64 = "0.22"
 rand = "0.8"
 libc = "0.2"
 sha2 = "0.10"
+tempfile = "3"
 matroska-demuxer = "0.8"
 ropus = "0.12"
 hound = "3.5"
@@ -115,6 +116,3 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["NSS
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
-
-[dev-dependencies]
-tempfile = "3"

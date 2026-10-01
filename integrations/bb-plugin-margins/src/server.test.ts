@@ -1,4 +1,4 @@
-import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
+import { createFakePluginHost, makePluginAgentConfigurationContext } from "@get-bb/plugin-sdk/testing";
 import { describe, expect, it, vi } from "vitest";
 import plugin from "./server.js";
 import { meetingMentionId } from "./meeting-mention.js";
@@ -7,14 +7,15 @@ const browser = { clientId: "client-1", platform: "other" as const, secureContex
 const mac = { ...browser, platform: "macos" as const };
 const snapshot = { recordingId: "rec-1", sessionId: "rec-1", status: "recording" as const, notepad: { text: "", revision: "v1" } };
 
-function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: string; meetingList?: boolean; relay?: boolean; workspaceHostFails?: boolean } = {}) {
+function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: string; meetingList?: boolean; relay?: boolean; workspaceHostFails?: boolean; menuMeeting?: boolean; transcriptReady?: boolean } = {}) {
   let stopped = false;
   let captureStatus: "recording" | "paused" = "recording";
+  const spawn = vi.fn(async (_request: unknown) => ({ id: "thr-created" }));
   const host = createFakePluginHost({
-    pluginId: "margins", agentSkillIds: ["watermark", "workspace-setup"],
+    pluginId: "margins", agentSkillIds: ["watermark", "workspace-setup", "connected-note"],
     sdk: {
       threads: { get: async ({ threadId }: { threadId: string }) => ({ id: threadId, title: threadId === "thr-note" ? "Create connected meeting note" : null,
-        projectId: threadId === "thr-other-project" ? "proj-2" : "proj-1" }) as never },
+        projectId: threadId === "thr-other-project" ? "proj-2" : "proj-1" }) as never, spawn: spawn as never },
       projects: { get: async ({ projectId }: { projectId: string }) => ({
         id: projectId, kind: "standard", name: "Project",
         sources: [
@@ -27,6 +28,10 @@ function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: strin
       if (method === "workspaceOptions" && options.workspaceHostFails) throw new Error("Host artifact unavailable");
       if (method === "workspaceOptions") return { defaultWorkspaceId: "workspace-1", autoSelected: false,
         workspaces: [{ id: "workspace-1", name: "Notes" }, { id: "practice", name: "Practice" }] };
+      if (method === "listWorkspaceMeetings" && options.menuMeeting) return { ok: true, meetings: [{
+        sessionId: "mac-meeting-1", title: "Calendar review", startedAt: "2026-09-28T13:00:00Z",
+        inputFinalized: false, notePath: null, threadIds: [], distilledMemoRevision: null,
+      }] };
       if (method === "listWorkspaceMeetings" && options.meetingList) return { ok: true, meetings: [{
         sessionId: "meeting-1", title: null, startedAt: "2026-09-25T01:00:00Z", inputFinalized: true,
         notePath: "inbox/note.md", noteFile: { hostId: "project-host", path: "/tmp/vault/inbox/note.md" },
@@ -36,6 +41,11 @@ function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: strin
         sessionId: "meeting-1", title: null, startedAt: "2026-09-25T01:00:00Z", inputFinalized: true,
         notepad: { text: "Memo", revision: "memo-v1" },
       } };
+      if (method === "readWorkspaceMeeting") return { ok: true, candidates: ["rec-1"], meeting: { sessionId: "rec-1", title: "Customer call",
+        startedAt: "2026-09-28T13:00:00Z", inputFinalized: true, notepad: { text: "Memo", revision: "memo-1" } } };
+      if (method === "readWorkspaceTranscript") return { ok: true, body: "We chose October 5 for launch." };
+      if (method === "noteDestination") return { ok: true, destination: "/srv/project/inbox", homeRoot: "/srv/project", homeSourceId: "home" };
+      if (method === "linkWorkspaceNote") return { ok: true, revision: 1 };
       if (method === "captureAuthority") return { ok: true, instanceId: "instance-1", workspaceId: "workspace-1" };
       if (method === "relayWorkspaceHttp" && options.relay) return { status: 200, bodyBase64: Buffer.from('{"ok":true}').toString("base64") };
       if (method === "sessionExists") return { ok: true, found: true };
@@ -45,7 +55,7 @@ function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: strin
       if (method === "uploadChunk") return { ok: true };
       if (method === "connectedNoteContext") return { ok: true, context: {
         schema: "margins.bb.connected-note-context.v1", instanceId: "instance-1", workspaceId: "workspace-1", sessionId: "rec-1", title: "Customer call",
-        transcript: { available: true, terminal: true, live: false, updatedAtUnixMs: 10 }, memo: { revision: "memo-1", lineCount: 1 }, artifacts: [], noteAssociation: null, instructions: "Pin exact session",
+        transcript: { available: options.transcriptReady !== false, terminal: options.transcriptReady !== false, live: false, updatedAtUnixMs: 10 }, memo: { revision: "memo-1", lineCount: 1 }, artifacts: [], noteAssociation: null, instructions: "Pin exact session",
       } };
       if (method === "requestTranscription") return { ok: true, status: "queued", attempt: 1 };
       if (method === "heartbeat" && options.heartbeatFails) return { ok: false, error: { code: "offline", message: "offline", retryable: true } };
@@ -53,10 +63,28 @@ function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: strin
     },
   });
   plugin(host.bb);
-  return host;
+  return { ...host, spawn };
 }
 
 describe("Margins project recording server", () => {
+  it("gives project agents pinned BB meeting reads and a note link tool", async () => {
+    const host = harness();
+    const config = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({
+      project: { id: "proj-1", kind: "standard", name: "Project" },
+    }));
+    expect(config?.tools.map((tool) => tool.name)).toEqual(["margins_bb_meeting_read", "margins_bb_note_link"]);
+    const pin = { workspaceId: "workspace-1", sessionId: "rec-1", memoRevision: "memo-1" };
+    const context = await host.harness.behavior.callAgentTool("margins_bb_meeting_read", { ...pin, part: "context" });
+    expect(context).toContain('"homeSourceId":"home"');
+    const memo = await host.harness.behavior.callAgentTool("margins_bb_meeting_read", { ...pin, part: "memo" });
+    expect(memo).toContain('"body":"Memo"');
+    const transcript = await host.harness.behavior.callAgentTool("margins_bb_meeting_read", { ...pin, part: "transcript" });
+    expect(transcript).toContain("We chose October 5 for launch.");
+    await expect(host.harness.behavior.callAgentTool("margins_bb_meeting_read", { ...pin, workspaceId: "other", part: "memo" }))
+      .rejects.toThrow("different Workspace");
+    await expect(host.harness.behavior.callAgentTool("margins_bb_note_link", { ...pin, sourceId: "home", relativePath: "inbox/note.md", expectedRevision: 0 }))
+      .resolves.toContain('"revision":1');
+  });
   it("reports a Workspace host failure without masking it as RPC output validation", async () => {
     const host = harness({ workspaceHostFails: true });
     await expect(host.harness.behavior.callRpc("availableWorkspaces", { projectId: "proj-1" }))
@@ -74,8 +102,50 @@ describe("Margins project recording server", () => {
     await expect(provider.resolve(meetingMentionId({ projectId: "proj-1", workspaceId: "workspace-1", sessionId: "rec-1",
       memoRevision: "old", note: "create" }))).rejects.toThrow("This meeting changed");
   });
+  it("starts a connected-note thread in the meeting project with a pinned mention", async () => {
+    const host = harness();
+    await expect(host.harness.behavior.callRpc("startConnectedNoteThread", { projectId: "proj-1", sessionId: "rec-1" }))
+      .resolves.toEqual({ threadId: "thr-created" });
+    expect(host.spawn).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: "proj-1", environment: { type: "project-default" },
+      input: [expect.objectContaining({ type: "text", mentions: [expect.objectContaining({
+        resource: expect.objectContaining({ kind: "plugin", pluginId: "margins" }),
+      })] })],
+    }));
+    const request = host.spawn.mock.calls[0]![0] as { input: [{ mentions: [{ resource: { itemId: string } }] }] };
+    expect(request.input[0].mentions[0].resource.itemId).toBe(`margins:${meetingMentionId({
+      projectId: "proj-1", workspaceId: "workspace-1", sessionId: "rec-1", memoRevision: "memo-1", note: "create",
+    })}`);
+    await host.bb.storage.kv.set("meeting-origin:workspace-1:rec-1", "proj-1");
+    await expect(host.harness.behavior.callRpc("startConnectedNoteThread", { projectId: "proj-2", sessionId: "rec-1" }))
+      .rejects.toThrow("belongs to another BB project");
+    expect(host.spawn).toHaveBeenCalledTimes(1);
+  });
+  it("automatically starts one note thread after a new recorded meeting finishes", async () => {
+    const host = harness();
+    await host.harness.behavior.callRpc("recordMeetingOrigin", { projectId: "proj-1", sessionId: "rec-1" });
+    await expect(host.bb.storage.kv.get("auto-note-pending:workspace-1:rec-1")).resolves.toMatchObject({ projectId: "proj-1" });
+    await host.harness.runSchedule("auto-connected-notes");
+    expect(host.spawn).toHaveBeenCalledOnce();
+    await expect(host.bb.storage.kv.get("auto-note-pending:workspace-1:rec-1")).resolves.toBeUndefined();
+    await host.harness.runSchedule("auto-connected-notes");
+    expect(host.spawn).toHaveBeenCalledOnce();
+    await expect(host.harness.behavior.callRpc("startConnectedNoteThread", { projectId: "proj-1", sessionId: "rec-1" }))
+      .resolves.toEqual({ threadId: "thr-created" });
+    expect(host.spawn).toHaveBeenCalledOnce();
+  });
+  it("queues transcription before automatically starting a note thread", async () => {
+    const host = harness({ transcriptReady: false });
+    await host.harness.behavior.callRpc("recordMeetingOrigin", { projectId: "proj-1", sessionId: "rec-1" });
+    await host.harness.runSchedule("auto-connected-notes");
+    expect(host.spawn).not.toHaveBeenCalled();
+    expect(host.harness.inspection.experimental_hostRpcCalls).toEqual(expect.arrayContaining([
+      expect.objectContaining({ method: "requestTranscription" }),
+    ]));
+    await expect(host.bb.storage.kv.get("auto-note-pending:workspace-1:rec-1")).resolves.toBeDefined();
+  });
   it("issues a Workspace-bound Menu grant and revokes its relay access", async () => {
-    const host = harness({ relay: true });
+    const host = harness({ relay: true, menuMeeting: true });
     const grant = await host.harness.behavior.callRpc("issueMenuGrant", { projectId: "proj-1", origin: "https://jpham-server.getbb.app" }) as { token: string; serviceUrl: string; workspaceId: string };
     expect(grant).toMatchObject({ workspaceId: "workspace-1",
       serviceUrl: "https://jpham-server.getbb.app/api/v1/plugins/margins/http/menu/relay" });
@@ -90,6 +160,10 @@ describe("Margins project recording server", () => {
         bodyBase64: Buffer.from(JSON.stringify({ session_id: "mac-meeting-1" })).toString("base64") }) });
     await expect(created.json()).resolves.toMatchObject({ status: 200 });
     await expect(host.bb.storage.kv.get("meeting-origin:workspace-1:mac-meeting-1")).resolves.toBe("proj-1");
+    await expect(host.harness.behavior.callRpc("listWorkspaceMeetings", { projectId: "proj-1" })).resolves.toMatchObject({
+      ok: true, meetings: [{ sessionId: "mac-meeting-1", inputFinalized: false, originProjectId: "proj-1" }],
+    });
+    expect(host.harness.inspection.experimental_hostRpcCalls.some(call => call.method === "startBrowserCapture")).toBe(false);
     expect(host.harness.inspection.experimental_hostRpcCalls).toEqual(expect.arrayContaining([
       expect.objectContaining({ method: "relayWorkspaceHttp", input: expect.objectContaining({ target: expect.objectContaining({ workspaceId: "workspace-1" }) }) }),
     ]));
@@ -233,6 +307,7 @@ describe("Margins project recording server", () => {
     expect(host.harness.inspection.experimental_hostRpcCalls.filter(call => call.method === "sessionExists")).toHaveLength(0);
     await expect(host.harness.behavior.callRpc("pinNativeSession", { ...wrong, instanceId: "instance-1" })).resolves.toMatchObject({ ok: true });
     await expect(host.bb.storage.kv.get("last-session:workspace-1")).resolves.toBe("mac-session-1");
+    await expect(host.bb.storage.kv.get("meeting-origin:workspace-1:mac-session-1")).resolves.toBeUndefined();
     expect(host.harness.inspection.experimental_hostRpcCalls.filter(call => call.method === "sessionExists")).toHaveLength(1);
   });
 });

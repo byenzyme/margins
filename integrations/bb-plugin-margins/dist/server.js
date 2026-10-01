@@ -554,7 +554,7 @@ __export(core_exports2, {
   parseAsync: () => parseAsync,
   parseURLObject: () => parseURLObject,
   prettifyError: () => prettifyError,
-  process: () => process,
+  process: () => process2,
   regexes: () => regexes_exports,
   registry: () => registry,
   safeDecode: () => safeDecode,
@@ -15158,7 +15158,7 @@ function handleUnrepresentable(schema, ctx, json2, params, message) {
   Object.assign(json2, result);
   return true;
 }
-function process(schema, ctx, _params = { path: [], schemaPath: [] }) {
+function process2(schema, ctx, _params = { path: [], schemaPath: [] }) {
   var _a3;
   const def = schema._zod.def;
   const seen = ctx.seen.get(schema);
@@ -15197,7 +15197,7 @@ function process(schema, ctx, _params = { path: [], schemaPath: [] }) {
     if (parent) {
       if (!result.ref)
         result.ref = parent;
-      process(parent, ctx, params);
+      process2(parent, ctx, params);
       ctx.seen.get(parent).isParent = true;
     }
   }
@@ -15632,14 +15632,14 @@ function isTransforming(_schema, _ctx) {
 }
 var createToJSONSchemaMethod = (schema, processors = {}) => (params) => {
   const ctx = initializeContext({ ...params, processors });
-  process(schema, ctx);
+  process2(schema, ctx);
   extractDefs(ctx, schema);
   return finalize(ctx, schema);
 };
 var createStandardJSONSchemaMethod = (schema, io, processors = {}) => (params) => {
   const { libraryOptions, target } = params ?? {};
   const ctx = initializeContext({ ...libraryOptions ?? {}, target, io, processors });
-  process(schema, ctx);
+  process2(schema, ctx);
   extractDefs(ctx, schema);
   return finalize(ctx, schema);
 };
@@ -15871,7 +15871,7 @@ var arrayProcessor = (schema, ctx, _json, params) => {
   if (typeof maximum === "number")
     json2.maxItems = maximum;
   json2.type = "array";
-  json2.items = process(def.element, ctx, {
+  json2.items = process2(def.element, ctx, {
     ...params,
     path: [...params.path, "items"]
   });
@@ -15897,7 +15897,7 @@ var objectProcessor = (schema, ctx, _json, params) => {
   json2.type = "object";
   json2.properties = {};
   for (const key in shape) {
-    assignProp(json2.properties, key, process(shape[key], ctx, {
+    assignProp(json2.properties, key, process2(shape[key], ctx, {
       ...params,
       path: [...params.path, "properties", key]
     }));
@@ -15920,7 +15920,7 @@ var objectProcessor = (schema, ctx, _json, params) => {
     if (ctx.io === "output")
       json2.additionalProperties = false;
   } else if (def.catchall) {
-    json2.additionalProperties = process(def.catchall, ctx, {
+    json2.additionalProperties = process2(def.catchall, ctx, {
       ...params,
       path: [...params.path, "additionalProperties"]
     });
@@ -15929,7 +15929,7 @@ var objectProcessor = (schema, ctx, _json, params) => {
 var unionProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
   const isExclusive = def.inclusive === false;
-  const options = def.options.map((x, i) => process(x, ctx, {
+  const options = def.options.map((x, i) => process2(x, ctx, {
     ...params,
     path: [...params.path, isExclusive ? "oneOf" : "anyOf", i]
   }));
@@ -15941,11 +15941,11 @@ var unionProcessor = (schema, ctx, json2, params) => {
 };
 var intersectionProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
-  const a = process(def.left, ctx, {
+  const a = process2(def.left, ctx, {
     ...params,
     path: [...params.path, "allOf", 0]
   });
-  const b = process(def.right, ctx, {
+  const b = process2(def.right, ctx, {
     ...params,
     path: [...params.path, "allOf", 1]
   });
@@ -15963,11 +15963,11 @@ var tupleProcessor = (schema, ctx, _json, params) => {
   json2.type = "array";
   const prefixPath = ctx.target === "draft-2020-12" ? "prefixItems" : "items";
   const restPath = ctx.target === "draft-2020-12" ? "items" : ctx.target === "openapi-3.0" ? "items" : "additionalItems";
-  const prefixItems = def.items.map((x, i) => process(x, ctx, {
+  const prefixItems = def.items.map((x, i) => process2(x, ctx, {
     ...params,
     path: [...params.path, prefixPath, i]
   }));
-  const rest = def.rest ? process(def.rest, ctx, {
+  const rest = def.rest ? process2(def.rest, ctx, {
     ...params,
     path: [...params.path, restPath, ...ctx.target === "openapi-3.0" ? [def.items.length] : []]
   }) : null;
@@ -16092,7 +16092,7 @@ var recordProcessor = (schema, ctx, _json, params) => {
   const keyBag = keyType._zod.bag;
   const patterns = keyBag?.patterns;
   if (def.mode === "loose" && patterns && patterns.size > 0) {
-    const valueSchema = process(def.valueType, ctx, {
+    const valueSchema = process2(def.valueType, ctx, {
       ...params,
       path: [...params.path, "patternProperties", "*"]
     });
@@ -16102,7 +16102,7 @@ var recordProcessor = (schema, ctx, _json, params) => {
     }
   } else {
     if (ctx.target === "draft-07" || ctx.target === "draft-2020-12") {
-      json2.propertyNames = process(def.keyType, ctx, {
+      json2.propertyNames = process2(def.keyType, ctx, {
         ...params,
         path: [...params.path, "propertyNames"]
       });
@@ -16114,7 +16114,7 @@ var recordProcessor = (schema, ctx, _json, params) => {
       }
       pending.push(schema);
     }
-    json2.additionalProperties = process(def.valueType, ctx, {
+    json2.additionalProperties = process2(def.valueType, ctx, {
       ...params,
       path: [...params.path, "additionalProperties"]
     });
@@ -16130,7 +16130,7 @@ var recordProcessor = (schema, ctx, _json, params) => {
 };
 var nullableProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
-  const inner = process(def.innerType, ctx, params);
+  const inner = process2(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   if (ctx.target === "openapi-3.0") {
     seen.ref = def.innerType;
@@ -16141,7 +16141,7 @@ var nullableProcessor = (schema, ctx, json2, params) => {
 };
 var nonoptionalProcessor = (schema, ctx, _json, params) => {
   const def = schema._zod.def;
-  process(def.innerType, ctx, params);
+  process2(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = def.innerType;
 };
@@ -16161,7 +16161,7 @@ function serializeDefaultValue(value, schema, ctx, json2, params) {
 }
 var defaultProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
-  process(def.innerType, ctx, params);
+  process2(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = def.innerType;
   const value = serializeDefaultValue(def.defaultValue, schema, ctx, json2, params);
@@ -16170,7 +16170,7 @@ var defaultProcessor = (schema, ctx, json2, params) => {
 };
 var prefaultProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
-  process(def.innerType, ctx, params);
+  process2(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = def.innerType;
   if (ctx.io !== "input")
@@ -16181,7 +16181,7 @@ var prefaultProcessor = (schema, ctx, json2, params) => {
 };
 var catchProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
-  process(def.innerType, ctx, params);
+  process2(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = def.innerType;
   let catchValue;
@@ -16197,32 +16197,32 @@ var pipeProcessor = (schema, ctx, _json, params) => {
   const def = schema._zod.def;
   const inIsTransform = def.in._zod.traits.has("$ZodTransform");
   const innerType = ctx.io === "input" ? inIsTransform ? def.out : def.in : def.out;
-  process(innerType, ctx, params);
+  process2(innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = innerType;
 };
 var readonlyProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
-  process(def.innerType, ctx, params);
+  process2(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = def.innerType;
   json2.readOnly = true;
 };
 var promiseProcessor = (schema, ctx, _json, params) => {
   const def = schema._zod.def;
-  process(def.innerType, ctx, params);
+  process2(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = def.innerType;
 };
 var optionalProcessor = (schema, ctx, _json, params) => {
   const def = schema._zod.def;
-  process(def.innerType, ctx, params);
+  process2(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = def.innerType;
 };
 var lazyProcessor = (schema, ctx, _json, params) => {
   const innerType = schema._zod.innerType;
-  process(innerType, ctx, params);
+  process2(innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = innerType;
 };
@@ -16274,7 +16274,7 @@ function toJSONSchema(input2, params) {
     const defs = {};
     for (const entry of registry2._idmap.entries()) {
       const [_, schema] = entry;
-      process(schema, ctx2);
+      process2(schema, ctx2);
     }
     const schemas = {};
     const external = {
@@ -16297,7 +16297,7 @@ function toJSONSchema(input2, params) {
     return { schemas };
   }
   const ctx = initializeContext({ ...params, processors: allProcessors });
-  process(input2, ctx);
+  process2(input2, ctx);
   extractDefs(ctx, input2);
   return finalize(ctx, input2);
 }
@@ -16356,7 +16356,7 @@ var JSONSchemaGenerator = class {
    * This must be called before emit().
    */
   process(schema, _params = { path: [], schemaPath: [] }) {
-    return process(schema, this.ctx, _params);
+    return process2(schema, this.ctx, _params);
   }
   /**
    * Emit the final JSON Schema after processing.
@@ -18982,6 +18982,10 @@ var transcriptionRequestResultSchema = external_exports.discriminatedUnion("ok",
   external_exports.object({ ok: external_exports.literal(true), status: external_exports.enum(["queued", "running", "complete", "failed"]), attempt: external_exports.number().int().positive() }).strict(),
   external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
 ]);
+var speechSetupResultSchema = external_exports.discriminatedUnion("ok", [
+  external_exports.object({ ok: external_exports.literal(true), state: external_exports.enum(["preparing", "ready", "failed", "unavailable"]), message: external_exports.string(), progress: external_exports.number().min(0).max(1).nullable() }).strict(),
+  external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
+]);
 var ownedCaptureInputSchema = external_exports.object({ target: projectTargetSchema }).extend({
   recordingId: external_exports.string().min(1),
   ownerId: external_exports.string().min(1)
@@ -19046,6 +19050,28 @@ var marginsHostContract = defineRpcContract({
     input: external_exports.object({ target: projectTargetSchema, sessionId: external_exports.string().min(1) }).strict(),
     output: workspaceTranscriptResultSchema
   },
+  noteDestination: {
+    input: external_exports.object({ target: projectTargetSchema }).strict(),
+    output: external_exports.discriminatedUnion("ok", [
+      external_exports.object({ ok: external_exports.literal(true), destination: external_exports.string(), homeRoot: external_exports.string(), homeSourceId: external_exports.string() }).strict(),
+      external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
+    ])
+  },
+  linkWorkspaceNote: {
+    input: external_exports.object({
+      target: projectTargetSchema,
+      sessionId: external_exports.string().min(1),
+      sourceId: external_exports.string().min(1),
+      relativePath: external_exports.string().min(1),
+      expectedRevision: external_exports.number().int().nonnegative(),
+      bbThreadId: external_exports.string().min(1),
+      memoRevision: external_exports.string().min(1)
+    }).strict(),
+    output: external_exports.discriminatedUnion("ok", [
+      external_exports.object({ ok: external_exports.literal(true), revision: external_exports.number().int().nonnegative() }).strict(),
+      external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
+    ])
+  },
   sessionExists: {
     input: external_exports.object({ target: projectTargetSchema, recordingId: external_exports.string().min(1) }).strict(),
     output: external_exports.discriminatedUnion("ok", [
@@ -19060,6 +19086,8 @@ var marginsHostContract = defineRpcContract({
       external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
     ])
   },
+  speechSetup: { input: external_exports.object({ target: projectTargetSchema }).strict(), output: speechSetupResultSchema },
+  retrySpeechSetup: { input: external_exports.object({ target: projectTargetSchema }).strict(), output: speechSetupResultSchema },
   relayWorkspaceHttp: {
     input: external_exports.object({
       target: projectTargetSchema,
@@ -19240,6 +19268,8 @@ var marginsRpcContract = defineRpcContract({
       external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
     ])
   },
+  speechSetup: { input: external_exports.object({ projectId: external_exports.string().min(1) }).strict(), output: speechSetupResultSchema },
+  retrySpeechSetup: { input: external_exports.object({ projectId: external_exports.string().min(1) }).strict(), output: speechSetupResultSchema },
   issueMenuGrant: {
     input: external_exports.object({ projectId: external_exports.string().min(1), origin: external_exports.string().url().max(300) }).strict(),
     output: external_exports.object({
@@ -19282,6 +19312,10 @@ var marginsRpcContract = defineRpcContract({
   transcribePinnedSession: {
     input: external_exports.object({ threadId: external_exports.string().min(1).optional(), projectId: external_exports.string().min(1).optional(), sessionId: external_exports.string().min(1) }).strict(),
     output: transcriptionRequestResultSchema
+  },
+  startConnectedNoteThread: {
+    input: external_exports.object({ projectId: external_exports.string().min(1), sessionId: external_exports.string().min(1) }).strict(),
+    output: external_exports.object({ threadId: external_exports.string().min(1) }).strict()
   }
 });
 
@@ -19289,6 +19323,9 @@ var marginsRpcContract = defineRpcContract({
 import { createHash, randomBytes } from "node:crypto";
 
 // src/meeting-mention.ts
+function meetingMentionId(value) {
+  return encodeURIComponent(JSON.stringify(value));
+}
 function parseMeetingMentionId(id) {
   if (id.length > 2048) throw new Error("Meeting reference is too long. Open Make note again.");
   let value;
@@ -19315,6 +19352,8 @@ var MEETING_ORIGIN_PREFIX = "meeting-origin:";
 var MEETING_ARCHIVE_PREFIX = "meeting-archive:";
 var MENU_GRANT_PREFIX = "menu-grant:";
 var MENU_GRANT_EPOCH_PREFIX = "menu-grant-epoch:";
+var AUTO_NOTE_PENDING_PREFIX = "auto-note-pending:";
+var NOTE_THREAD_PREFIX = "note-thread:";
 var MENU_GRANT_TTL_MS = 60 * 60 * 1e3;
 var REALTIME_CHANNEL = "margins-recording";
 var DISCONNECT_GRACE_MS = CAPTURE_DISCONNECT_GRACE_MS;
@@ -19332,6 +19371,12 @@ function lastSessionKey(workspaceId) {
 }
 function originKey(workspaceId, sessionId) {
   return `${MEETING_ORIGIN_PREFIX}${workspaceId}:${sessionId}`;
+}
+function pendingNoteKey(workspaceId, sessionId) {
+  return `${AUTO_NOTE_PENDING_PREFIX}${workspaceId}:${sessionId}`;
+}
+function noteThreadKey(workspaceId, sessionId) {
+  return `${NOTE_THREAD_PREFIX}${workspaceId}:${sessionId}`;
 }
 function archiveKey(workspaceId, sessionId) {
   return `${MEETING_ARCHIVE_PREFIX}${workspaceId}:${sessionId}`;
@@ -19428,6 +19473,7 @@ function sourceFor(client) {
 function marginsPlugin(bb) {
   const host = bb.hosts.experimental_client({ contract: marginsHostContract, experimental_signals: hostSignals });
   const startLocks = /* @__PURE__ */ new Map();
+  const noteThreadLocks = /* @__PURE__ */ new Set();
   const menuGrantSchema = external_exports.object({
     target: external_exports.object({ projectId: external_exports.string(), hostId: external_exports.string(), projectRoot: external_exports.string(), workspaceId: external_exports.string() }).strict(),
     origin: external_exports.string(),
@@ -19661,9 +19707,68 @@ function marginsPlugin(bb) {
         lastHeartbeatUnixMs: Date.now()
       });
       await bb.storage.kv.set(originKey(workspaceId, result.snapshot.sessionId), target.projectId);
+      await bb.storage.kv.set(pendingNoteKey(workspaceId, result.snapshot.sessionId), { projectId: target.projectId, workspaceId, sessionId: result.snapshot.sessionId });
       bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: "start" });
       return getPanelStateForTarget(target, client);
     });
+  }
+  async function startConnectedNoteThread(projectId, sessionId) {
+    const target = await targetForProject(projectId);
+    const lockKey = `${projectId}:${sessionId}`;
+    if (noteThreadLocks.has(lockKey)) throw new Error("A note thread is already starting for this meeting.");
+    noteThreadLocks.add(lockKey);
+    try {
+      const result = await callHost(target, "connectedNoteContext", { target, recordingId: sessionId });
+      if (!result.ok) throw new Error(result.error.message);
+      const context = result.context;
+      if (context.sessionId !== sessionId || !context.workspaceId || !context.memo.revision) {
+        throw new Error("Meeting context changed. Open the meeting again.");
+      }
+      const meeting = await callHost(target, "readWorkspaceMeeting", { target, sessionId });
+      if (!meeting.ok || !meeting.meeting?.inputFinalized) {
+        throw new Error("Finish and save this meeting before making a note.");
+      }
+      const recordedOrigin = await bb.storage.kv.get(originKey(context.workspaceId, sessionId));
+      if (typeof recordedOrigin === "string" && recordedOrigin !== projectId) {
+        throw new Error("This meeting belongs to another BB project. Open it there to make its note.");
+      }
+      const existing = await bb.storage.kv.get(noteThreadKey(context.workspaceId, sessionId));
+      if (existing?.threadId && existing.memoRevision === context.memo.revision && !context.noteAssociation) {
+        return { threadId: existing.threadId };
+      }
+      const updating = Boolean(context.noteAssociation);
+      const label = (context.title || meeting.meeting.title || "Meeting").trim().slice(0, 100) || "Meeting";
+      const prefix = updating ? "Update the connected note from this meeting: " : "Make a connected note from this meeting: ";
+      const mentionText = `@${label}`;
+      const thread = await bb.sdk.threads.spawn({
+        projectId,
+        environment: { type: "project-default" },
+        title: `${updating ? "Update" : "Make"} note \xB7 ${label}`,
+        input: [{ type: "text", text: prefix + mentionText, mentions: [{
+          start: prefix.length,
+          end: prefix.length + mentionText.length,
+          resource: {
+            kind: "plugin",
+            pluginId: "margins",
+            label,
+            itemId: `margins:${meetingMentionId({
+              projectId,
+              workspaceId: context.workspaceId,
+              sessionId,
+              memoRevision: context.memo.revision,
+              note: updating ? "update" : "create"
+            })}`
+          }
+        }] }],
+        pluginMetadata: { sessionId, workspaceId: context.workspaceId }
+      });
+      await bb.storage.kv.set(noteThreadKey(context.workspaceId, sessionId), { threadId: thread.id, memoRevision: context.memo.revision });
+      await bb.storage.kv.delete(pendingNoteKey(context.workspaceId, sessionId));
+      bb.realtime.publish(REALTIME_CHANNEL, { projectId, reason: "note-thread-started", sessionId });
+      return { threadId: thread.id };
+    } finally {
+      noteThreadLocks.delete(lockKey);
+    }
   }
   bb.rpc.register(marginsRpcContract, {
     async availableWorkspaces({ projectId }) {
@@ -19716,6 +19821,8 @@ function marginsPlugin(bb) {
       const workspaceName = options.workspaces?.find((item) => item.id === authority.workspaceId)?.name || authority.workspaceId;
       return { ok: true, meetings: await Promise.all(listed.meetings.map(async (meeting) => {
         const originProjectId = await bb.storage.kv.get(originKey(authority.workspaceId, meeting.sessionId));
+        const startedThread = await bb.storage.kv.get(noteThreadKey(authority.workspaceId, meeting.sessionId));
+        const threadIds = [.../* @__PURE__ */ new Set([...meeting.threadIds || [], ...startedThread?.threadId ? [startedThread.threadId] : []])];
         let originProjectName = null;
         if (typeof originProjectId === "string") {
           try {
@@ -19726,12 +19833,13 @@ function marginsPlugin(bb) {
         }
         return {
           ...meeting,
+          threadIds,
           workspaceId: authority.workspaceId,
           workspaceName,
           originProjectId: typeof originProjectId === "string" ? originProjectId : null,
           originProjectName,
           archived: await bb.storage.kv.get(archiveKey(authority.workspaceId, meeting.sessionId)) === true,
-          threadLinks: await Promise.all((meeting.threadIds || []).map(async (id) => {
+          threadLinks: await Promise.all(threadIds.map(async (id) => {
             try {
               const thread = await bb.sdk.threads.get({ threadId: id });
               return { id, title: thread.title?.trim().slice(0, 100) || "Meeting note thread" };
@@ -19802,6 +19910,9 @@ function marginsPlugin(bb) {
       };
       const key = originKey(authority.workspaceId, sessionId);
       if (!await bb.storage.kv.get(key)) await bb.storage.kv.set(key, projectId);
+      if (!await bb.storage.kv.get(noteThreadKey(authority.workspaceId, sessionId))) {
+        await bb.storage.kv.set(pendingNoteKey(authority.workspaceId, sessionId), { projectId, workspaceId: authority.workspaceId, sessionId });
+      }
       return { ok: true };
     },
     async discardWorkspaceMeeting({ projectId, sessionId }) {
@@ -19826,6 +19937,14 @@ function marginsPlugin(bb) {
       } catch (cause) {
         return { ok: false, error: { code: "project_folder_unavailable", message: cause instanceof Error ? cause.message : String(cause), retryable: false } };
       }
+    },
+    async speechSetup({ projectId }) {
+      const target = await targetForProject(projectId);
+      return callHost(target, "speechSetup", { target });
+    },
+    async retrySpeechSetup({ projectId }) {
+      const target = await targetForProject(projectId);
+      return callHost(target, "retrySpeechSetup", { target });
     },
     async issueMenuGrant({ projectId, origin }) {
       const parsed = new URL(origin);
@@ -19875,8 +19994,6 @@ function marginsPlugin(bb) {
         if (!found.ok) return { ok: false, error: found.error };
         if (!found.found) return { ok: false, error: { code: "native_session_not_found", message: "The saved Mac session is not visible in this BB project's Margins Workspace yet.", retryable: true } };
         await bb.storage.kv.set(lastSessionKey(authority.workspaceId), sessionId);
-        const origin = originKey(authority.workspaceId, sessionId);
-        if (!await bb.storage.kv.get(origin)) await bb.storage.kv.set(origin, target.projectId);
         bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: "stop" });
         return { ok: true };
       } catch (cause) {
@@ -19911,6 +20028,43 @@ function marginsPlugin(bb) {
     async transcribePinnedSession({ threadId, projectId, sessionId }) {
       const target = await targetForSelection({ threadId, projectId });
       return callHost(target, "requestTranscription", { target, recordingId: sessionId });
+    },
+    async startConnectedNoteThread({ projectId, sessionId }) {
+      return startConnectedNoteThread(projectId, sessionId);
+    }
+  });
+  const pendingNoteSchema = external_exports.object({ projectId: external_exports.string().min(1), workspaceId: external_exports.string().min(1), sessionId: external_exports.string().min(1) }).strict();
+  bb.background.schedule("auto-connected-notes", "* * * * *", async () => {
+    if (process.env.MARGINS_BB_E2E_DISABLE_AUTO_NOTE === "1") return;
+    for (const key of (await bb.storage.kv.list(AUTO_NOTE_PENDING_PREFIX)).slice(0, 20)) {
+      const parsed = pendingNoteSchema.safeParse(await bb.storage.kv.get(key));
+      if (!parsed.success || key !== pendingNoteKey(parsed.data.workspaceId, parsed.data.sessionId)) {
+        await bb.storage.kv.delete(key);
+        continue;
+      }
+      const { projectId, workspaceId, sessionId } = parsed.data;
+      try {
+        if (await bb.storage.kv.get(noteThreadKey(workspaceId, sessionId))) {
+          await bb.storage.kv.delete(key);
+          continue;
+        }
+        const target = await targetForProject(projectId);
+        const meeting = await callHost(target, "readWorkspaceMeeting", { target, sessionId });
+        if (!meeting.ok || !meeting.meeting?.inputFinalized) continue;
+        const result = await callHost(target, "connectedNoteContext", { target, recordingId: sessionId });
+        if (!result.ok || result.context.workspaceId !== workspaceId) continue;
+        if (result.context.noteAssociation) {
+          await bb.storage.kv.delete(key);
+          continue;
+        }
+        if (!result.context.transcript.available) {
+          await callHost(target, "requestTranscription", { target, recordingId: sessionId });
+          continue;
+        }
+        if (!result.context.transcript.terminal || result.context.transcript.live) continue;
+        await startConnectedNoteThread(projectId, sessionId);
+      } catch {
+      }
     }
   });
   const chunkSchema = external_exports.object({
@@ -19986,12 +20140,19 @@ function marginsPlugin(bb) {
       if (!Number.isInteger(result.status) || typeof result.bodyBase64 !== "string") {
         return context.json({ ok: false, error: "Capture host unavailable" }, 502);
       }
-      if (result.status >= 200 && result.status < 300 && parsed.data.method === "POST" && parsed.data.path.replace(/^\//, "") === `v1/workspaces/${grant.workspaceId}/sessions`) {
+      if (parsed.data.method === "POST" && parsed.data.path === `v1/workspaces/${grant.workspaceId}/sessions` && result.status >= 200 && result.status < 300) {
         try {
-          const command = JSON.parse(Buffer.from(parsed.data.bodyBase64, "base64").toString("utf8"));
-          if (typeof command.session_id === "string" && /^[A-Za-z0-9_-]{1,200}$/.test(command.session_id)) {
-            const key = originKey(grant.workspaceId, command.session_id);
+          const created = JSON.parse(Buffer.from(parsed.data.bodyBase64, "base64").toString("utf8"));
+          if (typeof created.session_id === "string" && created.session_id.length > 0 && created.session_id.length <= 300) {
+            const key = originKey(grant.workspaceId, created.session_id);
             if (!await bb.storage.kv.get(key)) await bb.storage.kv.set(key, grant.target.projectId);
+            if (!await bb.storage.kv.get(noteThreadKey(grant.workspaceId, created.session_id))) {
+              await bb.storage.kv.set(pendingNoteKey(grant.workspaceId, created.session_id), {
+                projectId: grant.target.projectId,
+                workspaceId: grant.workspaceId,
+                sessionId: created.session_id
+              });
+            }
           }
         } catch {
         }
@@ -20029,10 +20190,92 @@ ${JSON.stringify({
 </margins-context-v1>` };
     }
   });
+  const pinnedMeetingSchema = external_exports.object({
+    workspaceId: external_exports.string().min(1),
+    sessionId: external_exports.string().min(1),
+    memoRevision: external_exports.string().min(1)
+  }).strict();
+  async function agentMeeting(projectId, input2) {
+    const target = await targetForProject(projectId);
+    const result = await callHost(target, "connectedNoteContext", { target, recordingId: input2.sessionId });
+    if (!result.ok) throw new Error(result.error.message);
+    if (result.context.workspaceId !== input2.workspaceId || result.context.sessionId !== input2.sessionId) {
+      throw new Error("This meeting belongs to a different Workspace or project");
+    }
+    if (result.context.memo.revision !== input2.memoRevision) {
+      throw new Error("The meeting memo changed. Open Make note again to use its current revision");
+    }
+    return { target, context: result.context };
+  }
+  bb.agents.registerTool({
+    name: "margins_bb_meeting_read",
+    description: "Read the exact @Meeting session from this BB project's Margins Workspace.",
+    instructions: "For a BB @Meeting, read context, memo, and transcript with this tool. Use the IDs and memo revision in margins-context-v1. Do not use the unrelated Codex Margins MCP or local CLI meeting store.",
+    parameters: pinnedMeetingSchema.extend({
+      part: external_exports.enum(["context", "memo", "transcript"]),
+      offset: external_exports.number().int().nonnegative().default(0)
+    }).strict(),
+    async execute({ part, offset, ...pinned }, { projectId }) {
+      if (!projectId) throw new Error("Choose a BB project for this meeting");
+      const { target, context } = await agentMeeting(projectId, pinned);
+      if (part === "context") {
+        const destination = await callHost(target, "noteDestination", { target });
+        if (!destination.ok) throw new Error(destination.error.message);
+        return JSON.stringify({
+          context,
+          noteDestination: destination.destination,
+          homeRoot: destination.homeRoot,
+          homeSourceId: destination.homeSourceId
+        });
+      }
+      if (part === "transcript" && (!context.transcript.available || !context.transcript.terminal)) {
+        throw new Error("This meeting transcript is not complete yet");
+      }
+      const result = part === "memo" ? await callHost(target, "readWorkspaceMeeting", { target, sessionId: pinned.sessionId }) : await callHost(target, "readWorkspaceTranscript", { target, sessionId: pinned.sessionId });
+      if (!result.ok) throw new Error(result.error.message);
+      if (part === "memo" && result.meeting?.notepad?.revision !== pinned.memoRevision) {
+        throw new Error("The meeting memo changed while it was being read");
+      }
+      const body = part === "memo" ? result.meeting?.notepad?.text : result.body;
+      if (typeof body !== "string") throw new Error("Meeting content is unavailable");
+      const limit = 2e4;
+      return JSON.stringify({
+        part,
+        offset,
+        totalChars: body.length,
+        nextOffset: Math.min(body.length, offset + limit),
+        body: body.slice(offset, offset + limit)
+      });
+    }
+  });
+  bb.agents.registerTool({
+    name: "margins_bb_note_link",
+    description: "Associate a completed project note with the exact BB @Meeting session.",
+    parameters: pinnedMeetingSchema.extend({
+      sourceId: external_exports.string().min(1),
+      relativePath: external_exports.string().min(1),
+      expectedRevision: external_exports.number().int().nonnegative()
+    }).strict(),
+    async execute({ sourceId, relativePath, expectedRevision, ...pinned }, { projectId, threadId }) {
+      if (!projectId || !threadId) throw new Error("A BB project and thread are required to link a note");
+      const { target, context } = await agentMeeting(projectId, pinned);
+      const result = await callHost(target, "linkWorkspaceNote", {
+        target,
+        sessionId: pinned.sessionId,
+        sourceId,
+        relativePath,
+        expectedRevision,
+        bbThreadId: threadId,
+        memoRevision: pinned.memoRevision
+      });
+      if (!result.ok) throw new Error(result.error.message);
+      return JSON.stringify({ sessionId: context.sessionId, sourceId, relativePath, revision: result.revision });
+    }
+  });
   bb.agents.configure((context) => context.project.kind === "personal" ? { tools: [], skills: [] } : {
-    tools: [],
-    skills: ["watermark", "workspace-setup"],
-    instructions: "Margins recordings live in the resolved Margins Workspace. Use the Margins skills and the Workspace destination read for notes; do not infer a project .margins folder or treat raw notes as settled knowledge."
+    tools: ["margins_bb_meeting_read", "margins_bb_note_link"],
+    skills: ["watermark", "workspace-setup", "connected-note"],
+    instructions: "For BB @Meeting, use the Margins BB agent tools and connected-note skill to read the pinned session and link its note. The Codex Margins MCP and local Margins CLI may target different stores. Do not infer a project .margins folder or treat raw notes as settled knowledge."
   });
 }
 export {

@@ -25,7 +25,7 @@ use margins_meeting_protocol::{
 };
 use margins_workflows::workspace_service::{
     ScopedCredentialStore, ServicePrincipal, WorkspaceService, OP_CAPTURE_WRITE, OP_MEMO_WRITE,
-    OP_SESSION_CREATE, OP_SESSION_READ, OP_SESSION_WRITE,
+    OP_SESSION_CREATE, OP_SESSION_READ, OP_SESSION_WRITE, OP_WORKSPACE_READ,
 };
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -43,7 +43,11 @@ pub struct ServerState {
     pub workspace_service: Arc<WorkspaceService>,
     pub credential_store: ScopedCredentialStore,
     pub service_principal: ServicePrincipal,
-    #[cfg(feature = "parakeet-asr")]
+    pub asr_setup: super::asr_state::SpeechSetup,
+    #[cfg(any(
+        feature = "parakeet-asr",
+        all(feature = "coreml-asr", target_os = "macos")
+    ))]
     pub remote_asr_jobs: super::remote_asr::RemoteAsrJobs,
 }
 
@@ -70,6 +74,7 @@ pub fn build_router(state: ServerState) -> Router {
         // Current Workspace authority API. Unlike /api/invoke, these routes
         // are typed, explicitly Workspace-scoped, and use the shared service.
         .route("/v1/capabilities", get(workspace_capabilities))
+        .route("/v1/workspaces/:workspace/speech-setup", get(workspace_speech_setup).post(workspace_retry_speech_setup))
         .route("/v1/workspaces/:workspace", get(workspace_summary))
         .route("/v1/workspaces/:workspace/recall", post(workspace_recall))
         .route("/v1/workspaces/:workspace/current", get(workspace_current))
@@ -373,6 +378,54 @@ async fn workspace_capabilities(State(state): State<ServerState>, headers: Heade
         .unwrap_or_else(service_error)
 }
 
+async fn workspace_speech_setup(
+    State(state): State<ServerState>,
+    Path(workspace): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = workspace_auth_operation(&state, &headers, &workspace, OP_WORKSPACE_READ)
+    {
+        return response;
+    }
+    workspace_ok(state.asr_setup.snapshot())
+}
+
+async fn workspace_retry_speech_setup(
+    State(state): State<ServerState>,
+    Path(workspace): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = workspace_auth_operation(&state, &headers, &workspace, OP_SESSION_WRITE)
+    {
+        return response;
+    }
+    #[cfg(any(
+        feature = "parakeet-asr",
+        all(feature = "coreml-asr", target_os = "macos")
+    ))]
+    {
+        return state
+            .asr_setup
+            .start(
+                state.workspace_service.clone(),
+                state.service_principal.clone(),
+                state.remote_asr_jobs.clone(),
+            )
+            .map(|_| workspace_ok(state.asr_setup.snapshot()))
+            .unwrap_or_else(service_error);
+    }
+    #[cfg(not(any(
+        feature = "parakeet-asr",
+        all(feature = "coreml-asr", target_os = "macos")
+    )))]
+    workspace_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "asr_unavailable",
+        false,
+        "This server cannot transcribe recordings",
+    )
+}
+
 async fn workspace_summary(
     State(state): State<ServerState>,
     Path(workspace): Path<String>,
@@ -588,8 +641,11 @@ async fn workspace_session_command(
     let result = state
         .workspace_service
         .execute_capture(&principal, token, command);
-    #[cfg(feature = "parakeet-asr")]
-    if finalized && result.is_ok() {
+    #[cfg(any(
+        feature = "parakeet-asr",
+        all(feature = "coreml-asr", target_os = "macos")
+    ))]
+    if finalized && result.is_ok() && state.workspace_service.asr_available() {
         if let Ok(Some(job)) = state
             .workspace_service
             .latest_job(&state.service_principal, &SessionId(session))
@@ -601,7 +657,10 @@ async fn workspace_session_command(
             );
         }
     }
-    #[cfg(not(feature = "parakeet-asr"))]
+    #[cfg(not(any(
+        feature = "parakeet-asr",
+        all(feature = "coreml-asr", target_os = "macos")
+    )))]
     let _ = finalized;
     result.map(workspace_ok).unwrap_or_else(service_error)
 }
@@ -1033,12 +1092,17 @@ async fn workspace_request_transcription(
         Ok(value) => value,
         Err(error) => return service_error(error),
     };
-    #[cfg(feature = "parakeet-asr")]
-    state.remote_asr_jobs.schedule(
-        state.workspace_service.clone(),
-        state.service_principal.clone(),
-        job.clone(),
-    );
+    #[cfg(any(
+        feature = "parakeet-asr",
+        all(feature = "coreml-asr", target_os = "macos")
+    ))]
+    if state.workspace_service.asr_available() {
+        state.remote_asr_jobs.schedule(
+            state.workspace_service.clone(),
+            state.service_principal.clone(),
+            job.clone(),
+        );
+    }
     workspace_ok(job)
 }
 
@@ -1673,7 +1737,13 @@ async fn handle_ws(mut socket: WebSocket, sink: Arc<WsSink>) {
     }
 }
 
-#[cfg(all(test, feature = "parakeet-asr"))]
+#[cfg(all(
+    test,
+    any(
+        feature = "parakeet-asr",
+        all(feature = "coreml-asr", target_os = "macos")
+    )
+))]
 mod remote_finalize_authority_tests {
     use super::*;
     use axum::http::{header::AUTHORIZATION, HeaderValue};
@@ -1791,6 +1861,7 @@ mod remote_finalize_authority_tests {
             workspace_service: service.clone(),
             credential_store: credentials,
             service_principal: internal.clone(),
+            asr_setup: super::super::asr_state::SpeechSetup::new(true, true),
             remote_asr_jobs: super::super::remote_asr::RemoteAsrJobs::default(),
         };
         let mut headers = HeaderMap::new();

@@ -27,6 +27,42 @@ afterEach(() => {
 });
 
 describe("ProjectServerManager remote adapter", () => {
+  it("reads speech setup progress and retries through the selected host", async () => {
+    const manager = { ensure: vi.fn(async () => ({ baseUrl: "https://margins.example.test", token: "scoped-token",
+      workspaceId: "practice", instanceId: "instance-remote" })) } as unknown as ProjectServerManager;
+    const fetchMock = vi.fn(async (_input: string | URL | Request, _options?: RequestInit) => new Response(JSON.stringify({ ok: true, result: {
+      state: "preparing", message: "Downloading transcription model", progress: 0.42,
+    } })));
+    vi.stubGlobal("fetch", fetchMock);
+    const transport = new ProjectMarginsTransport(manager);
+    const target = { projectId: "project", projectRoot: "/tmp/project", hostId: "host" };
+    expect(await transport.speechSetup(target, "/tmp/data")).toEqual({ ok: true,
+      state: "preparing", message: "Downloading transcription model", progress: 0.42 });
+    expect(await transport.speechSetup(target, "/tmp/data", true)).toMatchObject({ ok: true });
+    expect(fetchMock.mock.calls.map(([input, options]) => [new URL(String(input)).pathname, options?.method]))
+      .toEqual([["/v1/workspaces/practice/speech-setup", "GET"],
+        ["/v1/workspaces/practice/speech-setup", "POST"]]);
+  });
+
+  it("lists an active Menu capture before its first audio segment", async () => {
+    const manager = { ensure: vi.fn(async () => ({ baseUrl: "https://margins.example.test", token: "scoped-token",
+      workspaceId: "practice", instanceId: "instance-remote" })) } as unknown as ProjectServerManager;
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const path = new URL(String(input)).pathname;
+      const result = path.endsWith("/active-sessions") ? { sessions: [{ session_id: "menu-live" }] }
+        : path.endsWith("/sessions") ? { sessions: [] }
+          : path.endsWith("/note-association") ? null
+            : { session_id: "menu-live", title: "Calendar review", started_at: "2026-09-29T04:07:00Z", input_finalized: false, segment_count: 0 };
+      return new Response(JSON.stringify({ ok: true, result }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const listed = await new ProjectMarginsTransport(manager).listWorkspaceMeetings(
+      { projectId: "project", projectRoot: "/tmp/project", hostId: "host" }, "/tmp/data");
+    expect(listed).toMatchObject({ ok: true, meetings: [
+      { sessionId: "menu-live", inputFinalized: false, notePath: null },
+    ] });
+  });
+
   it("reads recording and note destinations from the selected Workspace CLI", async () => {
     const root = await mkdtemp(join(tmpdir(), "margins-bb-workspace-paths-"));
     try {
@@ -35,8 +71,11 @@ describe("ProjectServerManager remote adapter", () => {
       await chmod(cli, 0o755);
       process.env.MARGINS_CLI_BIN = cli;
       process.env.MARGINS_HOME = root;
+      await expect(new ProjectServerManager().ensureCli(root)).resolves.toBe(cli);
       await expect(workspacePaths("practice")).resolves.toEqual({ notes: "/vault/inbox", recordings: "/data/captures" });
       await expect(workspacePaths("../other")).rejects.toThrow("Invalid Margins Workspace id");
+      await rm(cli);
+      await expect(new ProjectServerManager().ensureCli(root)).rejects.toThrow("configured Margins CLI is not executable");
     } finally { await rm(root, { recursive: true, force: true }); }
   });
   it("uses the Workspace service for completed meeting actions", async () => {
@@ -97,7 +136,8 @@ describe("ProjectServerManager remote adapter", () => {
       vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
         const url = String(input);
         const id = url.includes("/sessions/inside") ? "inside" : "outside";
-        const result = url.endsWith("sessions?limit=50") ? { sessions: [{ session_id: "inside" }, { session_id: "outside" }] }
+        const result = url.endsWith("active-sessions") ? { sessions: [] }
+          : url.endsWith("sessions?limit=50") ? { sessions: [{ session_id: "inside" }, { session_id: "outside" }] }
           : url.endsWith("/note-association") ? { relative_path: `inbox/${id === "inside" ? "note" : "outside"}.md`, bb_thread_ids: [] }
             : { session_id: id, title: null, started_at: "2026-09-25T01:00:00Z", input_finalized: true };
         return new Response(JSON.stringify({ ok: true, result }));
@@ -238,7 +278,8 @@ describe("ProjectServerManager remote adapter", () => {
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const path = new URL(String(input)).pathname;
       const result = path === "/v1/capabilities" ? { workspace_id: "practice", instance_id: "instance-remote" }
-        : path.endsWith("/sessions") ? { sessions: [{ session_id: "meeting-1" }] }
+        : path.endsWith("/active-sessions") ? { sessions: [] }
+          : path.endsWith("/sessions") ? { sessions: [{ session_id: "meeting-1" }] }
           : path.endsWith("/note-association") ? null
             : { session_id: "meeting-1", title: "Shared meeting", started_at: "2026-09-25T01:00:00Z", input_finalized: true };
       return new Response(JSON.stringify({ ok: true, result }));
@@ -278,7 +319,8 @@ fs.appendFileSync(${JSON.stringify(join(root, "spawns"))},String(process.pid)+'\
 fs.writeFileSync(path.join(data,'token'),'fixture-token');
 http.createServer((req,res)=>{if(req.url==='/health'){res.writeHead(200);res.end('ok');return;}
 const pathname=new URL(req.url,'http://localhost').pathname;
-const result=pathname.endsWith('/sessions')?{sessions:[{session_id:'meeting-1'}]}:
+const result=pathname.endsWith('/active-sessions')?{sessions:[]}:
+pathname.endsWith('/sessions')?{sessions:[{session_id:'meeting-1'}]}:
 pathname.endsWith('/note-association')?null:
 {session_id:'meeting-1',title:'Shared meeting',started_at:'2026-09-25T01:00:00Z',input_finalized:true};
 res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:true,result}));

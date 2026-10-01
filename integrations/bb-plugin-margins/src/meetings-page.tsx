@@ -1,15 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { experimental_FileLink as FileLink, useBbContext, useBbNavigate, useComposer, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
+import { experimental_FileLink as FileLink, useBbContext, useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import { Pause } from "lucide-react";
 import type { marginsRpcContract } from "../server.js";
 import { browserCaptureOwner, detectClientCapabilities } from "./browser-capture.js";
 import { nativeBridgeOwner } from "./native-bridge-client.js";
 import type { PanelState, WorkspaceMeeting, WorkspaceMeetingSummary } from "./contracts.js";
 import type { WorkspaceSetupPreview } from "./workspace-setup.js";
-import { meetingMentionId } from "./meeting-mention.js";
 
 const LAST_PROJECT_KEY = "margins.bb.meetings-project";
-const HANDOFF_KEY = "margins.bb.note-draft";
 const STOP_ACK_KEY = "margins.bb.stop-ack";
 const STOP_ACK_EVENT = "margins:stop-saved";
 const openedMeetings = new Map<string, WorkspaceMeeting>();
@@ -55,14 +53,6 @@ function readStopAck(sessionId: string | null): StopAck | null {
     return ack?.sessionId === sessionId && Number.isFinite(ack.at) && Date.now() - ack.at < 4_000 ? ack : null;
   } catch { return null; }
 }
-function handoffKey(projectId: string, sessionId: string) { return `${HANDOFF_KEY}.${projectId}.${sessionId}`; }
-function readHandoff(projectId: string, sessionId: string | null): string[] | null {
-  if (!projectId || !sessionId) return null;
-  try {
-    const value = JSON.parse(sessionStorage.getItem(handoffKey(projectId, sessionId)) || "null");
-    return Array.isArray(value) && value.every((item) => typeof item === "string") ? value : null;
-  } catch { return null; }
-}
 
 export function MeetingLevelDot({ level, paused = false, accessory = false }: { level: number | null; paused?: boolean; accessory?: boolean }) {
   const amplitude = level === null ? null : Math.max(0, Math.min(1, level));
@@ -96,7 +86,6 @@ export function MeetingsAccessory() {
 export function MeetingsPage({ subPath }: { subPath: string }) {
   const rpc = useRpc<typeof marginsRpcContract>();
   const navigate = useBbNavigate();
-  const composer = useComposer();
   const navigateRef = useRef(navigate);
   navigateRef.current = navigate;
   const context = useBbContext();
@@ -125,8 +114,9 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   const [draft, setDraft] = useState(() => openedMeetings.get(`${projectId}/${selectedId}`)?.notepad.text || "");
   const [message, setMessage] = useState("");
   const [transcriptStatus, setTranscriptStatus] = useState<{ sessionId: string; state: "checking" | "ready" | "pending" | "not_ready" | "failed" } | null>(null);
+  const [speechSetup, setSpeechSetup] = useState<{ state: "preparing" | "ready" | "failed" | "unavailable"; message: string; progress: number | null } | null>(null);
   const [stopAck, setStopAck] = useState<StopAck | null>(null);
-  const [handoffTick, setHandoffTick] = useState(0);
+  const [noteBusy, setNoteBusy] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
@@ -142,10 +132,10 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   const focusedSession = useRef("");
   const pendingDraftText = useRef("");
   const pendingNativeStart = useRef<{ projectId: string; existing: Set<string>; startedAt: number; accepted: boolean } | null>(null);
+  const observedLiveSession = useRef<string | null>(null);
   const client = useRef(detectClientCapabilities()).current;
   const selected = meetings.find((item) => item.sessionId === selectedId)
     || (selectedId ? openedSummaries.get(`${projectId}/${selectedId}`) : undefined);
-  const handoff = readHandoff(projectId, selectedId);
 
   useEffect(() => {
     void rpc.call("availableProjects", {}).then(({ projects: available }) => {
@@ -179,14 +169,29 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     setWorkspaceChoice((current) => current && options.workspaces.some((item) => item.id === current)
       ? current : options.workspaces[0]?.id || "");
     if (options.autoSelected) setWorkspaceNotice(`Using ${options.workspaces[0]?.name || options.workspaces[0]?.id} as the machine default.`);
-    const [nextPanel, listed] = await Promise.all([
+    const [nextPanel, listed, speech] = await Promise.all([
       rpc.call("getProjectPanelState", { projectId, client }),
       rpc.call("listWorkspaceMeetings", { projectId }),
+      rpc.call("speechSetup", { projectId }).catch(() => null),
     ]);
     setPanel(nextPanel);
+    if (speech?.ok) setSpeechSetup({ state: speech.state, message: speech.message, progress: speech.progress });
     if (!listed.ok) { setMessage(listed.error.message); return; }
     for (const item of listed.meetings) rememberSummary(`${projectId}/${item.sessionId}`, item);
     setMeetings(listed.meetings);
+    const liveSession = listed.meetings.find((item) => !item.inputFinalized)?.sessionId || null;
+    const newlyObservedLiveSession = liveSession && liveSession !== observedLiveSession.current ? liveSession : null;
+    if (newlyObservedLiveSession && !pendingNativeStart.current && newlyObservedLiveSession !== selectedId) {
+      try { await saveMemo(); }
+      catch (error) { setMessage(String(error)); return; }
+      const cached = openedMeetings.get(`${projectId}/${newlyObservedLiveSession}`) || null;
+      dirty.current = false;
+      revision.current = cached?.notepad.revision || "";
+      latestDraft.current = cached?.notepad.text || "";
+      setMeeting(cached); setDraft(cached?.notepad.text || "");
+      navigateRef.current.toPluginPanel("meetings", { subPath: `${projectId}/${newlyObservedLiveSession}` });
+    }
+    observedLiveSession.current = liveSession;
     const pending = pendingNativeStart.current;
     const recordingId = nativeBridgeOwner.status?.sessionId;
     const candidates = pending?.projectId === projectId && pending.accepted
@@ -209,13 +214,14 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     setSelectedId((current) => {
       if (newMeeting) return newMeeting.sessionId;
       if (pendingNativeStart.current) return current;
+      if (newlyObservedLiveSession) return newlyObservedLiveSession;
       if (current && listed.meetings.some((item) => item.sessionId === current)) return current;
       const recent = listed.meetings.filter((item) => !item.archived);
       return recent.find((item) => !item.inputFinalized)?.sessionId
         || recent.find((item) => item.inputFinalized && !item.notePath)?.sessionId
         || recent[0]?.sessionId || null;
     });
-  }, [projectId, rpc, client.clientId]);
+  }, [projectId, selectedId, rpc, client.clientId]);
   useEffect(() => {
     void refresh().catch((error) => setMessage(String(error)));
     const timer = setInterval(() => void refresh().catch(() => undefined), 3_000);
@@ -300,12 +306,6 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     const timer = setInterval(() => void check(), 3_000);
     return () => { disposed = true; clearInterval(timer); };
   }, [projectId, selectedId, selected?.inputFinalized, rpc]);
-  useEffect(() => {
-    if (!selected || !handoff || !selected.threadIds?.some((id) => !handoff.includes(id))) return;
-    try { sessionStorage.removeItem(handoffKey(projectId, selected.sessionId)); } catch { /* private browser */ }
-    setHandoffTick((tick) => tick + 1);
-  }, [projectId, selected?.sessionId, selected?.threadIds?.join(","), handoffTick]);
-
   async function saveMemo() {
     if (saveLoop.current) return saveLoop.current;
     if (!dirty.current || !meeting || !projectId || !revision.current) return;
@@ -379,6 +379,36 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   }
   async function start() {
     if (!projectId) return;
+    if (nativeBridgeOwner.paired) {
+      try {
+        const native = await nativeBridgeOwner.refresh();
+        if (["getting_ready", "recording", "paused"].includes(native.state)) {
+          pendingNativeStart.current = null;
+          setStarting(false);
+          setStartError("");
+          if (native.sessionId) {
+            const joined = await rpc.call("readWorkspaceMeeting", { projectId, sessionId: native.sessionId });
+            if (joined.ok && joined.meeting) {
+              try { await saveMemo(); }
+              catch (error) { setMessage(String(error)); return; }
+              rememberMeeting(`${projectId}/${native.sessionId}`, joined.meeting);
+              setMeeting(joined.meeting);
+              const joinedDraft = joined.meeting.notepad.text || pendingDraftText.current;
+              dirty.current = joinedDraft !== joined.meeting.notepad.text;
+              setDraft(joinedDraft);
+              latestDraft.current = joinedDraft;
+              revision.current = joined.meeting.notepad.revision;
+              setSelectedId(native.sessionId);
+              navigate.toPluginPanel("meetings", { subPath: `${projectId}/${native.sessionId}` });
+              return;
+            }
+          }
+          setMessage("Margins Menu is already recording. Waiting for its meeting to appear here…");
+          await refresh();
+          return;
+        }
+      } catch { /* The normal Connect flow below reports an unavailable bridge. */ }
+    }
     const live = meetings.find((item) => !item.inputFinalized);
     if (live && !window.confirm("Stop and save the current meeting, then start?")) return;
     if (live && !await control("stop", live.sessionId)) return;
@@ -412,7 +442,15 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
       await startBrowserMicrophone();
     } catch (error) {
       pendingNativeStart.current = null;
-      if (nativeStart) setStartError(error instanceof Error ? error.message : String(error));
+      if (nativeStart) {
+        const reason = error instanceof Error ? error.message : String(error);
+        if (reason.includes("capture_already_active")) {
+          setStarting(false);
+          setStartError("");
+          setMessage("Margins Menu is already recording. Waiting for its meeting to appear here…");
+          void refresh().catch(() => undefined);
+        } else setStartError(reason);
+      }
       else setMessage(error instanceof Error ? error.message : String(error));
     }
   }
@@ -545,31 +583,28 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     finally { setActionBusy(false); }
   }
   async function distill() {
-    if (!selected || !projectId) return;
+    if (!selected || !projectId || noteBusy) return;
+    setNoteBusy(true);
     try {
-      if (composer.text.trim()) throw new Error("Send or clear your current new-thread draft before opening a meeting note.");
       await saveMemo();
-      const result = await rpc.call("connectedNoteContext", { projectId, sessionId: selected.sessionId });
+      const noteProjectId = selected.originProjectId || projectId;
+      const result = await rpc.call("connectedNoteContext", { projectId: noteProjectId, sessionId: selected.sessionId });
       if (!result.ok) throw new Error(result.error.message);
-      const { sessionId, workspaceId, memo } = result.context;
+      const { sessionId } = result.context;
       if (!result.context.transcript.available) {
-        const requested = await rpc.call("transcribePinnedSession", { projectId, sessionId });
+        const requested = await rpc.call("transcribePinnedSession", { projectId: noteProjectId, sessionId });
         if (!requested.ok) { setTranscriptStatus({ sessionId, state: "failed" }); throw new Error(requested.error.message); }
         setTranscriptStatus({ sessionId, state: requested.status === "complete" ? "ready" : "pending" });
       }
-      const updating = Boolean(result.context.noteAssociation);
-      composer.setText(updating ? "Update the connected note from this meeting: " : "Make a connected note from this meeting: ");
-      composer.insertMention({ provider: "margins", id: meetingMentionId({ projectId, workspaceId, sessionId,
-        memoRevision: memo.revision, note: updating ? "update" : "create" }),
-        label: selected.title?.trim().slice(0, 100) || `Meeting · ${meetingTime(selected.startedAt)}` });
-      try { sessionStorage.setItem(handoffKey(projectId, sessionId), JSON.stringify(selected.threadIds || [])); } catch { /* private browser */ }
-      setHandoffTick((tick) => tick + 1);
-      navigate.toCompose({ focusPrompt: true });
+      const started = await rpc.call("startConnectedNoteThread", { projectId: noteProjectId, sessionId });
+      navigate.toThread(started.threadId);
     } catch (error) { setMessage(String(error)); }
+    finally { setNoteBusy(false); }
   }
 
   const live = meetings.filter((item) => !item.inputFinalized);
-  const ready = meetings.filter((item) => item.inputFinalized && !item.archived && !item.notePath);
+  const preparing = meetings.filter((item) => item.inputFinalized && !item.archived && !item.notePath && (item.threadIds?.length || 0) > 0);
+  const ready = meetings.filter((item) => item.inputFinalized && !item.archived && !item.notePath && !item.threadIds?.length);
   const distilled = meetings.filter((item) => item.inputFinalized && !item.archived && item.notePath);
   const archived = meetings.filter((item) => item.archived);
   const pausedSession = (sessionId: string) => panel?.sessionId === sessionId && panel.state === "paused"
@@ -580,7 +615,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   const threadLinks = selected?.threadLinks?.length ? selected.threadLinks
     : (selected?.threadIds || []).map((id) => ({ id, title: "Meeting note thread" }));
   const shownTranscript = transcriptStatus?.sessionId === selectedId ? transcriptStatus.state : "checking";
-  const groups = [["Live", live], ["Ready to refine", ready], ["Distilled", distilled], ["Archived", showArchived ? archived : []]] as const;
+  const groups = [["Live", live], ["Preparing note", preparing], ["Ready to refine", ready], ["Distilled", distilled], ["Archived", showArchived ? archived : []]] as const;
   return <main className="margins-meetings-page">
     <aside className="margins-meeting-list">
       <div className="margins-meetings-top"><strong>Meetings</strong>
@@ -603,7 +638,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
       }}>{showArchived ? "Hide archived" : `Archived (${archived.length})`}</button>}
     </aside>
     <section className={`margins-meeting-pad${selected?.inputFinalized ? " finished" : ""}`}>
-      {panel && panel.state !== "unavailable" && (client.platform === "macos" || menuAvailable) && live.length === 0 && !selectedId && meetings.length === 0 && <div className="margins-menu-connect">
+      {panel && panel.state !== "unavailable" && (client.platform === "macos" || menuAvailable) && live.length === 0 && <div className="margins-menu-connect">
         <span>{nativeBridgeOwner.paired && nativeConnectionError
           ? "Margins Menu disconnected"
           : nativeBridgeOwner.paired
@@ -611,6 +646,19 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
           : "Record with Margins Menu (mic + computer audio)"}</span>
         {(!nativeBridgeOwner.paired || nativeConnectionError) && <button disabled={menuBusy || !projectId} onClick={() => void connectMenu().catch(() => undefined)}>{nativeBridgeOwner.paired ? "Reconnect" : "Connect"}</button>}
         {client.platform === "macos" && !nativeBridgeOwner.paired && <button disabled={menuBusy || !projectId} onClick={() => void startBrowserMicrophone()}>Browser mic only</button>}
+      </div>}
+      {panel && panel.state !== "unavailable" && speechSetup && speechSetup.state !== "ready" && <div className="margins-workspace-notice" role="status">
+        {speechSetup.state === "preparing" ? "Preparing transcription on this project's machine. You can record now; saved audio will be transcribed when it is ready."
+          : speechSetup.state === "failed" ? `Transcription setup needs attention: ${speechSetup.message}`
+            : speechSetup.message}
+        {speechSetup.state === "preparing" && <span> {speechSetup.message}{speechSetup.progress !== null ? ` · ${Math.round(speechSetup.progress * 100)}%` : ""}</span>}
+        {speechSetup.state === "failed" && <button onClick={() => {
+          setSpeechSetup({ state: "preparing", message: "Retrying transcription setup", progress: null });
+          void rpc.call("retrySpeechSetup", { projectId }).then((result) => {
+            if (result.ok) setSpeechSetup({ state: result.state, message: result.message, progress: result.progress });
+            else setSpeechSetup({ state: "failed", message: result.error.message, progress: null });
+          }).catch((error) => setSpeechSetup({ state: "failed", message: String(error), progress: null }));
+        }}>Retry</button>}
       </div>}
       {panel?.state === "unavailable" && <div className="margins-meetings-empty">
         <h2>{workspaceOptions.length ? "Choose a Margins Workspace" : "Set up a Margins Workspace"}</h2>
@@ -669,9 +717,17 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
             {!selected.inputFinalized && selected.audioSource && ` · ${selected.audioSource}`}
             {selected.workspaceName && ` · ${selected.inputFinalized ? selected.workspaceName : `Workspace: ${selected.workspaceName}`}`}
             {selected.originProjectName && selected.inputFinalized && selected.originProjectName.toLowerCase() !== selected.workspaceName?.toLowerCase() && ` · from ${selected.originProjectName}`}
-            {!selected.inputFinalized && (selected.originProjectName || projects.find((item) => item.id === projectId)?.name) && ` · Started from ${selected.originProjectName || projects.find((item) => item.id === projectId)?.name}`}
+            {!selected.inputFinalized && (selected.originProjectName
+              ? ` · Started from ${selected.originProjectName}`
+              : nativeStatus?.sessionId === selected.sessionId && audioStartingId !== selected.sessionId
+                ? " · Started in Margins Menu"
+                : projects.find((item) => item.id === projectId)?.name
+                  ? ` · Started from ${projects.find((item) => item.id === projectId)?.name}` : "")}
             {selected.inputFinalized && message === "Saved" && <span className="margins-meeting-status saved" role="status"> · Memo updated</span>}</p></div>
         </header>
+        {!selected.inputFinalized && !selected.originProjectId && audioStartingId !== selected.sessionId
+          && nativeStatus?.sessionId === selected.sessionId &&
+          <p className="margins-workspace-notice">Taking notes on the meeting already recording in Margins Menu.</p>}
         {audioStartingId === selected.sessionId && nativeStatus?.state === "needs_attention" &&
           <p role="alert">{nativeStatus.error || "Margins Menu could not start recording."}</p>}
         <textarea ref={memoRef} aria-label="Meeting memo pad" placeholder="Write notes..." value={draft} onChange={(event) => { dirty.current = true; latestDraft.current = event.target.value; setDraft(event.target.value); setMessage(""); }} onBlur={() => void saveMemo().catch((error) => setMessage(String(error)))} />
@@ -679,11 +735,11 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
           {selected.inputFinalized && <div className="margins-meeting-trail">{shownTranscript !== "ready" && <span>{shownTranscript === "pending" ? "Transcribing…" : shownTranscript === "checking" ? "Checking transcript…" : shownTranscript === "failed" ? "Transcript unavailable" : "Transcript not ready"}</span>}
             {shownTranscript === "ready" && <button onClick={() => void viewTranscript()}>{transcriptOpen ? "Hide transcript" : "View transcript"}</button>}
             {(shownTranscript === "failed" || shownTranscript === "not_ready") && <button onClick={() => void retryTranscription()}>{shownTranscript === "failed" ? "Retry" : "Transcribe"}</button>}
-            {handoff && <span>Note draft opened — press Enter to start</span>}</div>}
+          </div>}
           {transcriptOpen && <div className="margins-meeting-transcript" aria-label="Meeting transcript">{transcriptBody || "Transcript is empty."}</div>}
           {memoChangedSinceNote && <span>Note uses an earlier memo revision</span>}
           {selected.inputFinalized && <div className="margins-meeting-next">
-            {noteAction && <button onClick={() => void distill()}>{selected.notePath ? "Update note" : "Make note"} →</button>}
+            {noteAction && <button disabled={noteBusy} onClick={() => void distill()}>{noteBusy ? "Starting note thread…" : selected.notePath ? "Update note" : selected.threadIds?.length ? "Open note thread" : "Make note"} →</button>}
             <div className="margins-meeting-more"><button className="margins-inline-action" aria-expanded={moreOpen} onClick={() => setMoreOpen(!moreOpen)}>More</button>
               {moreOpen && <div className="margins-meeting-more-menu">
                 <button disabled={actionBusy} onClick={() => void archiveMeeting(!selected.archived)}>{selected.archived ? "Restore to recent" : "Archive"}</button>

@@ -1,7 +1,7 @@
 # Official CLI release pipeline
 
 The official `margins` executable is built only from the private
-`useenzyme/margins-desktop` source-of-truth. The public `useenzyme/margins`
+`byenzyme/margins-desktop` source-of-truth. The public `byenzyme/margins`
 repository is an audited open-core export and validates its source graph, but
 has no release-writing workflow. Never add a tag-triggered binary publisher or
 a cross-repository write token to the public export.
@@ -11,38 +11,37 @@ a cross-repository write token to the public export.
 `.github/workflows/cli-release.yml` checks out an existing private tag and
 builds the root `margins` package's internal `margins-private` target with an
 explicit, fail-closed private composition, then stages it in each archive as
-the user-facing `margins` executable, for:
+the user-facing `margins` executable alongside `margins-server`, for:
 
 - `aarch64-apple-darwin` on the `macos-15` Apple Silicon runner with
-  `audio-capture,coreml-asr`;
-- `x86_64-apple-darwin` on the `macos-15-intel` runner with
   `audio-capture,coreml-asr`;
 - `x86_64-unknown-linux-gnu` on Ubuntu with
   `audio-capture,parakeet-asr`.
 
+The Apple Silicon archive also includes `margins-live`.
+
 Each native runner creates its archive, extracts it, and executes that exact
 packaged binary's `__release-smoke` contract. A separate publish job verifies
-that all three archives and checksums are present, then creates the release in
-`useenzyme/margins` and updates `useenzyme/homebrew-margins`. Build jobs receive
+that both archives and checksums are present, then creates the release in
+`byenzyme/margins` and updates `byenzyme/homebrew-margins`. Build jobs receive
 no publishing credential. The publish job is protected by the
 `official-cli-release` GitHub Environment so reviewers can inspect all artifacts
 before secrets become available.
 
-The public repository must already contain the matching tag. `--verify-tag`
-prevents the private workflow from silently inventing a public tag at an
-unreviewed commit. Tags and releases are intentionally not created by setup or
-validation work.
+The publish job exports and verifies the public source tree, then commits and
+tags that tree before uploading the matching binary archives. Tags and releases
+are not created by setup or validation work.
 
 ## Required secrets and permissions
 
 Configure these as secrets on the protected `official-cli-release` Environment
-in `useenzyme/margins-desktop`:
+in `byenzyme/margins-desktop`:
 
 - `MARGINS_RELEASE_TOKEN`: a fine-grained PAT (or equivalent installation
-  token) limited to `useenzyme/margins`, with repository **Contents: read and
+  token) limited to `byenzyme/margins`, with repository **Contents: read and
   write**. It needs no access to the private source repository or Homebrew tap.
 - `HOMEBREW_TAP_TOKEN`: a separate fine-grained PAT limited to
-  `useenzyme/homebrew-margins`, with repository **Contents: read and write**. It
+  `byenzyme/homebrew-margins`, with repository **Contents: read and write**. It
   needs no access to releases or private source.
 
 Protect the Environment with required reviewers and restrict it to `v*` tags.

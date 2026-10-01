@@ -31,8 +31,16 @@ this bb project automatically.
   transcribes finalized audio there. **Make connected note** requests
   transcription for an older saved session when needed; Margins still owns
   diarization, distillation, and retention.
-- **Make connected note** fills and focuses the bb composer without sending.
-- Bundled `watermark` and `workspace-setup` skills; no recording agent tool.
+- **Make connected note** starts a bb thread in the meeting's recorded project
+  (or the project selected for older meetings without provenance) and opens it.
+  The thread receives a pinned meeting reference with the current memo revision.
+- Newly started recordings are queued for one automatic note thread after the
+  session is finalized and its transcript is ready. The queue survives plugin
+  reloads and keeps separate meetings independent; older saved sessions are not
+  backfilled automatically.
+- Bundled `watermark`, `workspace-setup`, and `connected-note` skills. BB agent
+  tools read a pinned meeting's memo and transcript through its project host,
+  then link an existing note in the Workspace Home Source.
 
 The panel does not show a live transcript, host picker, elapsed-time dashboard,
 meeting library, or processing controls. Plugin storage holds only routing and
@@ -43,11 +51,16 @@ action tied to that meeting.
 
 ## Installation shape
 
-On first Start, the plugin’s project-host worker installs one version-pinned,
+On first Workspace discovery, the plugin’s project-host worker installs one version-pinned,
 digest-verified Margins release when needed. That release contains:
 
 - `margins`, the normal CLI;
 - `margins-server`, the project-side recording service.
+
+The currently published `v0.4.9` Linux and Apple Silicon macOS archives lack `margins-server`; a clean
+install from that release fails closed until a release with both executables is
+published and the plugin pin is advanced. Development builds can use
+`MARGINS_CLI_BIN` and `MARGINS_PROJECT_SERVER_PATH` as explicit overrides.
 
 The service is launched with the bb project's default source path as
 `MARGINS_WORK_DIR` and an explicit `MARGINS_WORKSPACE`. It uses that Workspace's
@@ -55,9 +68,18 @@ capture store. Set the machine default with `margins workspace default --set
 <id>`, or enter a project override in the panel. For local development,
 `MARGINS_PROJECT_SERVER_PATH` may point at an already-built `margins-server`.
 
+The released project service prepares transcription on the **project host** in
+the background at first launch. A Mac host downloads the shared FluidAudio
+CoreML model cache; a Linux host downloads the pinned Parakeet ONNX model and
+ONNX Runtime into its user cache. Meetings shows setup progress and a Retry
+button on failure. Recording can start while setup runs: finalized audio waits
+in the durable transcription queue, then transcribes when the model is ready.
+The Mac running Margins Menu only needs its recording bridge when the project
+service is on a remote Linux host; the remote host performs ASR.
+
 For an explicitly provisioned project host, `asr-runtime.json` in the plugin's
 host data directory can select a server with the `hosted-web` feature and its
-local Parakeet model and ONNX Runtime library. It contains absolute paths:
+local Parakeet model and ONNX Runtime library instead of automatic setup. It contains absolute paths:
 
 ```json
 {

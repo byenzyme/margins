@@ -83,7 +83,7 @@ fn drain_service_jobs(mut request: JobRequest, in_flight: &Mutex<HashSet<String>
                 "failed",
                 None,
                 None,
-                Some(&error.to_string()),
+                Some(&format!("{error:#}")),
             );
         }
         in_flight
@@ -138,9 +138,12 @@ fn transcribe_remote_session(
     principal: &ServicePrincipal,
     session_id: &SessionId,
 ) -> Result<String> {
-    let (model_dir, kind) = margins::offline_asr::resolve_parakeet_model_dir()?;
-    let mut backend = margins::asr::parakeet::ParakeetAsr::from_dir(&model_dir, kind)
-        .with_context(|| format!("failed to load ASR model from {}", model_dir.display()))?;
+    #[cfg(not(all(feature = "coreml-asr", target_os = "macos")))]
+    let mut backend = {
+        let (model_dir, kind) = margins::offline_asr::resolve_parakeet_model_dir()?;
+        margins::asr::parakeet::ParakeetAsr::from_dir(&model_dir, kind)
+            .with_context(|| format!("failed to load ASR model from {}", model_dir.display()))?
+    };
     let record = service
         .repository_record(principal, session_id)?
         .context("finalized session has no canonical repository record")?;
@@ -183,7 +186,6 @@ fn transcribe_remote_session(
             }
             _ => bail!("remote ASR lane uses an unsupported durable audio format"),
         };
-        let words = backend.transcribe_words(&mono_16k)?;
         let channel_order = match lane_id {
             "mic" => 0,
             "system" => 1,
@@ -204,9 +206,23 @@ fn transcribe_remote_session(
             lane_id
         };
         channel_labels.insert(channel_order, label.to_string());
+        #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
+        entries.extend(
+            margins::offline_asr::transcribe_mono_16k(&mono_16k)?
+                .entries
+                .into_iter()
+                .map(|mut entry| {
+                    entry.channel = channel_order;
+                    entry.start_ms = entry.start_ms.saturating_add(segment.start_offset_ms);
+                    entry.end_ms = entry.end_ms.saturating_add(segment.start_offset_ms);
+                    entry
+                })
+                .filter(|entry| !entry.text.trim().is_empty()),
+        );
+        #[cfg(not(all(feature = "coreml-asr", target_os = "macos")))]
         entries.extend(
             margins::asr::words_to_transcript_entries(
-                &words,
+                &backend.transcribe_words(&mono_16k)?,
                 channel_order,
                 segment.start_offset_ms,
             )
@@ -223,7 +239,7 @@ fn transcribe_remote_session(
     let timeline = render_remote_timeline(entries, &channel_labels, &memo);
     let content = crate::render_aligned_markdown(
         session_id.as_ref(),
-        "Margins remote offline Parakeet TDT ONNX transcript and memo context.",
+        "Margins offline speech transcript and memo context.",
         &memo,
         &timeline,
     );

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Isolated bb + Chrome journey. Steps 1-6 never submit; step 7 requires an explicit opt-in.
+// Isolated bb + Chrome journey. Steps 1-6 stop before Make note; step 7 requires an explicit opt-in.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { closeSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -17,10 +17,13 @@ const required = (name) => {
   return value;
 };
 const marginsBin = required("MARGINS_E2E_BIN");
-const serverBin = required("MARGINS_E2E_SERVER_BIN");
+const freshRelease = process.env.MARGINS_E2E_FRESH_RELEASE === "1";
+const serverBin = freshRelease ? null : required("MARGINS_E2E_SERVER_BIN");
 const bbApp = required("MARGINS_E2E_BB_APP");
 const chromeBin = required("MARGINS_E2E_CHROME_BIN");
-const spokenWav = required("MARGINS_E2E_SPOKEN_WAV");
+const spokenWav = process.env.MARGINS_E2E_SPOKEN_WAV
+  ? required("MARGINS_E2E_SPOKEN_WAV")
+  : path.join(here, "fixtures", "launch-accessibility.wav");
 const asrModelDir = required("MARGINS_E2E_ASR_MODEL_DIR");
 const ortLibrary = required("MARGINS_E2E_ORT_LIBRARY");
 const realLlm = process.env.MARGINS_E2E_REAL_LLM === "1";
@@ -31,6 +34,7 @@ const home = path.join(temporary, "margins-home");
 const vault = path.join(temporary, "vault");
 const code = path.join(temporary, "code");
 const bbData = path.join(temporary, "bb");
+const freshCliBinDir = path.join(temporary, "plugin-installed-bin");
 const wav = path.join(temporary, "meeting.wav");
 const browserConfig = path.join(temporary, "agent-browser.json");
 const chromeName = `margins-bb-e2e-${process.pid}`;
@@ -168,24 +172,21 @@ for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => {
 let cdpPort;
 let bbEnv;
 let currentProjectId;
-async function holdAtComposer() {
+async function holdBeforeNote() {
   const marker = path.join(artifacts, "continue-preflight");
   writeFileSync(path.join(artifacts, "preflight-ready.json"), `${JSON.stringify({
     bbServerUrl: bbEnv.BB_SERVER_URL, bbData, cdpPort, browserSession, browserConfig, temporary,
     projectId: currentProjectId,
   }, null, 2)}\n`);
-  console.log(`Preflight paused at composer; inspect ${artifacts}/preflight-ready.json, then create ${marker}`);
+  console.log(`Preflight paused before Make note; inspect ${artifacts}/preflight-ready.json, then create ${marker}`);
   await until("preflight release", () => existsSync(marker), 10 * 60_000);
 }
 try {
   assert(!home.startsWith(path.join(os.homedir(), ".margins")));
   assert(!vault.startsWith("/workspace/obsidian"));
-  const skillTarget = path.join(code, ".bb/skills/margins");
-  mkdirSync(path.dirname(skillTarget), { recursive: true });
-  cpSync(path.join(repo, "skills/margins"), skillTarget, { recursive: true });
-  writeFileSync(path.join(code, "AGENTS.md"), `# Disposable Margins meeting fixture\n\nUse ${marginsBin} by absolute path for every Margins CLI call, with MARGINS_HOME=${home}. Do not invoke a margins binary from PATH. This project's notes are in the disposable Workspace Home ${vault}; write the connected note inside its inbox/ folder. The note must reflect distinct evidence from both the memo and the spoken transcript. Do not read or write /workspace/obsidian or ~/.margins.\n`);
+  writeFileSync(path.join(code, "AGENTS.md"), `# Disposable Margins meeting fixture\n\nFor a BB @Meeting, use the bundled Margins BB agent tools to read the pinned session, memo, and transcript, then link a written note. Do not use a local Margins CLI or Codex MCP to read this meeting. This project's notes are in the disposable Workspace Home ${vault}; write the connected note inside its inbox/ folder. The note must reflect distinct evidence from both the memo and the spoken transcript. Do not read or write /workspace/obsidian or ~/.margins.\n`);
   command("git", ["init", "-q", "-b", "main", code]);
-  command("git", ["-C", code, "add", "AGENTS.md", ".bb/skills/margins"]);
+  command("git", ["-C", code, "add", "AGENTS.md"]);
   command("git", ["-C", code, "-c", "user.name=Meetings E2E", "-c", "user.email=meetings-e2e@example.invalid", "commit", "-qm", "Seed disposable project"]);
   makeSpokenWav(wav, spokenWav);
   const marginsEnv = { ...process.env, MARGINS_HOME: home };
@@ -210,15 +211,25 @@ try {
   const daemonPort = await freePort();
   cdpPort = await freePort();
   bbEnv = { ...process.env, BB_SERVER_URL: `http://127.0.0.1:${serverPort}`, BB_DATA_DIR: bbData,
-    MARGINS_HOME: home, MARGINS_CLI_BIN: marginsBin };
+    MARGINS_HOME: home,
+    ...(freshRelease ? { MARGINS_CLI_BIN_DIR: freshCliBinDir,
+      MARGINS_PARAKEET_MODEL_DIR: asrModelDir, MARGINS_PARAKEET_MODEL_KIND: "tdt-v2",
+      ORT_DYLIB_PATH: ortLibrary } : { MARGINS_CLI_BIN: marginsBin }),
+    ...(realLlm ? {} : { MARGINS_BB_E2E_DISABLE_AUTO_NOTE: "1" }) };
+  if (freshRelease) {
+    delete bbEnv.MARGINS_CLI_BIN;
+    delete bbEnv.MARGINS_PROJECT_SERVER_PATH;
+    delete bbEnv.MARGINS_BB_REMOTE_URL;
+    delete bbEnv.MARGINS_BB_REMOTE_TOKEN;
+  }
   const hostData = path.join(bbData, "plugins/margins/host-data");
   mkdirSync(hostData, { recursive: true });
-  writeFileSync(path.join(hostData, "asr-runtime.json"), `${JSON.stringify({ serverPath: serverBin,
+  if (!freshRelease) writeFileSync(path.join(hostData, "asr-runtime.json"), `${JSON.stringify({ serverPath: serverBin,
     modelDir: asrModelDir, ortLibraryPath: ortLibrary })}\n`);
   const bbOut = openSync(path.join(artifacts, "bb.log"), "w");
   const bbErr = openSync(path.join(artifacts, "bb-errors.log"), "w");
   bbProcess = spawn(bbApp, ["--data-dir", bbData, "--server-bind-host", "0.0.0.0", "--server-port", String(serverPort), "--host-daemon-port", String(daemonPort), "start"], {
-    env: { ...bbEnv, MARGINS_HOME: home, MARGINS_PROJECT_SERVER_PATH: serverBin },
+    env: { ...bbEnv, ...(freshRelease ? {} : { MARGINS_PROJECT_SERVER_PATH: serverBin }) },
     stdio: ["ignore", bbOut, bbErr],
   });
   closeSync(bbOut); closeSync(bbErr);
@@ -235,7 +246,6 @@ try {
   const threadOne = findId(bb(["thread", "spawn", "--project", projectId, "--title", "E2E thread one", "--prompt", "Fixture only; do not run", "--send-at", "7d"]), "thr_");
   const threadTwo = findId(bb(["thread", "spawn", "--project", projectId, "--title", "E2E thread two", "--prompt", "Fixture only; do not run", "--send-at", "7d"]), "thr_");
   assert(threadOne && threadTwo, "Fixture threads did not return ids");
-  const beforeThreads = bb(["thread", "list", "--project", projectId]);
 
   command("docker", ["run", "-d", "--rm", "--name", chromeName, "--network", "host",
     "-v", `${path.dirname(chromeBin)}:/browser:ro`, "-v", `${wav}:/meeting.wav:ro`, image,
@@ -249,6 +259,9 @@ try {
   videoStartedAt = Date.now();
   browser(["set", "viewport", "1440", "900"]);
   await until("Meetings page", () => browserEval('!!document.querySelector(".margins-meetings-page")'));
+  if (freshRelease) await until("fresh release runtime install", () =>
+    existsSync(path.join(freshCliBinDir, "margins"))
+      && existsSync(path.join(hostData, "runtime", "v0.4.10", "margins-server")), 120_000);
   shot("01-workspace.png");
 
   // The fake microphone is this harness's deliberate browser-only choice.
@@ -311,36 +324,23 @@ try {
   await until("Resumed", () => browserEval(`!!document.querySelector('button[aria-label="Pause recording"]')`));
   browser(["click", 'button[aria-label="Stop and save recording"]']);
   await until("Ready to refine", () => browserEval(`document.querySelector('.margins-meeting-list')?.innerText.toLowerCase().includes('ready to refine') && !document.querySelector('button[aria-label="Stop and save recording"]')`));
-  await until("Stop acknowledgment", () => browserEval(`/^Saved · [0-9]+:[0-9]{2} recorded$/.test(document.querySelector('.margins-meeting-kicker')?.innerText || '')`), 4_000);
+  await until("Stop acknowledgment", () => browserEval(`(document.querySelector('.margins-meetings-page')?.innerText || '').includes('Saved · e2e')`), 4_000);
   assertMemo(liveMemo);
-  assert.equal(browserEval(`document.querySelectorAll('.margins-meeting-pad .margins-meeting-kicker').length`), 1);
   assert(browserEval(`document.querySelector('.margins-meeting-next')?.innerText.includes('Make note →')`));
   shot("05-ready.png");
   const revisedMemo = `${liveMemo} Post-stop correction: include accessibility pass.`;
+  const captureDir = path.join(home, "workspaces/e2e/captures/.margins");
   browser(["fill", 'textarea[aria-label="Meeting memo pad"]', revisedMemo]);
-  await until("Revised memo saved", () => browserEval('document.querySelector(".margins-meeting-status")?.innerText.includes("Saved")'));
+  await until("Revised memo saved", () => readdirSync(captureDir).some((name) =>
+    name.endsWith(".md") && readFileSync(path.join(captureDir, name), "utf8").includes(revisedMemo)));
   browser(["find", "role", "button", "click", "--name", "Meetings", "--exact"]);
   assertMemo(revisedMemo);
-  const captureDir = path.join(home, "workspaces/e2e/captures/.margins");
   const memos = readdirSync(captureDir).filter((name) => name.endsWith(".md"));
   assert(memos.some((name) => readFileSync(path.join(captureDir, name), "utf8").includes(revisedMemo)));
   shot("06-revised.png");
 
-  browser(["find", "role", "button", "click", "--name", "Make note →", "--exact"]);
-  await until("Composer", () => browserEval(`!!document.querySelector('[role="textbox"] [data-prompt-mention-resource]')`), 120_000);
-  const prompt = browserEval(`document.querySelector('[role="textbox"]')?.innerText || ''`);
-  const plainPrompt = prompt.split("\n")[0].trim();
-  assert.equal(plainPrompt, "Make a connected note from this meeting:");
-  const mention = browserEval(`JSON.parse(document.querySelector('[role="textbox"] [data-prompt-mention-resource]')?.getAttribute('data-prompt-mention-resource') || 'null')`);
-  assert.equal(mention?.pluginId, "margins", "Composer lacks a Margins meeting pill");
-  assert.match(mention?.label || "", /^Meeting · \d{1,2}:\d{2} [AP]M$/);
-  assert.match(mention?.itemId || "", /^margins:/);
-  const composerContext = JSON.parse(decodeURIComponent(mention.itemId.slice("margins:".length)));
-  assert.deepEqual({ workspaceId: composerContext.workspaceId, sessionId: composerContext.sessionId,
-    projectId: composerContext.projectId, note: composerContext.note },
-  { workspaceId: "e2e", sessionId: "meeting", projectId, note: "create" });
-  assert.match(composerContext.memoRevision, /^v\d+-/);
-  assert(!/\(\d{3}\)/.test(prompt), "Composer draft includes a raw HTTP error");
+  browser(["find", "role", "button", "click", "--name", "Transcribe", "--exact"]);
+
   const transcript = await until("Parakeet transcript", () => {
     const result = jsonCommand(marginsBin, ["--workspace", "e2e", "transcript", "latest", "--format", "json"], { env: marginsEnv });
     const utterances = String(result.body || "").split("\n").filter((line) => /^\[\d{2}:\d{2}(?::\d{2})?\]/.test(line) && !/\] memo:/.test(line));
@@ -348,42 +348,27 @@ try {
       && utterances.length > 0 ? result : null;
   }, 120_000);
   writeFileSync(path.join(artifacts, "transcript.json"), `${JSON.stringify(transcript, null, 2)}\n`);
-  // The SDK's toCompose has no project argument. Select the fixture project
-  // through bb's composer picker without submitting the prompt.
-  browser(["find", "role", "button", "click", "--name", "Project: Work in a project", "--exact"]);
-  browser(["find", "role", "option", "click", "--name", "Meetings E2E code", "--exact"]);
-  assert(browserEval(`!!document.querySelector('button[aria-label="Project: Meetings E2E code"]')`));
-  assert(!browserEval(`document.body.innerText.includes('Unknown checkout')`), "Disposable bb project is missing its Git checkout");
-  const afterThreads = bb(["thread", "list", "--project", projectId]);
   const threadIds = (value) => [...JSON.stringify(value).matchAll(/thr_[a-z0-9]+/g)].map((match) => match[0]).sort();
-  assert.deepEqual(threadIds(afterThreads), threadIds(beforeThreads), "Distill must not spawn or send a thread");
+  const beforeNoteThreads = threadIds(bb(["thread", "list", "--project", projectId]));
   assert(!existsSync(path.join(code, ".margins")), "Capture must not fall back to the bb project folder");
-  shot("07-composer.png");
-  if (!realLlm) {
-    browser(["find", "role", "button", "click", "--name", "Meetings", "--exact"]);
-    await until("handoff trail", () => browserEval(`document.querySelector('.margins-meeting-trail')?.innerText.includes('Note draft opened — press Enter to start')`));
-    assert(browserEval(`document.querySelector('.margins-meeting-trail')?.innerText.includes('Transcript ready')`));
-    shot("08-handoff-ready.png");
-  }
+  shot("07-before-note.png");
   const assertions = { projectId, threadOne, threadTwo, levels, memoSavedAfterStop: true, stopAcknowledged: true,
     overlayVisibleOnOtherThread: true, overlayClearOfComposerSubmit: composerClearance,
-    projectCaptureFallbackAbsent: true, composerPrompt: prompt, composerPlainPrompt: plainPrompt,
-    composerContext, threadsUnchanged: true, transcription: "parakeet-asr", transcriptObserved: true, noLlm: !realLlm };
+    projectCaptureFallbackAbsent: true, transcription: "parakeet-asr", transcriptObserved: true,
+    freshReleaseInstalled: freshRelease, noLlm: !realLlm };
   writeFileSync(path.join(artifacts, "assertions.json"), `${JSON.stringify(assertions, null, 2)}\n`);
-  if (process.env.MARGINS_E2E_HOLD_AT_COMPOSER === "1") await holdAtComposer();
+  if (process.env.MARGINS_E2E_HOLD_BEFORE_NOTE === "1") await holdBeforeNote();
   if (realLlm) {
-    // This is the one authorized send. The isolated bb has retries disabled above.
-    browser(["find", "role", "button", "click", "--name", "Permission mode", "--exact"]);
-    browser(["find", "role", "menuitem", "click", "--name", "Full Access"]);
-    assert(browserEval(`!!document.querySelector('button[aria-label="Submit (Enter)"]:not(:disabled)')`));
-    shot("08-before-send.png");
-    browser(["click", 'button[aria-label="Submit (Enter)"]']);
+    // Make note creates and starts the BB thread immediately. There is no
+    // intermediate composer draft in the current product flow.
     writeFileSync(path.join(artifacts, "llm-send.marker"), `${new Date().toISOString()}\n`);
-    const newThreadId = await until("new composer thread", () => {
+    browser(["find", "role", "button", "click", "--name", "Make note →", "--exact"]);
+    const newThreadId = await until("new connected-note thread", () => {
       const ids = threadIds(bb(["thread", "list", "--project", projectId]));
-      return ids.find((id) => !threadIds(beforeThreads).includes(id)) || null;
+      return ids.find((id) => !beforeNoteThreads.includes(id)) || null;
     }, 60_000);
     assertions.distillationThreadId = newThreadId;
+    await until("connected-note navigation", () => browserEval(`location.pathname.includes('${newThreadId}')`));
     shot("09-thread-running.png");
     const noteName = await until("connected note in throwaway inbox", () => {
       const names = readdirSync(path.join(vault, "inbox")).filter((name) => name.endsWith(".md"));
@@ -400,7 +385,7 @@ try {
     assertions.memoReflected = true;
     assertions.transcriptReflected = true;
     await until("note association", () => {
-      const result = command(marginsBin, ["--workspace", "e2e", "note-association", composerContext.sessionId], { env: marginsEnv });
+      const result = command(marginsBin, ["--workspace", "e2e", "note-association", "meeting"], { env: marginsEnv });
       return result.includes(newThreadId) && result.includes(noteName);
     }, 90_000);
     browser(["find", "role", "button", "click", "--name", "Meetings", "--exact"]);

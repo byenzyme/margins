@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   control: vi.fn(),
   refreshNative: vi.fn(),
   navigate: vi.fn(),
+  navigateThread: vi.fn(),
   meetings: [] as Array<{ sessionId: string; title: string; startedAt: string; inputFinalized: boolean;
     notePath: null; threadIds: string[]; distilledMemoRevision: null; archived?: boolean }>,
   native: { paired: false, status: null as { state: string; sessionId: string | null;
@@ -29,6 +30,9 @@ const mocks = vi.hoisted(() => ({
       return { ok: true, meeting: item && { ...item, notepad: { revision: "rev2", text: input?.text || "" } } };
     }
     if (method === "captureAuthority") return { ok: true, instanceId: "one", workspaceId: "obsidian" };
+    if (method === "connectedNoteContext") return { ok: true, context: { sessionId: input?.sessionId,
+      workspaceId: "obsidian", memo: { revision: "rev" }, transcript: { available: true }, noteAssociation: null } };
+    if (method === "startConnectedNoteThread") return { threadId: "thr-note" };
     if (method === "issueMenuGrant") return {
       serviceUrl: "https://jpham-server.getbb.app/api/v1/plugins/margins/http/menu/relay",
       token: "grant", workspaceId: "obsidian", workspaceName: "Obsidian", instanceId: "one", expiresAt: Date.now() + 60_000,
@@ -43,7 +47,7 @@ const defaultCall = mocks.call.getMockImplementation()!;
 vi.mock("@get-bb/plugin-sdk/app", () => ({
   experimental_FileLink: () => null,
   useBbContext: () => ({ projectId: "proj-mac" }),
-  useBbNavigate: () => ({ toPluginPanel: mocks.navigate }),
+  useBbNavigate: () => ({ toPluginPanel: mocks.navigate, toThread: mocks.navigateThread }),
   useComposer: () => ({ text: "", setText: vi.fn(), insertMention: vi.fn() }),
   useRealtime: () => undefined,
   useRpc: () => mocks.rpc,
@@ -62,6 +66,7 @@ vi.mock("./native-bridge-client.js", () => ({
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  mocks.refreshNative.mockReset();
   mocks.call.mockImplementation(defaultCall);
   mocks.native.paired = false;
   mocks.native.status = null;
@@ -71,6 +76,40 @@ afterEach(() => {
 });
 
 describe("Meetings Mac recorder choice", () => {
+  it("starts a note thread in the meeting's recorded project and opens it", async () => {
+    mocks.meetings = [{ sessionId: "saved", title: "Customer call", startedAt: "2026-09-28T00:00:00Z",
+      inputFinalized: true, notePath: null, threadIds: [], distilledMemoRevision: null,
+      originProjectId: "proj-origin" } as (typeof mocks.meetings)[number]];
+    render(<MeetingsPage subPath="proj-mac/saved" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Make note →" }));
+    await waitFor(() => expect(mocks.call).toHaveBeenCalledWith("startConnectedNoteThread",
+      { projectId: "proj-origin", sessionId: "saved" }));
+    expect(mocks.navigateThread).toHaveBeenCalledWith("thr-note");
+  });
+  it("does not start a second capture while a Menu meeting is already recording", async () => {
+    mocks.native.paired = true;
+    mocks.native.status = { state: "recording", sessionId: "menu-live", microphoneSamples: 16_000, micPeak: 0.2 };
+    mocks.refreshNative.mockResolvedValue(mocks.native.status);
+    mocks.meetings = [{ sessionId: "saved", title: "Earlier meeting", startedAt: "2026-09-28T00:00:00Z",
+      inputFinalized: true, notePath: null, threadIds: [], distilledMemoRevision: null }];
+    render(<MeetingsPage subPath="proj-mac/saved" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Start" }));
+    await screen.findByText("Margins Menu is already recording. Waiting for its meeting to appear here…");
+    expect(mocks.control).not.toHaveBeenCalledWith("start");
+    expect(screen.queryByText("New meeting")).toBeNull();
+  });
+
+  it("opens the memo for a meeting started in Margins Menu", async () => {
+    mocks.native.paired = true;
+    mocks.native.status = { state: "recording", sessionId: "menu-live", microphoneSamples: 16_000, micPeak: 0.2 };
+    mocks.meetings = [{ sessionId: "menu-live", title: "Weekly review", startedAt: new Date().toISOString(),
+      inputFinalized: false, notePath: null, threadIds: [], distilledMemoRevision: null }];
+    render(<MeetingsPage subPath="proj-mac" />);
+    await screen.findByText("Taking notes on the meeting already recording in Margins Menu.");
+    expect(mocks.navigate).toHaveBeenCalledWith("meetings", { subPath: "proj-mac/menu-live" });
+    expect(mocks.call).not.toHaveBeenCalledWith("recordMeetingOrigin", expect.anything());
+  });
+
   it("renames, views transcript, archives, restores, and confirms permanent discard", async () => {
     const item = { sessionId: "complete", title: "Planning", startedAt: "2026-09-27T00:00:00Z",
       inputFinalized: true, notePath: null, threadIds: [], distilledMemoRevision: null,
@@ -95,7 +134,10 @@ describe("Meetings Mac recorder choice", () => {
     render(<MeetingsPage subPath="proj-mac/complete" />);
     await screen.findByDisplayValue("Decisions");
     expect(screen.getByText("Saved · 1:17 · Obsidian · from Mac")).toBeDefined();
-    expect(screen.queryByText(/Record with Margins Menu/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Connect" })).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(mocks.call).toHaveBeenCalledWith("issueMenuGrant", expect.objectContaining({ projectId: "proj-mac" })));
+    expect(mocks.startBrowser).not.toHaveBeenCalled();
     expect(screen.queryByText("Transcript ready")).toBeNull();
     expect(screen.queryByText("Choose project in composer")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Rename" }));

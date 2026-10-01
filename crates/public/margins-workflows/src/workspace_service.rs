@@ -304,7 +304,8 @@ pub struct WorkspaceService {
     margins_dir: PathBuf,
     runtime: Arc<MeetingRuntime<SqliteMeetingRuntimeStorage>>,
     authority: SqliteWorkspaceAuthorityStorage,
-    asr_available: bool,
+    asr_available: Arc<std::sync::atomic::AtomicBool>,
+    deferred_asr_enabled: Arc<std::sync::atomic::AtomicBool>,
     recall_available: bool,
 }
 
@@ -332,7 +333,8 @@ impl WorkspaceService {
             margins_dir,
             runtime: Arc::new(MeetingRuntime::new(runtime_storage)),
             authority,
-            asr_available,
+            asr_available: Arc::new(std::sync::atomic::AtomicBool::new(asr_available)),
+            deferred_asr_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             recall_available,
         })
     }
@@ -355,6 +357,28 @@ impl WorkspaceService {
 
     pub fn asr_available(&self) -> bool {
         self.asr_available
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Publish machine-level ASR readiness after the speech assets finish
+    /// installing. Cloned Workspace handles observe the same capability.
+    pub fn set_asr_available(&self, available: bool) {
+        self.asr_available
+            .store(available, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Keep finalized audio in the durable ASR queue while a supported server
+    /// downloads its machine-level model. Capability stays false until ready.
+    pub fn enable_deferred_asr(&self) {
+        self.deferred_asr_enabled
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn can_admit_asr(&self) -> bool {
+        self.asr_available()
+            || self
+                .deferred_asr_enabled
+                .load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub fn capabilities(&self, principal: &ServicePrincipal) -> Result<WorkspaceCapabilitiesV1> {
@@ -382,7 +406,7 @@ impl WorkspaceService {
                 .filter(|operation| self.recall_available || operation.as_str() != OP_RECALL_QUERY)
                 .cloned()
                 .collect(),
-            asr_available: self.asr_available,
+            asr_available: self.asr_available(),
             recall_available: self.recall_available,
         })
     }
@@ -545,7 +569,7 @@ impl WorkspaceService {
                 .iter()
                 .any(|message| matches!(message.body, ServerMessageBodyV1::SessionFinalized(_)))
         {
-            if self.asr_available {
+            if self.can_admit_asr() {
                 // Admission is durable and precedes producer release. A lost
                 // finalize response can therefore be retried without ever
                 // leaving finalized audio in an unobservable processing gap.
@@ -1257,7 +1281,7 @@ impl WorkspaceService {
         &self,
         session_id: &SessionId,
     ) -> Result<WorkspaceProcessingJobV1> {
-        if !self.asr_available {
+        if !self.can_admit_asr() {
             bail!("ASR capability is unavailable on this instance");
         }
         let stored = self

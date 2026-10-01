@@ -354,6 +354,19 @@ impl FluidCoreMlAsr {
         let bundle = FluidCoreMlBundle::from_dir(model_dir, version)?;
         let vocabulary = load_vocabulary(&bundle.vocabulary)?;
         let preprocessor = CoreMlModel::load(&bundle.preprocessor, MLComputeUnits::CPUOnly)
+            .or_else(|derived_error| {
+                let source = bundle.root.join("Preprocessor.mlmodelc");
+                if source == bundle.preprocessor {
+                    return Err(derived_error);
+                }
+                CoreMlModel::load(&source, MLComputeUnits::CPUOnly).with_context(|| {
+                    format!(
+                        "derived CoreML preprocessor failed to load ({derived_error:#}); \
+                         original {} also failed",
+                        source.display()
+                    )
+                })
+            })
             .with_context(|| format!("failed to load {}", bundle.preprocessor.display()))?;
         let encoder = CoreMlModel::load(&bundle.encoder, MLComputeUnits::CPUAndNeuralEngine)
             .with_context(|| format!("failed to load {}", bundle.encoder.display()))?;

@@ -15,21 +15,36 @@ use margins_cli::args::{Args, Command, SetupLocalModelPolicyArg, SetupSkipArg, S
 use std::ffi::OsString;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::Path;
-#[cfg(feature = "audio-capture")]
+#[cfg(any(
+    feature = "audio-capture",
+    all(feature = "coreml-asr", target_os = "macos")
+))]
 use std::path::PathBuf;
 #[cfg(any(test, feature = "audio-capture"))]
 use std::sync::atomic::AtomicBool;
 #[cfg(feature = "audio-capture")]
 use std::sync::atomic::AtomicU32;
-#[cfg(any(test, feature = "audio-capture"))]
+#[cfg(any(
+    test,
+    feature = "audio-capture",
+    all(feature = "coreml-asr", target_os = "macos")
+))]
 use std::sync::atomic::AtomicU64;
 #[cfg(any(test, feature = "audio-capture"))]
 use std::sync::atomic::AtomicU8;
-#[cfg(any(test, feature = "audio-capture"))]
+#[cfg(any(
+    test,
+    feature = "audio-capture",
+    all(feature = "coreml-asr", target_os = "macos")
+))]
 use std::sync::atomic::Ordering;
 #[cfg(feature = "audio-capture")]
 use std::sync::Mutex;
-#[cfg(any(test, feature = "audio-capture"))]
+#[cfg(any(
+    test,
+    feature = "audio-capture",
+    all(feature = "coreml-asr", target_os = "macos")
+))]
 use std::sync::{mpsc, Arc};
 
 #[cfg(feature = "audio-capture")]

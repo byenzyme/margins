@@ -1,7 +1,7 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
-import { parseMeetingMentionId } from "./meeting-mention.js";
+import { meetingMentionId, parseMeetingMentionId } from "./meeting-mention.js";
 import {
   PANEL_STATE_SCHEMA,
   captureRecordSchema,
@@ -29,6 +29,8 @@ const MEETING_ORIGIN_PREFIX = "meeting-origin:";
 const MEETING_ARCHIVE_PREFIX = "meeting-archive:";
 const MENU_GRANT_PREFIX = "menu-grant:";
 const MENU_GRANT_EPOCH_PREFIX = "menu-grant-epoch:";
+const AUTO_NOTE_PENDING_PREFIX = "auto-note-pending:";
+const NOTE_THREAD_PREFIX = "note-thread:";
 const MENU_GRANT_TTL_MS = 60 * 60 * 1_000;
 const REALTIME_CHANNEL = "margins-recording";
 export const DISCONNECT_GRACE_MS = CAPTURE_DISCONNECT_GRACE_MS;
@@ -38,6 +40,8 @@ function recordingKey(recordingId: string) { return `${RECORDING_PREFIX}${record
 function liveKey(workspaceId: string) { return `${LIVE_PREFIX}${workspaceId}`; }
 function lastSessionKey(workspaceId: string) { return `${LAST_SESSION_PREFIX}${workspaceId}`; }
 function originKey(workspaceId: string, sessionId: string) { return `${MEETING_ORIGIN_PREFIX}${workspaceId}:${sessionId}`; }
+function pendingNoteKey(workspaceId: string, sessionId: string) { return `${AUTO_NOTE_PENDING_PREFIX}${workspaceId}:${sessionId}`; }
+function noteThreadKey(workspaceId: string, sessionId: string) { return `${NOTE_THREAD_PREFIX}${workspaceId}:${sessionId}`; }
 function archiveKey(workspaceId: string, sessionId: string) { return `${MEETING_ARCHIVE_PREFIX}${workspaceId}:${sessionId}`; }
 function meetingName(value: string | null | undefined) {
   const slug = (value || "meeting").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 90);
@@ -103,6 +107,7 @@ function sourceFor(client: ClientCapabilities) {
 export default function marginsPlugin(bb: BbPluginApi) {
   const host = bb.hosts.experimental_client({ contract: marginsHostContract, experimental_signals: hostSignals });
   const startLocks = new Map<string, Promise<void>>();
+  const noteThreadLocks = new Set<string>();
   const menuGrantSchema = z.object({ target: z.object({ projectId: z.string(), hostId: z.string(), projectRoot: z.string(), workspaceId: z.string() }).strict(),
     origin: z.string(), instanceId: z.string(), workspaceId: z.string(), epoch: z.number().int(), expiresAt: z.number().int() }).strict();
   const grantKey = (token: string) => `${MENU_GRANT_PREFIX}${createHash("sha256").update(token).digest("hex")}`;
@@ -313,9 +318,57 @@ export default function marginsPlugin(bb: BbPluginApi) {
         ownerId, lastHeartbeatUnixMs: Date.now(),
       });
       await bb.storage.kv.set(originKey(workspaceId, result.snapshot.sessionId), target.projectId);
+      await bb.storage.kv.set(pendingNoteKey(workspaceId, result.snapshot.sessionId), { projectId: target.projectId, workspaceId, sessionId: result.snapshot.sessionId });
       bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: "start" });
       return getPanelStateForTarget(target, client);
     });
+  }
+
+  async function startConnectedNoteThread(projectId: string, sessionId: string) {
+    const target = await targetForProject(projectId);
+    const lockKey = `${projectId}:${sessionId}`;
+    if (noteThreadLocks.has(lockKey)) throw new Error("A note thread is already starting for this meeting.");
+    noteThreadLocks.add(lockKey);
+    try {
+      const result = await callHost(target, "connectedNoteContext", { target, recordingId: sessionId }) as ConnectedNoteResult;
+      if (!result.ok) throw new Error(result.error.message);
+      const context = result.context;
+      if (context.sessionId !== sessionId || !context.workspaceId || !context.memo.revision) {
+        throw new Error("Meeting context changed. Open the meeting again.");
+      }
+      const meeting = await callHost(target, "readWorkspaceMeeting", { target, sessionId });
+      if (!meeting.ok || !meeting.meeting?.inputFinalized) {
+        throw new Error("Finish and save this meeting before making a note.");
+      }
+      const recordedOrigin = await bb.storage.kv.get(originKey(context.workspaceId, sessionId));
+      if (typeof recordedOrigin === "string" && recordedOrigin !== projectId) {
+        throw new Error("This meeting belongs to another BB project. Open it there to make its note.");
+      }
+      const existing = await bb.storage.kv.get(noteThreadKey(context.workspaceId, sessionId)) as { threadId?: string; memoRevision?: string } | null;
+      if (existing?.threadId && existing.memoRevision === context.memo.revision && !context.noteAssociation) {
+        return { threadId: existing.threadId };
+      }
+      const updating = Boolean(context.noteAssociation);
+      const label = (context.title || meeting.meeting.title || "Meeting").trim().slice(0, 100) || "Meeting";
+      const prefix = updating ? "Update the connected note from this meeting: " : "Make a connected note from this meeting: ";
+      const mentionText = `@${label}`;
+      const thread = await bb.sdk.threads.spawn({
+        projectId, environment: { type: "project-default" },
+        title: `${updating ? "Update" : "Make"} note · ${label}`,
+        input: [{ type: "text", text: prefix + mentionText, mentions: [{
+          start: prefix.length, end: prefix.length + mentionText.length,
+          resource: { kind: "plugin", pluginId: "margins", label,
+            itemId: `margins:${meetingMentionId({ projectId, workspaceId: context.workspaceId, sessionId,
+              memoRevision: context.memo.revision, note: updating ? "update" : "create" })}`,
+          },
+        }] }],
+        pluginMetadata: { sessionId, workspaceId: context.workspaceId },
+      });
+      await bb.storage.kv.set(noteThreadKey(context.workspaceId, sessionId), { threadId: thread.id, memoRevision: context.memo.revision });
+      await bb.storage.kv.delete(pendingNoteKey(context.workspaceId, sessionId));
+      bb.realtime.publish(REALTIME_CHANNEL, { projectId, reason: "note-thread-started", sessionId });
+      return { threadId: thread.id };
+    } finally { noteThreadLocks.delete(lockKey); }
   }
 
   bb.rpc.register(marginsRpcContract, {
@@ -367,15 +420,17 @@ export default function marginsPlugin(bb: BbPluginApi) {
       const workspaceName = options.workspaces?.find((item: { id: string }) => item.id === authority.workspaceId)?.name || authority.workspaceId;
       return { ok: true as const, meetings: await Promise.all(listed.meetings.map(async (meeting: { sessionId: string; threadIds?: string[] }) => {
         const originProjectId = await bb.storage.kv.get(originKey(authority.workspaceId, meeting.sessionId));
+        const startedThread = await bb.storage.kv.get(noteThreadKey(authority.workspaceId, meeting.sessionId)) as { threadId?: string } | null;
+        const threadIds = [...new Set([...(meeting.threadIds || []), ...(startedThread?.threadId ? [startedThread.threadId] : [])])];
         let originProjectName: string | null = null;
         if (typeof originProjectId === "string") {
           try { originProjectName = (await bb.sdk.projects.get({ projectId: originProjectId })).name; }
           catch { originProjectName = null; }
         }
-        return { ...meeting, workspaceId: authority.workspaceId, workspaceName,
+        return { ...meeting, threadIds, workspaceId: authority.workspaceId, workspaceName,
           originProjectId: typeof originProjectId === "string" ? originProjectId : null, originProjectName,
           archived: await bb.storage.kv.get(archiveKey(authority.workspaceId, meeting.sessionId)) === true,
-          threadLinks: await Promise.all((meeting.threadIds || []).map(async (id) => {
+          threadLinks: await Promise.all(threadIds.map(async (id) => {
           try {
             const thread = await bb.sdk.threads.get({ threadId: id }) as { title?: string | null };
             return { id, title: thread.title?.trim().slice(0, 100) || "Meeting note thread" };
@@ -440,6 +495,9 @@ export default function marginsPlugin(bb: BbPluginApi) {
         error: { code: "meeting_not_found", message: "Meeting has not appeared in this Workspace yet.", retryable: true } };
       const key = originKey(authority.workspaceId, sessionId);
       if (!await bb.storage.kv.get(key)) await bb.storage.kv.set(key, projectId);
+      if (!await bb.storage.kv.get(noteThreadKey(authority.workspaceId, sessionId))) {
+        await bb.storage.kv.set(pendingNoteKey(authority.workspaceId, sessionId), { projectId, workspaceId: authority.workspaceId, sessionId });
+      }
       return { ok: true as const };
     },
     async discardWorkspaceMeeting({ projectId, sessionId }) {
@@ -464,6 +522,14 @@ export default function marginsPlugin(bb: BbPluginApi) {
       } catch (cause) {
         return { ok: false as const, error: { code: "project_folder_unavailable", message: cause instanceof Error ? cause.message : String(cause), retryable: false } };
       }
+    },
+    async speechSetup({ projectId }) {
+      const target = await targetForProject(projectId);
+      return callHost(target, "speechSetup", { target });
+    },
+    async retrySpeechSetup({ projectId }) {
+      const target = await targetForProject(projectId);
+      return callHost(target, "retrySpeechSetup", { target });
     },
     async issueMenuGrant({ projectId, origin }) {
       const parsed = new URL(origin);
@@ -503,8 +569,6 @@ export default function marginsPlugin(bb: BbPluginApi) {
         if (!found.ok) return { ok: false as const, error: found.error };
         if (!found.found) return { ok: false as const, error: { code: "native_session_not_found", message: "The saved Mac session is not visible in this BB project's Margins Workspace yet.", retryable: true } };
         await bb.storage.kv.set(lastSessionKey(authority.workspaceId), sessionId);
-        const origin = originKey(authority.workspaceId, sessionId);
-        if (!await bb.storage.kv.get(origin)) await bb.storage.kv.set(origin, target.projectId);
         bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: "stop" });
         return { ok: true as const };
       } catch (cause) {
@@ -536,6 +600,40 @@ export default function marginsPlugin(bb: BbPluginApi) {
       const target = await targetForSelection({ threadId, projectId });
       return callHost(target, "requestTranscription", { target, recordingId: sessionId }) as Promise<TranscriptionRequestResult>;
     },
+    async startConnectedNoteThread({ projectId, sessionId }) {
+      return startConnectedNoteThread(projectId, sessionId);
+    },
+  });
+
+  const pendingNoteSchema = z.object({ projectId: z.string().min(1), workspaceId: z.string().min(1), sessionId: z.string().min(1) }).strict();
+  bb.background.schedule("auto-connected-notes", "* * * * *", async () => {
+    if (process.env.MARGINS_BB_E2E_DISABLE_AUTO_NOTE === "1") return;
+    for (const key of (await bb.storage.kv.list(AUTO_NOTE_PENDING_PREFIX)).slice(0, 20)) {
+      const parsed = pendingNoteSchema.safeParse(await bb.storage.kv.get(key));
+      if (!parsed.success || key !== pendingNoteKey(parsed.data.workspaceId, parsed.data.sessionId)) {
+        await bb.storage.kv.delete(key);
+        continue;
+      }
+      const { projectId, workspaceId, sessionId } = parsed.data;
+      try {
+        if (await bb.storage.kv.get(noteThreadKey(workspaceId, sessionId))) {
+          await bb.storage.kv.delete(key);
+          continue;
+        }
+        const target = await targetForProject(projectId);
+        const meeting = await callHost(target, "readWorkspaceMeeting", { target, sessionId });
+        if (!meeting.ok || !meeting.meeting?.inputFinalized) continue;
+        const result = await callHost(target, "connectedNoteContext", { target, recordingId: sessionId }) as ConnectedNoteResult;
+        if (!result.ok || result.context.workspaceId !== workspaceId) continue;
+        if (result.context.noteAssociation) { await bb.storage.kv.delete(key); continue; }
+        if (!result.context.transcript.available) {
+          await callHost(target, "requestTranscription", { target, recordingId: sessionId });
+          continue;
+        }
+        if (!result.context.transcript.terminal || result.context.transcript.live) continue;
+        await startConnectedNoteThread(projectId, sessionId);
+      } catch { /* Keep this session queued for a later sweep; other meetings can proceed. */ }
+    }
   });
 
   const chunkSchema = z.object({
@@ -594,15 +692,20 @@ export default function marginsPlugin(bb: BbPluginApi) {
       if (!Number.isInteger(result.status) || typeof result.bodyBase64 !== "string") {
         return context.json({ ok: false, error: "Capture host unavailable" }, 502);
       }
-      if (result.status >= 200 && result.status < 300 && parsed.data.method === "POST"
-        && parsed.data.path.replace(/^\//, "") === `v1/workspaces/${grant.workspaceId}/sessions`) {
+      if (parsed.data.method === "POST" && parsed.data.path === `v1/workspaces/${grant.workspaceId}/sessions`
+        && result.status >= 200 && result.status < 300) {
         try {
-          const command = JSON.parse(Buffer.from(parsed.data.bodyBase64, "base64").toString("utf8")) as { session_id?: unknown };
-          if (typeof command.session_id === "string" && /^[A-Za-z0-9_-]{1,200}$/.test(command.session_id)) {
-            const key = originKey(grant.workspaceId, command.session_id);
+          const created = JSON.parse(Buffer.from(parsed.data.bodyBase64, "base64").toString("utf8")) as { session_id?: unknown };
+          if (typeof created.session_id === "string" && created.session_id.length > 0 && created.session_id.length <= 300) {
+            const key = originKey(grant.workspaceId, created.session_id);
             if (!await bb.storage.kv.get(key)) await bb.storage.kv.set(key, grant.target.projectId);
+            if (!await bb.storage.kv.get(noteThreadKey(grant.workspaceId, created.session_id))) {
+              await bb.storage.kv.set(pendingNoteKey(grant.workspaceId, created.session_id), {
+                projectId: grant.target.projectId, workspaceId: grant.workspaceId, sessionId: created.session_id,
+              });
+            }
           }
-        } catch { /* A malformed capture command is reported by the Workspace service. */ }
+        } catch { /* A successful relay is never changed by optional project attribution. */ }
       }
       return context.json(result);
     } catch { return context.json({ ok: false, error: "Capture relay unavailable" }, 502); }
@@ -629,8 +732,71 @@ export default function marginsPlugin(bb: BbPluginApi) {
       })}\n</margins-context-v1>` };
     },
   });
+  const pinnedMeetingSchema = z.object({
+    workspaceId: z.string().min(1), sessionId: z.string().min(1), memoRevision: z.string().min(1),
+  }).strict();
+  async function agentMeeting(projectId: string, input: z.infer<typeof pinnedMeetingSchema>) {
+    const target = await targetForProject(projectId);
+    const result = await callHost(target, "connectedNoteContext", { target, recordingId: input.sessionId }) as ConnectedNoteResult;
+    if (!result.ok) throw new Error(result.error.message);
+    if (result.context.workspaceId !== input.workspaceId || result.context.sessionId !== input.sessionId) {
+      throw new Error("This meeting belongs to a different Workspace or project");
+    }
+    if (result.context.memo.revision !== input.memoRevision) {
+      throw new Error("The meeting memo changed. Open Make note again to use its current revision");
+    }
+    return { target, context: result.context };
+  }
+  bb.agents.registerTool({
+    name: "margins_bb_meeting_read",
+    description: "Read the exact @Meeting session from this BB project's Margins Workspace.",
+    instructions: "For a BB @Meeting, read context, memo, and transcript with this tool. Use the IDs and memo revision in margins-context-v1. Do not use the unrelated Codex Margins MCP or local CLI meeting store.",
+    parameters: pinnedMeetingSchema.extend({
+      part: z.enum(["context", "memo", "transcript"]), offset: z.number().int().nonnegative().default(0),
+    }).strict(),
+    async execute({ part, offset, ...pinned }, { projectId }) {
+      if (!projectId) throw new Error("Choose a BB project for this meeting");
+      const { target, context } = await agentMeeting(projectId, pinned);
+      if (part === "context") {
+        const destination = await callHost(target, "noteDestination", { target });
+        if (!destination.ok) throw new Error(destination.error.message);
+        return JSON.stringify({ context, noteDestination: destination.destination,
+          homeRoot: destination.homeRoot, homeSourceId: destination.homeSourceId });
+      }
+      if (part === "transcript" && (!context.transcript.available || !context.transcript.terminal)) {
+        throw new Error("This meeting transcript is not complete yet");
+      }
+      const result = part === "memo"
+        ? await callHost(target, "readWorkspaceMeeting", { target, sessionId: pinned.sessionId })
+        : await callHost(target, "readWorkspaceTranscript", { target, sessionId: pinned.sessionId });
+      if (!result.ok) throw new Error(result.error.message);
+      if (part === "memo" && result.meeting?.notepad?.revision !== pinned.memoRevision) {
+        throw new Error("The meeting memo changed while it was being read");
+      }
+      const body = part === "memo" ? result.meeting?.notepad?.text : result.body;
+      if (typeof body !== "string") throw new Error("Meeting content is unavailable");
+      const limit = 20_000;
+      return JSON.stringify({ part, offset, totalChars: body.length, nextOffset: Math.min(body.length, offset + limit),
+        body: body.slice(offset, offset + limit) });
+    },
+  });
+  bb.agents.registerTool({
+    name: "margins_bb_note_link",
+    description: "Associate a completed project note with the exact BB @Meeting session.",
+    parameters: pinnedMeetingSchema.extend({
+      sourceId: z.string().min(1), relativePath: z.string().min(1), expectedRevision: z.number().int().nonnegative(),
+    }).strict(),
+    async execute({ sourceId, relativePath, expectedRevision, ...pinned }, { projectId, threadId }) {
+      if (!projectId || !threadId) throw new Error("A BB project and thread are required to link a note");
+      const { target, context } = await agentMeeting(projectId, pinned);
+      const result = await callHost(target, "linkWorkspaceNote", { target, sessionId: pinned.sessionId,
+        sourceId, relativePath, expectedRevision, bbThreadId: threadId, memoRevision: pinned.memoRevision });
+      if (!result.ok) throw new Error(result.error.message);
+      return JSON.stringify({ sessionId: context.sessionId, sourceId, relativePath, revision: result.revision });
+    },
+  });
   bb.agents.configure((context) => context.project.kind === "personal" ? { tools: [], skills: [] } : {
-    tools: [], skills: ["watermark", "workspace-setup"],
-    instructions: "Margins recordings live in the resolved Margins Workspace. Use the Margins skills and the Workspace destination read for notes; do not infer a project .margins folder or treat raw notes as settled knowledge.",
+    tools: ["margins_bb_meeting_read", "margins_bb_note_link"], skills: ["watermark", "workspace-setup", "connected-note"],
+    instructions: "For BB @Meeting, use the Margins BB agent tools and connected-note skill to read the pinned session and link its note. The Codex Margins MCP and local Margins CLI may target different stores. Do not infer a project .margins folder or treat raw notes as settled knowledge.",
   });
 }

@@ -23,20 +23,24 @@ export function createMarginsHostEntry(transport: Transport) {
     contract: marginsHostContract,
     experimental_signals: hostSignals,
     handlers: {
-      workspaceOptions(_input, context) {
+      async workspaceOptions(_input, context) {
         retain(context);
+        await transport.prepareCli(context.experimental_paths.dataDir);
         return workspaceOptions();
       },
-      workspacePaths(input, context) {
+      async workspacePaths(input, context) {
         retain(context);
+        await transport.prepareCli(context.experimental_paths.dataDir);
         return workspacePaths(input.workspaceId);
       },
-      previewWorkspaceSetup(input, context) {
+      async previewWorkspaceSetup(input, context) {
         retain(context);
+        await transport.prepareCli(context.experimental_paths.dataDir);
         return previewWorkspaceSetup(input.target, context.experimental_paths.dataDir, input.homeRoot, input.noteFolder);
       },
-      applyWorkspaceSetup(input, context) {
+      async applyWorkspaceSetup(input, context) {
         retain(context);
+        await transport.prepareCli(context.experimental_paths.dataDir);
         return applyWorkspaceSetup(context.experimental_paths.dataDir, input.previewId);
       },
       listWorkspaceMeetings(input, context) {
@@ -64,6 +68,14 @@ export function createMarginsHostEntry(transport: Transport) {
         retain(context);
         return transport.readWorkspaceTranscript(input.target, context.experimental_paths.dataDir, input.sessionId);
       },
+      noteDestination(input, context) {
+        retain(context);
+        return transport.noteDestination(input.target, context.experimental_paths.dataDir);
+      },
+      linkWorkspaceNote(input, context) {
+        retain(context);
+        return transport.linkWorkspaceNote(input.target, context.experimental_paths.dataDir, input);
+      },
       sessionExists(input, context) {
         retain(context);
         return transport.sessionExists(input.target, context.experimental_paths.dataDir, input.recordingId);
@@ -71,6 +83,14 @@ export function createMarginsHostEntry(transport: Transport) {
       captureAuthority(input, context) {
         retain(context);
         return transport.authority(input.target, context.experimental_paths.dataDir);
+      },
+      speechSetup(input, context) {
+        retain(context);
+        return transport.speechSetup(input.target, context.experimental_paths.dataDir);
+      },
+      retrySpeechSetup(input, context) {
+        retain(context);
+        return transport.speechSetup(input.target, context.experimental_paths.dataDir, true);
       },
       relayWorkspaceHttp(input, context) {
         retain(context);

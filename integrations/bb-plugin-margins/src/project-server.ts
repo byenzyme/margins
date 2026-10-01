@@ -64,7 +64,7 @@ export function workspaceInstanceDir(dataDir: string, workspaceId: string) {
 export function marginsCli(): string {
   const configured = process.env.MARGINS_CLI_BIN?.trim();
   if (configured && isAbsolute(configured)) return configured;
-  const installed = join(homedir(), ".local", "bin", "margins");
+  const installed = join(process.env.MARGINS_CLI_BIN_DIR?.trim() || join(homedir(), ".local", "bin"), "margins");
   return installed;
 }
 
@@ -143,6 +143,20 @@ export async function workspacePaths(workspaceId: string): Promise<{ notes: stri
   return { notes: destination.destination, recordings: capture.path };
 }
 
+export async function workspaceNoteDestination(workspaceId: string) {
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(workspaceId)) throw new Error("Invalid Margins Workspace id");
+  const { stdout } = await execFile(marginsCli(), ["--workspace", workspaceId, "workspace", "destination", "--json"], {
+    env: { ...process.env, MARGINS_HOME: marginsHome() }, timeout: 5_000, maxBuffer: 65_536,
+  });
+  const value = JSON.parse(stdout) as { destination?: unknown; home_root?: unknown; home_source_id?: unknown };
+  if (typeof value.destination !== "string" || !isAbsolute(value.destination)
+    || typeof value.home_root !== "string" || !isAbsolute(value.home_root)
+    || typeof value.home_source_id !== "string" || !value.home_source_id) {
+    throw new Error("Margins Workspace note destination is unavailable");
+  }
+  return { destination: value.destination, homeRoot: value.home_root, homeSourceId: value.home_source_id };
+}
+
 export async function resolveWorkspaceId(target: ProjectTarget): Promise<string> {
   if (target.workspaceId) {
     if (!/^[a-z0-9][a-z0-9-]*$/.test(target.workspaceId)) throw new Error("Invalid Margins Workspace id");
@@ -189,6 +203,19 @@ async function waitForServer(baseUrl: string, tokenPath: string, child: ChildPro
 export class ProjectServerManager {
   private readonly handles = new Map<string, Promise<ServerHandle>>();
   private readonly runtime = createRuntimeManager();
+
+  async ensureCli(dataDir: string) {
+    const cli = marginsCli();
+    const stat = await lstat(cli).catch(() => null);
+    if (stat?.isFile() && (stat.mode & 0o111) !== 0) return cli;
+    if (process.env.MARGINS_CLI_BIN) throw new Error("The configured Margins CLI is not executable");
+    await this.runtime.ensureProjectServer({ dataDir });
+    const installed = await lstat(cli).catch(() => null);
+    if (!installed?.isFile() || (installed.mode & 0o111) === 0) {
+      throw new Error("Margins CLI installation did not complete");
+    }
+    return cli;
+  }
 
   async ensure(target: ProjectTarget, dataDir: string, signal?: AbortSignal): Promise<ServerHandle> {
     const workspaceId = await resolveWorkspaceId(target);
@@ -281,6 +308,8 @@ export class ProjectMarginsTransport {
   private readonly browserSessions = new Set<string>();
   constructor(private readonly manager = new ProjectServerManager()) {}
 
+  async prepareCli(dataDir: string) { await this.manager.ensureCli(dataDir); }
+
   private browserSessionKey(handle: ServerHandle, sessionId: string) {
     return `${handle.instanceId}:${handle.workspaceId}:${sessionId}`;
   }
@@ -288,8 +317,14 @@ export class ProjectMarginsTransport {
   async listWorkspaceMeetings(target: ProjectTarget, dataDir: string) {
     try {
       const handle = await this.manager.ensure(target, dataDir);
-      const listed = await this.request<{ sessions: Array<{ session_id: string }> }>(handle, "sessions?limit=50", "GET");
-      const rows = await Promise.all(listed.sessions.map(async ({ session_id }) => {
+      const [listed, active] = await Promise.all([
+        this.request<{ sessions: Array<{ session_id: string }> }>(handle, "sessions?limit=50", "GET"),
+        this.request<{ sessions: Array<{ session_id: string }> }>(handle, "active-sessions", "GET"),
+      ]);
+      // Ordinary sessions omit empty reservations until audio arrives. Active
+      // capture sessions must still be visible so BB can join their memo now.
+      const sessionIds = [...new Set([...active.sessions, ...listed.sessions].map((session) => session.session_id))];
+      const rows = await Promise.all(sessionIds.map(async (session_id) => {
         const id = encodeURIComponent(session_id);
         const [summary, note] = await Promise.all([
           this.request<{ session_id: string; title: string | null; started_at: string; input_finalized: boolean;
@@ -399,12 +434,55 @@ export class ProjectMarginsTransport {
     }
   }
 
+  async noteDestination(target: ProjectTarget, dataDir: string) {
+    try {
+      const handle = await this.manager.ensure(target, dataDir);
+      return { ok: true as const, ...await workspaceNoteDestination(handle.workspaceId) };
+    } catch (cause) {
+      return { ok: false as const, error: hostError("note_destination_unavailable", cause instanceof Error ? cause.message : String(cause)) };
+    }
+  }
+
+  async linkWorkspaceNote(target: ProjectTarget, dataDir: string, input: {
+    sessionId: string; sourceId: string; relativePath: string; expectedRevision: number;
+    bbThreadId: string; memoRevision: string;
+  }) {
+    try {
+      const handle = await this.manager.ensure(target, dataDir);
+      const destination = await workspaceNoteDestination(handle.workspaceId);
+      if (input.sourceId !== destination.homeSourceId
+        || !await associatedNoteFile(await realpath(destination.homeRoot), input.relativePath)) {
+        throw new Error("The note must exist inside the selected Workspace Home Source");
+      }
+      const result = await this.request<{ revision: number }>(handle,
+        `sessions/${encodeURIComponent(input.sessionId)}/note-association`, "PUT", {
+          request_id: randomUUID(), source_id: input.sourceId, relative_path: input.relativePath,
+          observed_content_hash: null, expected_revision: input.expectedRevision,
+          bb_thread_id: input.bbThreadId, distilled_memo_revision: input.memoRevision,
+        });
+      return { ok: true as const, revision: result.revision };
+    } catch (cause) {
+      return { ok: false as const, error: hostError("note_association_failed", cause instanceof Error ? cause.message : String(cause)) };
+    }
+  }
+
   async authority(target: ProjectTarget, dataDir: string) {
     try {
       const handle = await this.manager.ensure(target, dataDir);
       return { ok: true as const, instanceId: handle.instanceId, workspaceId: handle.workspaceId };
     } catch (cause) {
       return { ok: false as const, error: hostError("project_recorder_unavailable", cause instanceof Error ? cause.message : String(cause)) };
+    }
+  }
+
+  async speechSetup(target: ProjectTarget, dataDir: string, retry = false) {
+    try {
+      const handle = await this.manager.ensure(target, dataDir);
+      const status = await this.request<{ state: "preparing" | "ready" | "failed" | "unavailable"; message: string; progress: number | null }>(
+        handle, "speech-setup", retry ? "POST" : "GET");
+      return { ok: true as const, ...status };
+    } catch (cause) {
+      return { ok: false as const, error: hostError("speech_setup_unavailable", cause instanceof Error ? cause.message : String(cause)) };
     }
   }
 

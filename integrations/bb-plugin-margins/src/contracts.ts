@@ -90,6 +90,10 @@ export const transcriptionRequestResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), status: z.enum(["queued", "running", "complete", "failed"]), attempt: z.number().int().positive() }).strict(),
   z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
 ]);
+export const speechSetupResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), state: z.enum(["preparing", "ready", "failed", "unavailable"]), message: z.string(), progress: z.number().min(0).max(1).nullable() }).strict(),
+  z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
+]);
 
 const ownedCaptureInputSchema = z.object({ target: projectTargetSchema }).extend({
   recordingId: z.string().min(1), ownerId: z.string().min(1),
@@ -140,6 +144,22 @@ export const marginsHostContract = defineRpcContract({
     input: z.object({ target: projectTargetSchema, sessionId: z.string().min(1) }).strict(),
     output: workspaceTranscriptResultSchema,
   },
+  noteDestination: {
+    input: z.object({ target: projectTargetSchema }).strict(),
+    output: z.discriminatedUnion("ok", [
+      z.object({ ok: z.literal(true), destination: z.string(), homeRoot: z.string(), homeSourceId: z.string() }).strict(),
+      z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
+    ]),
+  },
+  linkWorkspaceNote: {
+    input: z.object({ target: projectTargetSchema, sessionId: z.string().min(1), sourceId: z.string().min(1),
+      relativePath: z.string().min(1), expectedRevision: z.number().int().nonnegative(),
+      bbThreadId: z.string().min(1), memoRevision: z.string().min(1) }).strict(),
+    output: z.discriminatedUnion("ok", [
+      z.object({ ok: z.literal(true), revision: z.number().int().nonnegative() }).strict(),
+      z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
+    ]),
+  },
   sessionExists: {
     input: z.object({ target: projectTargetSchema, recordingId: z.string().min(1) }).strict(),
     output: z.discriminatedUnion("ok", [
@@ -154,6 +174,8 @@ export const marginsHostContract = defineRpcContract({
       z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
     ]),
   },
+  speechSetup: { input: z.object({ target: projectTargetSchema }).strict(), output: speechSetupResultSchema },
+  retrySpeechSetup: { input: z.object({ target: projectTargetSchema }).strict(), output: speechSetupResultSchema },
   relayWorkspaceHttp: {
     input: z.object({ target: projectTargetSchema, method: z.enum(["GET", "POST", "PUT"]), path: z.string().min(1).max(300),
       bodyBase64: z.string().max(2_000_000), contentType: z.string().max(120).optional(),
@@ -293,6 +315,8 @@ export const marginsRpcContract = defineRpcContract({
       z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
     ]),
   },
+  speechSetup: { input: z.object({ projectId: z.string().min(1) }).strict(), output: speechSetupResultSchema },
+  retrySpeechSetup: { input: z.object({ projectId: z.string().min(1) }).strict(), output: speechSetupResultSchema },
   issueMenuGrant: {
     input: z.object({ projectId: z.string().min(1), origin: z.string().url().max(300) }).strict(),
     output: z.object({ serviceUrl: z.string().url(), token: z.string().min(32), workspaceId: z.string().min(1),
@@ -329,6 +353,10 @@ export const marginsRpcContract = defineRpcContract({
   transcribePinnedSession: {
     input: z.object({ threadId: z.string().min(1).optional(), projectId: z.string().min(1).optional(), sessionId: z.string().min(1) }).strict(),
     output: transcriptionRequestResultSchema,
+  },
+  startConnectedNoteThread: {
+    input: z.object({ projectId: z.string().min(1), sessionId: z.string().min(1) }).strict(),
+    output: z.object({ threadId: z.string().min(1) }).strict(),
   },
 });
 

@@ -2,11 +2,17 @@
 // server/ — WP2 headless axum server transport
 // ---------------------------------------------------------------------------
 
+#[cfg(all(feature = "parakeet-asr", target_os = "linux"))]
+mod asr_prepare;
+pub mod asr_state;
 pub mod assets;
 pub mod auth;
 pub mod events;
 pub mod http;
-#[cfg(feature = "parakeet-asr")]
+#[cfg(any(
+    feature = "parakeet-asr",
+    all(feature = "coreml-asr", target_os = "macos")
+))]
 pub mod remote_asr;
 
 #[cfg(windows)]
@@ -21,6 +27,61 @@ use margins_workflows::{
 };
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
+/// Prepare the machine-level speech cache before a Workspace server starts.
+/// The Mac project service uses the same CoreML assets as local recording.
+pub fn prepare_asr() -> anyhow::Result<()> {
+    #[cfg(all(feature = "parakeet-asr", target_os = "linux"))]
+    asr_prepare::configure_env()?;
+    prepare_asr_assets(&|message, progress| {
+        eprintln!("[margins-server] {message} {progress:?}");
+    })?;
+    anyhow::ensure!(
+        crate::speech_models::transcription_runtime_available(&crate::settings::load_settings()),
+        "speech model is still unavailable after preparation"
+    );
+    println!("{{\"stage\":\"ready\",\"progress\":1}}");
+    Ok(())
+}
+
+fn prepare_asr_assets(
+    progress: &(dyn Fn(String, Option<f32>) + Send + Sync),
+) -> anyhow::Result<()> {
+    #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
+    {
+        use std::sync::atomic::AtomicBool;
+        struct Progress<'a>(&'a (dyn Fn(String, Option<f32>) + Send + Sync));
+        impl crate::ctx::EventSink for Progress<'_> {
+            fn emit(&self, event: &str, payload: serde_json::Value) {
+                if event == "speech-model-progress" {
+                    (self.0)(
+                        payload["message"]
+                            .as_str()
+                            .unwrap_or("Preparing transcription model")
+                            .to_string(),
+                        payload["progress"].as_f64().map(|value| value as f32),
+                    );
+                }
+            }
+        }
+        if !crate::speech_models::transcription_runtime_available(&crate::settings::load_settings())
+        {
+            crate::speech_models::download_fluid_coreml_model(
+                &Progress(progress),
+                &Arc::new(AtomicBool::new(false)),
+            )
+            .map_err(anyhow::Error::msg)?;
+        }
+        return Ok(());
+    }
+    #[cfg(all(feature = "parakeet-asr", target_os = "linux"))]
+    return asr_prepare::prepare(progress);
+    #[cfg(not(any(
+        all(feature = "coreml-asr", target_os = "macos"),
+        all(feature = "parakeet-asr", target_os = "linux")
+    )))]
+    anyhow::bail!("automatic ASR preparation is unavailable in this server build")
+}
+
 /// Entry point for the headless server.  Called from `server_main.rs`.
 ///
 /// Reads:
@@ -32,6 +93,8 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 ///
 /// Blocks until the server exits.
 pub fn run() -> anyhow::Result<()> {
+    #[cfg(all(feature = "parakeet-asr", target_os = "linux"))]
+    asr_prepare::configure_env()?;
     // Build a tokio runtime — server_main just calls this synchronous wrapper.
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -142,6 +205,18 @@ async fn run_async() -> anyhow::Result<()> {
         crate::speech_models::transcription_runtime_available(&settings),
         cfg!(feature = "recall"),
     )?);
+    let asr_setup = asr_state::SpeechSetup::new(
+        workspace_service.asr_available(),
+        cfg!(any(
+            feature = "parakeet-asr",
+            all(feature = "coreml-asr", target_os = "macos")
+        )),
+    );
+    #[cfg(any(
+        feature = "parakeet-asr",
+        all(feature = "coreml-asr", target_os = "macos")
+    ))]
+    workspace_service.enable_deferred_asr();
 
     // --- Build shared app state ---
     let app_state = crate::build_app_state(work_dir, settings);
@@ -172,7 +247,10 @@ async fn run_async() -> anyhow::Result<()> {
         None,
     )?;
 
-    #[cfg(feature = "parakeet-asr")]
+    #[cfg(any(
+        feature = "parakeet-asr",
+        all(feature = "coreml-asr", target_os = "macos")
+    ))]
     let remote_asr_jobs = remote_asr::RemoteAsrJobs::default();
 
     // --- Build router ---
@@ -183,12 +261,27 @@ async fn run_async() -> anyhow::Result<()> {
         workspace_service: workspace_service.clone(),
         credential_store,
         service_principal: administrator.clone(),
-        #[cfg(feature = "parakeet-asr")]
+        asr_setup: asr_setup.clone(),
+        #[cfg(any(
+            feature = "parakeet-asr",
+            all(feature = "coreml-asr", target_os = "macos")
+        ))]
         remote_asr_jobs: remote_asr_jobs.clone(),
     };
-    #[cfg(feature = "parakeet-asr")]
-    for job in workspace_service.pending_transcription_jobs()? {
-        remote_asr_jobs.schedule(workspace_service.clone(), administrator.clone(), job);
+    #[cfg(any(
+        feature = "parakeet-asr",
+        all(feature = "coreml-asr", target_os = "macos")
+    ))]
+    if workspace_service.asr_available() {
+        for job in workspace_service.pending_transcription_jobs()? {
+            remote_asr_jobs.schedule(workspace_service.clone(), administrator.clone(), job);
+        }
+    } else {
+        asr_setup.start(
+            workspace_service.clone(),
+            administrator.clone(),
+            remote_asr_jobs.clone(),
+        )?;
     }
     let app = build_router(server_state);
 
