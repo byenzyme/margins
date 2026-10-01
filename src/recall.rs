@@ -472,8 +472,48 @@ fn search_index(
                 response.top_contributing_catalysts,
             ))
         }
-        Bridged::NoGenerator => anyhow::bail!(RECALL_UNAVAILABLE_MESSAGE),
-        Bridged::NoEntities => Ok(("ok", "no_entities", "catalyze", Vec::new(), Vec::new())),
+        Bridged::NoGenerator | Bridged::NoEntities => {
+            // Reopening an index with zero catalysts reports NoGenerator even
+            // when init had a usable generator and simply selected no link
+            // entities. Keep the declared notes searchable in that case.
+            let corpus = crate::workspace_recall::prepare(workspace, false)?;
+            if !corpus.selected_entity_names.is_empty() {
+                anyhow::bail!(RECALL_UNAVAILABLE_MESSAGE);
+            }
+            ensure_usable_generator()?;
+            let direct_hits = index
+                .direct_search(query, search_limit)?
+                .into_iter()
+                .map(|hit| RecallHit {
+                    path: hit.path,
+                    score: hit.score,
+                    content: hit.content,
+                    via_catalyst_id: None,
+                    via_catalyst_text: None,
+                })
+                .collect::<Vec<_>>();
+            let exact_hits = if is_distinctive_phrase(query) {
+                index
+                    .exact_phrase_search(query, search_limit)?
+                    .into_iter()
+                    .filter(|hit| native_markdown_hit(workspace, &hit.path))
+                    .map(|hit| RecallHit {
+                        path: hit.path,
+                        score: hit.score,
+                        content: hit.content,
+                        via_catalyst_id: None,
+                        via_catalyst_text: None,
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            let hits = merge_exact_and_catalyst_hits(
+                filter_recall_hits(workspace, exact_hits, source_filter),
+                filter_recall_hits(workspace, direct_hits, source_filter),
+            );
+            Ok(("ok", "no_entities", "direct", hits, Vec::new()))
+        }
     }
 }
 
@@ -1558,11 +1598,12 @@ impl SearchHandle {
             anyhow::bail!(readiness.message());
         }
         let started = std::time::Instant::now();
-        let (reason, hits, top_contributing_catalysts) = match self.index.bridged {
+        let (reason, search_strategy, hits, top_contributing_catalysts) = match self.index.bridged {
             Bridged::Ready => {
                 let response = self.index.catalyst_search_response(query, limit)?;
                 (
                     "catalyst",
+                    "catalyze",
                     response
                         .results
                         .into_iter()
@@ -1577,8 +1618,25 @@ impl SearchHandle {
                     response.top_contributing_catalysts,
                 )
             }
-            Bridged::NoGenerator => anyhow::bail!(RECALL_UNAVAILABLE_MESSAGE),
-            Bridged::NoEntities => ("no_entities", Vec::new(), Vec::new()),
+            Bridged::NoGenerator | Bridged::NoEntities => {
+                if !self.selected_entity_names.is_empty() {
+                    anyhow::bail!(RECALL_UNAVAILABLE_MESSAGE);
+                }
+                ensure_usable_generator()?;
+                let hits = self
+                    .index
+                    .direct_search(query, limit)?
+                    .into_iter()
+                    .map(|hit| RecallHit {
+                        path: hit.path,
+                        score: hit.score,
+                        content: hit.content,
+                        via_catalyst_id: None,
+                        via_catalyst_text: None,
+                    })
+                    .collect();
+                ("no_entities", "direct", hits, Vec::new())
+            }
         };
         let output = RecallOutput {
             query: query.to_string(),
@@ -1589,7 +1647,7 @@ impl SearchHandle {
             note_count: self.index.document_count,
             results: recall_results(hits, &self.catalog),
             top_contributing_catalysts,
-            search_strategy: "catalyze",
+            search_strategy,
             processing_time: (started.elapsed().as_secs_f64() * 1000.0).round() / 1000.0,
         };
         render_recall_json(&output)

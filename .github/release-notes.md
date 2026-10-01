@@ -9,6 +9,8 @@ Apple Silicon macOS; the macOS archive also includes `margins-live`.
   note back to that session.
 - The project service prepares transcription assets on its host and retains
   finalized audio for transcription while those assets become ready.
+- Recall searches declared notes directly when a Workspace has no selected
+  link entities, so setup can verify both a grounded question and an exact phrase.
 - The browser recording, memo, transcript, and connected-note path passed an
   isolated BB end-to-end run with a spoken audio fixture.
 
