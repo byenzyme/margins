@@ -19,7 +19,7 @@ for target in aarch64-apple-darwin x86_64-unknown-linux-gnu; do
   if [[ "$target" == aarch64-apple-darwin ]]; then
     expected+=$'\nmargins-live'
   fi
-  actual_entries=$(tar -tzf "$archive" | sed -e '/^\.\/?$/d' -e 's#^\./##' | LC_ALL=C sort)
+  actual_entries=$(tar -tzf "$archive" | sed -e '/^\.$/d' -e '/^\.\/$/d' -e 's#^\./##' | LC_ALL=C sort)
   expected_entries=$(printf '%s\n' "$expected" | LC_ALL=C sort)
   test "$actual_entries" = "$expected_entries" || {
     echo "unexpected executables in $archive" >&2

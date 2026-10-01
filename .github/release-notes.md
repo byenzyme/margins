@@ -1,4 +1,4 @@
-Margins 0.4.10 adds the project recording service to the official release
+Margins 0.4.11 adds the project recording service to the official release
 archives. The `margins` CLI and `margins-server` now ship together on Linux and
 Apple Silicon macOS; the macOS archive also includes `margins-live`.
 
