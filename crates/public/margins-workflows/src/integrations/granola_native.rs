@@ -20,12 +20,19 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use url::Url;
 
+use super::{
+    ConnectorCtx, ExternalDocumentDelta, ExternalDocumentEvidence, ExternalDocumentParticipant,
+    IntegrationsStore, RawItemDraft, ReconcileResult, SurveyRange,
+};
 use crate::granola_import::Meeting;
-use crate::workspace::normalize_granola_account;
+use crate::workspace::{
+    normalize_granola_account, GranolaCollectionSelector, WorkspaceMutationError,
+};
 
 pub const GRANOLA_MCP_URL: &str = "https://mcp.granola.ai/mcp";
 pub const GRANOLA_PROTECTED_RESOURCE_METADATA_URL: &str =
     "https://mcp.granola.ai/.well-known/oauth-protected-resource";
+pub const GRANOLA_CONNECTOR_ID: &str = "granola";
 const DEFAULT_AUTH_SERVER: &str = "https://mcp-auth.granola.ai";
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const REQUIRED_SCOPES: &[&str] = &["openid", "profile", "email", "offline_access"];
@@ -37,19 +44,6 @@ const STORAGE_SCHEMA: &str = "margins.granola-token-cache.v1";
 const METADATA_SCHEMA: &str = "margins.granola-account.v1";
 const MAX_TOOLS_LIST_PAGES: usize = 32;
 const MAX_DISCOVERED_TOOLS: usize = 256;
-
-#[derive(Debug, Clone, Copy)]
-struct GranolaImportCollection;
-
-impl GranolaImportCollection {
-    const fn provider_time_range(self) -> &'static str {
-        "last_30_days"
-    }
-
-    fn occurred_from(self, now: DateTime<Utc>) -> DateTime<Utc> {
-        now - chrono::Duration::days(30)
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1397,6 +1391,7 @@ fn discovery_http_client() -> Result<Client> {
 #[derive(Debug, Clone)]
 pub struct GranolaMcpImportBatch {
     pub meetings: Vec<Meeting>,
+    pub raw_payloads: Vec<Value>,
     pub warnings: Vec<String>,
     pub transcripts_plan_gated: bool,
 }
@@ -1407,17 +1402,28 @@ pub fn fetch_granola_import_batch(
     backend: GranolaCredentialBackendKind,
     progress: &(dyn Fn(&str, usize, usize) + Send + Sync),
 ) -> Result<GranolaMcpImportBatch> {
+    fetch_granola_import_batch_for_collection(
+        margins_home,
+        account,
+        backend,
+        &GranolaCollectionSelector::default_declaration(),
+        progress,
+    )
+}
+
+pub fn fetch_granola_import_batch_for_collection(
+    margins_home: &Path,
+    account: &str,
+    backend: GranolaCredentialBackendKind,
+    collection: &GranolaCollectionSelector,
+    progress: &(dyn Fn(&str, usize, usize) + Send + Sync),
+) -> Result<GranolaMcpImportBatch> {
     let account = normalize_granola_account(account)?;
     let store = GranolaAccountStore::new_with_backend(margins_home, &account, backend)?;
     let fetched = store.ensure_access_token().and_then(|access_token| {
-        fetch_meetings(
-            &access_token,
-            GRANOLA_MCP_URL,
-            GranolaImportCollection,
-            progress,
-        )
+        fetch_meetings(&access_token, GRANOLA_MCP_URL, collection, progress)
     });
-    let (meetings, _raw_payloads, warnings, transcripts_plan_gated) = match fetched {
+    let (meetings, raw_payloads, warnings, transcripts_plan_gated) = match fetched {
         Ok(result) => result,
         Err(error) => {
             if granola_failure_info(&error)
@@ -1430,9 +1436,162 @@ pub fn fetch_granola_import_batch(
     };
     Ok(GranolaMcpImportBatch {
         meetings,
+        raw_payloads,
         warnings,
         transcripts_plan_gated,
     })
+}
+
+pub fn sync_granola_binding(
+    margins_home: &Path,
+    workspace_state_dir: &Path,
+    account: &str,
+    collection: &GranolaCollectionSelector,
+    expected_workspace_revision: Option<&str>,
+    backend: GranolaCredentialBackendKind,
+    progress: &(dyn Fn(&str, usize, usize) + Send + Sync),
+) -> Result<ReconcileResult> {
+    let account = normalize_granola_account(account)?;
+    let batch = fetch_granola_import_batch_for_collection(
+        margins_home,
+        &account,
+        backend,
+        collection,
+        progress,
+    )?;
+    apply_granola_batch(
+        workspace_state_dir,
+        &account,
+        collection,
+        batch,
+        expected_workspace_revision,
+    )
+}
+
+fn apply_granola_batch(
+    workspace_state_dir: &Path,
+    account: &str,
+    collection: &GranolaCollectionSelector,
+    batch: GranolaMcpImportBatch,
+    expected_workspace_revision: Option<&str>,
+) -> Result<ReconcileResult> {
+    let ctx = ConnectorCtx {
+        vault_root: workspace_state_dir.to_path_buf(),
+        connector_id: GRANOLA_CONNECTOR_ID.to_string(),
+        account: account.to_string(),
+        command_path: None,
+    };
+    let store = IntegrationsStore::open(workspace_state_dir)?;
+    let result = (|| {
+        let now = Utc::now();
+        let mut documents = Vec::with_capacity(batch.meetings.len());
+        let mut participants = Vec::new();
+        let mut raw_items = Vec::new();
+        for (index, meeting) in batch.meetings.iter().enumerate() {
+            let source_id = stable_meeting_source_id(meeting)?;
+            let occurred_at = meeting_occurred_at(meeting)?;
+            documents.push(ExternalDocumentEvidence {
+                source_id: source_id.clone(),
+                occurred_at,
+                title: meeting.title.clone(),
+                body_text: meeting_body(meeting),
+                href: meeting.provenance.clone(),
+                attributes: serde_json::json!({
+                    "granola_id": meeting.id,
+                    "organizations": meeting.organizations,
+                    "plan_gated_transcript": meeting.plan_gated_transcript,
+                }),
+            });
+            for (position, person) in meeting.people.iter().enumerate() {
+                participants.push(ExternalDocumentParticipant {
+                    source_id: source_id.clone(),
+                    participant_key: person
+                        .email
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|email| !email.is_empty())
+                        .map(str::to_ascii_lowercase)
+                        .unwrap_or_else(|| {
+                            format!(
+                                "position:{position}:{}",
+                                person.name.trim().to_ascii_lowercase()
+                            )
+                        }),
+                    position: u32::try_from(position).unwrap_or(u32::MAX),
+                    display_name: person.name.clone(),
+                    email: person.email.clone(),
+                    ambiguous: !person.resolved,
+                });
+            }
+            if let Some(payload) = batch.raw_payloads.get(index) {
+                raw_items.push(RawItemDraft {
+                    source_id,
+                    payload: payload.clone(),
+                });
+            }
+        }
+        store.apply_external_document_delta(
+            &ctx,
+            ExternalDocumentDelta {
+                documents,
+                participants,
+                tombstone_source_ids: Vec::new(),
+                raw_items,
+                snapshot_scope: Some(SurveyRange {
+                    occurred_from: collection.occurred_from(now),
+                    occurred_to: now,
+                }),
+                complete_snapshot: true,
+                materialization_fingerprint: collection.materialization_fingerprint()?,
+                next_cursor: None,
+            },
+            expected_workspace_revision,
+        )
+    })();
+    if let Err(error) = &result {
+        if error.downcast_ref::<WorkspaceMutationError>().is_none() {
+            let _ = store.record_failed_reconcile(&ctx, &format!("{error:#}"));
+        }
+    }
+    result
+}
+
+fn stable_meeting_source_id(meeting: &Meeting) -> Result<String> {
+    meeting
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .with_context(|| "Granola meeting is missing a stable provider id")
+}
+
+fn meeting_occurred_at(meeting: &Meeting) -> Result<DateTime<Utc>> {
+    meeting
+        .created_at
+        .as_deref()
+        .and_then(crate::granola_import::parse_source_datetime)
+        .with_context(|| "Granola meeting is missing a valid occurred_at timestamp")
+}
+
+fn meeting_body(meeting: &Meeting) -> String {
+    let notes = meeting
+        .notes
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("_No notes were returned by Granola._");
+    let transcript = meeting
+        .transcript
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(if meeting.plan_gated_transcript {
+            "_Transcript access was not available from the connected Granola account._"
+        } else {
+            "_No transcript was returned by Granola._"
+        });
+    format!("## Granola notes\n\n{notes}\n\n## Transcript\n\n{transcript}")
 }
 
 struct McpClient {
@@ -1748,7 +1907,7 @@ fn verify_mcp_access(access_token: &str, endpoint: &str, oauth_account: &str) ->
 fn fetch_meetings(
     access_token: &str,
     endpoint: &str,
-    collection: GranolaImportCollection,
+    collection: &GranolaCollectionSelector,
     progress: &(dyn Fn(&str, usize, usize) + Send + Sync),
 ) -> Result<(Vec<Meeting>, Vec<Value>, Vec<String>, bool)> {
     progress("Connecting to Granola", 0, 0);
@@ -1780,8 +1939,8 @@ fn fetch_meetings(
     let payload = client.call_tool(
         &list_tool.name,
         json!({
-            "time_range": collection.provider_time_range(),
-            "workspace_only": false,
+            "time_range": collection.time_range.as_provider_value(),
+            "workspace_only": collection.workspace_only,
         }),
     )?;
     validate_complete_collection_payload(&payload)?;
@@ -1850,7 +2009,7 @@ fn fetch_meetings(
 
 fn validate_collection_capability(
     list_tool: &McpTool,
-    collection: GranolaImportCollection,
+    collection: &GranolaCollectionSelector,
 ) -> Result<()> {
     let properties = list_tool
         .input_schema
@@ -1872,7 +2031,7 @@ fn validate_collection_capability(
         })?;
     if !supported_ranges
         .iter()
-        .any(|value| value.as_str() == Some(collection.provider_time_range()))
+        .any(|value| value.as_str() == Some(collection.time_range.as_provider_value()))
     {
         return Err(GranolaNativeError::Mcp {
             code: "granola_mcp_collection_unsupported",
@@ -1976,7 +2135,7 @@ fn validate_complete_collection_payload(payload: &Value) -> Result<()> {
 
 fn validate_meetings_in_collection(
     values: &[Value],
-    collection: GranolaImportCollection,
+    collection: &GranolaCollectionSelector,
     now: DateTime<Utc>,
 ) -> Result<()> {
     let occurred_from = collection.occurred_from(now);
@@ -2329,6 +2488,7 @@ fn ensure_private_dir_chain(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::integrations::HealthStatus;
 
     struct PanicPresenter;
 
@@ -2865,13 +3025,18 @@ mod tests {
                             json!({"jsonrpc":"2.0","id":request["id"],"result":{"tools":[{"name":"list_meetings","inputSchema":{"type":"object","properties":{"time_range":{"type":"string","enum":["last_30_days"]},"workspace_only":{"type":"boolean"}}}}]}}),
                         ),
                     ),
-                    "tools/call" => write_http_json(
-                        &mut stream,
-                        "200 OK",
-                        Some(
-                            json!({"jsonrpc":"2.0","id":request["id"],"result":{"content":[{"type":"text","text":format!("<meetings_data count=\"1\"><meeting id=\"remote-1\" title=\"Review\" date=\"{meeting_date}\"><known_participants>Guest &lt;guest@example.com&gt;</known_participants><summary>Decision</summary></meeting></meetings_data>")}]}}),
-                        ),
-                    ),
+                    "tools/call" => {
+                        assert_eq!(request["params"]["name"], "list_meetings");
+                        assert_eq!(request["params"]["arguments"]["time_range"], "last_30_days");
+                        assert_eq!(request["params"]["arguments"]["workspace_only"], false);
+                        write_http_json(
+                            &mut stream,
+                            "200 OK",
+                            Some(
+                                json!({"jsonrpc":"2.0","id":request["id"],"result":{"content":[{"type":"text","text":format!("<meetings_data count=\"1\"><meeting id=\"remote-1\" title=\"Review\" date=\"{meeting_date}\"><known_participants>Guest &lt;guest@example.com&gt;</known_participants><summary>Decision</summary></meeting></meetings_data>")}]}}),
+                            ),
+                        )
+                    }
                     other => panic!("unexpected MCP method: {other}"),
                 }
             }
@@ -2879,7 +3044,7 @@ mod tests {
         let (meetings, raw_payloads, warnings, plan_gated) = fetch_meetings(
             "fixture-access",
             &endpoint,
-            GranolaImportCollection,
+            &GranolaCollectionSelector::default_declaration(),
             &|_, _, _| {},
         )
         .unwrap();
@@ -2890,6 +3055,75 @@ mod tests {
         assert_eq!(raw_payloads.len(), 1);
         assert_eq!(meetings[0].id.as_deref(), Some("remote-1"));
         assert_eq!(meetings[0].people.len(), 1);
+    }
+
+    #[test]
+    fn granola_batch_materializes_under_declared_account_and_selector() {
+        let temp = tempfile::tempdir().unwrap();
+        let collection = GranolaCollectionSelector::default_declaration();
+        let occurred_at = (Utc::now() - chrono::Duration::days(1)).to_rfc3339();
+        let result = apply_granola_batch(
+            temp.path(),
+            "owner@example.com",
+            &collection,
+            GranolaMcpImportBatch {
+                meetings: vec![Meeting {
+                    id: Some("granola-remote-1".to_string()),
+                    title: "Migration review".to_string(),
+                    created_at: Some(occurred_at),
+                    notes: Some("Keep online source binding.".to_string()),
+                    transcript: Some("Ada: Sync from Granola.".to_string()),
+                    people: vec![crate::granola_import::Person {
+                        name: "Ada Lovelace".to_string(),
+                        email: Some("Ada@Example.COM".to_string()),
+                        organizations: vec!["Example".to_string()],
+                        resolved: true,
+                    }],
+                    organizations: vec!["Example".to_string()],
+                    provenance: Some("https://granola.ai/meetings/granola-remote-1".to_string()),
+                    plan_gated_transcript: false,
+                }],
+                raw_payloads: vec![json!({"id":"granola-remote-1","fixture":true})],
+                warnings: Vec::new(),
+                transcripts_plan_gated: false,
+            },
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(result.records_written, 1);
+        let store = IntegrationsStore::open(temp.path()).unwrap();
+        let ctx = ConnectorCtx {
+            vault_root: temp.path().to_path_buf(),
+            connector_id: GRANOLA_CONNECTOR_ID.to_string(),
+            account: "owner@example.com".to_string(),
+            command_path: None,
+        };
+        let documents = store.external_document_evidence(&ctx).unwrap();
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].source_id, "granola-remote-1");
+        assert!(documents[0].body_text.contains("## Granola notes"));
+        assert!(documents[0].body_text.contains("## Transcript"));
+        assert_eq!(
+            store.external_document_participants(&ctx).unwrap()[0].participant_key,
+            "ada@example.com"
+        );
+        let report = store
+            .health_report_for_materialization(
+                &ctx,
+                &collection.materialization_fingerprint().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(report.status, HealthStatus::Fresh);
+
+        let other_account = ConnectorCtx {
+            account: "other@example.com".to_string(),
+            ..ctx
+        };
+        assert!(store
+            .external_document_evidence(&other_account)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -2943,7 +3177,7 @@ mod tests {
             let error = fetch_meetings(
                 "fixture-access",
                 &endpoint,
-                GranolaImportCollection,
+                &GranolaCollectionSelector::default_declaration(),
                 &|_, _, _| {},
             )
             .unwrap_err();

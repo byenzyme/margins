@@ -571,6 +571,10 @@ pub fn forget_granola(
     output: &mut dyn Write,
 ) -> Result<(), CliError> {
     let account = workspace::normalize_granola_account(account).map_err(CliError::from_anyhow)?;
+    let mut retained_workspaces =
+        workspace::workspaces_using_granola_account(margins_home, &account)
+            .map_err(CliError::from_anyhow)?;
+    retained_workspaces.sort();
     let store = GranolaAccountStore::new_with_backend(
         margins_home,
         &account,
@@ -578,6 +582,7 @@ pub fn forget_granola(
     )
     .map_err(granola_native_error)?;
     store.forget().map_err(granola_native_error)?;
+    mark_retained_granola_workspaces_needs_auth(margins_home, &account, &retained_workspaces)?;
     if json_output {
         writeln!(
             output,
@@ -588,6 +593,7 @@ pub fn forget_granola(
                 "scope": "machine",
                 "account": account,
                 "forgotten": true,
+                "retained_workspaces": retained_workspaces,
             })
         )
         .map_err(granola_io_error)?;
@@ -715,6 +721,26 @@ fn mark_retained_workspaces_needs_auth(
         if workspace.ledger_path().is_file() {
             IntegrationsStore::open(&workspace.state_dir)
                 .and_then(|store| store.mark_google_connection_needs_auth(account).map(|_| ()))
+                .map_err(CliError::from_anyhow)?;
+        }
+    }
+    Ok(())
+}
+
+fn mark_retained_granola_workspaces_needs_auth(
+    margins_home: &Path,
+    account: &str,
+    retained_workspaces: &[String],
+) -> Result<(), CliError> {
+    for id in retained_workspaces {
+        let workspace = workspace::resolve_at(margins_home, id).map_err(CliError::from_anyhow)?;
+        if workspace.ledger_path().is_file() {
+            IntegrationsStore::open(&workspace.state_dir)
+                .and_then(|store| {
+                    store
+                        .mark_granola_connection_needs_auth(account)
+                        .map(|_| ())
+                })
                 .map_err(CliError::from_anyhow)?;
         }
     }
@@ -1146,7 +1172,7 @@ mod tests {
         forget_granola(temp.path(), "owner@example.com", true, &mut output).unwrap();
         let result: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(result["forgotten"], true);
-        assert!(result.get("retained_workspaces").is_none());
+        assert_eq!(result["retained_workspaces"], json!([]));
         assert!(!temp.path().join("granola/owner@example.com").exists());
     }
 }

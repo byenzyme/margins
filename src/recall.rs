@@ -34,8 +34,9 @@ use margins_workflows::integrations::{
     GOOGLE_MEET_MATERIALIZATION_FINGERPRINT,
 };
 use margins_workflows::workspace::{
-    calendar_collection_namespace, gmail_collection_namespace, meet_collection_namespace,
-    native_markdown_collection_namespace, ResolvedWorkspace, SourceKind, WorkspaceBinding,
+    calendar_collection_namespace, gmail_collection_namespace, granola_collection_namespace,
+    meet_collection_namespace, native_markdown_collection_namespace, ResolvedWorkspace, SourceKind,
+    WorkspaceBinding,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
@@ -105,6 +106,18 @@ pub fn workspace_source_refresh_staleness(
                         "google_meet",
                         account.as_str(),
                         Ok(GOOGLE_MEET_MATERIALIZATION_FINGERPRINT.to_string()),
+                        Ok(None),
+                    )),
+                )),
+                WorkspaceBinding::Granola {
+                    account,
+                    collection,
+                } => Some((
+                    granola_collection_namespace(account),
+                    Some((
+                        "granola",
+                        account.as_str(),
+                        collection.materialization_fingerprint(),
                         Ok(None),
                     )),
                 )),
@@ -589,6 +602,24 @@ fn catalog_entry_for_document_ref(
                     });
                 }
             }
+            WorkspaceBinding::Granola { account, .. } => {
+                if document_ref_source_matches(
+                    document_ref,
+                    &granola_collection_namespace(account)?,
+                ) {
+                    let source_id = sqlite_document_ref_source_id(document_ref);
+                    return Ok(CatalogEntry {
+                        source: name.clone(),
+                        kind: binding.kind(),
+                        evidence: external_evidence_for_hit(
+                            workspace,
+                            "granola",
+                            account,
+                            source_id.as_deref(),
+                        )?,
+                    });
+                }
+            }
             WorkspaceBinding::Captures { .. } => {}
         }
     }
@@ -626,6 +657,10 @@ fn source_name_for_document_ref(
                 WorkspaceBinding::GoogleMeet { account } => document_ref_source_matches(
                     document_ref,
                     &meet_collection_namespace(account).ok()?,
+                ),
+                WorkspaceBinding::Granola { account, .. } => document_ref_source_matches(
+                    document_ref,
+                    &granola_collection_namespace(account).ok()?,
                 ),
                 WorkspaceBinding::Captures { .. } => false,
             };
@@ -684,7 +719,7 @@ fn lookup_external_href(
     let table = match connector_id {
         "email" => "thread_evidence",
         "gcal" => "calendar_event_evidence",
-        "google_meet" => "external_document_evidence",
+        "google_meet" | "granola" => "external_document_evidence",
         _ => return Ok(None),
     };
     let id_column = if connector_id == "email" {
@@ -1085,7 +1120,10 @@ fn index_freshness(corpus: &WorkspaceCorpus, index: &SearchIndex) -> Result<Evid
 fn source_kind_has_ledger_corpus(kind: SourceKind) -> bool {
     matches!(
         kind,
-        SourceKind::GoogleMail | SourceKind::GoogleCalendar | SourceKind::GoogleMeet
+        SourceKind::GoogleMail
+            | SourceKind::GoogleCalendar
+            | SourceKind::GoogleMeet
+            | SourceKind::Granola
     )
 }
 
@@ -1171,6 +1209,15 @@ fn materialization_freshness(
                     "google_meet",
                     account,
                     Some(Ok(GOOGLE_MEET_MATERIALIZATION_FINGERPRINT.to_string())),
+                    Ok(None),
+                ),
+                WorkspaceBinding::Granola {
+                    account,
+                    collection,
+                } => (
+                    "granola",
+                    account,
+                    Some(collection.materialization_fingerprint()),
                     Ok(None),
                 ),
                 _ => return None,

@@ -5254,7 +5254,7 @@ dependencies = [
 
 [[package]]
 name = "margins"
-version = "0.4.8"
+version = "0.4.9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5291,7 +5291,7 @@ dependencies = [
 
 [[package]]
 name = "margins-cli"
-version = "0.4.8"
+version = "0.4.9"
 dependencies = [
  "anyhow",
  "argon2",
@@ -5327,7 +5327,7 @@ dependencies = [
 
 [[package]]
 name = "margins-desktop"
-version = "0.4.8"
+version = "0.4.9"
 dependencies = [
  "anyhow",
  "asupersync",
