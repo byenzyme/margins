@@ -57,9 +57,9 @@ digest-verified Margins release when needed. That release contains:
 - `margins`, the normal CLI;
 - `margins-server`, the project-side recording service.
 
-The currently published `v0.4.9` Linux and Apple Silicon macOS archives lack `margins-server`; a clean
-install from that release fails closed until a release with both executables is
-published and the plugin pin is advanced. Development builds can use
+The plugin pins `v0.4.10`, whose Linux and Apple Silicon macOS archives include
+both executables. That release must be published before a clean installation
+can start the project service. Development builds can use
 `MARGINS_CLI_BIN` and `MARGINS_PROJECT_SERVER_PATH` as explicit overrides.
 
 The service is launched with the bb project's default source path as
