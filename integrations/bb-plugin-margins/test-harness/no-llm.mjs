@@ -261,7 +261,7 @@ try {
   await until("Meetings page", () => browserEval('!!document.querySelector(".margins-meetings-page")'));
   if (freshRelease) await until("fresh release runtime install", () =>
     existsSync(path.join(freshCliBinDir, "margins"))
-      && existsSync(path.join(hostData, "runtime", "v0.4.12", "margins-server")), 120_000);
+      && existsSync(path.join(hostData, "runtime", "v0.4.13", "margins-server")), 120_000);
   shot("01-workspace.png");
 
   // The fake microphone is this harness's deliberate browser-only choice.

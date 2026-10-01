@@ -206,19 +206,21 @@ jobs:
           echo "Signing with $SIGNING_IDENTITY"
           NOTARIZATION_DIR="$RUNNER_TEMP/margins-cli-notarization"
           mkdir "$NOTARIZATION_DIR"
+          SIGNING_ARGS=(
+            --force
+            --sign "$SIGNING_IDENTITY"
+            --keychain "$KEYCHAIN_PATH"
+            --options runtime
+            --timestamp
+          )
           for BINARY_PATH in $BINARY_PATHS; do
-            SIGNING_ENTITLEMENTS=()
             if [[ "$(basename "$BINARY_PATH")" == "margins-live" ]]; then
-              SIGNING_ENTITLEMENTS=(--entitlements desktop/src-tauri/MarginsLive.entitlements)
+              codesign "${SIGNING_ARGS[@]}" \
+                --entitlements desktop/src-tauri/MarginsLive.entitlements \
+                "$BINARY_PATH"
+            else
+              codesign "${SIGNING_ARGS[@]}" "$BINARY_PATH"
             fi
-            codesign \
-              --force \
-              --sign "$SIGNING_IDENTITY" \
-              --keychain "$KEYCHAIN_PATH" \
-              --options runtime \
-              --timestamp \
-              "${SIGNING_ENTITLEMENTS[@]}" \
-              "$BINARY_PATH"
             codesign --verify --deep --strict --verbose=2 "$BINARY_PATH"
             if [[ "$(basename "$BINARY_PATH")" == "margins-live" ]]; then
               scripts/verify-margins-live-macos.sh "$BINARY_PATH" --signed
@@ -233,6 +235,7 @@ jobs:
             --team-id "$APPLE_TEAM_ID" \
             --wait \
             --output-format json > "$NOTARIZATION_RESULT"
+          test -s "$NOTARIZATION_RESULT"
           cat "$NOTARIZATION_RESULT"
 
           NOTARIZATION_STATUS="$(plutil -extract status raw -o - "$NOTARIZATION_RESULT")"
