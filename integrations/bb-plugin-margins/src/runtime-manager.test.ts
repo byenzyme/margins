@@ -22,8 +22,8 @@ async function archiveFixture(root: string, executables: string[]) {
 }
 
 function releaseFetch(archive: Uint8Array) {
-  const name = "margins-0.4.10-x86_64-unknown-linux-gnu.tar.gz";
-  const url = `https://github.com/byenzyme/margins/releases/download/v0.4.10/${name}`;
+  const name = "margins-0.4.11-x86_64-unknown-linux-gnu.tar.gz";
+  const url = `https://github.com/byenzyme/margins/releases/download/v0.4.11/${name}`;
   return vi.fn(async (input: string | URL | Request) => String(input) === url
     ? new Response(Uint8Array.from(archive).buffer, { status: 200 })
     : new Response(JSON.stringify({ assets: [{
@@ -41,18 +41,18 @@ describe("Margins runtime manager", () => {
         {
           assets: [
             {
-              name: "margins-0.4.10-aarch64-apple-darwin.tar.gz",
+              name: "margins-0.4.11-aarch64-apple-darwin.tar.gz",
               browser_download_url:
-                "https://github.com/byenzyme/margins/releases/download/v0.4.10/margins-0.4.10-aarch64-apple-darwin.tar.gz",
+                "https://github.com/byenzyme/margins/releases/download/v0.4.11/margins-0.4.11-aarch64-apple-darwin.tar.gz",
               digest: `sha256:${"a".repeat(64)}`,
               size: 42,
             },
           ],
         },
-        "margins-0.4.10-aarch64-apple-darwin.tar.gz",
+        "margins-0.4.11-aarch64-apple-darwin.tar.gz",
       ),
     ).toEqual({
-      url: "https://github.com/byenzyme/margins/releases/download/v0.4.10/margins-0.4.10-aarch64-apple-darwin.tar.gz",
+      url: "https://github.com/byenzyme/margins/releases/download/v0.4.11/margins-0.4.11-aarch64-apple-darwin.tar.gz",
       digest: "a".repeat(64),
       size: 42,
     });
@@ -62,15 +62,15 @@ describe("Margins runtime manager", () => {
         {
           assets: [
             {
-              name: "margins-0.4.10-aarch64-apple-darwin.tar.gz",
+              name: "margins-0.4.11-aarch64-apple-darwin.tar.gz",
               browser_download_url:
-                "https://github.com/byenzyme/margins/releases/download/v0.4.10/margins-0.4.10-aarch64-apple-darwin.tar.gz",
+                "https://github.com/byenzyme/margins/releases/download/v0.4.11/margins-0.4.11-aarch64-apple-darwin.tar.gz",
               digest: "sha256:not-a-digest",
               size: 42,
             },
           ],
         },
-        "margins-0.4.10-aarch64-apple-darwin.tar.gz",
+        "margins-0.4.11-aarch64-apple-darwin.tar.gz",
       ),
     ).toBeNull();
 
@@ -79,14 +79,14 @@ describe("Margins runtime manager", () => {
         {
           assets: [
             {
-              name: "margins-0.4.10-aarch64-apple-darwin.tar.gz",
+              name: "margins-0.4.11-aarch64-apple-darwin.tar.gz",
               browser_download_url: "https://downloads.example.test/margins.tar.gz",
               digest: `sha256:${"a".repeat(64)}`,
               size: 42,
             },
           ],
         },
-        "margins-0.4.10-aarch64-apple-darwin.tar.gz",
+        "margins-0.4.11-aarch64-apple-darwin.tar.gz",
       ),
     ).toBeNull();
   });
@@ -116,10 +116,10 @@ describe("Margins runtime manager", () => {
         env: { MARGINS_CLI_BIN_DIR: cliBinDir }, fetchImpl, homeDir: root, platform: "linux", arch: "x64",
       });
       const server = await manager.ensureProjectServer({ dataDir });
-      expect(server).toBe(join(dataDir, "runtime", "v0.4.10", "margins-server"));
+      expect(server).toBe(join(dataDir, "runtime", "v0.4.11", "margins-server"));
       expect((await execFile(server)).stdout.trim()).toBe("margins-server");
       expect((await execFile(join(cliBinDir, "margins"))).stdout.trim()).toBe("margins");
-      expect(await readFile(`${join(cliBinDir, "margins")}.bb-margins-managed`, "utf8")).toContain("version=0.4.10");
+      expect(await readFile(`${join(cliBinDir, "margins")}.bb-margins-managed`, "utf8")).toContain("version=0.4.11");
       await manager.ensureProjectServer({ dataDir });
       expect(vi.mocked(fetchImpl)).toHaveBeenCalledTimes(2);
     } finally {

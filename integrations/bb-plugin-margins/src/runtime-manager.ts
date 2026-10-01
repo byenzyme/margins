@@ -17,7 +17,7 @@ import { promisify } from "node:util";
 
 const execFile = promisify(execFileCallback);
 
-export const RUNTIME_RELEASE_VERSION = "0.4.10";
+export const RUNTIME_RELEASE_VERSION = "0.4.11";
 const RELEASE_API = `https://api.github.com/repos/byenzyme/margins/releases/tags/v${RUNTIME_RELEASE_VERSION}`;
 const MAX_ARCHIVE_BYTES = 128 * 1024 * 1024;
 
