@@ -15,7 +15,6 @@ members = [
     "crates/public/margins-meeting-protocol",
     "crates/public/margins-meeting-runtime",
     "crates/public/margins-server",
-    "crates/private/recall-engine",
 ]
 default-members = [
     ".",
@@ -47,14 +46,12 @@ path = "src/main.rs"
 [features]
 default = ["coreml-asr", "audio-capture", "polyvoice-coreml", "recall-local-model"]
 audio-capture = ["dep:cpal", "dep:cidre"]
-# Associative vault search backing `margins recall`. Composes the subtree-linked
-# private recall engine's portable orchestration and lookup into the binary. The
-# public CLI keeps the command present and degrades gracefully when this port is
-# absent.
-recall = ["dep:recall-engine", "dep:reqwest", "dep:tokio"]
+# The public manifest and lockfile contain no private git source. Official
+# builds use scripts/with-private-recall to inject the pinned optional engine.
+recall = ["dep:reqwest", "dep:tokio"]
 # In-process llama.cpp generation for offline thematic bridges. Kept separate
 # so recall policy and lookup tests need no native C/C++ inference toolchain.
-recall-local-model = ["recall", "recall-engine/local-llm"]
+recall-local-model = ["recall"]
 parakeet-asr = ["margins-cli/parakeet-onnx", "margins-media/parakeet-onnx", "margins-media/model-download"]
 parakeet-asr-dynamic = ["parakeet-asr", "margins-media/parakeet-onnx-dynamic"]
 coreml-asr = ["margins-cli/coreml-asr", "margins-media/coreml-asr", "margins-media/model-download"]
@@ -74,7 +71,6 @@ margins-workflows = { path = "crates/public/margins-workflows" }
 margins-meeting-protocol = { path = "crates/public/margins-meeting-protocol" }
 margins-meeting-runtime = { path = "crates/public/margins-meeting-runtime" }
 rusqlite.workspace = true
-recall-engine = { path = "crates/private/recall-engine", package = "enzyme-core", features = ["embedder-compat"], optional = true }
 tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }

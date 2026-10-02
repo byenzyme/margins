@@ -4,15 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-if [ -z "${CARGO_TARGET_DIR:-}" ]; then
-  repo_common="$(cd "$REPO_ROOT" && git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
-  if [ -n "$repo_common" ]; then
-    repo_root="$(dirname "$repo_common")"
-    export CARGO_TARGET_DIR="$(dirname "$repo_root")/margins-cargo-target"
-  else
-    export CARGO_TARGET_DIR="$REPO_ROOT/target"
-  fi
-fi
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$("$REPO_ROOT/scripts/cargo-lane" target-dir)}"
+export CARGO_TARGET_DIR
 
 BIN_DIR="${MARGINS_BIN_DIR:-${HOME:?HOME is required}/.local/bin}"
 DEST="$BIN_DIR/margins"
@@ -35,7 +28,7 @@ BUILD_ARGS+=(--bin margins-private)
 echo "Building official Margins CLI (profile: $PROFILE)..."
 (
   cd "$REPO_ROOT"
-  cargo "${BUILD_ARGS[@]}"
+  scripts/with-private-recall scripts/cargo-lane shared -- cargo "${BUILD_ARGS[@]}"
 )
 
 SOURCE="$CARGO_TARGET_DIR/release/margins-private"
