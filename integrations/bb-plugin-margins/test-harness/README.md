@@ -4,8 +4,9 @@
 Margins home and an isolated bb server. It installs this plugin only into that
 temporary bb instance. The two fixture threads are scheduled seven days out
 and the temporary server and data are removed before the script exits. The
-default lane stops before Make note and suppresses automatic note-thread creation
-in the isolated server. Step 7 requires the explicit
+default lane stops before Make note. Both lanes suppress automatic note-thread
+creation in the isolated server so the real-LLM lane sends only its explicit
+Make note request. Step 7 requires the explicit
 `MARGINS_E2E_REAL_LLM=1` opt-in described below.
 
 Build from **this worktree** first. Keep Rust commands on the repo's guarded
@@ -36,7 +37,7 @@ The runner creates a fixture vault copy with `inbox`, initializes the disposable
 bb project as a Git checkout, adds `note_folder` to a
 desired Workspace TOML, preserves the exact reviewed plan JSON, applies that
 plan, and sets the disposable home's global default to that Workspace. It
-prepares a single-utterance WAV and mounts it into headless Chrome as the
+prepares a repeated speech WAV and mounts it into headless Chrome as the
 fake microphone. The browser journey checks recording, changing sidebar level,
 memo persistence across thread switches, pause/resume, Stop, post-stop memo
 save, and an exact spoken transcript before Make note creates a thread.
@@ -48,8 +49,8 @@ directory, and `MARGINS_E2E_ORT_LIBRARY` to the ONNX Runtime library. Set both
 ASR paths, and build the server with
 `scripts/cargo-lane shared -- cargo build -p margins-desktop --manifest-path
 desktop/src-tauri/Cargo.toml --no-default-features --features hosted-web --bin
-margins-server`. The runner plays the WAV once, pads the rest with silence for
-Chrome's fake microphone, and creates `asr-runtime.json` under the disposable
+margins-server`. The runner repeats the WAV for 120 seconds so speech remains
+available after a cold install, and creates `asr-runtime.json` under the disposable
 bb plugin host data directory,
 selecting the `hosted-web` server built above. It requests transcription of
 the same browser session after Finish and requires at least one spoken timeline

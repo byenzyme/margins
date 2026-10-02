@@ -103,7 +103,7 @@ export function pendingWorkspaceSetupMarker(workspaceId: string): string {
 export async function workspaceOptions(): Promise<{ defaultWorkspaceId: string | null; workspaces: Array<{ id: string; name: string | null }>; autoSelected: boolean }> {
   const binary = marginsCli();
   const env = { ...process.env, MARGINS_HOME: marginsHome() };
-  const { stdout } = await execFile(binary, ["workspace", "list", "--json"], { env, timeout: 5_000, maxBuffer: 65_536 });
+  const { stdout } = await execFile(binary, ["workspace", "list", "--json"], { env, timeout: 15_000, maxBuffer: 65_536 });
   const listing = JSON.parse(stdout) as { default_workspace?: unknown; workspaces?: unknown };
   if (!Array.isArray(listing.workspaces) || !listing.workspaces.every((item) => item && typeof item === "object"
     && typeof item.id === "string" && (item.name === null || typeof item.name === "string"))) {
@@ -118,7 +118,7 @@ export async function workspaceOptions(): Promise<{ defaultWorkspaceId: string |
   let autoSelected = false;
   if (!defaultWorkspaceId && workspaces.length === 1) {
     const selected = workspaces[0]!.id;
-    await execFile(binary, ["workspace", "default", "--set", selected, "--json"], { env, timeout: 5_000, maxBuffer: 65_536 });
+    await execFile(binary, ["workspace", "default", "--set", selected, "--json"], { env, timeout: 15_000, maxBuffer: 65_536 });
     defaultWorkspaceId = selected;
     autoSelected = true;
   }

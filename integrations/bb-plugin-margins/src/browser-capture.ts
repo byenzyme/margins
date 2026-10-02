@@ -168,11 +168,15 @@ export function detectClientCapabilities(): ClientCapabilities {
 }
 
 async function rpc<T>(pluginId: string, method: string, input: object): Promise<T> {
+  // A cold project recorder may initialize the ASR model during the first
+  // capture request. Keep the ordinary control calls on their short deadline.
+  const timeoutMs = method === "beginBrowserCapture" || method === "beginProjectCapture" ? 30_000 : 10_000;
   const value = await fetchJsonWithDeadline<{ ok: boolean; result?: T; error?: { message?: string } }>(
     `/api/v1/plugins/${encodeURIComponent(pluginId)}/rpc/${method}`,
     {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input),
     },
+    { timeoutMs },
   );
   if (!value.ok) throw new Error(value.error?.message || `Margins ${method} failed`);
   return value.result as T;

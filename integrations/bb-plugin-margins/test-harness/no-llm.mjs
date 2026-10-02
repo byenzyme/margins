@@ -70,9 +70,11 @@ function findId(value, prefix) {
   return null;
 }
 function makeSpokenWav(file, source) {
-  // Give Chrome one spoken utterance, then silence for the rest of the journey.
-  command("ffmpeg", ["-nostdin", "-loglevel", "error", "-i", source, "-af", "apad",
-    "-t", "40", "-ac", "1", "-ar", "16000", "-acodec", "pcm_s16le", "-y", file]);
+  // Chrome starts consuming fake microphone audio at launch, before a cold
+  // release install and recorder startup finish. Repeat the utterance so the
+  // captured interval contains speech even when setup takes longer.
+  command("ffmpeg", ["-nostdin", "-loglevel", "error", "-stream_loop", "-1", "-i", source,
+    "-t", "120", "-ac", "1", "-ar", "16000", "-acodec", "pcm_s16le", "-y", file]);
 }
 async function freePort() {
   const server = net.createServer();
@@ -212,10 +214,12 @@ try {
   cdpPort = await freePort();
   bbEnv = { ...process.env, BB_SERVER_URL: `http://127.0.0.1:${serverPort}`, BB_DATA_DIR: bbData,
     MARGINS_HOME: home,
-    ...(freshRelease ? { MARGINS_CLI_BIN_DIR: freshCliBinDir,
-      MARGINS_PARAKEET_MODEL_DIR: asrModelDir, MARGINS_PARAKEET_MODEL_KIND: "tdt-v2",
-      ORT_DYLIB_PATH: ortLibrary } : { MARGINS_CLI_BIN: marginsBin }),
-    ...(realLlm ? {} : { MARGINS_BB_E2E_DISABLE_AUTO_NOTE: "1" }) };
+    MARGINS_PARAKEET_MODEL_DIR: asrModelDir, MARGINS_PARAKEET_MODEL_KIND: "tdt",
+    ORT_DYLIB_PATH: ortLibrary,
+    ...(freshRelease ? { MARGINS_CLI_BIN_DIR: freshCliBinDir } : { MARGINS_CLI_BIN: marginsBin }),
+    // This journey exercises the explicit Make note action once. The separate
+    // auto-note scheduler has its own test and must not race a paid E2E call.
+    MARGINS_BB_E2E_DISABLE_AUTO_NOTE: "1" };
   if (freshRelease) {
     delete bbEnv.MARGINS_CLI_BIN;
     delete bbEnv.MARGINS_PROJECT_SERVER_PATH;
@@ -259,6 +263,11 @@ try {
   videoStartedAt = Date.now();
   browser(["set", "viewport", "1440", "900"]);
   await until("Meetings page", () => browserEval('!!document.querySelector(".margins-meetings-page")'));
+  await until("Meetings workspace choice", () => browserEval(`document.body.innerText.includes('Choose a Margins Workspace') || !![...document.querySelectorAll('button')].find(button => button.textContent === 'Start meeting')`), 60_000);
+  if (browserEval(`document.body.innerText.includes('Choose a Margins Workspace')`)) {
+    browser(["find", "role", "button", "click", "--name", "Use Workspace", "--exact"]);
+    await until("Workspace selected", () => browserEval(`!document.body.innerText.includes('Choose a Margins Workspace')`));
+  }
   if (freshRelease) await until("fresh release runtime install", () =>
     existsSync(path.join(freshCliBinDir, "margins"))
       && existsSync(path.join(hostData, "runtime", "v0.4.13", "margins-server")), 120_000);
@@ -271,6 +280,7 @@ try {
   browser(["find", "role", "button", "click", "--name", "Start meeting", "--exact"]);
   const startState = await until("Recording", () => browserEval(`document.querySelector('button[aria-label="Pause recording"]') ? 'recording' : document.querySelector('.margins-meetings-empty [role="alert"]')?.textContent || null`), 60_000);
   assert.equal(startState, "recording", `Start failed: ${startState}`);
+  await until("meeting memo pad", () => browserEval(`!!document.querySelector('textarea[aria-label="Meeting memo pad"]')`), 60_000);
   const levels = [];
   for (let i = 0; i < 6; i++) {
     levels.push(Number(browserEval(`document.querySelector('[aria-label="Live audio level"]')?.getAttribute('data-level') || 0`)));
@@ -287,38 +297,51 @@ try {
   assert(browserEval(`document.querySelector('.margins-meetings-top button')?.classList.contains('is-reserved')`));
   shot("02-recording.png");
   const liveMemo = "Decision: ship the quiet Meetings view. Owner: Maya.";
-  browser(["fill", 'textarea[aria-label="Meeting memo pad"]', liveMemo]);
-  await until("Live memo saved", () => browserEval('document.querySelector(".margins-meeting-status")?.innerText.includes("Saved")'));
+  browser(["click", 'textarea[aria-label="Meeting memo pad"]']);
+  browser(["keyboard", "type", liveMemo]);
+  browser(["press", "Tab"]);
+  const liveSessionId = await until("meeting route", () => browserEval(`location.pathname.endsWith('/meeting') ? location.pathname.split('/').pop() : null`));
+  await until("Live memo saved", async () => {
+    const response = await fetch(`${bbEnv.BB_SERVER_URL}/api/v1/plugins/margins/rpc/readWorkspaceMeeting`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: currentProjectId, sessionId: liveSessionId }),
+    });
+    const value = await response.json();
+    return value.result?.meeting?.notepad?.text === liveMemo;
+  }, 60_000);
   assert(!browserEval(`document.querySelector('.margins-meeting-pad footer')?.innerText.includes('Saved')`));
   browser(["click", `a[aria-label="Open E2E thread two"]`]);
-  await until("thread composer submit", () => browserEval(`!!document.querySelector('button[aria-label="Submit (Enter)"]')`));
+  await until("thread composer", () => browserEval(`!!document.querySelector('[aria-label^="Ask for a follow-up"]')`));
   assert(browserEval(`!!document.querySelector('button[aria-label="Pause recording"]')`));
   assert(browserEval(`document.querySelector('.margins-overlay')?.innerText.includes('Microphone only')`));
   const composerClearance = browserEval(`(() => {
     const pill = document.querySelector('.margins-overlay')?.getBoundingClientRect();
-    const submit = document.querySelector('button[aria-label="Submit (Enter)"]')?.getBoundingClientRect();
-    if (!pill || !submit) return { pillFound: !!pill, submitFound: !!submit, clear: false };
+    const submit = document.querySelector('[aria-label^="Ask for a follow-up"]')?.getBoundingClientRect();
+    if (!pill || !submit) return { pillFound: !!pill, promptFound: !!submit, clear: false };
     const gap = 8;
-    return { pillFound: true, submitFound: true,
+    return { pillFound: true, promptFound: true,
       clear: pill.right + gap <= submit.left || pill.left >= submit.right + gap
         || pill.bottom + gap <= submit.top || pill.top >= submit.bottom + gap,
       pill: { left: pill.left, top: pill.top, right: pill.right, bottom: pill.bottom },
-      submit: { left: submit.left, top: submit.top, right: submit.right, bottom: submit.bottom } };
+      prompt: { left: submit.left, top: submit.top, right: submit.right, bottom: submit.bottom } };
   })()`);
-  assert(composerClearance.clear, `Recording pill overlaps thread composer submit: ${JSON.stringify(composerClearance)}`);
+  assert(composerClearance.clear, `Recording pill overlaps thread composer: ${JSON.stringify(composerClearance)}`);
   shot("03-overlay-other-thread.png");
+  writeFileSync(path.join(artifacts, "03-capture-state.json"), `${JSON.stringify(browserEval(`({stored:sessionStorage.getItem('margins.bb.capture.v1'), navigation:performance.getEntriesByType('navigation').map(x=>x.type), url:location.href})`), null, 2)}\n`);
+  writeFileSync(path.join(artifacts, "03-browser-console.txt"), browser(["console"]));
   otherThreadAt = Date.now();
   browser(["click", `a[aria-label="Open E2E thread one"]`]);
   browser(["find", "role", "button", "click", "--name", "Meetings", "--exact"]);
-  await until("Live memo after thread switch", () => browserEval(`!!document.querySelector('textarea[aria-label="Meeting memo pad"]')`));
+  await until("Live memo after thread switch", () => browserEval(`!!document.querySelector('textarea[aria-label="Meeting memo pad"]')`), 60_000);
   assertMemo(liveMemo);
   shot("03-thread-switch.png");
+  writeFileSync(path.join(artifacts, "03-return-capture-state.json"), `${JSON.stringify(browserEval(`({stored:sessionStorage.getItem('margins.bb.capture.v1'), navigation:performance.getEntriesByType('navigation').map(x=>x.type), url:location.href})`), null, 2)}\n`);
+  writeFileSync(path.join(artifacts, "03-return-browser-console.txt"), browser(["console"]));
   browser(["click", 'button[aria-label="Pause recording"]']);
   await until("Paused", () => browserEval(`!!document.querySelector('button[aria-label="Resume recording"]')`));
   assert.match(browserEval(`document.querySelector('.margins-overlay')?.innerText || ''`), /^Paused · \d+:\d{2}/);
   assert(browserEval(`document.querySelector('.margins-level-dot.paused') !== null`));
-  assert(browserEval(`document.querySelector('.margins-meeting-kicker')?.innerText.includes('Paused')`));
-  assert(browserEval(`document.querySelector('.margins-meeting-list')?.innerText.includes('Paused')`));
+  await until("Paused meeting details", () => browserEval(`document.querySelector('.margins-meeting-kicker')?.innerText.includes('Paused') && document.querySelector('.margins-meeting-list')?.innerText.includes('Paused')`));
   shot("04-paused.png");
   browser(["click", 'button[aria-label="Resume recording"]']);
   await until("Resumed", () => browserEval(`!!document.querySelector('button[aria-label="Pause recording"]')`));
@@ -330,7 +353,9 @@ try {
   shot("05-ready.png");
   const revisedMemo = `${liveMemo} Post-stop correction: include accessibility pass.`;
   const captureDir = path.join(home, "workspaces/e2e/captures/.margins");
-  browser(["fill", 'textarea[aria-label="Meeting memo pad"]', revisedMemo]);
+  browser(["click", 'textarea[aria-label="Meeting memo pad"]']);
+  browser(["keyboard", "type", " Post-stop correction: include accessibility pass."]);
+  browser(["press", "Tab"]);
   await until("Revised memo saved", () => readdirSync(captureDir).some((name) =>
     name.endsWith(".md") && readFileSync(path.join(captureDir, name), "utf8").includes(revisedMemo)));
   browser(["find", "role", "button", "click", "--name", "Meetings", "--exact"]);
@@ -425,6 +450,25 @@ try {
     try { writeFileSync(path.join(artifacts, "failure-snapshot.txt"), browser(["snapshot", "-i"])); } catch { /* browser may be gone */ }
     try { writeFileSync(path.join(artifacts, "failure-state.json"), `${JSON.stringify(browserEval(`({url:location.href,text:document.body.innerText})`), null, 2)}\n`); } catch { /* browser may be gone */ }
     try { writeFileSync(path.join(artifacts, "failure-browser-console.txt"), browser(["console"])); } catch { /* browser may be gone */ }
+    try {
+      const requests = JSON.parse(browser(["network", "requests", "--json"])).data.requests;
+      writeFileSync(path.join(artifacts, "failure-network.json"), `${JSON.stringify(requests.map((request) => ({
+        method: request.method, url: request.url, status: request.status,
+        bodyBytes: request.postData?.length || 0, timestamp: request.timestamp,
+      })), null, 2)}\n`);
+    } catch { /* browser may be gone */ }
+  }
+  if (currentProjectId && bbEnv?.BB_SERVER_URL && browserUsed) {
+    try {
+      const sessionId = browserEval(`location.pathname.split('/').pop()`);
+      const response = await fetch(`${bbEnv.BB_SERVER_URL}/api/v1/plugins/margins/rpc/readWorkspaceMeeting`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: currentProjectId, sessionId }), signal: AbortSignal.timeout(8_000),
+      });
+      writeFileSync(path.join(artifacts, "failure-meeting-rpc.json"), `${JSON.stringify({ status: response.status, body: await response.json() }, null, 2)}\n`);
+    } catch (cause) {
+      writeFileSync(path.join(artifacts, "failure-meeting-rpc.txt"), String(cause));
+    }
   }
   if (existsSync(path.join(bbData, "logs"))) cpSync(path.join(bbData, "logs"), path.join(artifacts, "bb-diagnostic-logs"), { recursive: true });
   if (realLlm && existsSync(vault)) cpSync(vault, path.join(artifacts, "vault"), { recursive: true });
