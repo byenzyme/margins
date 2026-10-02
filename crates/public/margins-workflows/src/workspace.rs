@@ -1822,7 +1822,11 @@ fn validate_config(config: &WorkspaceConfig) -> Result<()> {
 }
 
 fn native_roots_overlap(left: &Path, right: &Path) -> bool {
-    left == right || left.starts_with(right) || right.starts_with(left)
+    // A declared Home is canonicalized at creation, while later bindings may
+    // arrive through an alias such as macOS /var -> /private/var.
+    let left = left.canonicalize().unwrap_or_else(|_| left.to_path_buf());
+    let right = right.canonicalize().unwrap_or_else(|_| right.to_path_buf());
+    left.starts_with(&right) || right.starts_with(&left)
 }
 
 fn validate_binding(binding: &WorkspaceBinding) -> Result<()> {
@@ -2551,6 +2555,29 @@ mod tests {
         assert!(overlap.unwrap_err().to_string().contains("overlap"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn workspace_rejects_native_root_through_symlink_alias() {
+        let temp = tempfile::tempdir().unwrap();
+        let notes = temp.path().join("notes");
+        let alias = temp.path().join("notes-alias");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::os::unix::fs::symlink(&notes, &alias).unwrap();
+        let mut workspace =
+            create_workspace(&temp.path().join("state"), "practice", None, &notes).unwrap();
+
+        let overlap = add_source(
+            &mut workspace,
+            "alias",
+            WorkspaceBinding::NativeMarkdown {
+                path: alias,
+                role: SourceRole::Reference,
+                note_folder: None,
+            },
+        );
+        assert!(overlap.unwrap_err().to_string().contains("overlap"));
+    }
+
     #[test]
     fn config_roundtrip_uses_bindings_not_sources() {
         let temp = tempfile::tempdir().unwrap();
@@ -3063,7 +3090,7 @@ account = "owner@example.com"
         let home = temp.path().join("vault");
         std::fs::create_dir_all(&home).unwrap();
         let mut workspace = create_workspace(&machine, "practice", None, &home).unwrap();
-        assert_eq!(workspace.note_destination().unwrap(), home);
+        assert_eq!(workspace.note_destination().unwrap(), workspace.home_dir);
         assert_eq!(default_workspace(&machine).unwrap(), None);
         set_default_workspace(&machine, "practice").unwrap();
         assert_eq!(
@@ -3084,7 +3111,7 @@ account = "owner@example.com"
                 .unwrap()
                 .note_destination()
                 .unwrap(),
-            home.join("inbox")
+            workspace.home_dir.join("inbox")
         );
         assert!(plan_workspace_config(&workspace.config, {
             let mut invalid = workspace.config.clone();

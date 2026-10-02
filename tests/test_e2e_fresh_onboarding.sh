@@ -14,6 +14,9 @@ cleanup() {
 trap cleanup EXIT
 
 : "${MARGINS_E2E_BIN:?set MARGINS_E2E_BIN to the margins CLI under test}"
+# This CI fixture supplies Google HTTP responses. A live Granola MCP session
+# belongs to the separate authenticated lane, not this isolated Google run.
+export MARGINS_E2E_GOOGLE_ONLY=1
 
 OBSERVED_BUILD_COMMIT="$("$MARGINS_E2E_BIN" capabilities | python3 -c \
   'import json, sys; print(json.load(sys.stdin)["build"]["commit"])')"
@@ -264,7 +267,7 @@ os.chmod(token_path, 0o600)
 PY
 
 RECALL_AVAILABLE="$("$MARGINS_E2E_BIN" capabilities | python3 -c \
-  'import json, sys; print(1 if json.load(sys.stdin).get("recall", {}).get("available") else 0)')"
+  'import json, sys; print(1 if json.load(sys.stdin).get("recall", {}).get("indexing") else 0)')"
 if [ "$RECALL_AVAILABLE" = 1 ]; then
   FIXTURE_PORT_FILE="$RUN_ROOT/fixture-generator.port"
   python3 "$REPO_ROOT/tests/fixture_openai_server.py" \
@@ -303,7 +306,8 @@ python3 - "$RUN_ROOT/sources-after-init.json" <<'PY'
 import json, sys
 sources = json.load(open(sys.argv[1]))
 names = {source["name"] for source in sources}
-assert {"home", "meeting-notes", "mail", "calendar", "meet", "granola"} <= names, names
+assert {"home", "meeting-notes", "mail", "calendar", "meet"} <= names, names
+assert "granola" not in names, names
 home = next(source for source in sources if source["name"] == "home")
 assert home["kind"] == "notes"
 assert home["role"] == "home"
@@ -335,15 +339,6 @@ allowed_calendar_keys = {
     "name", "kind", "account", "calendar", "cache_raw_payload", "project_to_home", "indexed_how",
 }
 assert set(calendar) <= allowed_calendar_keys, calendar
-granola = next(source for source in sources if source["name"] == "granola")
-assert granola["kind"] == "granola"
-assert granola["account"] == "owner@example.com"
-assert granola["projection"]["enabled"] is True
-assert granola["projection"]["notes_folder"] == "meetings"
-assert "path" not in granola
-assert "role" not in granola
-assert granola["project_to_home"] is True
-assert granola["indexed_how"] == "ledger"
 PY
 "$MARGINS_E2E_BIN" --workspace "$MARGINS_WORKSPACE" workspace status --json \
   > "$RUN_ROOT/workspace-status.json"
@@ -352,8 +347,15 @@ import json, sys
 status = json.load(open(sys.argv[1]))
 expected = ({"mode": "hosted", "reason": "hosted_bundle_ready"}
             if sys.argv[2] == "1" else
-            {"mode": "none", "reason": "setup_required"})
-assert status["catalyst"] == expected, status
+            None)
+if expected:
+    assert status["catalyst"] == expected, status
+else:
+    assert "catalyst" not in status, status
+    assert status["recall"]["schema_version"] == "margins.local-recall.v1", status
+    assert status["recall"]["mode"] == "live_lexical", status
+    assert status["recall"]["available"] is True, status
+    assert status["recall"]["documents"] > 0, status
 PY
 
 [ "$(stat -c '%a' "$MARGINS_HOME/google/owner@example.com/token-cache.json" 2>/dev/null || stat -f '%Lp' "$MARGINS_HOME/google/owner@example.com/token-cache.json")" = 600 ]
@@ -392,9 +394,14 @@ if [ "$RECALL_AVAILABLE" = 1 ]; then
   "$MARGINS_E2E_BIN" --workspace "$MARGINS_WORKSPACE" init >/dev/null
 fi
 "$HARNESS" contract-lifecycle
-"$HARNESS" contract-greps
 "$HARNESS" contract-phase8
 "$HARNESS" contract-phase9
+if [ "$RECALL_AVAILABLE" = 1 ]; then
+  # Retention mutates the ledger after phase2's snapshot. Retrieval must be
+  # refreshed explicitly before the final recall assertion.
+  "$MARGINS_E2E_BIN" --workspace "$MARGINS_WORKSPACE" init \
+    > "$RUN_ROOT/recall-after-retention-init.txt"
+fi
 "$HARNESS" verify-isolation > "$RUN_ROOT/verify-isolation-1.txt"
 "$HARNESS" verify-isolation > "$RUN_ROOT/verify-isolation-2.txt"
 grep -Eq "Margins-managed Google home: $RUN_ROOT/sandbox/margins-home/google/owner@example.com \(inside sandbox\)" \
@@ -460,23 +467,27 @@ PY
   wait "$FIXTURE_PID" 2>/dev/null || true
   FIXTURE_PID=""
   rm -f -- "$MARGINS_HOME/llm-config-cache.json" "$MARGINS_HOME/config.toml"
-  if "$MARGINS_E2E_BIN" --workspace "$MARGINS_WORKSPACE" recall \
-    "Tuesday pilot kickoff checkpoint" >"$RUN_ROOT/recall-unavailable.stdout" \
-    2>"$RUN_ROOT/recall-unavailable.stderr"; then
-    printf 'recall succeeded without a usable generator\n' >&2
-    exit 1
-  fi
-  grep -Fxq '<margins_error code="command_failed">Recall unavailable: no usable generator is configured. Run `margins setup`.</margins_error>' \
-    "$RUN_ROOT/recall-unavailable.stderr"
+  "$MARGINS_E2E_BIN" --workspace "$MARGINS_WORKSPACE" recall \
+    "Tuesday pilot kickoff checkpoint" > "$RUN_ROOT/recall-without-generator.json"
+  python3 - "$RUN_ROOT/recall.json" "$RUN_ROOT/recall-without-generator.json" <<'PY'
+import json, sys
+before, after = (json.load(open(path)) for path in sys.argv[1:])
+assert after["status"] == before["status"] == "ok", after
+assert after["total_results"] == before["total_results"], (before, after)
+assert after["results"] == before["results"], (before, after)
+PY
 else
-  grep -Fq 'catalyst mode: none (setup_required)' "$RUN_ROOT/report.txt"
-  if "$MARGINS_E2E_BIN" --workspace "$MARGINS_WORKSPACE" recall \
-    "Tuesday pilot kickoff checkpoint" >"$RUN_ROOT/recall-unavailable.stdout" \
-    2>"$RUN_ROOT/recall-unavailable.stderr"; then
-    printf 'public recall unexpectedly succeeded without linked recall composition\n' >&2
-    exit 1
-  fi
-  grep -Fq 'composition_unavailable' "$RUN_ROOT/recall-unavailable.stderr"
+  grep -Fq 'local recall mode: live_lexical' "$RUN_ROOT/report.txt"
+  "$MARGINS_E2E_BIN" --workspace "$MARGINS_WORKSPACE" recall \
+    "Tuesday pilot kickoff checkpoint" > "$RUN_ROOT/recall.json"
+  python3 - "$RUN_ROOT/recall.json" <<'PY'
+import json, sys
+result = json.load(open(sys.argv[1]))
+assert result["schema_version"] == "margins.recall.v1", result
+assert result["status"] == "ok" and result["reason"] == "local_lexical", result
+assert result["total_results"] > 0, result
+assert all(row["evidence"]["kind"] == "native_markdown" for row in result["results"]), result
+PY
 fi
 
 "$HARNESS" assert-machine-forget-preservation

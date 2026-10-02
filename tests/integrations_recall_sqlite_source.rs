@@ -19,6 +19,22 @@ use std::sync::Mutex;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+fn assert_stale_recall(
+    workspace: &margins_workflows::workspace::ResolvedWorkspace,
+    query: &str,
+    binding: &str,
+    reason: &str,
+) {
+    let error = match margins::recall::recall(workspace, query, None) {
+        Err(error) => error,
+        Ok(_) => panic!("stale materialization must block semantic retrieval"),
+    };
+    assert!(error.to_string().contains("recall_unavailable_stale_materialization"));
+    let sources = margins::recall::workspace_source_refresh_staleness(workspace).unwrap();
+    assert!(sources[binding].stale);
+    assert_eq!(sources[binding].stale_reason.as_deref(), Some(reason));
+}
+
 #[test]
 fn materialized_calendar_events_keep_stable_refs_and_multi_attendee_occurrences() {
     let _env_guard = ENV_LOCK.lock().unwrap();
@@ -142,14 +158,7 @@ fn materialized_calendar_events_keep_stable_refs_and_multi_attendee_occurrences(
     store
         .record_failed_reconcile(&ctx, "simulated Calendar refresh failure")
         .unwrap();
-    let stale = margins::recall::recall(&workspace, "Calendar checkpoint", None).unwrap();
-    assert_eq!(stale.results.len(), recall.results.len());
-    assert_eq!(
-        stale.freshness.status,
-        margins_workflows::integrations::FreshnessStatus::Error
-    );
-    assert!(stale.freshness.stale);
-    assert_eq!(stale.freshness.reason.as_deref(), Some("refresh_failed"));
+    assert_stale_recall(&workspace, "Calendar checkpoint", "calendar", "refresh_failed");
     store
         .update_health(&ctx, HealthStatus::Fresh, None)
         .unwrap();
@@ -341,18 +350,7 @@ fn materialized_mail_threads_use_generic_shared_document_context() {
     store
         .record_failed_reconcile(&ctx, "simulated Gmail refresh failure")
         .unwrap();
-    let stale = margins::recall::recall(&workspace, "Alice proposes checkpoint", None).unwrap();
-    assert!(stale.freshness.stale);
-    assert_eq!(
-        stale.freshness.status,
-        margins_workflows::integrations::FreshnessStatus::Error
-    );
-    assert_eq!(stale.freshness.reason.as_deref(), Some("refresh_failed"));
-    assert_eq!(stale.results.len(), recall.results.len());
-    assert_eq!(
-        stale.freshness.materialization[0].freshness.status,
-        margins_workflows::integrations::FreshnessStatus::Error
-    );
+    assert_stale_recall(&workspace, "Alice proposes checkpoint", "mail", "refresh_failed");
     store
         .update_health(&ctx, HealthStatus::Fresh, None)
         .unwrap();
@@ -520,30 +518,14 @@ fn materialized_mail_threads_use_generic_shared_document_context() {
         },
     )
     .unwrap();
-    let selector_stale =
-        margins::recall::recall(&workspace, "Alice proposes checkpoint", None).unwrap();
-    assert_eq!(selector_stale.results.len(), display_rename.results.len());
-    assert_eq!(
-        selector_stale.freshness.status,
-        margins_workflows::integrations::FreshnessStatus::Stale
-    );
-    assert_eq!(
-        selector_stale.freshness.reason.as_deref(),
-        Some("refresh_required")
-    );
+    assert_stale_recall(&workspace, "Alice proposes checkpoint", "important-mail", "refresh_required");
     margins::recall::provision_workspace_for_init(&workspace).unwrap();
     assert_eq!(
         generator.request_count(),
         2,
         "selector changes retain stable Gmail document and prompt hashes"
     );
-    let still_stale =
-        margins::recall::recall(&workspace, "Alice proposes checkpoint", None).unwrap();
-    assert_eq!(
-        still_stale.freshness.reason.as_deref(),
-        Some("refresh_required"),
-        "reindexing cannot substitute for a materialization refresh"
-    );
+    assert_stale_recall(&workspace, "Alice proposes checkpoint", "important-mail", "refresh_required");
 
     store
         .replace_email_thread_snapshot_with_materialization_fingerprint(
@@ -728,7 +710,11 @@ fn native_markdown_hashes_survive_binding_rename_and_additional_root() {
     let _generator = fixture_generator::FixtureGenerator::start(&margins_home);
     margins::recall::provision_workspace_for_init(&workspace).unwrap();
 
-    let namespace = native_markdown_collection_namespace(&reference).unwrap();
+    let reference_path = match &workspace.config.bindings["research"] {
+        WorkspaceBinding::NativeMarkdown { path, .. } => path,
+        _ => unreachable!("research must be a native Markdown source"),
+    };
+    let namespace = native_markdown_collection_namespace(reference_path).unwrap();
     let index = rusqlite::Connection::open(workspace.recall_path()).unwrap();
     let document_hashes_before = native_document_hashes(&index, &namespace);
     assert_eq!(document_hashes_before.len(), 4);
@@ -813,7 +799,7 @@ fn scan_style_native_folder_entity_materializes_with_source_qualified_identity()
         "fixture generator should be asked to materialize the folder catalyst"
     );
 
-    let namespace = native_markdown_collection_namespace(&home).unwrap();
+    let namespace = native_markdown_collection_namespace(&workspace.home_dir).unwrap();
     let folder_entity = format!("{namespace}/people");
     let index = rusqlite::Connection::open(workspace.recall_path()).unwrap();
     let folder_occurrences: i64 = index
@@ -911,7 +897,7 @@ fn thin_source_qualified_folder_uses_expanded_link_catalysts() {
     assert_eq!(status.readiness.items_pending, 0, "{status:?}");
     assert!(generator.request_count() > 0);
 
-    let namespace = native_markdown_collection_namespace(&home).unwrap();
+    let namespace = native_markdown_collection_namespace(&workspace.home_dir).unwrap();
     let folder_entity = format!("{namespace}/people");
     let index = rusqlite::Connection::open(workspace.recall_path()).unwrap();
     let link_catalysts: i64 = index

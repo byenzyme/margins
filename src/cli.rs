@@ -3378,7 +3378,7 @@ fn debit_queued_samples(queued_samples: &AtomicU64, consumed: u64) {
     for _ in 0..128 {
         if queued_samples
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-                (queued >= consumed).then_some(queued - consumed)
+                (queued >= consumed).then(|| queued - consumed)
             })
             .is_ok()
         {

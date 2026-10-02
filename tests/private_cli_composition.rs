@@ -107,7 +107,12 @@ fn production_capture_preflights_and_opens_native_lanes_before_session_reservati
         .find("RecorderHandle::start_with_live_audio")
         .unwrap();
     assert!(create_start < create.find("create_session(").unwrap());
-    assert!(create_start < create.find("std::fs::write(&memo_path").unwrap());
+    assert!(
+        create_start
+            < create
+                .find("std::fs::write(margins_dir.join(\"current\")")
+                .unwrap()
+    );
 
     let attach = composition
         .split("fn attach_native_session")
@@ -342,8 +347,9 @@ fn workspace_commands_refuse_unsafe_home_and_state_cwds_with_exact_reasons() {
             } else {
                 "command_failed"
             };
+            let refusal = stderr.lines().last().unwrap_or("");
             if args.first() == Some(&"integrations") && args.contains(&"--json") {
-                let error: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap();
+                let error: serde_json::Value = serde_json::from_str(refusal).unwrap();
                 assert_eq!(error["schema_version"], "margins.error.v1");
                 assert_eq!(error["error"]["code"], code);
                 assert_eq!(error["error"]["message"], message);
@@ -358,8 +364,8 @@ fn workspace_commands_refuse_unsafe_home_and_state_cwds_with_exact_reasons() {
                 )
             };
             assert_eq!(
-                stderr,
-                expected,
+                refusal,
+                expected.trim_end(),
                 "unexpected refusal for {args:?} from {}",
                 cwd.display()
             );

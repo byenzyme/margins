@@ -1217,7 +1217,7 @@ mod tests {
         let corpus = prepare(&workspace, false).unwrap();
         let folder_identity = format!(
             "{}/people",
-            native_markdown_collection_namespace(&notes).unwrap()
+            native_markdown_collection_namespace(&workspace.home_dir).unwrap()
         );
         let loaded = recall_engine::config::EnzymeConfig::load_at(
             &corpus.virtual_home,
@@ -1275,7 +1275,7 @@ mod tests {
         let corpus = prepare(&workspace, false).unwrap();
         let expected = BTreeSet::from([format!(
             "{}/people",
-            native_markdown_collection_namespace(&home).unwrap()
+            native_markdown_collection_namespace(&workspace.home_dir).unwrap()
         )]);
 
         assert_eq!(corpus.selected_entity_names, expected);
