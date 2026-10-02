@@ -97,15 +97,6 @@ pub fn download_model_with_cancel(
     mut progress: impl FnMut(u64, u64),
     is_cancelled: &(dyn Fn() -> bool + Send + Sync),
 ) -> Result<PathBuf> {
-    if matches!(
-        std::env::var("MARGINS_FLUID_COREML_VERSION")
-            .ok()
-            .map(|version| version.to_ascii_lowercase())
-            .as_deref(),
-        Some("v3" | "3")
-    ) {
-        eprintln!("warning: MARGINS_FLUID_COREML_VERSION=v3 requested; setup downloads the pinned v2 CoreML model");
-    }
     download_model_from(
         TREE_URL,
         FILE_URL,
@@ -145,6 +136,20 @@ fn download_model_from(
     }
     let _lock = ModelInstallLock(lock);
     anyhow::ensure!(!is_cancelled(), "model preparation canceled");
+    // Another caller may have completed the install while we waited. Keep its
+    // live model directory in place instead of downloading and swapping it.
+    if valid_model(&final_dir) {
+        return Ok(final_dir);
+    }
+    if matches!(
+        std::env::var("MARGINS_FLUID_COREML_VERSION")
+            .ok()
+            .map(|version| version.to_ascii_lowercase())
+            .as_deref(),
+        Some("v3" | "3")
+    ) {
+        eprintln!("warning: MARGINS_FLUID_COREML_VERSION=v3 requested; setup downloads the pinned v2 CoreML model");
+    }
     let tree = Command::new("/usr/bin/curl")
         .args([
             "--fail",
@@ -378,7 +383,7 @@ mod tests {
     #[cfg(feature = "model-download")]
     use std::net::TcpListener;
     #[cfg(feature = "model-download")]
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     #[cfg(feature = "model-download")]
     use std::sync::Arc;
 
@@ -432,13 +437,15 @@ mod tests {
 
     #[cfg(feature = "model-download")]
     #[test]
-    fn downloads_required_assets_from_fake_model_host() {
+    fn concurrent_callers_download_once_without_swapping_live_model() {
         let temp = tempfile::tempdir().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let server_stop = stop.clone();
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let server_request_count = request_count.clone();
         let server = std::thread::spawn(move || {
             let files = [
                 "Preprocessor.mlmodelc/coremldata.bin",
@@ -450,6 +457,7 @@ mod tests {
             while !server_stop.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        server_request_count.fetch_add(1, Ordering::Relaxed);
                         let mut request = [0u8; 2048];
                         let count = stream.read(&mut request).unwrap();
                         let line = String::from_utf8_lossy(&request[..count]);
@@ -476,13 +484,51 @@ mod tests {
             }
         });
         let target = temp.path().join("parakeet-tdt-0.6b-v2");
-        let result = download_model_from(
-            &format!("http://{address}/tree"),
-            &format!("http://{address}/files"),
-            target.clone(),
-            &mut |_, _| {},
-            &|| false,
-        );
+        let tree_url = format!("http://{address}/tree");
+        let file_url = format!("http://{address}/files");
+        let (installed_tx, installed_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first_target = target.clone();
+        let first_tree = tree_url.clone();
+        let first_files = file_url.clone();
+        let first = std::thread::spawn(move || {
+            let mut announced = false;
+            download_model_from(
+                &first_tree,
+                &first_files,
+                first_target.clone(),
+                &mut |_, _| {
+                    if !announced && first_target.exists() {
+                        announced = true;
+                        installed_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                    }
+                },
+                &|| false,
+            )
+        });
+        installed_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        let first_requests = request_count.load(Ordering::Relaxed);
+        fs::write(target.join("loaded.marker"), b"keep").unwrap();
+        let second_target = target.clone();
+        let second_tree = tree_url.clone();
+        let second_files = file_url.clone();
+        let second = std::thread::spawn(move || {
+            download_model_from(
+                &second_tree,
+                &second_files,
+                second_target,
+                &mut |_, _| {},
+                &|| false,
+            )
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        release_tx.send(()).unwrap();
+        let result = first.join().unwrap();
+        let second_result = second.join().unwrap();
+        assert_eq!(request_count.load(Ordering::Relaxed), first_requests);
         let cancelled = AtomicBool::new(false);
         let canceled_target = temp.path().join("canceled-model");
         let canceled_result = download_model_from(
@@ -518,6 +564,8 @@ mod tests {
         stop.store(true, Ordering::Relaxed);
         server.join().unwrap();
         assert_eq!(result.unwrap(), target);
+        assert_eq!(second_result.unwrap(), target);
+        assert_eq!(fs::read(target.join("loaded.marker")).unwrap(), b"keep");
         assert!(format!("{:#}", canceled_result.unwrap_err()).contains("canceled"));
         assert!(!canceled_target.exists());
         assert!(format!("{:#}", locked_result.unwrap_err()).contains("canceled"));
