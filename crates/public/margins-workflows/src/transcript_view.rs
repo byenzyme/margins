@@ -133,16 +133,18 @@ pub fn load_transcript_view(
         (source, "full")
     } else {
         let (path, body) = read_registered_or_fallback(work_dir, margins_dir, &name)?;
+        let pending = path == margins_dir.join(format!("{name}_capture_context.md"))
+            && body.starts_with("<!-- margins:transcript-pending-v1 -->");
         (
             TranscriptSource {
                 source_path: path,
                 body,
                 decoded_until_ms: 0,
                 committed_until_ms: 0,
-                terminal: true,
+                terminal: !pending,
                 live_checkpoint: false,
             },
-            "aligned",
+            if pending { "pending" } else { "aligned" },
         )
     };
     // The public store has no process-level capture status. A current session

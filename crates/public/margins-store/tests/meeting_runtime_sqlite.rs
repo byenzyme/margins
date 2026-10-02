@@ -15,16 +15,76 @@ use std::{
 struct SqliteRecorderAdapter {
     directory: PathBuf,
     runtime: MeetingRuntime<SqliteMeetingRuntimeStorage>,
+    use_facade: bool,
 }
 
 impl RecorderConformanceAdapter for SqliteRecorderAdapter {
-    type Error = margins_meeting_runtime::RuntimeError<anyhow::Error>;
+    type Error = anyhow::Error;
 
     fn send(
         &mut self,
         message: ClientMessageV1,
     ) -> Result<margins_meeting_runtime::RuntimeResponseV1, Self::Error> {
-        self.runtime.handle(message)
+        if !self.use_facade {
+            return self
+                .runtime
+                .handle(message)
+                .map_err(|error| anyhow::anyhow!(error.to_string()));
+        }
+        let recorder = self.runtime.recorder();
+        let ClientMessageV1 {
+            session_id,
+            message_id,
+            sent_at_unix_ms,
+            body,
+            ..
+        } = message;
+        let result = match body {
+            ClientMessageBodyV1::CreateSession(create) => {
+                recorder.reserve(&session_id, message_id, sent_at_unix_ms, create)
+            }
+            ClientMessageBodyV1::AudioChunk(chunk) => {
+                let lane = recorder
+                    .open_lane(&session_id, chunk.segment_id, chunk.lane_id)
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                recorder.append_chunk(
+                    &lane,
+                    message_id,
+                    sent_at_unix_ms,
+                    chunk.sequence,
+                    chunk.starts_at_ms,
+                    chunk.duration_ms,
+                    chunk.payload,
+                )
+            }
+            ClientMessageBodyV1::CloseSegment(close)
+                if close.reason == SegmentCloseReasonV1::Pause =>
+            {
+                recorder.pause(&session_id, message_id, sent_at_unix_ms, close)
+            }
+            ClientMessageBodyV1::CloseSegment(close) => {
+                recorder.close_segment(&session_id, message_id, sent_at_unix_ms, close)
+            }
+            ClientMessageBodyV1::FinalizeSession(finalize) => {
+                recorder.finish(&session_id, message_id, sent_at_unix_ms, finalize)
+            }
+            ClientMessageBodyV1::BeginCaptureGeneration(begin) => {
+                recorder.start_generation(&session_id, message_id, sent_at_unix_ms, begin)
+            }
+            ClientMessageBodyV1::ResumeSession(resume) => {
+                return recorder
+                    .recover(
+                        &session_id,
+                        message_id,
+                        sent_at_unix_ms,
+                        resume.after_server_sequence,
+                    )
+                    .map(|(_, response)| response)
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+            }
+            _ => panic!("conformance suite sent an unsupported command"),
+        };
+        result.map_err(|error| anyhow::anyhow!(error.to_string()))
     }
 
     fn restart(&mut self) {
@@ -39,8 +99,11 @@ fn sqlite_recorder_conformance_projects_one_canonical_session_and_two_audio_arti
     let mut adapter = SqliteRecorderAdapter {
         directory: temp.path().to_path_buf(),
         runtime: MeetingRuntime::new(SqliteMeetingRuntimeStorage::open(temp.path()).unwrap()),
+        use_facade: false,
     };
     assert_recorder_conformance(&mut adapter, "conform");
+    adapter.use_facade = true;
+    assert_recorder_conformance(&mut adapter, "conform-facade");
     let connection = rusqlite::Connection::open(adapter.runtime.storage().database_path()).unwrap();
     let count: i64 = connection
         .query_row(
@@ -65,12 +128,8 @@ fn sqlite_recorder_conformance_projects_one_canonical_session_and_two_audio_arti
         )
         .unwrap();
     assert_eq!((count, segment_count, artifact_count), (1, 2, 2));
-    assert_eq!(lifecycle, "ended");
-    assert!(
-        std::fs::read_to_string(temp.path().join("conform_capture_context.md"))
-            .unwrap()
-            .contains("Transcript pending")
-    );
+    assert_eq!(lifecycle, "active");
+    assert!(!temp.path().join("conform_capture_context.md").exists());
 }
 
 #[test]
@@ -84,6 +143,46 @@ fn runtime_storage_rejects_new_session_ids_that_escape_artifact_paths() {
         .unwrap()
         .join("escape_capture_context.md")
         .exists());
+}
+
+#[test]
+fn pending_context_requires_finalized_audio_and_normal_finish() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = MeetingRuntime::new(SqliteMeetingRuntimeStorage::open(temp.path()).unwrap());
+    runtime.handle(create("empty")).unwrap();
+    runtime
+        .handle(message(
+            "empty",
+            "finish-empty",
+            ClientMessageBodyV1::FinalizeSession(FinalizeSessionV1 {
+                ended_at_ms: SessionMillis(0),
+                segment_closes: vec![],
+                reason: SessionFinalizeReasonV1::Completed,
+            }),
+        ))
+        .unwrap();
+    assert!(!temp.path().join("empty_capture_context.md").exists());
+
+    runtime.handle(create("cancelled")).unwrap();
+    runtime
+        .handle(chunk("cancelled", "chunk-0", 0, 9_600))
+        .unwrap();
+    runtime.handle(close("cancelled", 1)).unwrap();
+    runtime
+        .handle(message(
+            "cancelled",
+            "finish-cancelled",
+            ClientMessageBodyV1::FinalizeSession(FinalizeSessionV1 {
+                ended_at_ms: SessionMillis(20),
+                segment_closes: vec![SegmentCloseReferenceV1 {
+                    segment_id: "part".into(),
+                    close_message_id: "close".into(),
+                }],
+                reason: SessionFinalizeReasonV1::Cancelled,
+            }),
+        ))
+        .unwrap();
+    assert!(!temp.path().join("cancelled_capture_context.md").exists());
 }
 
 fn message(session: &str, id: impl Into<String>, body: ClientMessageBodyV1) -> ClientMessageV1 {
@@ -461,10 +560,13 @@ mod memo_authority {
                 "committed",
             )
             .unwrap();
+        assert!(written.mirror_stale);
         assert_eq!(storage.memo("meeting").unwrap().revision, written.revision);
+        assert!(storage.memo("meeting").unwrap().mirror_stale);
         assert!(path.is_dir());
         std::fs::remove_dir(&path).unwrap();
         storage.refresh_memo_mirror("meeting").unwrap();
+        assert!(!storage.memo("meeting").unwrap().mirror_stale);
         assert!(std::fs::read_to_string(&path)
             .unwrap()
             .contains("committed"));
@@ -477,5 +579,15 @@ mod memo_authority {
         assert!(std::fs::read_to_string(&path)
             .unwrap()
             .contains("replacement"));
+        std::fs::write(&path, "TUI wrote newer Markdown directly\n").unwrap();
+        let replay = storage
+            .replace_memo_lines("meeting", "bob", "replace", &written.revision, &lines)
+            .unwrap();
+        assert!(replay.replayed);
+        assert!(replay.mirror_stale);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "TUI wrote newer Markdown directly\n"
+        );
     }
 }

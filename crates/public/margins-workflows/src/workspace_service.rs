@@ -51,6 +51,11 @@ pub const OP_IMPORT_WRITE: &str = "import.write";
 pub const OP_IMPORT_RECEIPT: &str = "import.receipt";
 pub const OP_RECALL_QUERY: &str = "recall.query";
 
+/// Preserve the typed storage conflict across the transport-neutral service.
+pub fn is_memo_revision_conflict(error: &anyhow::Error) -> bool {
+    error.is::<margins_store::MemoRevisionConflict>()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServicePrincipal {
     pub id: String,
@@ -1116,6 +1121,7 @@ impl WorkspaceService {
             session_id: session_id.clone(),
             revision: memo.revision,
             lines: memo.lines.into_iter().map(memo_line).collect(),
+            mirror_stale: memo.mirror_stale,
         })
     }
 
@@ -1142,6 +1148,7 @@ impl WorkspaceService {
             session_id: session_id.clone(),
             revision: memo.revision,
             lines: memo.lines.into_iter().map(memo_line).collect(),
+            mirror_stale: memo.mirror_stale,
         })
     }
 
@@ -1170,6 +1177,7 @@ impl WorkspaceService {
             session_id: session_id.clone(),
             revision: memo.revision,
             lines: memo.lines.into_iter().map(memo_line).collect(),
+            mirror_stale: memo.mirror_stale,
         })
     }
 

@@ -12,6 +12,7 @@ pub struct AuthorityMemoReceipt {
     pub revision: String,
     pub lines: Vec<TimedMemoLine>,
     pub replayed: bool,
+    pub mirror_stale: bool,
 }
 
 /// The caller edited an older memo snapshot. Read `memo` again before retrying.
@@ -462,10 +463,17 @@ impl SqliteWorkspaceAuthorityStorage {
             .optional()?;
         let document = if let Some((revision, json)) = stored {
             let lines: Vec<TimedMemoLine> = serde_json::from_str(&json)?;
+            let mirror_stale = self
+                .mirror_is_stale_for_lines(session_id, &lines)
+                .unwrap_or_else(|error| {
+                    log::warn!("could not inspect memo mirror for {session_id}: {error}");
+                    true
+                });
             return Ok(AuthorityMemoReceipt {
                 revision,
                 lines,
                 replayed: false,
+                mirror_stale,
             });
         } else {
             let markdown = std::fs::read_to_string(self.directory.join(format!("{session_id}.md")))
@@ -476,6 +484,7 @@ impl SqliteWorkspaceAuthorityStorage {
             revision: document.revision(),
             lines: document.into_lines(),
             replayed: false,
+            mirror_stale: false,
         })
     }
 
@@ -562,7 +571,14 @@ impl SqliteWorkspaceAuthorityStorage {
             let mut receipt: AuthorityMemoReceiptWire = serde_json::from_str(&response)?;
             receipt.replayed = true;
             drop(tx);
-            let _ = self.refresh_memo_mirror(session_id);
+            // A replay is read-only: the TUI may have edited the Markdown
+            // mirror directly since the original request was committed.
+            receipt.mirror_stale = self
+                .memo_mirror_is_stale(session_id)
+                .unwrap_or_else(|error| {
+                    log::warn!("could not inspect memo mirror for {session_id}: {error}");
+                    true
+                });
             return Ok(receipt.into());
         }
         let current = self.memo_in_transaction(&tx, session_id)?;
@@ -593,6 +609,7 @@ impl SqliteWorkspaceAuthorityStorage {
             revision: document.revision(),
             lines: document.clone().into_lines(),
             replayed: false,
+            mirror_stale: false,
         };
         let response = serde_json::to_string(&AuthorityMemoReceiptWire::from(&receipt))?;
         tx.execute(
@@ -604,8 +621,25 @@ impl SqliteWorkspaceAuthorityStorage {
             params![session_id, principal_id, request_id, fingerprint, response],
         )?;
         tx.commit()?;
-        let _ = self.refresh_memo_mirror(session_id);
+        let mut receipt = receipt;
+        if let Err(error) = self.refresh_memo_mirror(session_id) {
+            log::warn!("memo mirror projection failed for {session_id}: {error}");
+            receipt.mirror_stale = true;
+        }
         Ok(receipt)
+    }
+
+    fn memo_mirror_is_stale(&self, session_id: &str) -> Result<bool> {
+        Ok(self.memo(session_id)?.mirror_stale)
+    }
+
+    fn mirror_is_stale_for_lines(&self, session_id: &str, lines: &[TimedMemoLine]) -> Result<bool> {
+        let expected = TimedMemoDocument::from_committed(lines.to_vec()).export_markdown();
+        match std::fs::read_to_string(self.directory.join(format!("{session_id}.md"))) {
+            Ok(actual) => Ok(actual != expected),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Rebuild the optional Markdown export from committed SQLite state.
@@ -640,6 +674,7 @@ impl SqliteWorkspaceAuthorityStorage {
                 revision,
                 lines: serde_json::from_str(&json)?,
                 replayed: false,
+                mirror_stale: false,
             });
         }
         let markdown = std::fs::read_to_string(self.directory.join(format!("{session_id}.md")))
@@ -649,6 +684,7 @@ impl SqliteWorkspaceAuthorityStorage {
             revision: document.revision(),
             lines: document.into_lines(),
             replayed: false,
+            mirror_stale: false,
         })
     }
 
@@ -723,6 +759,8 @@ struct AuthorityMemoReceiptWire {
     revision: String,
     lines: Vec<TimedMemoLine>,
     replayed: bool,
+    #[serde(default)]
+    mirror_stale: bool,
 }
 
 impl From<&AuthorityMemoReceipt> for AuthorityMemoReceiptWire {
@@ -731,6 +769,7 @@ impl From<&AuthorityMemoReceipt> for AuthorityMemoReceiptWire {
             revision: value.revision.clone(),
             lines: value.lines.clone(),
             replayed: value.replayed,
+            mirror_stale: value.mirror_stale,
         }
     }
 }
@@ -741,6 +780,7 @@ impl From<AuthorityMemoReceiptWire> for AuthorityMemoReceipt {
             revision: value.revision,
             lines: value.lines,
             replayed: value.replayed,
+            mirror_stale: value.mirror_stale,
         }
     }
 }

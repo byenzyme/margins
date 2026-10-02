@@ -5,8 +5,8 @@
 
 #![forbid(unsafe_code)]
 
-/// Reusable producer-adapter contract. Kept public so external HTTP and native
-/// adapters can run the same lifecycle suite against their own transport.
+/// Reusable producer-adapter contract for downstream tests.
+#[cfg(feature = "test-support")]
 pub mod test_support {
     //! Recorder conformance shared by in-process and transport adapters.
     //! The adapter owns its temporary store and must reopen it in `restart`.
@@ -146,6 +146,12 @@ pub mod test_support {
         let zero = pcm(session, "first", 0, 0);
         assert!(has_ack(&adapter.send(zero.clone()).unwrap()));
         assert!(adapter.send(zero).unwrap().idempotent_replay);
+        let mut conflicting = pcm(session, "first", 0, 0);
+        if let ClientMessageBodyV1::AudioChunk(chunk) = &mut conflicting.body {
+            chunk.payload[0] ^= 1;
+            chunk.payload_digest.hex = format!("{:x}", Sha256::digest(&chunk.payload));
+        }
+        assert_rejected(adapter.send(conflicting));
         assert!(has_ack(
             &adapter.send(pcm(session, "first", 1, 100)).unwrap()
         ));
@@ -193,6 +199,7 @@ pub mod test_support {
             .iter()
             .any(|event| matches!(event.body, ServerMessageBodyV1::SegmentFinalized(_))));
         assert!(adapter.send(pause).unwrap().idempotent_replay);
+        assert_rejected(adapter.send(pcm(session, "first", 4, 400)));
 
         // Resume capture in a new segment, then finish the complete session.
         assert!(has_ack(
@@ -232,8 +239,36 @@ pub mod test_support {
             }),
         );
         assert!(has_finalized(&adapter.send(finish.clone()).unwrap()));
+        adapter.restart();
         let repeated = adapter.send(finish).unwrap();
         assert!(repeated.idempotent_replay && has_finalized(&repeated));
+        assert_rejected(adapter.send(pcm(session, "late", 0, 500)));
+        let attach = command(
+            session,
+            "attach",
+            ClientMessageBodyV1::BeginCaptureGeneration(
+                margins_meeting_protocol::BeginCaptureGenerationV1 {
+                    prior_finalize_message_id: "finish".into(),
+                    started_at_ms: SessionMillis(500),
+                },
+            ),
+        );
+        let started = adapter.send(attach.clone()).unwrap();
+        assert!(started
+            .messages
+            .iter()
+            .any(|event| matches!(event.body, ServerMessageBodyV1::CaptureGenerationStarted(_))));
+        adapter.restart();
+        assert!(adapter.send(attach).unwrap().idempotent_replay);
+    }
+
+    fn assert_rejected<E: Debug>(response: Result<RuntimeResponseV1, E>) {
+        if let Ok(response) = response {
+            assert!(response
+                .messages
+                .iter()
+                .any(|event| matches!(event.body, ServerMessageBodyV1::CommandRejected(_))));
+        }
     }
 }
 
@@ -675,6 +710,13 @@ impl StoredSessionV1 {
             .as_ref()
             .filter(|record| record.finalized)
             .map(|record| (&record.message_id, record.command.ended_at_ms))
+    }
+
+    pub fn finalized_reason(&self) -> Option<margins_meeting_protocol::SessionFinalizeReasonV1> {
+        self.finalize
+            .as_ref()
+            .filter(|record| record.finalized)
+            .map(|record| record.command.reason)
     }
 
     pub fn next_event_sequence(&self) -> u64 {
@@ -2039,6 +2081,7 @@ impl<S: MeetingRuntimeStorage> Recorder<'_, S> {
         sent_at: UnixMillis,
         body: ClientMessageBodyV1,
     ) -> Result<RuntimeResponseV1, RecorderError<S::Error>> {
+        let submitted_id = message_id.clone();
         let response = self
             .runtime
             .handle(ClientMessageV1 {
@@ -2053,7 +2096,11 @@ impl<S: MeetingRuntimeStorage> Recorder<'_, S> {
             .messages
             .iter()
             .find_map(|message| match &message.body {
-                ServerMessageBodyV1::CommandRejected(value) => Some(value),
+                ServerMessageBodyV1::CommandRejected(value)
+                    if value.rejected_message_id == submitted_id =>
+                {
+                    Some(value)
+                }
                 _ => None,
             })
         {
@@ -2101,7 +2148,7 @@ impl<S: MeetingRuntimeStorage> Recorder<'_, S> {
             || session
                 .segments
                 .get(segment_id.as_ref())
-                .is_some_and(|segment| segment.close.is_some())
+                .is_some_and(|segment| segment.close.as_ref().is_some_and(|close| close.finalized))
         {
             return Err(RecorderError::InvalidTransition(
                 "segment is closed or session is finalized",

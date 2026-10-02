@@ -13,7 +13,6 @@
 
 #[path = "legacy.rs"]
 pub mod canonical;
-pub mod index;
 mod authority;
 mod meeting_runtime;
 mod sqlite;
@@ -22,6 +21,5 @@ pub use authority::{
     AuthorityMemoReceipt, ImportReceipt, MemoRevisionConflict, MemoWrite,
     SqliteWorkspaceAuthorityStorage,
 };
-pub use index::{list_session_index, SessionIndexEntry, SessionIndexQuery};
 pub use meeting_runtime::{MeetingRuntimeStorageStats, SqliteMeetingRuntimeStorage};
 pub use sqlite::SqliteSessionRepository;

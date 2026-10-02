@@ -9,6 +9,10 @@ readme = "README.md"
 keywords = ["meeting", "protocol", "state-machine", "transcription"]
 categories = ["data-structures"]
 
+[features]
+default = []
+test-support = []
+
 [dependencies]
 blake3 = "1"
 margins-meeting-protocol = { version = "0.1.0", path = "../margins-meeting-protocol" }
