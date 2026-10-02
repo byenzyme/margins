@@ -9,8 +9,8 @@ readme = "README.md"
 
 [features]
 default = []
-parakeet-asr = ["margins-media/parakeet-onnx-dynamic"]
-coreml-asr = ["margins-media/coreml-asr"]
+parakeet-asr = ["margins-media/parakeet-onnx-dynamic", "margins-media/model-download"]
+coreml-asr = ["margins-media/coreml-asr", "margins-media/model-download"]
 
 [dependencies]
 anyhow = "1"
@@ -35,7 +35,7 @@ tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.5", features = ["cors"] }
 
 [dev-dependencies]
-tower = "0.4"
+tower = { version = "0.5", features = ["util"] }
 
 [[bin]]
 name = "margins-server"

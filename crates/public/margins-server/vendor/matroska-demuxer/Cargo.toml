@@ -36,7 +36,3 @@ repository = "https://github.com/hasenbanck/matroska-demuxer"
 [lib]
 name = "matroska_demuxer"
 path = "src/lib.rs"
-
-[[test]]
-name = "lib"
-path = "tests/lib.rs"

@@ -219,6 +219,7 @@ fn render_remote_offline_transcript(body: &str, memo: &str) -> Option<String> {
     let (header, original_timeline) = body.split_once("## Timeline")?;
     if !header
         .contains("Source: Margins remote offline Parakeet TDT ONNX transcript and memo context.")
+        && !header.contains("Source: Margins remote offline speech transcript and memo context.")
     {
         return None;
     }
@@ -839,6 +840,15 @@ fn artifact_session_names(dir: &Path) -> Vec<String> {
 mod tests {
     use super::*;
     use chrono::Local;
+
+    #[test]
+    fn generic_remote_asr_marker_uses_current_memo_projection() {
+        let body = "# Transcript\n\nSession: `meet`\nSource: Margins remote offline speech transcript and memo context.\n\n## Timeline\n\n[00:01] you (mic): hello\n[00:02] memo: stale\n";
+        let rendered = render_remote_offline_transcript(body, "[00:02] current").unwrap();
+        assert!(rendered.contains("[00:01] you (mic): hello"));
+        assert!(rendered.contains("[00:02] memo: current"));
+        assert!(!rendered.contains("memo: stale"));
+    }
 
     #[test]
     fn completed_remote_transcript_groups_words_and_interleaves_current_memo() {

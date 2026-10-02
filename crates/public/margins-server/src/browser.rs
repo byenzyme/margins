@@ -167,14 +167,14 @@ fn layout(state: &CaptureState) -> Result<Layout> {
     })
 }
 
-fn complete_through(state: &CaptureState, expected: u64) -> std::result::Result<Layout, u64> {
-    let position = layout(state).map_err(|_| 0_u64)?;
+fn complete_through(state: &CaptureState, expected: u64) -> std::result::Result<Layout, Response> {
+    let position = layout(state).map_err(browser_error)?;
     if expected < position.closed_total {
-        return Err(expected);
+        return Err(gap_response(expected));
     }
     let local = expected - position.closed_total;
     if position.current_watermark < local {
-        return Err(position.closed_total + position.current_watermark);
+        return Err(gap_response(position.closed_total + position.current_watermark));
     }
     Ok(position)
 }
@@ -374,16 +374,17 @@ pub async fn pause(
         Ok(value) => value,
         Err(error) => return browser_error(error),
     };
-    let capture = match state
-        .workspace_service
-        .capture_state_for_producer(&principal, &body.owner_id, &session)
-    {
+    let capture = match state.workspace_service.capture_state_for_producer(
+        &principal,
+        &body.owner_id,
+        &session,
+    ) {
         Ok(value) => value,
         Err(error) => return browser_error(error),
     };
     let position = match complete_through(&capture, body.expected_next_sequence) {
         Ok(value) => value,
-        Err(sequence) => return gap_response(sequence),
+        Err(response) => return response,
     };
     if body.expected_next_sequence == position.closed_total
         && capture
@@ -391,6 +392,12 @@ pub async fn pause(
             .last()
             .and_then(|segment| segment.close.as_ref())
             .is_some_and(|close| close.command.reason == SegmentCloseReasonV1::Pause)
+        && !state.workspace_service.capture_command_recorded(
+            &principal,
+            &body.owner_id,
+            &session,
+            &MessageId(format!("browser-resume-{}", position.closed_count)),
+        ).unwrap_or(false)
     {
         return snapshot_value(&state, &principal, &body.owner_id, &session)
             .map(http::workspace_ok)
@@ -440,10 +447,11 @@ pub async fn resume(
         Ok(value) => value,
         Err(error) => return browser_error(error),
     };
-    let capture = match state
-        .workspace_service
-        .capture_state_for_producer(&principal, &body.owner_id, &session)
-    {
+    let capture = match state.workspace_service.capture_state_for_producer(
+        &principal,
+        &body.owner_id,
+        &session,
+    ) {
         Ok(value) => value,
         Err(error) => return browser_error(error),
     };
@@ -451,6 +459,12 @@ pub async fn resume(
         Ok(value) => value,
         Err(error) => return browser_error(error),
     };
+    let resume_id = MessageId(format!("browser-resume-{}", position.closed_count));
+    if state.workspace_service.capture_command_recorded(&principal, &body.owner_id, &session, &resume_id).unwrap_or(false) {
+        return snapshot_value(&state, &principal, &body.owner_id, &session)
+            .map(http::workspace_ok)
+            .unwrap_or_else(browser_error);
+    }
     if !capture
         .segments
         .last()
@@ -470,7 +484,7 @@ pub async fn resume(
             &principal,
             &body.owner_id,
             &session,
-            MessageId(format!("browser-resume-{}", position.closed_count)),
+            resume_id,
         )
         .and_then(|_| snapshot_value(&state, &principal, &body.owner_id, &session))
         .map(http::workspace_ok)
@@ -492,14 +506,28 @@ pub async fn chunk(
         .and_then(|value| value.to_str().ok())
     {
         Some(value) => value,
-        None => return http::workspace_error(StatusCode::UNAUTHORIZED, "owner_required", false, "Missing capture owner"),
+        None => {
+            return http::workspace_error(
+                StatusCode::UNAUTHORIZED,
+                "owner_required",
+                false,
+                "Missing capture owner",
+            )
+        }
     };
     let session = match authorized_recording(&recording, owner) {
         Ok(value) => value,
         Err(error) => return browser_error(error),
     };
-    if body.is_empty() || body.len() as u64 > margins_workflows::workspace_service::DEFAULT_MAX_CHUNK_BYTES {
-        return http::workspace_error(StatusCode::PAYLOAD_TOO_LARGE, "invalid_chunk", false, "Browser audio chunk is empty or too large");
+    if body.is_empty()
+        || body.len() as u64 > margins_workflows::workspace_service::DEFAULT_MAX_CHUNK_BYTES
+    {
+        return http::workspace_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "invalid_chunk",
+            false,
+            "Browser audio chunk is empty or too large",
+        );
     }
     let capture = match state
         .workspace_service
@@ -512,7 +540,10 @@ pub async fn chunk(
     let mut selected = None;
     for (index, segment) in capture.segments.iter().enumerate() {
         if let Some(close) = &segment.close {
-            let end = match close_boundary(close).and_then(|length| base.checked_add(length).context("browser sequence overflow")) {
+            let end = match close_boundary(close).and_then(|length| {
+                base.checked_add(length)
+                    .context("browser sequence overflow")
+            }) {
                 Ok(value) => value,
                 Err(error) => return browser_error(error),
             };
@@ -524,8 +555,23 @@ pub async fn chunk(
         }
     }
     let replaying_closed = selected.is_some();
-    let (segment, local_sequence, segment_index) =
-        selected.unwrap_or_else(|| (segment_id(capture.segments.iter().filter(|segment| segment.close.is_some()).count()), sequence.saturating_sub(base), capture.segments.iter().filter(|segment| segment.close.is_some()).count()));
+    let (segment, local_sequence, segment_index) = selected.unwrap_or_else(|| {
+        (
+            segment_id(
+                capture
+                    .segments
+                    .iter()
+                    .filter(|segment| segment.close.is_some())
+                    .count(),
+            ),
+            sequence.saturating_sub(base),
+            capture
+                .segments
+                .iter()
+                .filter(|segment| segment.close.is_some())
+                .count(),
+        )
+    });
     if !replaying_closed && sequence < base {
         return gap_response(sequence);
     }
@@ -567,7 +613,12 @@ pub async fn chunk(
         {
             http::workspace_ok(json!({"sequence": sequence, "durable": true}))
         }
-        Ok(_) => http::workspace_error(StatusCode::CONFLICT, "chunk_not_acknowledged", true, "Browser audio chunk was not durably acknowledged"),
+        Ok(_) => http::workspace_error(
+            StatusCode::CONFLICT,
+            "chunk_not_acknowledged",
+            true,
+            "Browser audio chunk was not durably acknowledged",
+        ),
         Err(error) => browser_error(error),
     }
 }
@@ -593,23 +644,37 @@ pub async fn stop(
         .capture_state(&principal, &session)
         .is_ok_and(|capture| capture.input_finalized)
     {
+        if let Err(error) = state.remote_asr_jobs.schedule_pending(state.workspace_service.clone(), state.service_principal.clone()) {
+            eprintln!("[margins-server] deferred ASR schedule after Stop replay: {error:#}");
+        }
         return http::workspace_ok(json!({"sessionId": recording, "inputFinalized": true}));
     }
-    let capture = match state
-        .workspace_service
-        .capture_state_for_producer(&principal, &body.owner_id, &session)
-    {
+    let capture = match state.workspace_service.capture_state_for_producer(
+        &principal,
+        &body.owner_id,
+        &session,
+    ) {
         Ok(value) => value,
         Err(error) => return browser_error(error),
     };
     let position = match complete_through(&capture, body.expected_next_sequence) {
         Ok(value) => value,
-        Err(sequence) => return gap_response(sequence),
+        Err(response) => return response,
     };
     if body.expected_next_sequence == 0 {
-        return http::workspace_error(StatusCode::CONFLICT, "browser_audio_empty", true, "Recording has no durable audio chunk");
+        return http::workspace_error(
+            StatusCode::CONFLICT,
+            "browser_audio_empty",
+            true,
+            "Recording has no durable audio chunk",
+        );
     }
-    if capture.segments.iter().all(|segment| segment.close.is_some()) && position.closed_total == body.expected_next_sequence {
+    if capture
+        .segments
+        .iter()
+        .all(|segment| segment.close.is_some())
+        && position.closed_total == body.expected_next_sequence
+    {
         // Stop after Pause, with no new MediaRecorder segment.
     } else {
         let close = CloseSegmentV1 {
@@ -637,20 +702,23 @@ pub async fn stop(
             return browser_error(error);
         }
     }
-    let closed = match state
-        .workspace_service
-        .capture_state_for_producer(&principal, &body.owner_id, &session)
-    {
+    let closed = match state.workspace_service.capture_state_for_producer(
+        &principal,
+        &body.owner_id,
+        &session,
+    ) {
         Ok(value) => value,
         Err(error) => return browser_error(error),
     };
     let references = closed
         .segments
         .iter()
-        .filter_map(|segment| segment.close.as_ref().map(|close| SegmentCloseReferenceV1 {
-            segment_id: segment.segment_id.clone(),
-            close_message_id: close.message_id.clone(),
-        }))
+        .filter_map(|segment| {
+            segment.close.as_ref().map(|close| SegmentCloseReferenceV1 {
+                segment_id: segment.segment_id.clone(),
+                close_message_id: close.message_id.clone(),
+            })
+        })
         .collect();
     let result = state.workspace_service.execute_capture(
         &principal,
@@ -659,14 +727,43 @@ pub async fn stop(
             &session,
             format!("browser-finish-{}", body.expected_next_sequence),
             ClientMessageBodyV1::FinalizeSession(FinalizeSessionV1 {
-                ended_at_ms: SessionMillis(body.expected_next_sequence.saturating_mul(CHUNK_TIMESLICE_MS)),
+                ended_at_ms: SessionMillis(
+                    body.expected_next_sequence
+                        .saturating_mul(CHUNK_TIMESLICE_MS),
+                ),
                 segment_closes: references,
                 reason: SessionFinalizeReasonV1::Completed,
             }),
         ),
     );
     match result {
-        Ok(_) => http::workspace_ok(json!({"sessionId": recording, "inputFinalized": true})),
+        Ok(_) => {
+            if let Err(error) = state.remote_asr_jobs.schedule_pending(state.workspace_service.clone(), state.service_principal.clone()) {
+                eprintln!("[margins-server] deferred ASR schedule after Stop: {error:#}");
+            }
+            http::workspace_ok(json!({"sessionId": recording, "inputFinalized": true}))
+        },
         Err(error) => browser_error(error),
+    }
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    #[test]
+    fn browser_snapshot_matches_shared_plugin_fixture() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../contracts/browser-snapshot.v3.json")).unwrap();
+        let rust = BrowserSnapshot {
+            recording_id: "browser-contract-session".into(),
+            session_id: "browser-contract-session".into(),
+            status: BrowserStatus::Paused,
+            notepad: BrowserNotepad {
+                text: "Review launch plan".into(),
+                revision: "memo-revision".into(),
+            },
+        };
+        assert_eq!(serde_json::to_value(rust).unwrap(), fixture);
     }
 }

@@ -16,9 +16,7 @@ use margins_meeting_protocol::{
     WorkspaceNoteAssociationUpdateV1, WorkspaceRenameV1, WorkspaceResponseV1,
     AUDIO_CHUNK_BATCH_CONTENT_TYPE_V1,
 };
-use margins_workflows::workspace_service::{
-    ServicePrincipal, OP_SESSION_WRITE, OP_WORKSPACE_READ,
-};
+use margins_workflows::workspace_service::{ServicePrincipal, OP_SESSION_WRITE, OP_WORKSPACE_READ};
 use serde_json::{json, Value};
 use tower_http::cors::{Any, CorsLayer};
 
@@ -208,6 +206,7 @@ pub(crate) fn workspace_auth_operation(
     operation: &str,
 ) -> Result<ServicePrincipal, Response> {
     let principal = workspace_auth(state, headers, Some(workspace))?;
+    workspace_instance_fence(state, headers)?;
     principal
         .require(state.workspace_service.workspace_id(), operation)
         .map_err(|_| {
@@ -342,7 +341,7 @@ async fn workspace_speech_setup(
     {
         return response;
     }
-    workspace_ok(speech_setup_snapshot(&state))
+    workspace_ok(state.asr_setup.snapshot())
 }
 
 async fn workspace_retry_speech_setup(
@@ -354,23 +353,23 @@ async fn workspace_retry_speech_setup(
     {
         return response;
     }
-    if state.workspace_service.asr_available() {
-        return workspace_ok(speech_setup_snapshot(&state));
+    if !crate::asr::supported() {
+        return workspace_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "asr_unavailable",
+            false,
+            "This server cannot transcribe recordings",
+        );
     }
-    workspace_error(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "asr_unavailable",
-        false,
-        "This server cannot transcribe recordings",
-    )
-}
-
-fn speech_setup_snapshot(state: &ServerState) -> Value {
-    if state.workspace_service.asr_available() {
-        json!({"state":"ready","message":"Transcription ready","progress":1.0})
-    } else {
-        json!({"state":"unavailable","message":"This server cannot transcribe recordings","progress":null})
-    }
+    state
+        .asr_setup
+        .start(
+            state.workspace_service.clone(),
+            state.service_principal.clone(),
+            state.remote_asr_jobs.clone(),
+        )
+        .map(|_| workspace_ok(state.asr_setup.snapshot()))
+        .unwrap_or_else(service_error)
 }
 
 async fn workspace_summary(
@@ -1007,9 +1006,6 @@ async fn workspace_request_transcription(
         Ok(value) => value,
         Err(response) => return response,
     };
-    if let Err(response) = workspace_instance_fence(&state, &headers) {
-        return response;
-    }
     let job = match state
         .workspace_service
         .request_transcription_job(&principal, &SessionId(session))
@@ -1017,6 +1013,13 @@ async fn workspace_request_transcription(
         Ok(value) => value,
         Err(error) => return service_error(error),
     };
+    if state.workspace_service.asr_available() {
+        state.remote_asr_jobs.schedule(
+            state.workspace_service.clone(),
+            state.service_principal.clone(),
+            job.clone(),
+        );
+    }
     workspace_ok(job)
 }
 

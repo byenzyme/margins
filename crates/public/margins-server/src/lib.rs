@@ -1,5 +1,6 @@
 //! HTTP adapter over the public Workspace service.
 
+pub mod asr;
 pub mod auth;
 pub mod browser;
 pub mod http;
@@ -24,10 +25,13 @@ pub struct ServerState {
     pub workspace_service: Arc<WorkspaceService>,
     pub credential_store: ScopedCredentialStore,
     pub service_principal: ServicePrincipal,
+    pub asr_setup: asr::SpeechSetup,
+    pub remote_asr_jobs: asr::RemoteAsrJobs,
 }
 
 /// Starts one loopback Workspace service selected explicitly by the launcher.
 pub fn run() -> anyhow::Result<()> {
+    asr::configure_model_environment()?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
@@ -77,9 +81,13 @@ async fn run_async() -> anyhow::Result<()> {
     let workspace_service = Arc::new(WorkspaceService::open_with_capabilities(
         &instance_id,
         workspace,
-        false,
+        asr::runtime_available(),
         true,
     )?);
+    let asr_setup = asr::SpeechSetup::new(workspace_service.asr_available(), asr::supported());
+    if asr::supported() {
+        workspace_service.enable_deferred_asr();
+    }
     let token = auth::load_or_create_token(&data_dir)?;
     let credential_store = ScopedCredentialStore::open(data_dir.join("credentials.json"))?;
     let service_principal =
@@ -91,10 +99,22 @@ async fn run_async() -> anyhow::Result<()> {
         service_principal.operations.iter().cloned().collect(),
         None,
     )?;
+    let remote_asr_jobs = asr::RemoteAsrJobs::default();
+    if workspace_service.asr_available() {
+        remote_asr_jobs.schedule_pending(workspace_service.clone(), service_principal.clone())?;
+    } else if asr::supported() {
+        asr_setup.start(
+            workspace_service.clone(),
+            service_principal.clone(),
+            remote_asr_jobs.clone(),
+        )?;
+    }
     let state = ServerState {
         workspace_service,
         credential_store,
         service_principal,
+        asr_setup,
+        remote_asr_jobs,
     };
     let listener =
         tokio::net::TcpListener::bind(format!("{host}:{port}").parse::<SocketAddr>()?).await?;

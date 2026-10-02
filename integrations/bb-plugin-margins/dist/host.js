@@ -33883,6 +33883,86 @@ function createRuntimeManager(options = {}) {
 
 // src/project-server.ts
 var execFile2 = promisify2(execFileCallback2);
+var captureLaneSchema = external_exports2.strictObject({
+  lane_id: external_exports2.string(),
+  source_ids: external_exports2.array(external_exports2.string()),
+  label: external_exports2.string().nullable().optional(),
+  format: external_exports2.strictObject({
+    codec: external_exports2.enum(["pcm_s16_le", "pcm_f32_le", "opus", "aac_lc"]),
+    container: external_exports2.enum(["raw", "webm", "ogg", "mp4", "packet_stream"]),
+    sample_rate_hz: external_exports2.number().int().nonnegative(),
+    channel_count: external_exports2.number().int().nonnegative()
+  })
+});
+var workspaceSessionSummarySchema = external_exports2.strictObject({
+  session_id: external_exports2.string(),
+  title: external_exports2.string().nullable(),
+  started_at: external_exports2.string(),
+  capture_lanes: external_exports2.array(captureLaneSchema),
+  segment_count: external_exports2.number().int().nonnegative(),
+  input_finalized: external_exports2.boolean(),
+  capture_duration_ms: external_exports2.number().int().nonnegative().nullable(),
+  capture_finalize_message_id: external_exports2.string().nullable(),
+  processing_state: external_exports2.string()
+});
+var workspaceSessionPageSchema = external_exports2.strictObject({
+  sessions: external_exports2.array(workspaceSessionSummarySchema),
+  next_cursor: external_exports2.string().nullable()
+});
+var workspaceTranscriptSchema = external_exports2.strictObject({
+  session_id: external_exports2.string(),
+  body: external_exports2.string(),
+  view: external_exports2.string(),
+  decoded_until_ms: external_exports2.number().int().nonnegative(),
+  committed_until_ms: external_exports2.number().int().nonnegative(),
+  updated_at_unix_ms: external_exports2.number().int().nonnegative(),
+  live: external_exports2.boolean(),
+  terminal: external_exports2.boolean(),
+  source_artifact: external_exports2.string()
+});
+var workspaceArtifactSchema = external_exports2.strictObject({
+  artifact_id: external_exports2.string(),
+  session_id: external_exports2.string(),
+  kind: external_exports2.string(),
+  ordinal: external_exports2.number().int(),
+  size_bytes: external_exports2.number().int().nonnegative().nullable(),
+  retention_class: external_exports2.string(),
+  created_at: external_exports2.string()
+});
+var workspaceMemoSchema = external_exports2.strictObject({
+  session_id: external_exports2.string(),
+  revision: external_exports2.string(),
+  lines: external_exports2.array(external_exports2.strictObject({
+    text: external_exports2.string(),
+    created_secs: external_exports2.number(),
+    edited_secs: external_exports2.number().nullable(),
+    draft_started_secs: external_exports2.number().nullable(),
+    audio_pending_at_mark: external_exports2.boolean(),
+    block_ordinal: external_exports2.number().int().nonnegative().nullable()
+  })),
+  mirror_stale: external_exports2.boolean().optional()
+});
+var workspaceNoteAssociationSchema = external_exports2.strictObject({
+  session_id: external_exports2.string(),
+  source_id: external_exports2.string(),
+  relative_path: external_exports2.string(),
+  observed_content_hash: external_exports2.string().nullable(),
+  revision: external_exports2.number().int().nonnegative(),
+  bb_thread_ids: external_exports2.array(external_exports2.string()),
+  distilled_memo_revision: external_exports2.string().nullable()
+});
+var workspaceProcessingJobSchema = external_exports2.strictObject({
+  job_id: external_exports2.string(),
+  session_id: external_exports2.string(),
+  operation: external_exports2.string(),
+  input_revision: external_exports2.string(),
+  attempt: external_exports2.number().int().nonnegative(),
+  status: external_exports2.enum(["queued", "running", "complete", "failed"]),
+  progress: external_exports2.number().nullable(),
+  result_ref: external_exports2.string().nullable(),
+  failure: external_exports2.string().nullable(),
+  failed_stage: external_exports2.string().nullable()
+});
 async function readAsrRuntimeConfig(dataDir) {
   const path2 = join2(dataDir, "asr-runtime.json");
   const raw = await readFile2(path2, "utf8").catch((error108) => {
@@ -34471,7 +34551,8 @@ var ProjectMarginsTransport = class {
         headers: {
           authorization: `Bearer ${handle.token}`,
           "content-type": "application/octet-stream",
-          "x-margins-capture-owner": ownerId
+          "x-margins-capture-owner": ownerId,
+          "X-Margins-Instance-Id": handle.instanceId
         },
         body: Buffer.from(bytesBase64, "base64")
       });

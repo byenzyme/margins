@@ -27,7 +27,7 @@ const workspaceMeetingSchema = z.object({
   sessionId: z.string().min(1), title: z.string().nullable(),
   startedAt: z.string().min(1), inputFinalized: z.boolean(), notepad: notepadSchema,
 }).strict();
-const hostCaptureSnapshotSchema = z.object({
+export const hostCaptureSnapshotSchema = z.object({
   recordingId: z.string().min(1), sessionId: z.string().min(1), status: z.enum(["recording", "paused", "saving"]),
   notepad: notepadSchema,
 }).strict();
