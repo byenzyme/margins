@@ -391,17 +391,19 @@ worktrees — the singleton constraint is specifically the install + live-app
 verification loop. (Prefer `app:reinstall:devtools` for that thread so it can
 also read the WKWebView console; the release build ships without devtools.)
 
-Provider/model routing:
+Provider/model routing (always pass `--model` explicitly; never rely on a
+provider default):
 
-- Use **Codex** (`--provider codex`, usually default model `gpt-5.5`) for purely
-  code, Rust, structural, backend, performance, test harness, or mechanical
-  verification tasks.
-- Use **Claude Code Opus 4.8** (`--provider claude-code --model 'claude-opus-4-8[1m]'`)
-  for UI/product judgment tasks: layout, visual hierarchy, copy, information
-  architecture, microinteractions, Playwright video review, and UX brief/judge
-  work.
-- Prefer independent maker/checker separation. The thread that patches UI should
-  not be the final judge of whether the UX improved.
+- Use **Codex GPT-6-Sol** (`--provider codex --model gpt-6-sol`) for code,
+  Rust, structural, backend, performance, test-harness, and mechanical
+  verification tasks. Check `bb provider models codex` for a newer Sol.
+- Use **Claude Code Opus 5.5** (`--provider claude-code --model claude-opus-5-5`)
+  for independent code review and UI/product judgment: layout, visual
+  hierarchy, copy, information architecture, microinteractions, Playwright
+  video review, and UX brief/judge work.
+- Prefer independent maker/checker separation. The thread that writes a change
+  (including a UI patch) should not be the final judge of whether it improved
+  things.
 
 Recommended hybrid UX E2E split:
 
@@ -420,7 +422,7 @@ Recommended hybrid UX E2E split:
 - memory thread: update loop observations for future runs
 
 Use Codex for runner/verifier/harness implementation unless the work turns on
-layout or product judgment. Use Claude Opus 4.8 for research/judge/planner when
+layout or product judgment. Use Claude Opus 5.5 for research/judge/planner when
 the task is UX-sensitive.
 
 For Playwright journey work, prefer a CLI/test-runner path that records the full
@@ -449,6 +451,82 @@ VPS E2E work; it covers, in order:
 - Real distillation, optional headless ASR, the env-var reference, and what still
   needs a native macOS pass.
 
+## Orchestrating Multi-Agent Work and Filing PRs
+
+These rules come from the 2026-10 core refactor, which ran 9 parallel worker
+threads and merged 6+ PRs in a day. They apply whenever one coordinator thread splits
+work across bb child threads.
+
+**Coordinator.** One parent thread owns the plan, writes briefs, reviews and
+merges PRs, routes cross-cutting findings, and talks to Joshua. Workers do not
+merge, release, or message each other; they report to the coordinator.
+
+**Slicing.** One reviewable PR-sized slice per worker, in its own worktree off
+`origin/main` (`bb thread spawn --parent-self --new-environment worktree
+--base-branch origin/main --permission-mode full --model ...`). Give slices
+disjoint files. When a slice depends on an open PR, the worker either waits or
+stacks on that PR's branch (`git fetch origin pull/<n>/head`). Never build against
+files another open PR is rewriting. The coordinator tells dependents when a
+dependency merges.
+
+**Briefs.** Every brief states:
+- the decisions in force and who made them;
+- current state with file:line pointers, framed as "verify first";
+- deliverables;
+- constraints, including which neighbouring slice owns what;
+- what is out of scope;
+- the report format: PR link, what changed, exactly what was run, what is
+  unverified (especially macOS), follow-ups; under 300 words.
+
+Keep shared rules in one common block appended to every brief. Send briefs and
+follow-ups from a file (`bb thread tell <id> "$(cat file)"`), never with
+backticks inside a double-quoted shell string.
+
+**Out-of-scope findings.** A worker that finds a bug outside its slice reports it
+and does not fix it. The coordinator routes it to the owning worker (or a new
+one) with the worker's diagnosis attached.
+
+**One repo (2026-10-02).** This repository becomes the public repository, with
+fresh history at cutover; there is no separate public export. Only the Enzyme
+recall engine stays closed, consumed as a private git dependency behind the
+`recall` / `recall-local-model` features. Workers must keep every crate building
+and testing with `recall` off, keep credentials out of source, and stop editing
+the export allowlist; the cutover retires that machinery.
+
+**Cleanup.** Delete dead code and generated build output only. Never delete
+documentation (specs, reports, READMEs) or benchmark/evaluation evidence. A doc
+that has become wrong is corrected with a minimal edit, not removed.
+
+**Gating tiers.** Review is the per-PR gate; heavy builds are batched.
+- Every PR: the coordinator reviews the diff. The worker runs only the
+  affected crates/packages' tests plus compile checks of the shipped binaries it
+  touches, and the no-`recall` (public) build when it touches shared crates.
+  It pastes what it ran into the PR.
+- Risky PRs (runtime/session/memo authority, ASR/models, server or plugin
+  protocol, data or schema, release configuration) also get an independent
+  Opus 5.5 review before merge. The same reviewer re-checks the fixes, and the
+  verdict is merge, merge-with-follow-ups, or changes-required.
+- Once per merged batch, run the full local Linux gate on `main` (see
+  `scripts/local-gate`).
+- Once before a release, run the macOS gate and the Mac smoke checklist on the
+  attached Mac bb host ("MacBook Pro"), through one bb thread.
+
+Gates run on our own machines. Don't trigger or dispatch GitHub workflows for
+validation; only the tag-triggered release build, signing and notarization
+runs on GitHub. Until main's gate is green, the merge bar is "no new failures
+relative to main", and every remaining failure must be traced to a known
+pre-existing cause.
+
+**Merging.** The coordinator merges with merge commits once review and gates
+pass. Ask Joshua first for anything not already covered by his explicit
+decisions: release composition, plugin-runtime compatibility, data or schema
+migrations, or publishing a release.
+
+**Mac work.** Collect macOS-only verification items in a running checklist
+during the batch, then run them together in one Mac session before release.
+Installed-app verification still follows the primary-checkout singleton rule in
+"bb Thread Routing".
+
 ## Release / Build Pointers
 
 Before preparing or approving a CLI release candidate, run the ecological
@@ -464,4 +542,6 @@ For native CLI core-product verification, use
 `scripts/core-product-smoke.sh`; the full and zero-compile iteration commands
 are documented in `docs/official-cli-release.md`.
 
-See `CLAUDE.md` for release flow, Homebrew tap notes, and legacy build commands.
+See `docs/official-cli-release.md` for the release order, including BB plugin
+runtime pairing. `CLAUDE.md` holds older release, Homebrew tap, and legacy
+build notes.
