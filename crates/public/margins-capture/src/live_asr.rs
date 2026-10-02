@@ -1,5 +1,20 @@
+#[cfg(any(test, all(feature = "coreml-asr", target_os = "macos")))]
+use anyhow::Context;
+use anyhow::Result;
+use std::io::{self, IsTerminal, Write};
+#[cfg(any(test, all(feature = "coreml-asr", target_os = "macos")))]
+use std::path::Path;
 #[cfg(feature = "audio-capture")]
-fn start_live_transcript_worker(
+use std::path::PathBuf;
+#[cfg(any(test, feature = "audio-capture", all(feature = "coreml-asr", target_os = "macos")))]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU8, Ordering};
+#[cfg(feature = "audio-capture")]
+use std::sync::Mutex;
+use std::sync::{mpsc, Arc};
+
+#[cfg(feature = "audio-capture")]
+pub fn start_live_transcript_worker(
     checkpoint_path: PathBuf,
     offset_ms: u64,
     status: Arc<AtomicU8>,
@@ -22,8 +37,9 @@ fn start_live_transcript_worker(
 // ── Live transcription ────────────────────────────────────────────────────────
 
 // The recorder sends native-rate samples before the worker resamples to 16 kHz.
-// Budget 30 seconds for two lanes at up to 96 kHz, not 30 seconds at 16 kHz.
-const LIVE_QUEUE_MAX_SAMPLES: u64 = 96_000 * 2 * 30;
+// Budget 30 seconds for two lanes at up to 96 kHz.
+#[cfg(any(test, feature = "audio-capture"))]
+pub const LIVE_QUEUE_MAX_SAMPLES: u64 = 96_000 * 2 * 30;
 
 #[cfg(any(test, all(feature = "coreml-asr", target_os = "macos")))]
 fn live_checkpoint_complete(captured_until_ms: u64, decoded_until_ms: u64, dropped: u64) -> bool {
@@ -31,7 +47,7 @@ fn live_checkpoint_complete(captured_until_ms: u64, decoded_until_ms: u64, dropp
 }
 
 #[cfg(feature = "audio-capture")]
-struct LiveTranscriptWorker {
+pub struct LiveTranscriptWorker {
     tx: mpsc::Sender<crate::recorder::LiveAudioChunk>,
     generation_clock: Arc<Mutex<crate::recorder::LiveGenerationClock>>,
     mic_accepted_samples: Arc<std::sync::atomic::AtomicU64>,
@@ -45,7 +61,7 @@ struct LiveTranscriptWorker {
 }
 
 #[cfg(any(test, feature = "audio-capture"))]
-struct LiveTranscriptFinalizer {
+pub struct LiveTranscriptFinalizer {
     status: Arc<AtomicU8>,
     send_result: std::result::Result<(), mpsc::SendError<u64>>,
     join: std::thread::JoinHandle<Result<()>>,
@@ -146,7 +162,7 @@ impl LiveTranscriptWorker {
         Ok(None)
     }
 
-    fn sink_for_offset(&self, session_offset_ms: u64) -> crate::recorder::LiveAudioSink {
+    pub fn sink_for_offset(&self, session_offset_ms: u64) -> crate::recorder::LiveAudioSink {
         let generation = {
             let mut clock = self
                 .generation_clock
@@ -169,14 +185,14 @@ impl LiveTranscriptWorker {
         }
     }
 
-    fn dropped_counters(&self) -> (Arc<AtomicU64>, Arc<AtomicU64>) {
+    pub fn dropped_counters(&self) -> (Arc<AtomicU64>, Arc<AtomicU64>) {
         (
             self.mic_dropped_samples.clone(),
             self.system_dropped_samples.clone(),
         )
     }
 
-    fn begin_finish(self, duration_ms: u64) -> LiveTranscriptFinalizer {
+    pub fn begin_finish(self, duration_ms: u64) -> LiveTranscriptFinalizer {
         crate::cli_log::event(
             "live_worker_finish_requested",
             format!(
@@ -200,11 +216,11 @@ impl LiveTranscriptWorker {
 
 #[cfg(any(test, feature = "audio-capture"))]
 impl LiveTranscriptFinalizer {
-    fn is_finished(&self) -> bool {
+    pub fn is_finished(&self) -> bool {
         self.join.is_finished()
     }
 
-    fn complete(self) -> Result<bool> {
+    pub fn complete(self) -> Result<bool> {
         let finish_error = self.send_result.err().map(|error| error.to_string());
         let join_error = match self.join.join() {
             Ok(Ok(())) => None,
@@ -228,7 +244,7 @@ impl LiveTranscriptFinalizer {
         Ok(true)
     }
 
-    fn wait_with_spinner(self, distill_requested: bool) -> Result<bool> {
+    pub fn wait_with_spinner(self, distill_requested: bool) -> Result<bool> {
         if self.is_finished() {
             return self.complete();
         }
@@ -490,4 +506,10 @@ fn write_checkpoint_value(path: &Path, value: &serde_json::Value) -> Result<()> 
     temp.persist(path).map_err(|error| error.error)?;
     std::fs::File::open(parent)?.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    include!("live_asr_tests.rs");
 }

@@ -1,4 +1,4 @@
-//! Private, bounded diagnostics for the shipped native CLI.
+//! Bounded diagnostics for the shipped native CLI.
 
 use chrono::{Local, SecondsFormat};
 use std::fs::{self, OpenOptions};
@@ -8,18 +8,18 @@ use std::path::{Path, PathBuf};
 const MAX_BYTES: u64 = 1024 * 1024;
 const BACKUPS: usize = 2;
 
-pub(crate) fn event(kind: &str, message: impl AsRef<str>) {
+pub fn event(kind: &str, message: impl AsRef<str>) {
     let Some(path) = log_path() else {
         return;
     };
     let _ = append_at(&path, MAX_BYTES, kind, message.as_ref());
 }
 
-pub(crate) fn path_display() -> Option<String> {
+pub fn path_display() -> Option<String> {
     log_path().map(|path| path.to_string_lossy().into_owned())
 }
 
-pub(crate) fn error_summary(error: &anyhow::Error) -> String {
+pub fn error_summary(error: &anyhow::Error) -> String {
     for source in error.chain() {
         if let Some(io) = source.downcast_ref::<std::io::Error>() {
             return match io.raw_os_error() {

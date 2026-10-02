@@ -104,45 +104,6 @@
         assert_eq!(source.request_count.load(Ordering::SeqCst), 0);
     }
 
-    #[test]
-    fn optional_transcript_shutdown_failures_degrade_instead_of_failing_capture() {
-        assert_eq!(optional_worker_failure_reason(false, None, None), None);
-        assert!(
-            optional_worker_failure_reason(false, Some("sending on a closed channel"), None)
-                .unwrap()
-                .contains("finish_channel_closed")
-        );
-        assert!(
-            optional_worker_failure_reason(false, None, Some("worker panicked"))
-                .unwrap()
-                .contains("worker_failed")
-        );
-        assert_eq!(
-            optional_worker_failure_reason(true, None, None).as_deref(),
-            Some("worker_reported_degraded")
-        );
-    }
-
-    #[test]
-    fn closed_optional_transcript_worker_is_nonfatal_at_the_real_finalizer_boundary() {
-        let (finish_tx, finish_rx) = mpsc::channel();
-        drop(finish_rx);
-        let status = Arc::new(AtomicU8::new(crate::app::LIVE_TRANSCRIPTION_READY));
-        let finalizer = LiveTranscriptFinalizer {
-            status: status.clone(),
-            send_result: finish_tx.send(1_000),
-            join: std::thread::spawn(|| -> Result<()> {
-                bail!("synthetic worker stopped before finalization")
-            }),
-        };
-
-        assert!(!finalizer.complete().unwrap());
-        assert_eq!(
-            status.load(Ordering::Acquire),
-            crate::app::LIVE_TRANSCRIPTION_DEGRADED
-        );
-    }
-
     struct SpySetupProvisioner {
         hosted_calls: AtomicUsize,
         speech_calls: AtomicUsize,

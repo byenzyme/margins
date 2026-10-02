@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-pub(super) struct LocalMeetingProducer {
+pub struct LocalMeetingProducer {
     runtime: MeetingRuntime<SqliteMeetingRuntimeStorage>,
     session_id: SessionId,
     closes: Vec<SegmentCloseReferenceV1>,
@@ -35,13 +35,13 @@ pub(super) struct LocalMeetingProducer {
 /// OS ownership fence for a local capture. The file stays in the vault; its
 /// advisory lock is released automatically when the process exits or crashes.
 #[derive(Debug)]
-pub(super) struct SessionOwnerLock {
+pub struct SessionOwnerLock {
     session_id: String,
     _file: std::fs::File,
 }
 
 impl SessionOwnerLock {
-    pub(super) fn acquire(dir: &Path, session_id: &str) -> Result<Self> {
+    pub fn acquire(dir: &Path, session_id: &str) -> Result<Self> {
         if session_id.is_empty()
             || session_id == "."
             || session_id == ".."
@@ -463,7 +463,7 @@ impl RuntimeStreamWorker {
 }
 
 impl LocalMeetingProducer {
-    pub(super) fn reserve(
+    pub fn reserve(
         margins_dir: &Path,
         name: &str,
         title: Option<&str>,
@@ -547,7 +547,7 @@ impl LocalMeetingProducer {
     }
 
     /// A reopened producer must replay durable state before it opens any lane.
-    pub(super) fn recover(
+    pub fn recover(
         margins_dir: &Path,
         name: &str,
         offset_ms: u64,
@@ -599,19 +599,19 @@ impl LocalMeetingProducer {
         })
     }
 
-    pub(super) fn next_ordinal(&self) -> Result<i64> {
+    pub fn next_ordinal(&self) -> Result<i64> {
         self.runtime
             .storage()
             .next_native_ordinal(self.session_id.as_ref())
     }
 
-    pub(super) fn pending_segment(&self) -> Result<Option<(i64, u64)>> {
+    pub fn pending_segment(&self) -> Result<Option<(i64, u64)>> {
         self.runtime
             .storage()
             .pending_native_segment(self.session_id.as_ref())
     }
 
-    pub(super) fn open(&self, ordinal: i64, offset_ms: u64) -> Result<()> {
+    pub fn open(&self, ordinal: i64, offset_ms: u64) -> Result<()> {
         let id = segment_id(self.session_id.as_ref(), ordinal);
         for lane in ["mic", "system"] {
             self.runtime
@@ -625,7 +625,7 @@ impl LocalMeetingProducer {
         Ok(())
     }
 
-    pub(super) fn existing_segment_start(&self, ordinal: i64) -> Result<Option<u64>> {
+    pub fn existing_segment_start(&self, ordinal: i64) -> Result<Option<u64>> {
         let id = segment_id(self.session_id.as_ref(), ordinal);
         let chunk_start = self
             .runtime
@@ -641,7 +641,7 @@ impl LocalMeetingProducer {
     /// Recovery has already replayed the runtime log before this is called.
     /// Finish an interrupted open segment from its durable chunk boundaries;
     /// the in-memory tail was smaller than one five-second batch.
-    pub(super) fn recover_pending_segment(&mut self, ordinal: i64, offset_ms: u64) -> Result<bool> {
+    pub fn recover_pending_segment(&mut self, ordinal: i64, offset_ms: u64) -> Result<bool> {
         let [(mic_count, mic_end), (system_count, system_end)] = self
             .runtime
             .storage()
@@ -696,7 +696,7 @@ impl LocalMeetingProducer {
         Ok(true)
     }
 
-    pub(super) fn start_stream(
+    pub fn start_stream(
         &mut self,
         ordinal: i64,
         offset_ms: u64,
@@ -719,7 +719,7 @@ impl LocalMeetingProducer {
         Ok(retrying)
     }
 
-    pub(super) fn flush_stream_and_close(
+    pub fn flush_stream_and_close(
         &mut self,
         ordinal: i64,
         offset_ms: u64,
@@ -773,11 +773,7 @@ impl LocalMeetingProducer {
     /// A failed native writer still leaves already committed chunks in the
     /// runtime. Stop its worker, close that durable prefix with an error, and
     /// allow the session to be finalized and attached later.
-    pub(super) fn recover_failed_stream_and_close(
-        &mut self,
-        ordinal: i64,
-        offset_ms: u64,
-    ) -> Result<()> {
+    pub fn recover_failed_stream_and_close(&mut self, ordinal: i64, offset_ms: u64) -> Result<()> {
         if let Some(worker) = self.stream.take() {
             let _ = worker.flush();
         }
@@ -785,13 +781,13 @@ impl LocalMeetingProducer {
         Ok(())
     }
 
-    pub(super) fn last_end_ms(&self) -> u64 {
+    pub fn last_end_ms(&self) -> u64 {
         self.last_end_ms
     }
 
     /// Adopt an older native WAV left by a capture that stopped before the
     /// streaming runtime path was introduced. New capture writes chunks live.
-    pub(super) fn ingest_wav_and_close(
+    pub fn ingest_wav_and_close(
         &mut self,
         ordinal: i64,
         wav_path: &Path,
@@ -900,11 +896,11 @@ impl LocalMeetingProducer {
         Ok(duration_ms)
     }
 
-    pub(super) fn finish(&self, ended_at_ms: u64) -> Result<()> {
+    pub fn finish(&self, ended_at_ms: u64) -> Result<()> {
         self.finish_with_reason(ended_at_ms, SessionFinalizeReasonV1::Completed)
     }
 
-    pub(super) fn finish_with_reason(
+    pub fn finish_with_reason(
         &self,
         ended_at_ms: u64,
         reason: SessionFinalizeReasonV1,
@@ -933,7 +929,7 @@ impl LocalMeetingProducer {
         Ok(())
     }
 
-    pub(super) fn register_transcript(&self, ordinal: i64) -> Result<()> {
+    pub fn register_transcript(&self, ordinal: i64) -> Result<()> {
         self.runtime
             .storage()
             .register_native_transcript(self.session_id.as_ref(), ordinal)

@@ -2612,26 +2612,22 @@ version = "0.4.14"
 dependencies = [
  "anyhow",
  "chrono",
- "cidre",
  "clap",
- "cpal",
  "crossterm 0.28.1",
  "ctor",
- "dasp",
  "dirs",
  "enzyme-core",
- "hound",
  "include_dir",
  "libsql-rusqlite",
+ "margins-capture",
  "margins-cli",
  "margins-core",
  "margins-media",
  "margins-meeting-protocol",
+ "margins-meeting-runtime",
  "margins-store",
  "margins-workflows",
- "ratatui",
  "reqwest",
- "rtrb",
  "serde",
  "serde_json",
  "sha2",
@@ -2639,6 +2635,34 @@ dependencies = [
  "tokio",
  "toml",
  "toml_edit 0.22.27",
+ "uuid",
+]
+
+[[package]]
+name = "margins-capture"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "cidre",
+ "cpal",
+ "crossterm 0.28.1",
+ "dasp",
+ "dirs",
+ "fs4",
+ "hound",
+ "libsql-rusqlite",
+ "margins-cli",
+ "margins-core",
+ "margins-media",
+ "margins-meeting-protocol",
+ "margins-meeting-runtime",
+ "margins-store",
+ "ratatui",
+ "rtrb",
+ "serde_json",
+ "similar",
+ "tempfile",
  "uuid",
  "windows 0.61.3",
 ]
@@ -2733,6 +2757,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "hound",
  "libsql-rusqlite",
  "log",
  "margins-core",
@@ -4523,6 +4548,12 @@ dependencies = [
  "errno",
  "libc",
 ]
+
+[[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "siphasher"

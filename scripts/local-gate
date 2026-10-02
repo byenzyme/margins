@@ -16,6 +16,7 @@ BB_PLUGIN = ROOT / "integrations/bb-plugin-margins"
 BB_PLUGIN_DIST = "integrations/bb-plugin-margins/dist"
 ROOT_PACKAGES = {
     "margins",
+    "margins-capture",
     "margins-cli",
     "margins-core",
     "margins-media",

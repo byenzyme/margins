@@ -1,3 +1,4 @@
+#[cfg(any(test, feature = "coreml-asr", feature = "parakeet-asr"))]
 use crate::asr;
 use crate::asr::TranscriptWordEntry;
 #[cfg(any(
@@ -6,6 +7,7 @@ use crate::asr::TranscriptWordEntry;
 ))]
 use anyhow::Context;
 use anyhow::{bail, Result};
+#[cfg(any(test, feature = "coreml-asr", feature = "parakeet-asr"))]
 use margins_core::{AsrBackend, AsrRequest};
 
 #[derive(Debug, Clone)]
@@ -98,6 +100,7 @@ fn transcribe_mono_16k_parakeet(mono_16k: &[f32]) -> Result<OfflineTranscript> {
     })
 }
 
+#[cfg(any(test, feature = "coreml-asr", feature = "parakeet-asr"))]
 fn transcribe_public(backend: &dyn AsrBackend, mono_16k: &[f32]) -> Result<Vec<asr::WordTiming>> {
     if mono_16k.is_empty() {
         return Ok(Vec::new());
