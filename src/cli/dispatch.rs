@@ -9,6 +9,10 @@ where
 }
 
 pub fn main_entry_from_env() -> i32 {
+    #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
+    margins_media::providers::coreml::set_coreml_diagnostic_sink(|message| {
+        crate::cli_log::event("coreml_preprocessor_fallback", message);
+    });
     main_entry(std::env::args_os())
 }
 
