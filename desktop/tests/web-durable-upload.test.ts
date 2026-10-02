@@ -56,10 +56,11 @@ test("never-settling durable upload is aborted and cannot hang Finish", async ()
 
   queue.enqueue(new Blob(["stuck"]));
   const started = Date.now();
-  await queue.close();
+  await assert.rejects(queue.close(), /incomplete|timed out/);
   assert.ok(Date.now() - started < 200, "Finish drain must be bounded");
   assert.equal(aborted, true);
   assert.ok(failures.some(message => message.includes("timed out")));
+  assert.equal(queue.pendingCount, 1);
 });
 
 test("fake server rejects a later upload while a timed-out earlier request is still late", async () => {
@@ -77,11 +78,11 @@ test("fake server rejects a later upload while a timed-out earlier request is st
   }, error => failures.push(error.message), { maxAttempts: 1, uploadTimeoutMs: 5, closeDeadlineMs: 50 });
   queue.enqueue(new Blob(["late-zero"]));
   queue.enqueue(new Blob(["one"]));
-  await queue.close();
+  await assert.rejects(queue.close(), /incomplete|timed out|Out-of-order/);
   await new Promise(resolve => setTimeout(resolve, 20));
-  assert.deepEqual(attempted, [0, 1]);
+  assert.deepEqual(attempted, [0]);
   assert.deepEqual(server.appended, [0]);
-  assert.ok(failures.some(message => message.includes("Out-of-order WebM chunk 1")));
+  assert.equal(queue.pendingCount, 2);
 });
 
 test("fake server accepts only an identical retry for an already durable sequence", () => {
@@ -107,20 +108,25 @@ test("lost ACK retries the exact sequence and stores one durable chunk", async (
   assert.deepEqual(server.appended, [0]);
 });
 
-test("failed durable chunk does not prevent later chunks from reaching the server subset", async () => {
+test("failed durable chunk blocks later uploads until its retained Blob succeeds", async () => {
   const uploaded: string[] = [];
   const failures: string[] = [];
+  let fail = true;
   const queue = new WebDurableUploadQueue(async chunk => {
     const value = await chunk.text();
-    if (value === "bad") throw new Error("HTTP 200 ok:false");
+    if (value === "bad" && fail) throw new Error("HTTP 200 ok:false");
     uploaded.push(value);
-  }, error => failures.push(error.message), { uploadTimeoutMs: 100, closeDeadlineMs: 100 });
+  }, error => failures.push(error.message), { maxAttempts: 2, uploadTimeoutMs: 100, closeDeadlineMs: 100 });
 
   queue.enqueue(new Blob(["good-a"]));
   queue.enqueue(new Blob(["bad"]));
   queue.enqueue(new Blob(["good-b"]));
-  await queue.close();
-  assert.deepEqual(uploaded, ["good-a", "good-b"]);
+  await assert.rejects(queue.close(), /HTTP 200 ok:false/);
+  assert.deepEqual(uploaded, ["good-a"]);
+  assert.equal(queue.pendingCount, 2);
+  fail = false;
+  await queue.retryPending();
+  assert.deepEqual(uploaded, ["good-a", "bad", "good-b"]);
   assert.deepEqual(failures, ["HTTP 200 ok:false"]);
 });
 
@@ -138,7 +144,8 @@ test("durable queue applies bounded backpressure", async () => {
   queue.enqueue(new Blob(["dropped"]));
   assert.ok(failures.some(message => message.includes("backpressure limit")));
   release();
-  await queue.close();
+  await assert.rejects(queue.close(), /recording is incomplete/);
+  assert.equal(queue.expectedNextSequence, 3);
 });
 
 test("Finish bounds a missing MediaRecorder stop event and keeps queued final data", async () => {

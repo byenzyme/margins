@@ -11,6 +11,7 @@ interface StoredCapture {
   sessionId: string;
   startedAtMs: number;
   nextSequence: number;
+  expectedNextSequence?: number;
   paused: boolean;
   pendingControl?: { kind: "pause" | "resume" | "stop"; operationId: string };
   stopDrainError?: HostError;
@@ -125,7 +126,8 @@ function readStored(): StoredCapture | null {
     const sessionId = value?.sessionId || value?.recordingId;
     return value && typeof sessionId === "string" && Number.isInteger(value.nextSequence)
       ? { ...value, sessionId, startedAtMs: typeof value.startedAtMs === "number" ? value.startedAtMs : Date.now(),
-          paused: value.paused === true, nextSequence: value.nextSequence! } : null;
+          paused: value.paused === true, nextSequence: value.nextSequence!,
+          expectedNextSequence: Number.isInteger(value.expectedNextSequence) ? value.expectedNextSequence : value.nextSequence! } : null;
   }
   catch { return null; }
 }
@@ -136,6 +138,7 @@ function writeStored(value: StoredCapture | null) {
         sessionId: value.sessionId,
         startedAtMs: value.startedAtMs,
         nextSequence: value.nextSequence,
+        ...(value.expectedNextSequence !== undefined ? { expectedNextSequence: value.expectedNextSequence } : {}),
         paused: value.paused,
         ...(value.pendingControl ? { pendingControl: value.pendingControl } : {}),
         ...(value.stopDrainError ? { stopDrainError: value.stopDrainError } : {}),
@@ -213,6 +216,7 @@ const defaultDependencies: BrowserCaptureDependencies = {
 export class BrowserCaptureOwner {
   private pluginId: string | null = null;
   private capture: LocalCapture | null = null;
+  private pendingCapture: LocalCapture | null = null;
   private readonly subscribers = new Set<Subscriber>();
   private recoveryStarted = false;
   private heartbeatRecovering = false;
@@ -369,7 +373,7 @@ export class BrowserCaptureOwner {
     this.recoveryStarted = true;
     try {
       if (stored.pendingControl?.kind === "stop" && this.pluginId) {
-        await this.reconcileStop(stored);
+        await this.retryPendingStop();
       } else {
         await this.createLocal(stored, await this.dependencies.acquireMicrophone());
       }
@@ -398,7 +402,7 @@ export class BrowserCaptureOwner {
         projectId, client: detectClientCapabilities(), ownerId, ...(title ? { title } : {}),
       });
       if (!state.recordingId || !state.ownsRecording) throw new Error(state.detail);
-      await this.createLocal({ sessionId: state.recordingId, startedAtMs: Date.now(), nextSequence: 0, paused: false }, stream);
+      await this.createLocal({ sessionId: state.recordingId, startedAtMs: Date.now(), nextSequence: 0, expectedNextSequence: 0, paused: false }, stream);
       this.acceptPanel(state.recordingId, state);
       return state;
     } catch (cause) {
@@ -454,6 +458,7 @@ export class BrowserCaptureOwner {
   async stop() {
     const current = this.capture; if (!current || !this.pluginId) return;
     this.capture = null;
+    this.pendingCapture = current;
     ++this.generation;
     this.heartbeatRecovering = false;
     current.levelMonitor?.dispose();
@@ -468,7 +473,8 @@ export class BrowserCaptureOwner {
     const recorderStopped = releaseBrowserDevice(current);
     try {
       const drain = await drainBrowserMedia(current, recorderStopped);
-      const errors = [...current.uploadErrors, ...drain.errors];
+      current.expectedNextSequence = current.uploads.expectedNextSequence;
+      const errors = drain.errors;
       if (errors.length > 0) {
         current.stopDrainError = {
           code: "browser_audio_drain_incomplete",
@@ -476,10 +482,13 @@ export class BrowserCaptureOwner {
           retryable: true,
         };
         writeStored(current);
+        return this.incompleteStopPanel(current, current.stopDrainError);
       }
       // The host owns finalization, so it must not close chunk admission until
       // the browser's bounded final-data drain has settled.
-      return await this.reconcileStop(current);
+      const result = await this.reconcileStop(current);
+      if (result.state === "saved") this.pendingCapture = null;
+      return result;
     } finally {
       this.emit();
     }
@@ -488,7 +497,50 @@ export class BrowserCaptureOwner {
   async retryPendingStop() {
     const stored = readStored();
     if (!stored || stored.pendingControl?.kind !== "stop") return;
-    return this.reconcileStop(stored);
+    const pending = this.pendingCapture?.sessionId === stored.sessionId ? this.pendingCapture : null;
+    if (stored.stopDrainError) {
+      if (!pending || pending.uploads.recoverablePendingCount === 0) {
+        return this.incompleteStopPanel(stored, stored.stopDrainError);
+      }
+      try {
+        await pending.uploads.retryPending();
+      } catch (cause) {
+        const error = { code: "browser_audio_drain_incomplete", message: cause instanceof Error ? cause.message : String(cause), retryable: true };
+        stored.stopDrainError = error;
+        writeStored(stored);
+        return this.incompleteStopPanel(stored, error);
+      }
+      stored.nextSequence = Math.max(stored.nextSequence, pending.nextSequence);
+      stored.stopDrainError = undefined;
+      writeStored(stored);
+    }
+    const result = await this.reconcileStop(stored);
+    if (result.state === "saved") this.pendingCapture = null;
+    return result;
+  }
+
+  private incompleteStopPanel(stored: StoredCapture, error: HostError): PanelState {
+    const prior = this.panels.get(stored.sessionId) ?? this.latestPanel;
+    const incomplete: PanelState = {
+      schema: prior?.schema ?? "margins.bb.recording.panel.v2",
+      state: "needs_attention",
+      title: "Recording incomplete",
+      detail: error.message,
+      sourceLabel: prior?.sourceLabel ?? null,
+      storageLabel: prior?.storageLabel ?? null,
+      primaryAction: error.retryable ? "retry" : "none",
+      primaryLabel: error.retryable ? "Try again" : "Recording incomplete",
+      canStop: false,
+      canEditNotepad: false,
+      ownsRecording: true,
+      recordingId: stored.sessionId,
+      sessionId: stored.sessionId,
+      notepad: prior?.notepad ?? null,
+      lastSessionId: prior?.lastSessionId ?? null,
+      error,
+    };
+    this.acceptPanel(stored.sessionId, incomplete);
+    return incomplete;
   }
 
   private async reconcileStop(stored: StoredCapture): Promise<PanelState> {
@@ -496,6 +548,7 @@ export class BrowserCaptureOwner {
     const state = await this.dependencies.rpc<PanelState>(this.pluginId, "stop", {
       sessionId: stored.sessionId, client: detectClientCapabilities(),
       operationId: stored.pendingControl.operationId,
+      expectedNextSequence: stored.expectedNextSequence ?? stored.nextSequence,
     });
     const latest = readStored();
     const recovery = latest?.sessionId === stored.sessionId
@@ -504,6 +557,8 @@ export class BrowserCaptureOwner {
       ? {
           ...stored,
           nextSequence: Math.max(stored.nextSequence, latest.nextSequence),
+          expectedNextSequence: Math.max(stored.expectedNextSequence ?? stored.nextSequence,
+            latest.expectedNextSequence ?? latest.nextSequence),
           stopDrainError: stored.stopDrainError ?? latest.stopDrainError,
         }
       : stored;
@@ -557,6 +612,7 @@ export class BrowserCaptureOwner {
   private async stopAfterDisconnect(current: LocalCapture) {
     if (this.capture !== current) return;
     this.capture = null;
+    this.pendingCapture = current;
     ++this.generation;
     this.heartbeatRecovering = true;
     this.endedRecordingId = current.sessionId;
@@ -569,7 +625,8 @@ export class BrowserCaptureOwner {
     writeStored(current);
     this.emit();
     const drain = await drainBrowserMedia(current, releaseBrowserDevice(current));
-    const errors = [...current.uploadErrors, ...drain.errors];
+    current.expectedNextSequence = current.uploads.expectedNextSequence;
+    const errors = drain.errors;
     if (errors.length > 0) {
       current.stopDrainError = {
         code: "browser_audio_drain_incomplete",
@@ -577,6 +634,8 @@ export class BrowserCaptureOwner {
         retryable: true,
       };
       writeStored(current);
+      this.incompleteStopPanel(current, current.stopDrainError);
+      return;
     }
     // The default transport is bounded. A failed acknowledgement leaves the
     // exact Stop identity in session storage for explicit reconciliation.

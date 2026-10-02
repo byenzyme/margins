@@ -616,9 +616,9 @@ export class ProjectMarginsTransport {
     });
   }
 
-  stop(target: ProjectTarget, dataDir: string, recordingId: string, ownerId: string) {
+  stop(target: ProjectTarget, dataDir: string, recordingId: string, ownerId: string, expectedNextSequence: number) {
     return this.withHandle(target, dataDir, async (handle) => {
-      await this.request(handle, `browser/sessions/${recordingId}/stop`, "POST", { ownerId });
+      await this.request(handle, `browser/sessions/${recordingId}/stop`, "POST", { ownerId, expectedNextSequence });
       return null;
     });
   }

@@ -3408,13 +3408,16 @@ dependencies = [
  "axum",
  "chrono",
  "dirs",
+ "hound",
  "margins-core",
  "margins-media",
  "margins-meeting-protocol",
  "margins-meeting-runtime",
  "margins-store",
  "margins-workflows",
+ "matroska-demuxer",
  "rand 0.8.6",
+ "ropus",
  "serde",
  "serde_json",
  "sha2",
@@ -3493,6 +3496,10 @@ dependencies = [
  "autocfg",
  "rawpointer",
 ]
+
+[[package]]
+name = "matroska-demuxer"
+version = "0.8.1"
 
 [[package]]
 name = "memchr"

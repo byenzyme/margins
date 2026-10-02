@@ -62,6 +62,9 @@ export class WebDurableUploadQueue {
   private active: AbortController | null = null;
   private accepting = true;
   private nextSequence: number;
+  private blocked = false;
+  private lostChunk = false;
+  private lastFailure: Error | null = null;
 
   constructor(
     upload: DurableChunkUpload,
@@ -82,9 +85,17 @@ export class WebDurableUploadQueue {
     return this.queue.length;
   }
 
+  get expectedNextSequence(): number { return this.nextSequence; }
+
+  get recoverablePendingCount(): number { return this.queue.length; }
+
   enqueue(chunk: Blob): void {
     if (!this.accepting || chunk.size === 0) return;
     if (this.queue.length >= this.maxQueuedChunks) {
+      // The caller must still fence Stop against this sequence. The Blob was
+      // not retained, so this capture cannot be finalized as complete.
+      this.nextSequence += 1;
+      this.lostChunk = true;
       this.onFailure(new Error(
         `Durable audio upload backpressure limit (${this.maxQueuedChunks} chunks) reached; a WebM chunk was not delivered.`,
       ));
@@ -96,31 +107,45 @@ export class WebDurableUploadQueue {
 
   async close(): Promise<void> {
     this.accepting = false;
+    await this.retryPending();
+  }
+
+  /** Retry retained, unacknowledged Blobs during a pending Stop. */
+  async retryPending(): Promise<void> {
+    if (this.lostChunk) throw new Error("A WebM chunk exceeded the upload queue limit; recording is incomplete");
+    if (this.blocked && this.worker) await this.worker;
+    this.blocked = false;
+    this.lastFailure = null;
+    this.startWorker();
     const worker = this.worker ?? Promise.resolve();
     let timer: ReturnType<typeof setTimeout> | null = null;
-    await Promise.race([
+    await Promise.race<void>([
       worker,
-      new Promise<void>((resolve) => {
+      new Promise<void>((_resolve, reject) => {
         timer = setTimeout(() => {
-          this.queue.length = 0;
           const error = new Error(
-            `Durable audio upload drain exceeded ${this.closeDeadlineMs}ms; Finish continued with the server-received subset.`,
+            `Durable audio upload drain exceeded ${this.closeDeadlineMs}ms; recording is incomplete.`,
           );
           this.active?.abort(error);
+          this.blocked = true;
+          this.lastFailure = error;
           this.onFailure(error);
-          resolve();
+          reject(error);
         }, this.closeDeadlineMs);
       }),
     ]).finally(() => {
       if (timer) clearTimeout(timer);
     });
+    if (this.blocked || this.queue.length > 0) {
+      throw this.lastFailure ?? new Error("Durable audio upload is incomplete");
+    }
   }
 
   private startWorker(): void {
-    if (this.worker) return;
+    if (this.worker || this.blocked || this.queue.length === 0) return;
     const worker = this.drain().finally(() => {
       if (this.worker === worker) this.worker = null;
-      if (this.accepting && this.queue.length > 0) this.startWorker();
+      if (!this.blocked && this.queue.length > 0) this.startWorker();
     });
     this.worker = worker;
     void worker.catch(() => undefined);
@@ -139,8 +164,13 @@ export class WebDurableUploadQueue {
           lastError = asError(error);
         }
       }
+      if (lastError) {
+        this.blocked = true;
+        this.lastFailure = lastError;
+        this.onFailure(lastError);
+        return;
+      }
       this.queue.shift();
-      if (lastError) this.onFailure(lastError);
     }
   }
 

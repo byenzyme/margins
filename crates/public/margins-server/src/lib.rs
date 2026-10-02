@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod http;
+pub mod webm;
 
 /// BB capture wire contract; checked against the plugin before remote use.
 pub const HOSTED_CAPTURE_PROTOCOL_VERSION: u8 = 3;
@@ -44,7 +45,11 @@ async fn run_async() -> anyhow::Result<()> {
     );
     let data_dir = std::env::var("MARGINS_DATA_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".margins-app"));
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".margins-app")
+        });
     std::fs::create_dir_all(&data_dir)?;
     let work_dir = std::env::var("MARGINS_WORK_DIR")
         .map(PathBuf::from)
@@ -56,18 +61,26 @@ async fn run_async() -> anyhow::Result<()> {
         .context("MARGINS_WORKSPACE is required for margins-server")?;
     let workspace = if std::env::var_os("MARGINS_SERVICE_PROVISION").is_some() {
         workspace::ensure_service_workspace(
-            &margins_home, &workspace_id, Some(&workspace_id), &work_dir, &work_dir,
+            &margins_home,
+            &workspace_id,
+            Some(&workspace_id),
+            &work_dir,
+            &work_dir,
         )?
     } else {
         workspace::resolve_workspace(&margins_home, Some(&workspace_id), &work_dir)?
     };
     let instance_id = std::env::var("MARGINS_INSTANCE_ID").unwrap_or_else(|_| "local".into());
     let workspace_service = Arc::new(WorkspaceService::open_with_capabilities(
-        &instance_id, workspace, false, true,
+        &instance_id,
+        workspace,
+        false,
+        true,
     )?);
     let token = auth::load_or_create_token(&data_dir)?;
     let credential_store = ScopedCredentialStore::open(data_dir.join("credentials.json"))?;
-    let service_principal = ServicePrincipal::full("server-admin", workspace_service.workspace_id());
+    let service_principal =
+        ServicePrincipal::full("server-admin", workspace_service.workspace_id());
     credential_store.register(
         &service_principal.id,
         &token,
@@ -75,10 +88,13 @@ async fn run_async() -> anyhow::Result<()> {
         service_principal.operations.iter().cloned().collect(),
         None,
     )?;
-    let state = ServerState { workspace_service, credential_store, service_principal };
-    let listener = tokio::net::TcpListener::bind(
-        format!("{host}:{port}").parse::<SocketAddr>()?,
-    ).await?;
+    let state = ServerState {
+        workspace_service,
+        credential_store,
+        service_principal,
+    };
+    let listener =
+        tokio::net::TcpListener::bind(format!("{host}:{port}").parse::<SocketAddr>()?).await?;
     let service_state = ServiceStateV1 {
         schema: "margins.service-state.v1".into(),
         protocol_version: 1,
@@ -88,14 +104,20 @@ async fn run_async() -> anyhow::Result<()> {
     };
     let state_path = data_dir.join("service.json");
     let temporary_path = data_dir.join(format!(".service.{}.tmp", std::process::id()));
-    let mut file = std::fs::OpenOptions::new().create_new(true).write(true).open(&temporary_path)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary_path)?;
     file.write_all(&serde_json::to_vec_pretty(&service_state)?)?;
     file.sync_all()?;
     drop(file);
     std::fs::rename(&temporary_path, &state_path)?;
     std::fs::File::open(&data_dir)?.sync_all()?;
     let app = http::build_router(state);
-    eprintln!("[margins-server] listening on http://{}", listener.local_addr()?);
+    eprintln!(
+        "[margins-server] listening on http://{}",
+        listener.local_addr()?
+    );
     axum::serve(listener, app).await?;
     Ok(())
 }

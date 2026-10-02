@@ -12,9 +12,9 @@ use axum::{
 use margins_meeting_protocol::{
     AudioChunkBatchV1, AudioChunkV1, ClientMessageBodyV1, ClientMessageV1, ContentDigestV1,
     DigestAlgorithmV1, DurationMillis, MessageId, ProtocolVersionV1, SessionId, SessionMillis,
-    UnixMillis, WorkspaceAttachV1, WorkspaceErrorV1, WorkspaceMemoReplaceV1,
-    WorkspaceMemoUpdateV1, WorkspaceNoteAssociationUpdateV1, WorkspaceRenameV1,
-    WorkspaceResponseV1, AUDIO_CHUNK_BATCH_CONTENT_TYPE_V1,
+    UnixMillis, WorkspaceAttachV1, WorkspaceErrorV1, WorkspaceMemoReplaceV1, WorkspaceMemoUpdateV1,
+    WorkspaceNoteAssociationUpdateV1, WorkspaceRenameV1, WorkspaceResponseV1,
+    AUDIO_CHUNK_BATCH_CONTENT_TYPE_V1,
 };
 use margins_workflows::workspace_service::{
     ServicePrincipal, OP_CAPTURE_WRITE, OP_SESSION_WRITE, OP_WORKSPACE_READ,
@@ -23,7 +23,10 @@ use serde_json::{json, Value};
 use tower_http::cors::{Any, CorsLayer};
 
 pub fn build_router(state: ServerState) -> Router {
-    let health_cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
+    let health_cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
     Router::new()
         .route("/health", get(|| async { Json(json!({"ok": true})) }).layer(health_cors))
         .route("/v1/capabilities", get(workspace_capabilities))
@@ -292,8 +295,8 @@ async fn workspace_capabilities(State(state): State<ServerState>, headers: Heade
         .workspace_service
         .capabilities(&principal)
         .map(|capabilities| {
-            let mut value = serde_json::to_value(capabilities)
-                .expect("Workspace capabilities serialize");
+            let mut value =
+                serde_json::to_value(capabilities).expect("Workspace capabilities serialize");
             value["capture_protocol_version"] = json!(crate::HOSTED_CAPTURE_PROTOCOL_VERSION);
             workspace_ok(value)
         })

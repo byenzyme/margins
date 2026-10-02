@@ -151,7 +151,7 @@ describe("browser capture ownership", () => {
       state: "needs_attention",
       error: { code: "browser_audio_drain_incomplete" },
     });
-    expect(stopInputs).toHaveLength(1);
+    expect(stopInputs).toHaveLength(0);
     expect(sessionStorage.getItem("margins.bb.capture.v1")).not.toBeNull();
   });
 
@@ -266,18 +266,18 @@ describe("browser capture ownership", () => {
       recordingId: "rec-1",
     });
     expect(stopTrack).toHaveBeenCalledOnce();
-    expect(stopInputs).toHaveLength(1);
+    expect(stopInputs).toHaveLength(0);
     const retained = JSON.parse(sessionStorage.getItem("margins.bb.capture.v1") || "null");
     expect(retained).toMatchObject({
       sessionId: "rec-1",
-      pendingControl: { kind: "stop", operationId: (stopInputs[0] as { operationId: string }).operationId },
+      pendingControl: { kind: "stop", operationId: expect.any(String) },
       stopDrainError: { code: "browser_audio_drain_incomplete" },
     });
     await expect(owner.retryPendingStop()).resolves.toMatchObject({
       state: "needs_attention",
       error: { code: "browser_audio_drain_incomplete" },
     });
-    expect(stopInputs[1]).toMatchObject({ operationId: (stopInputs[0] as { operationId: string }).operationId });
+    expect(stopInputs).toHaveLength(0);
     expect(sessionStorage.getItem("margins.bb.capture.v1")).not.toBeNull();
   });
 

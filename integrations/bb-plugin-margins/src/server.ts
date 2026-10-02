@@ -236,13 +236,14 @@ export default function marginsPlugin(bb: BbPluginApi) {
     finally { release(); if (startLocks.get(projectId) === queued) startLocks.delete(projectId); }
   }
 
-  async function operate(sessionId: string, client: ClientCapabilities, operationId: string, operation: "heartbeat" | "pause" | "resume" | "stop") {
+  async function operate(sessionId: string, client: ClientCapabilities, operationId: string, operation: "heartbeat" | "pause" | "resume" | "stop", expectedNextSequence?: number) {
     const receiptKey = `control-receipt:${sessionId}:${operationId}`;
     const capture = await readCapture(sessionId);
     if (operation !== "heartbeat") {
-      const prior = await bb.storage.kv.get(receiptKey) as { sessionId?: unknown; canonicalSessionId?: unknown; operation?: unknown; clientId?: unknown; workspaceId?: unknown; projectId?: unknown } | null;
+      const prior = await bb.storage.kv.get(receiptKey) as { sessionId?: unknown; canonicalSessionId?: unknown; operation?: unknown; clientId?: unknown; workspaceId?: unknown; projectId?: unknown; expectedNextSequence?: unknown } | null;
       if (prior) {
-        if (prior.sessionId !== sessionId || prior.operation !== operation || prior.clientId !== client.clientId) {
+        if (prior.sessionId !== sessionId || prior.operation !== operation || prior.clientId !== client.clientId
+          || (operation === "stop" && prior.expectedNextSequence !== expectedNextSequence)) {
           return basePanel(capture?.projectId || null, "needs_attention", client, {
             capture: null,
             error: { code: "operation_conflict", message: "This control operation id was already used for different content.", retryable: false },
@@ -262,7 +263,8 @@ export default function marginsPlugin(bb: BbPluginApi) {
     });
     const target: ProjectTarget = { projectId: capture.projectId, hostId: capture.hostId,
       projectRoot: capture.projectRoot, workspaceId: capture.workspaceId };
-    const result = await callHost(target, operation, { target, recordingId: capture.recordingId, ownerId: capture.ownerId }) as HostResult;
+    const result = await callHost(target, operation, { target, recordingId: capture.recordingId, ownerId: capture.ownerId,
+      ...(operation === "stop" ? { expectedNextSequence } : {}) }) as HostResult;
     if (result.ok) {
       if (operation === "stop") {
         await bb.storage.kv.set(lastSessionKey(capture.workspaceId), capture.sessionId);
@@ -272,6 +274,7 @@ export default function marginsPlugin(bb: BbPluginApi) {
       }
       if (operation !== "heartbeat") {
         await bb.storage.kv.set(receiptKey, { sessionId, canonicalSessionId: capture.sessionId, operation, clientId: client.clientId,
+          ...(operation === "stop" ? { expectedNextSequence } : {}),
           workspaceId: capture.workspaceId, projectId: capture.projectId });
       }
       if (operation === "stop") await clearCapture(capture);
@@ -561,7 +564,7 @@ export default function marginsPlugin(bb: BbPluginApi) {
     heartbeat: ({ sessionId, client, operationId }) => operate(sessionId, client, operationId, "heartbeat"),
     pause: ({ sessionId, client, operationId }) => operate(sessionId, client, operationId, "pause"),
     resume: ({ sessionId, client, operationId }) => operate(sessionId, client, operationId, "resume"),
-    stop: ({ sessionId, client, operationId }) => operate(sessionId, client, operationId, "stop"),
+    stop: ({ sessionId, client, operationId, expectedNextSequence }) => operate(sessionId, client, operationId, "stop", expectedNextSequence),
     async connectedNoteContext({ threadId, projectId, sessionId }): Promise<ConnectedNoteResult> {
       const target = await targetForSelection({ threadId, projectId });
       return callHost(target, "connectedNoteContext", { target, recordingId: sessionId }) as Promise<ConnectedNoteResult>;

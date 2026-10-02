@@ -28,7 +28,7 @@ default-members = [
     "crates/public/margins-meeting-runtime",
     "crates/public/margins-server",
 ]
-exclude = ["desktop/src-tauri"]
+exclude = ["desktop/src-tauri", "crates/public/margins-server/vendor/matroska-demuxer"]
 resolver = "2"
 [workspace.dependencies]
 rusqlite = { package = "libsql-rusqlite", version = "=0.9.30" }

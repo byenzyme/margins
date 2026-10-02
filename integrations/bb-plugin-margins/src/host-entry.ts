@@ -124,7 +124,7 @@ export function createMarginsHostEntry(transport: Transport) {
       },
       async stop(input, context) {
         retain(context);
-        const result = await transport.stop(input.target, context.experimental_paths.dataDir, input.recordingId, input.ownerId);
+        const result = await transport.stop(input.target, context.experimental_paths.dataDir, input.recordingId, input.ownerId, input.expectedNextSequence);
         await changed(context, input.target.projectId, "stop", result);
         return result;
       },
