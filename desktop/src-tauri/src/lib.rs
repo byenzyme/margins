@@ -7241,7 +7241,10 @@ fn write_aligned_sidecar(
     Ok(summary)
 }
 
-#[cfg(feature = "parakeet-asr")]
+#[cfg(any(
+    feature = "parakeet-asr",
+    all(feature = "coreml-asr", target_os = "macos")
+))]
 fn build_session_aligned_headless(
     work_dir: &Path,
     margins_dir: &Path,
@@ -7256,7 +7259,7 @@ fn build_session_aligned_headless(
         let mono_16k = margins::audio_pipeline::mono_16k_from_wav(&wav)
             .map_err(|e| format!("Failed to prepare audio for transcription: {e}"))?;
         let transcript = margins::offline_asr::transcribe_mono_16k(&mono_16k)
-            .map_err(|e| format!("Headless transcription failed: {e}"))?;
+            .map_err(|e| format!("Headless transcription failed: {e:#}"))?;
         backend = Some(transcript.backend);
         let offset_ms = seg.offset_ms.max(0) as u64;
         for entry in transcript.entries {
@@ -7301,7 +7304,10 @@ fn build_session_aligned_headless(
     Ok((content, summary))
 }
 
-#[cfg(feature = "parakeet-asr")]
+#[cfg(any(
+    feature = "parakeet-asr",
+    all(feature = "coreml-asr", target_os = "macos")
+))]
 fn write_aligned_sidecar_headless(
     work_dir: &Path,
     margins_dir: &Path,
@@ -7329,7 +7335,10 @@ pub(crate) async fn transcribe_hosted_browser_session(
     ctx: &ctx::Ctx,
     name: String,
 ) -> Result<String, String> {
-    #[cfg(feature = "parakeet-asr")]
+    #[cfg(any(
+        feature = "parakeet-asr",
+        all(feature = "coreml-asr", target_os = "macos")
+    ))]
     {
         let work_dir = ctx.state.work_dir.lock().unwrap().clone();
         return tokio::task::spawn_blocking(move || {
@@ -7372,7 +7381,10 @@ pub(crate) async fn transcribe_hosted_browser_session(
         .await
         .map_err(|error| format!("Transcription worker stopped: {error}"))?;
     }
-    #[cfg(not(feature = "parakeet-asr"))]
+    #[cfg(not(any(
+        feature = "parakeet-asr",
+        all(feature = "coreml-asr", target_os = "macos")
+    )))]
     {
         let _ = (ctx, name);
         Err("Headless transcription is not enabled in this server build".to_string())
@@ -11936,7 +11948,10 @@ pub(crate) async fn process_session_impl(
         force_transcribe,
         max_speakers,
         || {
-            #[cfg(feature = "parakeet-asr")]
+            #[cfg(any(
+                feature = "parakeet-asr",
+                all(feature = "coreml-asr", target_os = "macos")
+            ))]
             {
                 let event = ProcessingEvent::timed_lifecycle(
                     &run_started_at,
@@ -11986,7 +12001,10 @@ pub(crate) async fn process_session_impl(
                 }
                 Ok(aligned)
             }
-            #[cfg(not(feature = "parakeet-asr"))]
+            #[cfg(not(any(
+                feature = "parakeet-asr",
+                all(feature = "coreml-asr", target_os = "macos")
+            )))]
             {
                 Err("Headless transcription is not enabled in this server build.".to_string())
             }
