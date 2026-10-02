@@ -174,7 +174,9 @@ fn complete_through(state: &CaptureState, expected: u64) -> std::result::Result<
     }
     let local = expected - position.closed_total;
     if position.current_watermark < local {
-        return Err(gap_response(position.closed_total + position.current_watermark));
+        return Err(gap_response(
+            position.closed_total + position.current_watermark,
+        ));
     }
     Ok(position)
 }
@@ -392,12 +394,15 @@ pub async fn pause(
             .last()
             .and_then(|segment| segment.close.as_ref())
             .is_some_and(|close| close.command.reason == SegmentCloseReasonV1::Pause)
-        && !state.workspace_service.capture_command_recorded(
-            &principal,
-            &body.owner_id,
-            &session,
-            &MessageId(format!("browser-resume-{}", position.closed_count)),
-        ).unwrap_or(false)
+        && !state
+            .workspace_service
+            .capture_command_recorded(
+                &principal,
+                &body.owner_id,
+                &session,
+                &MessageId(format!("browser-resume-{}", position.closed_count)),
+            )
+            .unwrap_or(false)
     {
         return snapshot_value(&state, &principal, &body.owner_id, &session)
             .map(http::workspace_ok)
@@ -460,7 +465,11 @@ pub async fn resume(
         Err(error) => return browser_error(error),
     };
     let resume_id = MessageId(format!("browser-resume-{}", position.closed_count));
-    if state.workspace_service.capture_command_recorded(&principal, &body.owner_id, &session, &resume_id).unwrap_or(false) {
+    if state
+        .workspace_service
+        .capture_command_recorded(&principal, &body.owner_id, &session, &resume_id)
+        .unwrap_or(false)
+    {
         return snapshot_value(&state, &principal, &body.owner_id, &session)
             .map(http::workspace_ok)
             .unwrap_or_else(browser_error);
@@ -480,12 +489,7 @@ pub async fn resume(
     }
     state
         .workspace_service
-        .recover_capture_for_producer(
-            &principal,
-            &body.owner_id,
-            &session,
-            resume_id,
-        )
+        .recover_capture_for_producer(&principal, &body.owner_id, &session, resume_id)
         .and_then(|_| snapshot_value(&state, &principal, &body.owner_id, &session))
         .map(http::workspace_ok)
         .unwrap_or_else(browser_error)
@@ -644,8 +648,13 @@ pub async fn stop(
         .capture_state(&principal, &session)
         .is_ok_and(|capture| capture.input_finalized)
     {
-        if let Err(error) = state.remote_asr_jobs.schedule_pending(state.workspace_service.clone(), state.service_principal.clone()) {
-            eprintln!("[margins-server] deferred ASR schedule after Stop replay: {error:#}");
+        if state.workspace_service.asr_available() {
+            if let Err(error) = state.remote_asr_jobs.schedule_pending(
+                state.workspace_service.clone(),
+                state.service_principal.clone(),
+            ) {
+                eprintln!("[margins-server] deferred ASR schedule after Stop replay: {error:#}");
+            }
         }
         return http::workspace_ok(json!({"sessionId": recording, "inputFinalized": true}));
     }
@@ -738,11 +747,16 @@ pub async fn stop(
     );
     match result {
         Ok(_) => {
-            if let Err(error) = state.remote_asr_jobs.schedule_pending(state.workspace_service.clone(), state.service_principal.clone()) {
-                eprintln!("[margins-server] deferred ASR schedule after Stop: {error:#}");
+            if state.workspace_service.asr_available() {
+                if let Err(error) = state.remote_asr_jobs.schedule_pending(
+                    state.workspace_service.clone(),
+                    state.service_principal.clone(),
+                ) {
+                    eprintln!("[margins-server] deferred ASR schedule after Stop: {error:#}");
+                }
             }
             http::workspace_ok(json!({"sessionId": recording, "inputFinalized": true}))
-        },
+        }
         Err(error) => browser_error(error),
     }
 }

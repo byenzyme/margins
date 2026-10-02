@@ -3,7 +3,11 @@ use axum::{
     http::{Method, Request, StatusCode},
     Router,
 };
-use margins_server::{asr::{RemoteAsrJobs, SpeechSetup}, http::build_router, ServerState};
+use margins_server::{
+    asr::{RemoteAsrJobs, SpeechSetup},
+    http::build_router,
+    ServerState,
+};
 use margins_workflows::{
     workspace::ensure_service_workspace,
     workspace_service::{ScopedCredentialStore, ServicePrincipal, WorkspaceService},
@@ -22,6 +26,8 @@ fn router(root: &Path) -> Router {
     let workspace =
         ensure_service_workspace(&root.join("home"), "practice", None, &notes, &captures).unwrap();
     let service = Arc::new(WorkspaceService::open("test-instance", workspace).unwrap());
+    // A supported server can accept finalized audio while its model installs.
+    service.enable_deferred_asr();
     let credential_store = ScopedCredentialStore::open(root.join("credentials.json")).unwrap();
     let principal = ServicePrincipal::full("test-principal", "practice");
     credential_store
@@ -42,7 +48,13 @@ fn router(root: &Path) -> Router {
     })
 }
 
-async fn call(app: &Router, method: Method, path: &str, body: Vec<u8>, owner: bool) -> (StatusCode, Value) {
+async fn call(
+    app: &Router,
+    method: Method,
+    path: &str,
+    body: Vec<u8>,
+    owner: bool,
+) -> (StatusCode, Value) {
     let mut request = Request::builder()
         .method(method)
         .uri(path)
@@ -60,15 +72,27 @@ async fn call(app: &Router, method: Method, path: &str, body: Vec<u8>, owner: bo
         .await
         .unwrap();
     let status = response.status();
-    let body = to_bytes(response.into_body(), 2 * 1024 * 1024).await.unwrap();
+    let body = to_bytes(response.into_body(), 2 * 1024 * 1024)
+        .await
+        .unwrap();
     let value = serde_json::from_slice(&body).unwrap_or_else(|error| {
-        panic!("non-JSON {status} for {path}: {error}; {}", String::from_utf8_lossy(&body))
+        panic!(
+            "non-JSON {status} for {path}: {error}; {}",
+            String::from_utf8_lossy(&body)
+        )
     });
     (status, value)
 }
 
 async fn post(app: &Router, path: &str, body: Value) -> (StatusCode, Value) {
-    call(app, Method::POST, path, serde_json::to_vec(&body).unwrap(), false).await
+    call(
+        app,
+        Method::POST,
+        path,
+        serde_json::to_vec(&body).unwrap(),
+        false,
+    )
+    .await
 }
 
 #[tokio::test]
@@ -76,7 +100,12 @@ async fn stop_rejects_gap_until_missing_webm_chunk_is_durable_after_restart() {
     let temp = tempfile::tempdir().unwrap();
     let app = router(temp.path());
     let base = "/v1/workspaces/practice/browser/sessions";
-    let (status, started) = post(&app, base, json!({"ownerId": OWNER, "name": "Runtime HTTP test"})).await;
+    let (status, started) = post(
+        &app,
+        base,
+        json!({"ownerId": OWNER, "name": "Runtime HTTP test"}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{started}");
     let session = started["result"]["sessionId"].as_str().unwrap();
     assert_eq!(started["result"]["status"], "recording");
@@ -93,10 +122,18 @@ async fn stop_rejects_gap_until_missing_webm_chunk_is_durable_after_restart() {
         .await;
         assert_eq!(acknowledged["result"]["durable"], true, "{acknowledged}");
     }
-    let (status, gap) = post(&app, &stop_path, json!({"ownerId": OWNER, "expectedNextSequence": 3})).await;
+    let (status, gap) = post(
+        &app,
+        &stop_path,
+        json!({"ownerId": OWNER, "expectedNextSequence": 3}),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(gap["error"]["code"], "browser_chunk_gap");
-    assert_eq!(gap["error"]["message"], "Missing browser audio sequence 1; retry the chunk before Stop.");
+    assert_eq!(
+        gap["error"]["message"],
+        "Missing browser audio sequence 1; retry the chunk before Stop."
+    );
 
     // Reopen the actual SQLite runtime and its producer authority, not an
     // in-memory test double. The out-of-order acknowledgement must survive.
@@ -112,6 +149,18 @@ async fn stop_rejects_gap_until_missing_webm_chunk_is_durable_after_restart() {
     .await;
     assert_eq!(status, StatusCode::OK, "{finished}");
     assert_eq!(finished["result"]["inputFinalized"], true);
+    // Stop must leave the admitted job queued until speech setup publishes
+    // model readiness. An eager worker would fail the still-unavailable model.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let (_, job) = call(
+        &restarted,
+        Method::GET,
+        &format!("/v1/workspaces/practice/sessions/{session}/jobs/latest"),
+        vec![],
+        false,
+    )
+    .await;
+    assert_eq!(job["result"]["status"], "queued", "{job}");
     // A lost Stop response retries cleanly after the producer reservation is released.
     let (status, replayed) = post(
         &restarted,
@@ -128,15 +177,34 @@ async fn paused_capture_resumes_from_durable_runtime_state_after_restart() {
     let temp = tempfile::tempdir().unwrap();
     let app = router(temp.path());
     let base = "/v1/workspaces/practice/browser/sessions";
-    let (_, started) = post(&app, base, json!({"ownerId": OWNER, "name": "Pause resume HTTP test"})).await;
+    let (_, started) = post(
+        &app,
+        base,
+        json!({"ownerId": OWNER, "name": "Pause resume HTTP test"}),
+    )
+    .await;
     let session = started["result"]["sessionId"].as_str().unwrap();
     let first = format!("{base}/{session}/chunks/0");
     let (_, acknowledged) = call(&app, Method::PUT, &first, vec![b'A'], true).await;
     assert_eq!(acknowledged["result"]["durable"], true);
     let pause_path = format!("{base}/{session}/pause");
-    let (status, paused) = post(&app, &pause_path, json!({"ownerId": OWNER, "expectedNextSequence": 1})).await;
+    let (status, paused) = post(
+        &app,
+        &pause_path,
+        json!({"ownerId": OWNER, "expectedNextSequence": 1}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{paused}");
     assert_eq!(paused["result"]["status"], "paused");
+    let (_, summary) = call(
+        &app,
+        Method::GET,
+        &format!("/v1/workspaces/practice/sessions/{session}"),
+        vec![],
+        false,
+    )
+    .await;
+    assert_eq!(summary["result"]["input_finalized"], false, "{summary}");
     drop(app);
 
     let restarted = router(temp.path());
@@ -146,15 +214,42 @@ async fn paused_capture_resumes_from_durable_runtime_state_after_restart() {
         &format!("{base}/{session}/snapshot?ownerId={OWNER}"),
         vec![],
         false,
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{snapshot}");
     assert_eq!(snapshot["result"]["status"], "paused");
-    let (status, resumed) = post(&restarted, &format!("{base}/{session}/resume"), json!({"ownerId": OWNER})).await;
+    let (_, summary) = call(
+        &restarted,
+        Method::GET,
+        &format!("/v1/workspaces/practice/sessions/{session}"),
+        vec![],
+        false,
+    )
+    .await;
+    assert_eq!(summary["result"]["input_finalized"], false, "{summary}");
+    let (status, resumed) = post(
+        &restarted,
+        &format!("{base}/{session}/resume"),
+        json!({"ownerId": OWNER}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{resumed}");
     assert_eq!(resumed["result"]["status"], "recording");
-    let (_, second) = call(&restarted, Method::PUT, &format!("{base}/{session}/chunks/1"), vec![b'B'], true).await;
+    let (_, second) = call(
+        &restarted,
+        Method::PUT,
+        &format!("{base}/{session}/chunks/1"),
+        vec![b'B'],
+        true,
+    )
+    .await;
     assert_eq!(second["result"]["durable"], true, "{second}");
-    let (status, finished) = post(&restarted, &format!("{base}/{session}/stop"), json!({"ownerId": OWNER, "expectedNextSequence": 2})).await;
+    let (status, finished) = post(
+        &restarted,
+        &format!("{base}/{session}/stop"),
+        json!({"ownerId": OWNER, "expectedNextSequence": 2}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{finished}");
     assert_eq!(finished["result"]["inputFinalized"], true);
 }

@@ -72,16 +72,16 @@ pub fn decode_webm_opus_to_mono_16k(bytes: &[u8]) -> Result<Vec<f32>, String> {
     std::fs::write(&source, bytes).map_err(|error| error.to_string())?;
     finalize_webm_opus_to_wav(&source, &output)?;
     let reader = hound::WavReader::open(&output).map_err(|error| error.to_string())?;
-    if reader.spec().channels != 1 || reader.spec().sample_rate != TARGET_SAMPLE_RATE {
+    if reader.spec().channels != 1
+        || reader.spec().sample_rate != TARGET_SAMPLE_RATE
+        || reader.spec().bits_per_sample != 32
+        || reader.spec().sample_format != hound::SampleFormat::Float
+    {
         return Err("native WebM decoder returned an unexpected WAV format".into());
     }
     reader
-        .into_samples::<i16>()
-        .map(|sample| {
-            sample
-                .map(|value| f32::from(value) / 32768.0)
-                .map_err(|error| error.to_string())
-        })
+        .into_samples::<f32>()
+        .map(|sample| sample.map_err(|error| error.to_string()))
         .collect()
 }
 
@@ -572,6 +572,14 @@ mod tests {
         assert!(stats.max_decode_frames <= 320);
         assert!(stats.max_write_chunk_frames <= STREAM_CHUNK_FRAMES);
         assert_no_native_temp_wavs(paths.wav.parent().unwrap());
+    }
+
+    #[test]
+    fn batch_decoder_reads_native_float_wav_samples() {
+        let fixture = make_chrome_unknown_size_webm_fixture(20, 20, 1, true);
+        let samples = decode_webm_opus_to_mono_16k(&fixture.webm).unwrap();
+        assert!((samples.len() as i64 - fixture.expected_16k_frames as i64).abs() <= 1);
+        assert!(samples.iter().any(|sample| sample.abs() > 0.001));
     }
 
     #[test]

@@ -1022,17 +1022,21 @@ impl WorkspaceService {
             .runtime
             .storage()
             .load_session(&SessionId(session_id.to_string()))?;
-        let input_finalized = runtime
-            .as_ref()
-            .is_some_and(|value| value.input_finalized())
-            || (!meta.segments.is_empty()
+        let input_finalized = if let Some(runtime) = runtime.as_ref() {
+            runtime.input_finalized()
+        } else {
+            // Legacy/imported sessions predate runtime finalization. A paused
+            // runtime segment can have a duration while the session remains
+            // open for Resume, so these projections apply only without one.
+            (!meta.segments.is_empty()
                 && meta
                     .segments
                     .iter()
                     .all(|segment| segment.duration_secs.is_some()))
-            || canonical::list_session_artifacts(&self.margins_dir, session_id)?
-                .iter()
-                .any(|artifact| artifact.kind == "original_audio");
+                || canonical::list_session_artifacts(&self.margins_dir, session_id)?
+                    .iter()
+                    .any(|artifact| artifact.kind == "original_audio")
+        };
         let finalized_input = runtime.as_ref().and_then(|value| value.finalized_input());
         let capture_duration_ms = finalized_input.map(|(_, ended)| DurationMillis(ended.0));
         let capture_finalize_message_id = finalized_input.map(|(message, _)| message.clone());

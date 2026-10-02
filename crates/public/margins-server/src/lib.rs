@@ -20,6 +20,30 @@ use margins_workflows::{
 };
 use std::{io::Write as _, net::SocketAddr, path::PathBuf, sync::Arc};
 
+fn selected_workspace(
+    margins_home: &std::path::Path,
+    workspace_id: &str,
+    work_dir: &std::path::Path,
+    provision: bool,
+) -> anyhow::Result<workspace::ResolvedWorkspace> {
+    if workspace::workspace_state_dir(margins_home, workspace_id)?.exists() {
+        // BB starts the service for a Workspace the CLI has already declared.
+        // Its Home and capture bindings are authoritative; the server's cwd
+        // is only a launcher detail and must never rewrite those paths.
+        workspace::resolve_workspace(margins_home, Some(workspace_id), work_dir)
+    } else if provision {
+        workspace::ensure_service_workspace(
+            margins_home,
+            workspace_id,
+            Some(workspace_id),
+            work_dir,
+            work_dir,
+        )
+    } else {
+        workspace::resolve_workspace(margins_home, Some(workspace_id), work_dir)
+    }
+}
+
 #[derive(Clone)]
 pub struct ServerState {
     pub workspace_service: Arc<WorkspaceService>,
@@ -64,19 +88,13 @@ async fn run_async() -> anyhow::Result<()> {
         .unwrap_or_else(|_| data_dir.join("margins-home"));
     let workspace_id = std::env::var("MARGINS_WORKSPACE")
         .context("MARGINS_WORKSPACE is required for margins-server")?;
-    let workspace = if std::env::var_os("MARGINS_SERVICE_PROVISION").is_some()
-        || std::env::var_os("MARGINS_BB_CAPTURE_WORKSPACE").is_some()
-    {
-        workspace::ensure_service_workspace(
-            &margins_home,
-            &workspace_id,
-            Some(&workspace_id),
-            &work_dir,
-            &work_dir,
-        )?
-    } else {
-        workspace::resolve_workspace(&margins_home, Some(&workspace_id), &work_dir)?
-    };
+    let workspace = selected_workspace(
+        &margins_home,
+        &workspace_id,
+        &work_dir,
+        std::env::var_os("MARGINS_SERVICE_PROVISION").is_some()
+            || std::env::var_os("MARGINS_BB_CAPTURE_WORKSPACE").is_some(),
+    )?;
     let instance_id = std::env::var("MARGINS_INSTANCE_ID").unwrap_or_else(|_| "local".into());
     let workspace_service = Arc::new(WorkspaceService::open_with_capabilities(
         &instance_id,
@@ -143,4 +161,25 @@ async fn run_async() -> anyhow::Result<()> {
     );
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bb_launch_uses_existing_workspace_bindings_instead_of_launcher_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let notes = temp.path().join("notes");
+        let captures = temp.path().join("captures");
+        let launcher = temp.path().join("launcher");
+        for path in [&home, &notes, &captures, &launcher] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        workspace::ensure_service_workspace(&home, "practice", None, &notes, &captures).unwrap();
+        let selected = selected_workspace(&home, "practice", &launcher, true).unwrap();
+        assert_eq!(selected.home_dir, notes.canonicalize().unwrap());
+        assert_eq!(selected.capture_store_dir().unwrap(), captures.canonicalize().unwrap());
+    }
 }
