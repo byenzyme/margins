@@ -5340,6 +5340,8 @@ dependencies = [
  "libc",
  "libsql-rusqlite",
  "margins",
+ "margins-core",
+ "margins-media",
  "margins-meeting-protocol",
  "margins-meeting-runtime",
  "margins-workflows",
@@ -5379,7 +5381,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "block2",
+ "dirs",
  "hound",
+ "libc",
  "libloading 0.9.0",
  "margins-core",
  "ndarray",
@@ -5389,9 +5393,12 @@ dependencies = [
  "ort",
  "polyvoice",
  "realfft",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "symphonia",
+ "tempfile",
 ]
 
 [[package]]

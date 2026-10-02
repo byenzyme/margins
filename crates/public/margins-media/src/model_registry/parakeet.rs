@@ -120,12 +120,17 @@ pub fn configure_env() -> Result<()> {
         std::env::set_var("ORT_DYLIB_PATH", ort_path()?);
         std::env::set_var("MARGINS_MANAGED_ASR_RUNTIME", "1");
     }
-    if std::env::var_os("MARGINS_MANAGED_ASR_MODEL").is_some()
-        && std::env::var_os("MARGINS_PARAKEET_MODEL_KIND").is_none()
-    {
-        std::env::set_var("MARGINS_PARAKEET_MODEL_KIND", "tdt");
+    if let Some(kind) = managed_default_kind(
+        std::env::var_os("MARGINS_MANAGED_ASR_MODEL").is_some(),
+        std::env::var_os("MARGINS_PARAKEET_MODEL_KIND").is_some(),
+    ) {
+        std::env::set_var("MARGINS_PARAKEET_MODEL_KIND", kind);
     }
     Ok(())
+}
+
+fn managed_default_kind(managed_model: bool, explicit_kind: bool) -> Option<&'static str> {
+    (managed_model && !explicit_kind).then_some("tdt")
 }
 
 fn digest_file(path: &Path) -> Result<String> {
@@ -286,6 +291,7 @@ pub fn prepare(progress: &(dyn Fn(String, Option<f32>) + Send + Sync)) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
 
     #[test]
     fn replacing_cache_keeps_complete_new_directory() {
@@ -305,5 +311,63 @@ mod tests {
             "new"
         );
         assert!(!staged.exists());
+    }
+
+    #[test]
+    fn fake_model_host_download_enforces_pinned_digest() {
+        let root = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request).unwrap();
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest",
+                    )
+                    .unwrap();
+            }
+        });
+        let client = reqwest::blocking::Client::new();
+        let url = format!("http://{address}/model");
+        let target = root.path().join("asset");
+        let good = format!("{:x}", Sha256::digest(b"test"));
+        checked_download(
+            &client,
+            &url,
+            &target,
+            4,
+            &good,
+            &|_, _| {},
+            "fake asset",
+            0,
+            4,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"test");
+        assert!(checked_download(
+            &client,
+            &url,
+            &target,
+            4,
+            &"0".repeat(64),
+            &|_, _| {},
+            "fake asset",
+            0,
+            4
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("digest mismatch"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn managed_first_run_selects_tdt_without_overriding_explicit_kind() {
+        assert_eq!(managed_default_kind(true, false), Some("tdt"));
+        assert_eq!(managed_default_kind(true, true), None);
+        assert_eq!(managed_default_kind(false, false), None);
     }
 }

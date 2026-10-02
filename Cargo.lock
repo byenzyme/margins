@@ -3289,7 +3289,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "block2",
+ "dirs",
  "hound",
+ "libc",
  "libloading 0.9.0",
  "margins-core",
  "ndarray 0.17.2",
@@ -3299,8 +3301,10 @@ dependencies = [
  "ort",
  "polyvoice",
  "realfft",
+ "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "symphonia",
  "tempfile",
 ]

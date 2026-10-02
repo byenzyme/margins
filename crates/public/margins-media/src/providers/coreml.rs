@@ -1791,6 +1791,54 @@ impl StereoCoreMlAsrSession {
     }
 }
 
+impl margins_core::AsrStreamDecoder for CoreMlAsrSession {
+    fn append_audio(&mut self, mono_16k: &[f32]) {
+        CoreMlAsrSession::append_audio(self, mono_16k);
+    }
+
+    fn update_until(
+        &mut self,
+        end_ms: u64,
+    ) -> std::result::Result<margins_core::AsrStreamUpdate, margins_core::TranscriptError> {
+        CoreMlAsrSession::update_until(self, end_ms)
+            .map(coreml_stream_update)
+            .map_err(coreml_stream_error)
+    }
+
+    fn finish_until(
+        &mut self,
+        end_ms: u64,
+    ) -> std::result::Result<margins_core::AsrStreamUpdate, margins_core::TranscriptError> {
+        CoreMlAsrSession::finish_until(self, end_ms)
+            .map(coreml_stream_update)
+            .map_err(coreml_stream_error)
+    }
+}
+
+fn coreml_stream_update(update: StreamingTranscriptUpdate) -> margins_core::AsrStreamUpdate {
+    let convert = |word: WordTiming| margins_core::TranscriptWord {
+        start_ms: word.start_ms,
+        end_ms: word.end_ms,
+        text: word.text,
+        speaker: None,
+        confidence_per_mille: None,
+    };
+    margins_core::AsrStreamUpdate {
+        committed: update.committed.into_iter().map(convert).collect(),
+        hypothesis: update.hypothesis.into_iter().map(convert).collect(),
+        decoded_until_ms: update.decoded_until_ms,
+        committed_until_ms: update.committed_until_ms,
+    }
+}
+
+fn coreml_stream_error(error: anyhow::Error) -> margins_core::TranscriptError {
+    margins_core::TranscriptError {
+        code: margins_core::TranscriptErrorCode::InferenceFailed,
+        message: error.to_string(),
+        retryable: false,
+    }
+}
+
 struct DecodeSpanResult {
     timings: CoreMlStreamingTimings,
     token_windows: Vec<TokenWindow>,

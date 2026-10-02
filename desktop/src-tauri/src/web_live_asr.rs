@@ -10,13 +10,47 @@
 use crate::live_asr_worker::{LiveAsrTrace, STARTUP_TIMEOUT, WORKER_LOOP_POLL};
 use crate::live_asr_worker::{WorkerHealth, REQUEST_TIMEOUT, WORKER_STOPPED, WORKER_WARMING};
 use crate::live_backchannel::{LiveTranscriptContext, LiveTranscriptTiming};
-use margins::asr::{AsrBackend, WordTiming};
+use margins::asr::WordTiming;
 use margins::recorder::LiveAudioChannel;
+#[cfg(any(feature = "parakeet-asr", test))]
+use margins_core::{AsrChunkDecoder, AsrRequest};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+#[cfg(test)]
+macro_rules! test_chunk_decoder {
+    ($decoder:ty) => {
+        impl margins_core::AsrChunkDecoder for $decoder {
+            fn decode_chunk(
+                &mut self,
+                request: margins_core::AsrRequest,
+            ) -> Result<margins_core::AsrResult, margins_core::TranscriptError> {
+                self.transcribe_words(&request.samples)
+                    .map(|words| margins_core::AsrResult {
+                        words: words
+                            .into_iter()
+                            .map(|word| margins_core::TranscriptWord {
+                                start_ms: word.start_ms.saturating_add(request.session_offset_ms),
+                                end_ms: word.end_ms.saturating_add(request.session_offset_ms),
+                                text: word.text,
+                                speaker: None,
+                                confidence_per_mille: None,
+                            })
+                            .collect(),
+                        detected_language: None,
+                    })
+                    .map_err(|error| margins_core::TranscriptError {
+                        code: margins_core::TranscriptErrorCode::InferenceFailed,
+                        message: error.to_string(),
+                        retryable: false,
+                    })
+            }
+        }
+    };
+}
 
 const SAMPLE_RATE: u32 = 16_000;
 // Hosted ONNX model construction can take several minutes on an I/O-contended
@@ -188,18 +222,6 @@ impl DecodeTrigger {
             Self::Cadence => "cadence",
             Self::Idle => "idle",
         }
-    }
-}
-
-#[cfg(any(feature = "parakeet-asr", test))]
-trait WordDecoder: Send {
-    fn transcribe_words(&mut self, samples: &[f32]) -> anyhow::Result<Vec<WordTiming>>;
-}
-
-#[cfg(feature = "parakeet-asr")]
-impl WordDecoder for margins::asr::parakeet::ParakeetAsr {
-    fn transcribe_words(&mut self, samples: &[f32]) -> anyhow::Result<Vec<WordTiming>> {
-        AsrBackend::transcribe_words(self, samples)
     }
 }
 
@@ -522,7 +544,7 @@ pub(crate) fn start(
         reaper_tx,
         None,
         move || {
-            margins::asr::parakeet::ParakeetAsr::from_dir(&model_dir, kind)
+            margins_media::providers::parakeet::ParakeetOnnxBackend::from_dir(&model_dir, kind)
                 .map_err(|error| format!("Failed to load live Parakeet ONNX models: {error}"))
         },
     )
@@ -542,7 +564,7 @@ fn start_worker<D, Loader>(
     loader: Loader,
 ) -> Result<WebLiveAsrHandle, String>
 where
-    D: WordDecoder + 'static,
+    D: AsrChunkDecoder + 'static,
     Loader: FnOnce() -> Result<D, String> + Send + 'static,
 {
     // Capture-first: unbounded channel guarded by producer-side sample budget.
@@ -645,11 +667,12 @@ pub(crate) fn start_stalled_test_worker(
     loader_release: mpsc::Receiver<()>,
 ) -> Result<WebLiveAsrHandle, String> {
     struct EmptyDecoder;
-    impl WordDecoder for EmptyDecoder {
+    impl EmptyDecoder {
         fn transcribe_words(&mut self, _samples: &[f32]) -> anyhow::Result<Vec<WordTiming>> {
             Ok(Vec::new())
         }
     }
+    test_chunk_decoder!(EmptyDecoder);
     start_worker(
         session_name.clone(),
         LiveAsrTrace::new(margins_dir, session_name, "stalled_test"),
@@ -676,35 +699,11 @@ pub(crate) fn start(
 
 #[cfg(feature = "parakeet-asr")]
 fn resolve_model() -> Result<Option<(PathBuf, margins::asr::AsrModelKind)>, String> {
-    let Some(dir) = std::env::var("MARGINS_PARAKEET_MODEL_DIR")
-        .ok()
-        .map(|value| PathBuf::from(value.trim()))
-        .filter(|path| !path.as_os_str().is_empty())
-    else {
-        return Ok(None);
-    };
-    let kind = match std::env::var("MARGINS_PARAKEET_MODEL_KIND")
-        .unwrap_or_else(|_| "tdt".to_string())
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "tdt" | "tdt-v3" | "v3" => margins::asr::AsrModelKind::Tdt,
-        "ctc" => margins::asr::AsrModelKind::Ctc,
-        other => return Err(format!("Unknown Parakeet model kind: {other}")),
-    };
-    let missing = margins::asr::missing_model_files(&dir, kind);
-    if !missing.is_empty() {
-        return Err(format!(
-            "Parakeet model folder {} is missing: {}",
-            dir.display(),
-            missing.join(", ")
-        ));
-    }
-    Ok(Some((dir, kind)))
+    margins_media::model_registry::resolve_parakeet_model().map_err(|error| error.to_string())
 }
 
 #[cfg(any(feature = "parakeet-asr", test))]
-fn run_worker<D: WordDecoder>(
+fn run_worker<D: AsrChunkDecoder>(
     mut decoder: D,
     trace: LiveAsrTrace,
     audio_rx: mpsc::Receiver<InjectedAudio>,
@@ -855,7 +854,7 @@ fn select_decode_trigger(
 
 #[cfg(any(feature = "parakeet-asr", test))]
 #[allow(clippy::too_many_arguments)]
-fn handle_command<D: WordDecoder>(
+fn handle_command<D: AsrChunkDecoder>(
     command: Command,
     decoder: &mut D,
     audio_rx: &mpsc::Receiver<InjectedAudio>,
@@ -986,7 +985,7 @@ fn handle_command<D: WordDecoder>(
 
 #[cfg(any(feature = "parakeet-asr", test))]
 #[allow(clippy::too_many_arguments)]
-fn run_incremental_decode<D: WordDecoder>(
+fn run_incremental_decode<D: AsrChunkDecoder>(
     decoder: &mut D,
     mic: &mut ChannelState,
     system: &mut ChannelState,
@@ -1121,7 +1120,7 @@ fn drain_audio(
 }
 
 #[cfg(any(feature = "parakeet-asr", test))]
-fn update_words_until<D: WordDecoder>(
+fn update_words_until<D: AsrChunkDecoder>(
     decoder: &mut D,
     mic: &mut ChannelState,
     system: &mut ChannelState,
@@ -1135,7 +1134,7 @@ fn update_words_until<D: WordDecoder>(
 }
 
 #[cfg(any(feature = "parakeet-asr", test))]
-fn update_channel_words<D: WordDecoder>(
+fn update_channel_words<D: AsrChunkDecoder>(
     decoder: &mut D,
     channel: &mut ChannelState,
     target_samples: usize,
@@ -1158,11 +1157,21 @@ fn update_channel_words<D: WordDecoder>(
             .decoded_until_ms()
             .saturating_sub(ROLLING_OVERLAP_MS / 2)
     };
-    let mut replacement = decoder.transcribe_words(&channel.audio[start_sample..target_samples])?;
-    for word in &mut replacement {
-        word.start_ms = word.start_ms.saturating_add(start_ms);
-        word.end_ms = word.end_ms.saturating_add(start_ms);
-    }
+    let replacement = decoder
+        .decode_chunk(AsrRequest {
+            samples: channel.audio[start_sample..target_samples].to_vec(),
+            sample_rate_hz: SAMPLE_RATE,
+            session_offset_ms: start_ms,
+            language: None,
+        })?
+        .words
+        .into_iter()
+        .map(|word| WordTiming {
+            start_ms: word.start_ms,
+            end_ms: word.end_ms,
+            text: word.text,
+        })
+        .collect::<Vec<_>>();
     channel.words.retain(|word| word.end_ms < replace_from_ms);
     channel.words.extend(
         replacement
@@ -1198,7 +1207,7 @@ fn rolling_decode_start_samples(decoded_until_samples: usize, target_samples: us
 }
 
 #[cfg(any(feature = "parakeet-asr", test))]
-fn decode_snapshot<D: WordDecoder>(
+fn decode_snapshot<D: AsrChunkDecoder>(
     decoder: &mut D,
     mic: &mut ChannelState,
     system: &mut ChannelState,
@@ -1396,7 +1405,7 @@ mod tests {
         }
     }
 
-    impl WordDecoder for RecognizingDecoder {
+    impl RecognizingDecoder {
         fn transcribe_words(&mut self, samples: &[f32]) -> anyhow::Result<Vec<WordTiming>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(samples
@@ -1438,7 +1447,7 @@ mod tests {
         calls: usize,
     }
 
-    impl WordDecoder for ControlledFailingDecoder {
+    impl ControlledFailingDecoder {
         fn transcribe_words(&mut self, _samples: &[f32]) -> anyhow::Result<Vec<WordTiming>> {
             self.calls += 1;
             let _ = self.call_tx.send(self.calls);
@@ -1447,7 +1456,7 @@ mod tests {
         }
     }
 
-    impl WordDecoder for RecoveringDecoder {
+    impl RecoveringDecoder {
         fn transcribe_words(&mut self, _samples: &[f32]) -> anyhow::Result<Vec<WordTiming>> {
             self.calls += 1;
             let _ = self.call_tx.send(self.calls);
@@ -1461,7 +1470,7 @@ mod tests {
         }
     }
 
-    impl WordDecoder for FailingDecoder {
+    impl FailingDecoder {
         fn transcribe_words(&mut self, _samples: &[f32]) -> anyhow::Result<Vec<WordTiming>> {
             self.calls += 1;
             let _ = self.call_tx.send(self.calls);
@@ -1474,7 +1483,7 @@ mod tests {
         release_rx: mpsc::Receiver<()>,
     }
 
-    impl WordDecoder for BlockingDecoder {
+    impl BlockingDecoder {
         fn transcribe_words(&mut self, _samples: &[f32]) -> anyhow::Result<Vec<WordTiming>> {
             if let Some(entered_tx) = self.entered_tx.take() {
                 let _ = entered_tx.send(());
@@ -1483,6 +1492,12 @@ mod tests {
             Ok(Vec::new())
         }
     }
+
+    test_chunk_decoder!(RecognizingDecoder);
+    test_chunk_decoder!(ControlledFailingDecoder);
+    test_chunk_decoder!(RecoveringDecoder);
+    test_chunk_decoder!(FailingDecoder);
+    test_chunk_decoder!(BlockingDecoder);
 
     #[derive(Default)]
     struct ManualClock(AtomicU64);

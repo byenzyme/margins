@@ -43,18 +43,25 @@ impl TreeEntry {
 }
 
 pub fn find_installed_model() -> Option<PathBuf> {
-    if let Some(configured) = std::env::var_os("MARGINS_FLUID_COREML_MODEL_DIR")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-    {
+    resolve_installed_model_from(
+        super::env_path("MARGINS_FLUID_COREML_MODEL_DIR"),
+        dirs::home_dir(),
+        std::env::var("MARGINS_FLUID_COREML_VERSION")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn resolve_installed_model_from(
+    configured: Option<PathBuf>,
+    home: Option<PathBuf>,
+    version: Option<&str>,
+) -> Option<PathBuf> {
+    if let Some(configured) = configured {
         return valid_model(&configured).then_some(configured);
     }
-    let root = dirs::home_dir()?.join("Library/Application Support/FluidAudio/Models");
-    let preferred = match std::env::var("MARGINS_FLUID_COREML_VERSION")
-        .ok()
-        .map(|value| value.to_ascii_lowercase())
-        .as_deref()
-    {
+    let root = home?.join("Library/Application Support/FluidAudio/Models");
+    let preferred = match version.map(str::to_ascii_lowercase).as_deref() {
         Some("v3") | Some("3") => "parakeet-tdt-0.6b-v3",
         _ => "parakeet-tdt-0.6b-v2",
     };
@@ -68,7 +75,15 @@ pub fn find_installed_model() -> Option<PathBuf> {
 }
 
 pub fn download_model(mut progress: impl FnMut(u64, u64)) -> Result<PathBuf> {
-    let final_dir = download_target()?;
+    download_model_from(TREE_URL, FILE_URL, download_target()?, &mut progress)
+}
+
+fn download_model_from(
+    tree_url: &str,
+    file_url: &str,
+    final_dir: PathBuf,
+    progress: &mut impl FnMut(u64, u64),
+) -> Result<PathBuf> {
     let parent = final_dir
         .parent()
         .context("model directory has no parent")?;
@@ -81,7 +96,7 @@ pub fn download_model(mut progress: impl FnMut(u64, u64)) -> Result<PathBuf> {
             "--location",
             "--retry",
             "2",
-            TREE_URL,
+            tree_url,
         ])
         .output()
         .context("could not start curl")?;
@@ -144,7 +159,7 @@ pub fn download_model(mut progress: impl FnMut(u64, u64)) -> Result<PathBuf> {
                 next += 1;
                 let entry = &entries[index];
                 let destination = temp.join(&entry.path);
-                let url = format!("{FILE_URL}/{}", entry.path);
+                let url = format!("{file_url}/{}", entry.path);
                 let child = match Command::new("/usr/bin/curl")
                     .args([
                         "--fail",
@@ -259,10 +274,7 @@ fn stop_downloads(active: &mut Vec<(usize, std::process::Child)>) {
 }
 
 fn download_target() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("MARGINS_FLUID_COREML_MODEL_DIR")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-    {
+    if let Some(path) = super::env_path("MARGINS_FLUID_COREML_MODEL_DIR") {
         return Ok(path);
     }
     Ok(dirs::home_dir()
@@ -275,7 +287,7 @@ fn required_path(path: &str) -> bool {
         || REQUIRED_DIRS.contains(&path.split('/').next().unwrap_or_default())
 }
 
-fn valid_model(path: &Path) -> bool {
+pub fn valid_model(path: &Path) -> bool {
     REQUIRED_DIRS.iter().all(|dir| path.join(dir).is_dir())
         && path.join("parakeet_vocab.json").is_file()
 }
@@ -283,6 +295,10 @@ fn valid_model(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _;
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn required_assets_exclude_alternate_bundles() {
@@ -301,5 +317,95 @@ mod tests {
         assert!(!valid_model(temp.path()));
         fs::File::create(temp.path().join("parakeet_vocab.json")).unwrap();
         assert!(valid_model(temp.path()));
+    }
+
+    #[test]
+    fn explicit_missing_dir_is_authoritative_and_version_selects_installed_bundle() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp
+            .path()
+            .join("Library/Application Support/FluidAudio/Models");
+        let v2 = root.join("parakeet-tdt-0.6b-v2");
+        let v3 = root.join("parakeet-tdt-0.6b-v3");
+        for dir in [&v2, &v3] {
+            for asset in REQUIRED_DIRS {
+                fs::create_dir_all(dir.join(asset)).unwrap();
+            }
+            fs::write(dir.join("parakeet_vocab.json"), b"{}").unwrap();
+        }
+        let home = Some(temp.path().to_path_buf());
+        assert_eq!(
+            resolve_installed_model_from(None, home.clone(), None),
+            Some(v2)
+        );
+        assert_eq!(
+            resolve_installed_model_from(None, home.clone(), Some("v3")),
+            Some(v3)
+        );
+        assert_eq!(
+            resolve_installed_model_from(Some(root.join("missing")), home, None),
+            None
+        );
+    }
+
+    #[test]
+    fn downloads_required_assets_from_fake_model_host() {
+        let temp = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = stop.clone();
+        let server = std::thread::spawn(move || {
+            let files = [
+                "Preprocessor.mlmodelc/coremldata.bin",
+                "Encoder.mlmodelc/coremldata.bin",
+                "Decoder.mlmodelc/coremldata.bin",
+                "JointDecision.mlmodelc/coremldata.bin",
+                "parakeet_vocab.json",
+            ];
+            while !server_stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut request = [0u8; 2048];
+                        let count = stream.read(&mut request).unwrap();
+                        let line = String::from_utf8_lossy(&request[..count]);
+                        let path = line.split_whitespace().nth(1).unwrap_or("/");
+                        let (status, body) = if path == "/tree" {
+                            ("200 OK", serde_json::to_vec(&files.iter().map(|path| serde_json::json!({"path": path, "type": "file", "size": 1})).collect::<Vec<_>>()).unwrap())
+                        } else if files.iter().any(|file| path == format!("/files/{file}")) {
+                            ("200 OK", vec![b'x'])
+                        } else {
+                            ("404 Not Found", Vec::new())
+                        };
+                        let header = format!(
+                            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        stream.write_all(header.as_bytes()).unwrap();
+                        stream.write_all(&body).unwrap();
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("fake model host failed: {error}"),
+                }
+            }
+        });
+        let target = temp.path().join("parakeet-tdt-0.6b-v2");
+        let result = download_model_from(
+            &format!("http://{address}/tree"),
+            &format!("http://{address}/files"),
+            target.clone(),
+            &mut |_, _| {},
+        );
+        stop.store(true, Ordering::Relaxed);
+        server.join().unwrap();
+        assert_eq!(result.unwrap(), target);
+        assert!(valid_model(&target));
+        assert_eq!(
+            fs::read(target.join("Preprocessor.mlmodelc/coremldata.bin")).unwrap(),
+            b"x"
+        );
     }
 }

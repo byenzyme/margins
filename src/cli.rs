@@ -1167,7 +1167,7 @@ impl SetupMachineProvisioner for NativeSetupMachineProvisioner {
 
     fn provision_speech(&self) -> Result<Option<std::path::PathBuf>> {
         ensure_speech_model(true)?;
-        Ok(crate::speech_model_setup::find_installed_model())
+        Ok(margins_media::model_registry::resolve_coreml_dir())
     }
 
     fn provision_local_catalyst(&self) -> Result<Option<std::path::PathBuf>> {
@@ -3067,7 +3067,7 @@ struct LiveTranscriptFinalizer {
 impl LiveTranscriptWorker {
     #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
     fn start(checkpoint: PathBuf, offset_ms: u64, status: Arc<AtomicU8>) -> Result<Option<Self>> {
-        let Some(model_dir) = coreml_model_dir() else {
+        let Some(model_dir) = margins_media::model_registry::resolve_coreml_dir() else {
             // Degraded state is shown in the TUI; record the cause quietly.
             crate::cli_log::event(
                 "live_worker_unavailable",
@@ -3281,41 +3281,6 @@ fn optional_worker_failure_reason(
 }
 
 #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
-fn coreml_model_dir() -> Option<PathBuf> {
-    let configured = std::env::var_os("MARGINS_FLUID_COREML_MODEL_DIR")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-    if let Some(configured) = configured {
-        return has_coreml_assets(&configured).then_some(configured);
-    }
-    let root = dirs::home_dir()?.join("Library/Application Support/FluidAudio/Models");
-    let preferred = match std::env::var("MARGINS_FLUID_COREML_VERSION")
-        .ok()
-        .map(|value| value.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("v3") | Some("3") => "parakeet-tdt-0.6b-v3",
-        _ => "parakeet-tdt-0.6b-v2",
-    };
-    [
-        root.join(preferred),
-        root.join("parakeet-tdt-0.6b-v2"),
-        root.join("parakeet-tdt-0.6b-v3"),
-    ]
-    .into_iter()
-    .find(|candidate| has_coreml_assets(candidate))
-}
-
-#[cfg(all(feature = "coreml-asr", target_os = "macos"))]
-fn has_coreml_assets(dir: &Path) -> bool {
-    dir.join("Preprocessor.mlmodelc").exists()
-        && dir.join("Encoder.mlmodelc").exists()
-        && dir.join("Decoder.mlmodelc").exists()
-        && dir.join("JointDecision.mlmodelc").exists()
-        && dir.join("parakeet_vocab.json").exists()
-}
-
-#[cfg(all(feature = "coreml-asr", target_os = "macos"))]
 fn run_live_worker(
     mut rolling: margins_media::providers::coreml::StereoCoreMlAsrSession,
     rx: mpsc::Receiver<crate::recorder::LiveAudioChunk>,
@@ -3325,6 +3290,7 @@ fn run_live_worker(
     queued_samples: Arc<std::sync::atomic::AtomicU64>,
 ) -> Result<()> {
     use crate::recorder::LiveAudioChannel;
+    use margins_core::AsrStreamDecoder;
     let mut mic_resampler = None;
     let mut system_resampler = None;
     let mut last_update_local_ms = 0;
@@ -3343,8 +3309,8 @@ fn run_live_worker(
                         timeline_gap_samples(chunk.session_offset_ms, offset_ms, current_local_ms);
                     if gap_samples > 0 {
                         let silence = vec![0.0; gap_samples as usize];
-                        rolling.mic.append_audio(&silence);
-                        rolling.system.append_audio(&silence);
+                        AsrStreamDecoder::append_audio(&mut rolling.mic, &silence);
+                        AsrStreamDecoder::append_audio(&mut rolling.system, &silence);
                         mic_samples = mic_samples.saturating_add(gap_samples);
                         system_samples = system_samples.saturating_add(gap_samples);
                     }
@@ -3371,17 +3337,17 @@ fn run_live_worker(
                 match chunk.channel {
                     LiveAudioChannel::Mic => {
                         mic_samples = mic_samples.saturating_add(samples.len() as u64);
-                        rolling.mic.append_audio(&samples);
+                        AsrStreamDecoder::append_audio(&mut rolling.mic, &samples);
                     }
                     LiveAudioChannel::System => {
                         system_samples = system_samples.saturating_add(samples.len() as u64);
-                        rolling.system.append_audio(&samples);
+                        AsrStreamDecoder::append_audio(&mut rolling.system, &samples);
                     }
                 }
                 let local_end_ms = mic_samples.max(system_samples).saturating_mul(1_000) / 16_000;
                 if local_end_ms.saturating_sub(last_update_local_ms) >= 3_000 {
-                    let mic = rolling.mic.update_until(local_end_ms)?;
-                    let system = rolling.system.update_until(local_end_ms)?;
+                    let mic = AsrStreamDecoder::update_until(&mut rolling.mic, local_end_ms)?;
+                    let system = AsrStreamDecoder::update_until(&mut rolling.system, local_end_ms)?;
                     write_checkpoint(&checkpoint, &mic, &system, offset_ms, false)?;
                     last_update_local_ms = local_end_ms;
                 }
@@ -3393,8 +3359,9 @@ fn run_live_worker(
                     .context("live transcription ended without a final duration")?;
                 let local_duration_ms =
                     duration_ms.min(mic_samples.max(system_samples).saturating_mul(1_000) / 16_000);
-                let mic = rolling.mic.finish_until(local_duration_ms)?;
-                let system = rolling.system.finish_until(local_duration_ms)?;
+                let mic = AsrStreamDecoder::finish_until(&mut rolling.mic, local_duration_ms)?;
+                let system =
+                    AsrStreamDecoder::finish_until(&mut rolling.system, local_duration_ms)?;
                 write_checkpoint(&checkpoint, &mic, &system, offset_ms, true)?;
                 return Ok(());
             }
@@ -3440,18 +3407,24 @@ fn timeline_gap_samples(
 #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
 fn write_checkpoint(
     path: &Path,
-    mic: &margins_media::providers::coreml::StreamingTranscriptUpdate,
-    system: &margins_media::providers::coreml::StreamingTranscriptUpdate,
+    mic: &margins_core::AsrStreamUpdate,
+    system: &margins_core::AsrStreamUpdate,
     offset_ms: u64,
     terminal: bool,
 ) -> Result<()> {
-    let mut entries =
-        margins_media::transcript::words_to_transcript_entries(&mic.committed, 0, offset_ms);
-    entries.extend(margins_media::transcript::words_to_transcript_entries(
-        &system.committed,
-        1,
-        offset_ms,
-    ));
+    let to_entries = |words: &[margins_core::TranscriptWord], channel| {
+        words
+            .iter()
+            .map(|word| margins_media::transcript::TranscriptWordEntry {
+                channel,
+                start_ms: word.start_ms.saturating_add(offset_ms),
+                end_ms: word.end_ms.saturating_add(offset_ms),
+                text: word.text.clone(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut entries = to_entries(&mic.committed, 0);
+    entries.extend(to_entries(&system.committed, 1));
     let decoded_until_ms = mic
         .decoded_until_ms
         .max(system.decoded_until_ms)
@@ -3499,7 +3472,7 @@ fn write_checkpoint_value(path: &Path, value: &serde_json::Value) -> Result<()> 
 
 #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
 fn ensure_speech_model(explicit_setup: bool) -> Result<()> {
-    if crate::speech_model_setup::find_installed_model().is_some() {
+    if margins_media::model_registry::resolve_coreml_dir().is_some() {
         if explicit_setup {
             let speaker_setup = start_speaker_recognition()?;
             finish_speaker_recognition(speaker_setup, 0)?;
@@ -3541,7 +3514,7 @@ fn ensure_speech_model(explicit_setup: bool) -> Result<()> {
     let mut transfer_started = None;
     let mut starting_bytes = None;
     let mut transcription_total = 0;
-    crate::speech_model_setup::download_model(|downloaded, total| {
+    margins_media::model_registry::coreml::download_model(|downloaded, total| {
         transcription_total = total;
         let speaker_downloaded = speaker_setup.downloaded_bytes();
         let combined_downloaded = downloaded.saturating_add(speaker_downloaded);
