@@ -32,9 +32,11 @@ serde_json = "1"
 sha2 = "0.10"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
 tower-http = { version = "0.5", features = ["cors"] }
 
 [dev-dependencies]
+http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
 
 [[bin]]

@@ -3,6 +3,7 @@ use axum::{
     http::{Method, Request, StatusCode},
     Router,
 };
+use http_body_util::BodyExt as _;
 use margins_core::{AsrBackend, AsrRequest, AsrResult, TranscriptError, TranscriptWord};
 use margins_meeting_protocol::*;
 use margins_server::{
@@ -187,6 +188,108 @@ fn finalize_pcm(service: &WorkspaceService, principal: &ServicePrincipal) {
         .unwrap();
 }
 
+fn finalize_native_pcm(service: &WorkspaceService, principal: &ServicePrincipal) {
+    let segment_id = format!("{SESSION}-seg-0");
+    let reservation = service
+        .reserve_session(
+            principal,
+            command(
+                "native-create",
+                ClientMessageBodyV1::CreateSession(CreateSessionV1 {
+                    idempotency_key: "native-asr-http-create".into(),
+                    started_at_unix_ms: UnixMillis(BASE),
+                    title: Some("Native artifact fixture".into()),
+                    sources: vec![CaptureSourceV1 {
+                        source_id: "mic".into(),
+                        kind: CaptureSourceKindV1::Microphone,
+                        label: None,
+                        external_id: None,
+                    }],
+                    lanes: vec![CaptureLaneV1 {
+                        lane_id: "mic".into(),
+                        source_ids: vec!["mic".into()],
+                        label: None,
+                        format: AudioFormatV1 {
+                            codec: AudioCodecV1::PcmS16Le,
+                            container: AudioContainerV1::Raw,
+                            sample_rate_hz: 16_000,
+                            channel_count: 1,
+                        },
+                    }],
+                    provenance: CaptureProvenanceV1 {
+                        hops: vec![CaptureProvenanceHopV1 {
+                            producer: "margins-tui".into(),
+                            producer_version: Some("1".into()),
+                            mode: CaptureModeV1::Live,
+                            observed_at_unix_ms: UnixMillis(BASE),
+                            attributes: BTreeMap::new(),
+                        }],
+                    },
+                }),
+            ),
+        )
+        .unwrap();
+    for sequence in 0..2 {
+        let payload = vec![sequence as u8; 3_200];
+        service
+            .execute_capture(
+                principal,
+                &reservation.producer_token,
+                command(
+                    &format!("native-chunk-{sequence}"),
+                    ClientMessageBodyV1::AudioChunk(AudioChunkV1 {
+                        segment_id: segment_id.clone().into(),
+                        lane_id: "mic".into(),
+                        sequence,
+                        starts_at_ms: SessionMillis(sequence * 100),
+                        duration_ms: DurationMillis(100),
+                        payload_digest: ContentDigestV1 {
+                            algorithm: DigestAlgorithmV1::Sha256,
+                            hex: format!("{:x}", Sha256::digest(&payload)),
+                        },
+                        payload,
+                    }),
+                ),
+            )
+            .unwrap();
+    }
+    service
+        .execute_capture(
+            principal,
+            &reservation.producer_token,
+            command(
+                "native-close",
+                ClientMessageBodyV1::CloseSegment(CloseSegmentV1 {
+                    segment_id: segment_id.clone().into(),
+                    ended_at_ms: SessionMillis(200),
+                    lane_boundaries: vec![LaneBoundaryV1 {
+                        lane_id: "mic".into(),
+                        next_sequence: 2,
+                    }],
+                    reason: SegmentCloseReasonV1::Stop,
+                }),
+            ),
+        )
+        .unwrap();
+    service
+        .execute_capture(
+            principal,
+            &reservation.producer_token,
+            command(
+                "native-finalize",
+                ClientMessageBodyV1::FinalizeSession(FinalizeSessionV1 {
+                    ended_at_ms: SessionMillis(200),
+                    segment_closes: vec![SegmentCloseReferenceV1 {
+                        segment_id: segment_id.into(),
+                        close_message_id: "native-close".into(),
+                    }],
+                    reason: SessionFinalizeReasonV1::Completed,
+                }),
+            ),
+        )
+        .unwrap();
+}
+
 async fn call(app: &Router, method: Method, path: &str) -> (StatusCode, Value) {
     let request = Request::builder()
         .method(method)
@@ -244,6 +347,51 @@ async fn typed_transcribe_route_runs_durable_job_against_runtime_audio() {
         .as_str()
         .unwrap()
         .contains("[00:01] you (mic): spoken evidence"));
+}
+
+#[tokio::test]
+async fn interrupted_native_audio_download_leaves_no_wav() {
+    let temp = tempfile::tempdir().unwrap();
+    let (app, service, principal) = fixture(temp.path());
+    finalize_native_pcm(&service, &principal);
+    let artifact = service
+        .artifacts(&principal, SESSION)
+        .unwrap()
+        .into_iter()
+        .find(|artifact| artifact.kind == "audio_mic_runtime")
+        .expect("native mic artifact");
+    assert_eq!(artifact.size_bytes, Some(6_444));
+    let wav = service.margins_dir().join(format!("{SESSION}_seg0.wav"));
+    assert!(!wav.exists());
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(format!(
+            "/v1/workspaces/practice/artifacts/{}/content",
+            artifact.artifact_id.as_ref()
+        ))
+        .header("authorization", format!("Bearer {TOKEN}"))
+        .header("x-margins-instance-id", "test-instance")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    assert_eq!(&first[..4], b"RIFF");
+    assert_eq!(&first[8..12], b"WAVE");
+    assert_eq!(u16::from_le_bytes(first[22..24].try_into().unwrap()), 1);
+    assert_eq!(
+        u32::from_le_bytes(first[24..28].try_into().unwrap()),
+        16_000
+    );
+    assert!(first.len() < 6_444, "test must interrupt an active stream");
+    assert!(!wav.exists(), "stream must use an anonymous temporary file");
+    drop(body);
+    assert!(
+        !wav.exists(),
+        "dropping a download must leave no WAV on disk"
+    );
 }
 
 #[tokio::test]

@@ -3409,6 +3409,7 @@ dependencies = [
  "chrono",
  "dirs",
  "hound",
+ "http-body-util",
  "margins-core",
  "margins-media",
  "margins-meeting-protocol",
@@ -3423,6 +3424,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tower 0.5.3",
  "tower-http 0.5.2",
 ]

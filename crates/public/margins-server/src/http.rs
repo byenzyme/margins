@@ -2,7 +2,7 @@
 
 use crate::ServerState;
 use axum::{
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -859,12 +859,14 @@ async fn workspace_artifact_content(
     };
     match state
         .workspace_service
-        .artifact_content(&principal, &artifact)
+        .artifact_content_file(&principal, &artifact)
     {
-        Ok(bytes) => (
+        Ok(file) => (
             StatusCode::OK,
             [("Content-Type", "application/octet-stream")],
-            bytes,
+            Body::from_stream(tokio_util::io::ReaderStream::new(
+                tokio::fs::File::from_std(file),
+            )),
         )
             .into_response(),
         Err(error) => service_error(error),
