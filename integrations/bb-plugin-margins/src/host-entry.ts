@@ -6,9 +6,9 @@ import { applyWorkspaceSetup, previewWorkspaceSetup } from "./workspace-setup.js
 type Transport = ProjectMarginsTransport;
 
 async function changed(
-  context: { experimental_emitSignal(name: "changed", payload: { projectId: string; reason: "start" | "pause" | "resume" | "stop" | "notepad" }): Promise<void> },
+  context: { experimental_emitSignal(name: "changed", payload: { projectId: string; reason: "start" | "pause" | "resume" | "stop" }): Promise<void> },
   projectId: string,
-  reason: "start" | "pause" | "resume" | "stop" | "notepad",
+  reason: "start" | "pause" | "resume" | "stop",
   result: HostResult,
 ) {
   if (result.ok) await context.experimental_emitSignal("changed", { projectId, reason });
@@ -126,12 +126,6 @@ export function createMarginsHostEntry(transport: Transport) {
         retain(context);
         const result = await transport.stop(input.target, context.experimental_paths.dataDir, input.recordingId, input.ownerId);
         await changed(context, input.target.projectId, "stop", result);
-        return result;
-      },
-      async updateNotepad(input, context) {
-        retain(context);
-        const result = await transport.updateNotepad(input.target, context.experimental_paths.dataDir, input.recordingId, input.ownerId, input.expectedRevision, input.text);
-        await changed(context, input.target.projectId, "notepad", result);
         return result;
       },
       uploadChunk(input, context) {

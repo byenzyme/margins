@@ -79,20 +79,20 @@ describe("browser capture ownership", () => {
 
   it("pauses local production before a hung control request settles", async () => {
     const rpc: BrowserCaptureDependencies["rpc"] = async (_plugin, method) => {
-      if (method === "beginBrowserCapture") return state({}) as never;
+      if (method === "beginProjectCapture") return state({}) as never;
       return new Promise(() => {});
     };
     const { owner, recorder } = controllerFixture(rpc);
-    await owner.start("thr-1");
+    await owner.startFromProject("proj-1");
     void owner.pause();
     expect(recorder.pause).toHaveBeenCalledOnce();
   });
 
   it("keeps the session overlay live while another thread shows a ready panel", async () => {
     const rpc: BrowserCaptureDependencies["rpc"] = async (_plugin, method) =>
-      method === "beginBrowserCapture" ? state({}) as never : state({}) as never;
+      method === "beginProjectCapture" ? state({}) as never : state({}) as never;
     const { owner } = controllerFixture(rpc);
-    await owner.start("thr-1");
+    await owner.startFromProject("proj-1");
     owner.acceptPanel("thr-1", state({}));
     owner.acceptPanel("thr-2", state({ state: "ready", recordingId: null, ownsRecording: false }));
     expect(owner.panel()).toMatchObject({ state: "recording", recordingId: "rec-1" });
@@ -103,7 +103,7 @@ describe("browser capture ownership", () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_000);
     const { owner } = controllerFixture(async () => state({}) as never);
-    await owner.start("thr-1");
+    await owner.startFromProject("proj-1");
     expect(owner.noAudioWarning).toBe(false);
     vi.setSystemTime(4_100);
     expect(owner.noAudioWarning).toBe(true);
@@ -111,7 +111,7 @@ describe("browser capture ownership", () => {
 
   it("replaces the overlay state when Stop returns a saved panel without a recording id", async () => {
     const { owner } = controllerFixture(async () => state({}) as never);
-    await owner.start("thr-1");
+    await owner.startFromProject("proj-1");
     owner.acceptPanel("rec-1", state({ state: "saving" }));
     owner.acceptPanel("rec-1", state({ state: "saved", recordingId: null, ownsRecording: false, canStop: false }));
     expect(owner.panel()).toMatchObject({ state: "saved" });
@@ -119,11 +119,11 @@ describe("browser capture ownership", () => {
 
   it("releases tracks immediately when Stop transport and recorder stop event both hang", async () => {
     const rpc: BrowserCaptureDependencies["rpc"] = async (_plugin, method) => {
-      if (method === "beginBrowserCapture") return state({}) as never;
+      if (method === "beginProjectCapture") return state({}) as never;
       return new Promise(() => {});
     };
     const { owner, stopTrack } = controllerFixture(rpc);
-    await owner.start("thr-1");
+    await owner.startFromProject("proj-1");
     void owner.stop();
     expect(stopTrack).toHaveBeenCalledOnce();
     expect(owner.active).toBe(false);
@@ -133,7 +133,7 @@ describe("browser capture ownership", () => {
     vi.useFakeTimers();
     const stopInputs: object[] = [];
     const rpc: BrowserCaptureDependencies["rpc"] = async (_plugin, method, input) => {
-      if (method === "beginBrowserCapture") return state({}) as never;
+      if (method === "beginProjectCapture") return state({}) as never;
       if (method === "stop") {
         stopInputs.push(input);
         return state({ state: "saved", error: null }) as never;
@@ -141,7 +141,7 @@ describe("browser capture ownership", () => {
       return state({}) as never;
     };
     const { owner, stopTrack } = controllerFixture(rpc);
-    await owner.start("thr-1");
+    await owner.startFromProject("proj-1");
 
     const stopping = owner.stop();
     expect(stopTrack).toHaveBeenCalledOnce();
@@ -166,7 +166,7 @@ describe("browser capture ownership", () => {
     vi.stubGlobal("fetch", uploadFetch);
     const stopInputs: object[] = [];
     const rpc: BrowserCaptureDependencies["rpc"] = async (_plugin, method, input) => {
-      if (method === "beginBrowserCapture") return state({}) as never;
+      if (method === "beginProjectCapture") return state({}) as never;
       if (method === "stop") {
         order.push("server-stop");
         stopInputs.push(input);
@@ -178,7 +178,7 @@ describe("browser capture ownership", () => {
       this.ondataavailable?.({ data: new Blob(["final-webm"]) } as BlobEvent);
       this.onstop?.(new Event("stop"));
     });
-    await owner.start("thr-1");
+    await owner.startFromProject("proj-1");
     owner.acceptPanel("thr-1", state({}));
 
     const stopping = owner.stop();
@@ -207,7 +207,7 @@ describe("browser capture ownership", () => {
     })));
     const stopInputs: object[] = [];
     const rpc: BrowserCaptureDependencies["rpc"] = async (_plugin, method, input) => {
-      if (method === "beginBrowserCapture") return state({}) as never;
+      if (method === "beginProjectCapture") return state({}) as never;
       if (method === "stop") {
         stopInputs.push(input);
         return state(stopInputs.length === 1 ? {
@@ -221,7 +221,7 @@ describe("browser capture ownership", () => {
       this.ondataavailable?.({ data: new Blob(["final-webm"]) } as BlobEvent);
       this.onstop?.(new Event("stop"));
     });
-    await owner.start("thr-1");
+    await owner.startFromProject("proj-1");
 
     await expect(owner.stop()).resolves.toMatchObject({
       state: "needs_attention",
@@ -247,7 +247,7 @@ describe("browser capture ownership", () => {
     })));
     const stopInputs: object[] = [];
     const rpc: BrowserCaptureDependencies["rpc"] = async (_plugin, method, input) => {
-      if (method === "beginBrowserCapture") return state({}) as never;
+      if (method === "beginProjectCapture") return state({}) as never;
       if (method === "stop") {
         stopInputs.push(input);
         return state({ state: "saved", error: null }) as never;
@@ -258,7 +258,7 @@ describe("browser capture ownership", () => {
       this.ondataavailable?.({ data: new Blob(["last-undurable-chunk"]) } as BlobEvent);
       this.onstop?.(new Event("stop"));
     });
-    await owner.start("thr-1");
+    await owner.startFromProject("proj-1");
 
     await expect(owner.stop()).resolves.toMatchObject({
       state: "needs_attention",
@@ -285,12 +285,12 @@ describe("browser capture ownership", () => {
     vi.useFakeTimers();
     let heartbeatCalls = 0;
     const rpc: BrowserCaptureDependencies["rpc"] = async (_plugin, method) => {
-      if (method === "beginBrowserCapture") return state({}) as never;
+      if (method === "beginProjectCapture") return state({}) as never;
       if (method === "heartbeat") heartbeatCalls += 1;
       return new Promise(() => {});
     };
     const { owner, stopTrack } = controllerFixture(rpc);
-    await owner.start("thr-1");
+    await owner.startFromProject("proj-1");
     await vi.advanceTimersByTimeAsync(99);
     expect(heartbeatCalls).toBe(1);
     expect(stopTrack).not.toHaveBeenCalled();

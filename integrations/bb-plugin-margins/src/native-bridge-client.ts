@@ -17,7 +17,7 @@ export interface NativeStatus extends CaptureAuthority {
   error: string | null;
 }
 interface Pairing extends CaptureAuthority { token: string; port: number; grantExpiresAt: number | null }
-export interface MenuGrant extends CaptureAuthority {
+interface MenuGrant extends CaptureAuthority {
   serviceUrl: string; token: string; workspaceName: string; expiresAt: number;
 }
 type Listener = () => void;

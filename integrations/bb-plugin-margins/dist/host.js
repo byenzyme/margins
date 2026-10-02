@@ -33495,10 +33495,6 @@ var marginsHostContract = defineRpcContract2({
   pause: { input: ownedCaptureInputSchema, output: hostResultSchema },
   resume: { input: ownedCaptureInputSchema, output: hostResultSchema },
   stop: { input: ownedCaptureInputSchema, output: hostResultSchema },
-  updateNotepad: {
-    input: ownedCaptureInputSchema.extend({ expectedRevision: external_exports2.string().min(1), text: external_exports2.string().max(1e5) }).strict(),
-    output: hostResultSchema
-  },
   uploadChunk: {
     input: ownedCaptureInputSchema.extend({ sequence: external_exports2.number().int().nonnegative(), bytesBase64: external_exports2.string() }).strict(),
     output: external_exports2.object({ ok: external_exports2.boolean(), error: hostErrorSchema.optional() }).strict()
@@ -33515,7 +33511,7 @@ var marginsHostContract = defineRpcContract2({
 var hostSignals = {
   changed: { payload: external_exports2.object({
     projectId: external_exports2.string().min(1),
-    reason: external_exports2.enum(["start", "pause", "resume", "stop", "notepad"])
+    reason: external_exports2.enum(["start", "pause", "resume", "stop"])
   }).strict() }
 };
 var captureRecordSchema = external_exports2.object({
@@ -33546,10 +33542,6 @@ var panelStateSchema = external_exports2.object({
   notepad: notepadSchema.nullable(),
   lastSessionId: external_exports2.string().nullable(),
   error: hostErrorSchema.nullable()
-}).strict();
-var threadClientInputSchema = external_exports2.object({
-  threadId: external_exports2.string().min(1),
-  client: clientCapabilitiesSchema
 }).strict();
 var captureClientInputSchema = external_exports2.object({
   sessionId: external_exports2.string().min(1),
@@ -33678,19 +33670,10 @@ var marginsRpcContract = defineRpcContract2({
       external_exports2.object({ ok: external_exports2.literal(false), error: hostErrorSchema }).strict()
     ])
   },
-  getPanelState: { input: threadClientInputSchema, output: panelStateSchema },
-  beginBrowserCapture: {
-    input: threadClientInputSchema.extend({ ownerId: external_exports2.string().min(1), title: external_exports2.string().trim().max(160).optional() }).strict(),
-    output: panelStateSchema
-  },
   heartbeat: { input: captureClientInputSchema, output: panelStateSchema },
   pause: { input: captureClientInputSchema, output: panelStateSchema },
   resume: { input: captureClientInputSchema, output: panelStateSchema },
   stop: { input: captureClientInputSchema, output: panelStateSchema },
-  updateNotepad: {
-    input: captureClientInputSchema.extend({ expectedRevision: external_exports2.string().min(1), text: external_exports2.string().max(1e5) }).strict(),
-    output: panelStateSchema
-  },
   connectedNoteContext: {
     input: external_exports2.object({ threadId: external_exports2.string().min(1).optional(), projectId: external_exports2.string().min(1).optional(), sessionId: external_exports2.string().min(1) }).strict(),
     output: connectedNoteResultSchema
@@ -34451,11 +34434,6 @@ var ProjectMarginsTransport = class {
       return null;
     });
   }
-  updateNotepad(target, dataDir, recordingId, ownerId, expectedRevision, text) {
-    return this.withHandle(target, dataDir, async (handle) => {
-      return this.request(handle, `browser/sessions/${recordingId}/notepad`, "PUT", { ownerId, expectedRevision, text });
-    });
-  }
   async upload(target, dataDir, recordingId, ownerId, sequence, bytesBase64) {
     try {
       const handle = await this.manager.ensure(target, dataDir);
@@ -34782,12 +34760,6 @@ function createMarginsHostEntry(transport) {
         retain(context);
         const result = await transport.stop(input2.target, context.experimental_paths.dataDir, input2.recordingId, input2.ownerId);
         await changed(context, input2.target.projectId, "stop", result);
-        return result;
-      },
-      async updateNotepad(input2, context) {
-        retain(context);
-        const result = await transport.updateNotepad(input2.target, context.experimental_paths.dataDir, input2.recordingId, input2.ownerId, input2.expectedRevision, input2.text);
-        await changed(context, input2.target.projectId, "notepad", result);
         return result;
       },
       uploadChunk(input2, context) {
