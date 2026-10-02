@@ -82,6 +82,9 @@ const PCM_BATCH_FRAMES: usize = 5 * PCM_SAMPLE_RATE as usize;
 struct PcmLaneSender {
     lane: RecorderLaneV1,
     resampler: margins_media::timeline::RationalResampler,
+    source_rate: u32,
+    input_frames: u64,
+    last_input_sample: Option<f32>,
     sequence: u64,
     sent_frames: u64,
     pending: Vec<u8>,
@@ -112,6 +115,9 @@ impl PcmLaneSender {
                 source_rate,
                 PCM_SAMPLE_RATE,
             )?,
+            source_rate,
+            input_frames: 0,
+            last_input_sample: None,
             sequence: 0,
             sent_frames: 0,
             pending: Vec::with_capacity(PCM_BATCH_FRAMES * 2),
@@ -127,6 +133,13 @@ impl PcmLaneSender {
         samples: &[f32],
     ) -> Result<()> {
         let converted = self.resampler.process(samples)?;
+        self.input_frames = self
+            .input_frames
+            .checked_add(u64::try_from(samples.len())?)
+            .context("native audio frame count overflow")?;
+        if let Some(sample) = samples.last() {
+            self.last_input_sample = Some(*sample);
+        }
         self.push_converted(runtime, &converted)
     }
 
@@ -180,11 +193,48 @@ impl PcmLaneSender {
         &mut self,
         runtime: &MeetingRuntime<SqliteMeetingRuntimeStorage>,
     ) -> Result<(u64, u64)> {
-        let final_samples = self.resampler.finish()?;
+        // The spool's source-frame count is authoritative. A resampler's
+        // filter tail may be longer than the captured interval; constrain the
+        // final batch before it changes the segment boundary.
+        let target_frames = rounded_frames(self.input_frames, self.source_rate, PCM_SAMPLE_RATE)?;
+        let produced_frames = self
+            .sent_frames
+            .checked_add(u64::try_from(self.pending.len() / 2)?)
+            .context("native audio frame count overflow")?;
+        let remaining = target_frames
+            .checked_sub(produced_frames)
+            .context("resampler exceeded captured audio length before final flush")?;
+        let mut final_samples = self.resampler.finish()?;
+        final_samples.truncate(usize::try_from(remaining).unwrap_or(usize::MAX));
+        let deficit = remaining.saturating_sub(final_samples.len() as u64);
+        anyhow::ensure!(deficit <= 1, "resampler omitted captured audio frames");
+        if deficit != 0 {
+            final_samples.push(
+                final_samples
+                    .last()
+                    .copied()
+                    .or(self.last_input_sample)
+                    .unwrap_or(0.0),
+            );
+        }
         self.push_converted(runtime, &final_samples)?;
         self.flush(runtime)?;
+        anyhow::ensure!(
+            self.sent_frames == target_frames,
+            "native audio length drifted"
+        );
         Ok((self.sequence, self.sent_frames))
     }
+}
+
+fn rounded_frames(input_frames: u64, from_rate: u32, to_rate: u32) -> Result<u64> {
+    anyhow::ensure!(
+        from_rate != 0 && to_rate != 0,
+        "sample rates must be non-zero"
+    );
+    let scaled = u128::from(input_frames) * u128::from(to_rate) + u128::from(from_rate / 2);
+    u64::try_from(scaled / u128::from(from_rate))
+        .context("converted native audio frame count overflow")
 }
 
 fn sqlite_is_busy(error: &margins_meeting_runtime::RecorderError<anyhow::Error>) -> bool {
@@ -1202,6 +1252,49 @@ mod tests {
         assert_eq!(std::fs::read(wav).unwrap(), b"user kept export");
     }
 
+    #[test]
+    fn native_lane_output_length_is_exact_across_source_rates() {
+        for (rate, extra_frames) in [(44_100, 2), (48_000, 2), (96_000, 4)] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut producer =
+                LocalMeetingProducer::reserve(dir.path(), "length", None, chrono::Local::now())
+                    .unwrap();
+            let source_frames = rate as usize * 6 + extra_frames;
+            let source_bytes = vec![0.125f32.to_le_bytes(); source_frames].concat();
+            let mic_path = dir.path().join("mic.f32");
+            let system_path = dir.path().join("system.f32");
+            std::fs::write(&mic_path, &source_bytes).unwrap();
+            std::fs::write(&system_path, &source_bytes).unwrap();
+            producer
+                .start_stream(
+                    0,
+                    0,
+                    [
+                        crate::recorder::NativeSpoolSource::fake(mic_path, rate),
+                        crate::recorder::NativeSpoolSource::fake(system_path, rate),
+                    ],
+                )
+                .unwrap();
+            assert_eq!(
+                rounded_frames(source_frames as u64, rate, PCM_SAMPLE_RATE).unwrap(),
+                96_001,
+                "source rate {rate}"
+            );
+            assert_eq!(
+                producer
+                    .flush_stream_and_close(0, 0, SegmentCloseReasonV1::Stop)
+                    .unwrap(),
+                6_001,
+                "source rate {rate}"
+            );
+            assert_eq!(
+                producer.runtime.storage().stats().unwrap().blob_bytes,
+                96_001 * 2 * 2,
+                "source rate {rate}"
+            );
+        }
+    }
+
     #[cfg(feature = "audio-capture")]
     #[test]
     fn native_lane_actor_compacts_after_runtime_commit() {
@@ -1219,6 +1312,24 @@ mod tests {
         let system = writer.system_sink(2);
         mic.attach(16_000, 0).unwrap();
         system.attach(16_000, 0).unwrap();
+        // Reproduce the macOS timing: one actor tick can precede the first
+        // callback, making the sealed timeline longer than the fake samples.
+        let telemetry = writer.telemetry();
+        let tick_started = Instant::now();
+        while telemetry
+            .mic
+            .synthesized_durable_frames
+            .load(Ordering::Acquire)
+            == 0
+            || telemetry
+                .system
+                .synthesized_durable_frames
+                .load(Ordering::Acquire)
+                == 0
+        {
+            assert!(tick_started.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(5));
+        }
         mic.samples(16_000, vec![0.1; 80_000], Vec::new()).unwrap();
         system
             .samples(16_000, vec![0.2; 80_000], Vec::new())
@@ -1247,11 +1358,19 @@ mod tests {
         mic.retire().unwrap();
         system.retire().unwrap();
         let sealed = writer.seal_at(96_000).unwrap();
+        // A platform may tick before the first fake callback and persist
+        // leading wall-clock silence. The runtime must match the sealed
+        // timeline, including that deliberate gap.
+        assert!(sealed.shared_frame >= 96_000);
         assert_eq!(
             producer
                 .flush_stream_and_close(0, 0, SegmentCloseReasonV1::Stop)
                 .unwrap(),
-            6_000
+            sealed.shared_frame.div_ceil(16)
+        );
+        assert_eq!(
+            producer.runtime.storage().stats().unwrap().blob_bytes,
+            sealed.shared_frame * 2 * 2
         );
         sealed.finish_without_wav(|| Ok(())).unwrap();
         assert!(!overflow.load(std::sync::atomic::Ordering::Acquire));
