@@ -8,7 +8,7 @@ const mac = { ...browser, platform: "macos" as const };
 const snapshot = { recordingId: "rec-1", sessionId: "rec-1", status: "recording" as const,
   nextSequence: 0, notepad: { text: "", revision: "v1" } };
 
-function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: string; meetingList?: boolean; relay?: boolean; workspaceHostFails?: boolean; menuMeeting?: boolean; transcriptReady?: boolean; transcriptPartial?: boolean; finalized?: boolean } = {}) {
+function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: string; meetingList?: boolean; relay?: boolean; workspaceHostFails?: boolean; menuMeeting?: boolean; transcriptReady?: boolean; transcriptPartial?: boolean; finalized?: boolean; finalizedIncomplete?: boolean; leaseExpired?: boolean } = {}) {
   let stopped = false;
   let captureStatus: "recording" | "paused" = "recording";
   const spawn = vi.fn(async (_request: unknown) => ({ id: "thr-created" }));
@@ -52,6 +52,9 @@ function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: strin
       if (method === "sessionExists") return { ok: true, found: true };
       if (method === "stop" || method === "finishIncomplete") { stopped = true; return { ok: true, snapshot: null }; }
       if (method === "pause") captureStatus = "paused";
+      if (method === "resume" && options.leaseExpired) return { ok: false, error: {
+        code: "browser_lease_expired", message: "Finished while you were away (incomplete).", retryable: false,
+      } };
       if (method === "resume") captureStatus = "recording";
       if (method === "uploadChunk") return { ok: true };
       if (method === "connectedNoteContext") return { ok: true, context: {
@@ -61,7 +64,8 @@ function harness(options: { heartbeatFails?: boolean; canonicalSessionId?: strin
       if (method === "requestTranscription") return { ok: true, status: "queued", attempt: 1 };
       if (method === "heartbeat" && options.heartbeatFails) return { ok: false, error: { code: "offline", message: "offline", retryable: true } };
       return { ok: true, snapshot: stopped ? null : { ...snapshot, sessionId: options.canonicalSessionId || snapshot.sessionId,
-        status: options.finalized && method === "readCapture" ? "saving" : captureStatus } };
+        status: options.finalized && method === "readCapture" ? "saving" : captureStatus,
+        incomplete: options.finalizedIncomplete === true } };
     },
   });
   plugin(host.bb);
@@ -320,6 +324,33 @@ describe("Margins project recording server", () => {
     await expect(host.bb.storage.kv.get("last-session:workspace-1")).resolves.toBe("rec-1");
     await expect(host.harness.behavior.callRpc("getProjectPanelState", { projectId: "proj-1", client: browser })).resolves.toMatchObject({ state: "ready", lastSessionId: "rec-1" });
     expect(host.harness.inspection.experimental_hostRpcCalls.filter(call => call.method === "stop")).toHaveLength(1);
+  });
+
+  it("persists a terminal incomplete away outcome after a lease-expired Resume", async () => {
+    const host = harness({ leaseExpired: true });
+    await host.harness.behavior.callRpc("beginProjectCapture", { projectId: "proj-1", client: browser, ownerId: "owner" });
+    await host.harness.behavior.callRpc("pause", { sessionId: "rec-1", client: browser,
+      operationId: "pause-lease", expectedNextSequence: 0 });
+    await expect(host.harness.behavior.callRpc("resume", { sessionId: "rec-1", client: browser,
+      operationId: "resume-lease", segmentStartedUnixMs: 1_000 })).resolves.toMatchObject({
+        state: "saved", title: "Finished while you were away (incomplete)",
+        primaryAction: "start", error: null,
+      });
+    await expect(host.bb.storage.kv.get("finished-away:workspace-1")).resolves.toBe("rec-1");
+    await expect(host.harness.behavior.callRpc("getProjectPanelState", { projectId: "proj-1", client: browser }))
+      .resolves.toMatchObject({ state: "saved", title: "Finished while you were away (incomplete)",
+        primaryAction: "start" });
+  });
+
+  it("discovers an incomplete auto-finish from a finalized server snapshot", async () => {
+    const options = { finalized: false, finalizedIncomplete: true };
+    const host = harness(options);
+    await host.harness.behavior.callRpc("beginProjectCapture", { projectId: "proj-1", client: browser, ownerId: "owner" });
+    options.finalized = true;
+    await expect(host.harness.behavior.callRpc("getProjectPanelState", { projectId: "proj-1", client: browser }))
+      .resolves.toMatchObject({ state: "saved", title: "Finished while you were away (incomplete)" });
+    await expect(host.harness.behavior.callRpc("getProjectPanelState", { projectId: "proj-1", client: browser }))
+      .resolves.toMatchObject({ state: "saved", title: "Finished while you were away (incomplete)" });
   });
 
   it("resolves connected-note context for an explicitly selected ended session", async () => {

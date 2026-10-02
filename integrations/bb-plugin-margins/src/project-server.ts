@@ -29,6 +29,7 @@ export const workspaceSessionSummarySchema = z.strictObject({
   capture_incomplete: z.boolean().default(false), capture_gaps: z.array(z.strictObject({
     segment_id: z.string(), start_sequence: z.number().int().nonnegative(),
     end_exclusive: z.number().int().nonnegative(), reason: z.string(),
+    starts_at_ms: z.number().int().nonnegative().optional(),
   })).default([]),
 });
 export const workspaceSessionPageSchema = z.strictObject({
@@ -419,6 +420,7 @@ export class ProjectMarginsTransport {
           captureIncomplete: summary.capture_incomplete ?? false, captureGaps: (summary.capture_gaps ?? []).map((gap) => ({
             segmentId: gap.segment_id, startSequence: gap.start_sequence,
             endExclusive: gap.end_exclusive, reason: gap.reason,
+            ...(gap.starts_at_ms !== undefined ? { startsAtMs: gap.starts_at_ms } : {}),
           })),
           notePath: note?.relative_path || null,
           noteFile: noteFilePath ? { hostId: target.hostId, path: noteFilePath } : null,
@@ -455,7 +457,8 @@ export class ProjectMarginsTransport {
         sessionId: summary.session_id, title: summary.title, startedAt: summary.started_at,
         inputFinalized: summary.input_finalized, captureIncomplete: summary.capture_incomplete ?? false,
         captureGaps: (summary.capture_gaps ?? []).map((gap) => ({ segmentId: gap.segment_id,
-          startSequence: gap.start_sequence, endExclusive: gap.end_exclusive, reason: gap.reason })),
+          startSequence: gap.start_sequence, endExclusive: gap.end_exclusive, reason: gap.reason,
+          ...(gap.starts_at_ms !== undefined ? { startsAtMs: gap.starts_at_ms } : {}) })),
         notepad: { revision: memo.revision, text: memo.lines.map((line) => line.text).join("\n") },
       } };
     } catch (cause) {
@@ -466,16 +469,8 @@ export class ProjectMarginsTransport {
   async saveWorkspaceMemo(target: ProjectTarget, dataDir: string, sessionId: string, expectedRevision: string, text: string) {
     try {
       const handle = await this.manager.ensure(target, dataDir);
-      const summary = await this.request<WorkspaceSessionSummary>(
-        handle, `sessions/${encodeURIComponent(sessionId)}`, "GET",
-      );
-      const started = Date.parse(summary.started_at);
-      if (!Number.isFinite(started)) throw new Error("Meeting start time is invalid");
-      const observedAtMs = summary.input_finalized && summary.capture_duration_ms !== null
-        ? summary.capture_duration_ms : Math.max(0, Date.now() - started);
       await this.request(handle, `sessions/${encodeURIComponent(sessionId)}/memo`, "PUT", {
-        request_id: randomUUID(), expected_revision: expectedRevision,
-        observed_at_ms: Math.floor(observedAtMs), paused: false, text,
+        request_id: randomUUID(), expected_revision: expectedRevision, paused: false, text,
       });
       return this.readWorkspaceMeeting(target, dataDir, sessionId);
     } catch (cause) {

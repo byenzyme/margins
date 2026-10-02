@@ -3,6 +3,7 @@
   "sessionId": "browser-contract-session",
   "nextSequence": 3,
   "status": "paused",
+  "incomplete": false,
   "notepad": {
     "text": "Review launch plan",
     "revision": "memo-revision"

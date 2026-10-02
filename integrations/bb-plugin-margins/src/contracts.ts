@@ -29,11 +29,12 @@ const workspaceMeetingSchema = z.object({
   captureIncomplete: z.boolean().default(false), captureGaps: z.array(z.object({
     segmentId: z.string(), startSequence: z.number().int().nonnegative(),
     endExclusive: z.number().int().nonnegative(), reason: z.string(),
+    startsAtMs: z.number().int().nonnegative().optional(),
   }).strict()).default([]),
 }).strict();
 export const hostCaptureSnapshotSchema = z.object({
   recordingId: z.string().min(1), sessionId: z.string().min(1), status: z.enum(["recording", "paused", "saving"]),
-  notepad: notepadSchema, nextSequence: z.number().int().nonnegative(),
+  notepad: notepadSchema, nextSequence: z.number().int().nonnegative(), incomplete: z.boolean().optional(),
 }).strict();
 const hostErrorSchema = z.object({
   code: z.string().min(1), message: z.string().min(1), retryable: z.boolean(),

@@ -9,14 +9,15 @@ use anyhow::{bail, Context, Result};
 use fs4::fs_std::FileExt;
 use margins_core::SessionRepository;
 use margins_meeting_protocol::{
-    decode_opus_packet_blocks_v1, ArtifactId, AudioCodecV1, AudioContainerV1, AudioFormatV1,
-    BeginCaptureGenerationV1, ClientMessageBodyV1, ClientMessageV1, DurationMillis, InstanceId,
-    MessageId, ProtocolVersionV1, SequenceRangeV1, ServerMessageBodyV1, SessionId, UnixMillis,
-    WorkspaceArtifactV1, WorkspaceAttachV1, WorkspaceCapabilitiesV1, WorkspaceCaptureGapV1,
-    WorkspaceId, WorkspaceLimitsV1, WorkspaceMemoLineV1, WorkspaceMemoReplaceV1,
-    WorkspaceMemoUpdateV1, WorkspaceMemoV1, WorkspaceNoteAssociationUpdateV1,
-    WorkspaceNoteAssociationV1, WorkspaceProcessingJobV1, WorkspaceRenameV1,
-    WorkspaceSessionPageV1, WorkspaceSessionSummaryV1, WorkspaceSummaryV1, WorkspaceTranscriptV1,
+    decode_opus_packet_blocks_v1, ArtifactId, AudioChunkV1, AudioCodecV1, AudioContainerV1,
+    AudioFormatV1, BeginCaptureGenerationV1, ClientMessageBodyV1, ClientMessageV1, DurationMillis,
+    InstanceId, LaneId, MessageId, ProtocolVersionV1, SequenceRangeV1, ServerMessageBodyV1,
+    SessionId, UnixMillis, WorkspaceArtifactV1, WorkspaceAttachV1, WorkspaceCapabilitiesV1,
+    WorkspaceCaptureGapV1, WorkspaceId, WorkspaceLimitsV1, WorkspaceMemoLineV1,
+    WorkspaceMemoReplaceV1, WorkspaceMemoUpdateV1, WorkspaceMemoV1,
+    WorkspaceNoteAssociationUpdateV1, WorkspaceNoteAssociationV1, WorkspaceProcessingJobV1,
+    WorkspaceRenameV1, WorkspaceSessionPageV1, WorkspaceSessionSummaryV1, WorkspaceSummaryV1,
+    WorkspaceTranscriptV1,
 };
 use margins_meeting_runtime::{
     MeetingRuntime, MeetingRuntimeStorage, RuntimeResponseV1, StoredSegmentSummaryV1,
@@ -61,7 +62,21 @@ pub const OP_RECALL_QUERY: &str = "recall.query";
 pub struct CaptureState {
     pub input_finalized: bool,
     pub started_at_unix_ms: u64,
+    /// Browser clock at Start. The runtime start is the server receive time.
+    pub client_started_at_unix_ms: u64,
     pub segments: Vec<StoredSegmentSummaryV1>,
+}
+
+fn browser_client_clock_origin(session: &margins_meeting_runtime::StoredSessionV1) -> u64 {
+    session
+        .create()
+        .provenance
+        .hops
+        .iter()
+        .find(|hop| hop.producer == "bb-browser")
+        .and_then(|hop| hop.attributes.get("client_started_at_unix_ms"))
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(session.create().started_at_unix_ms.0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1159,6 +1174,7 @@ impl WorkspaceService {
                             .ok()
                             .and_then(|value| value.as_str().map(str::to_string))
                             .unwrap_or_else(|| "unknown".to_string()),
+                        starts_at_ms: Some(gap.starts_at_ms),
                     })
                     .collect::<Vec<_>>()
             })
@@ -1171,6 +1187,7 @@ impl WorkspaceService {
                     start_sequence: gap.start_sequence,
                     end_exclusive: gap.end_exclusive,
                     reason: gap.reason,
+                    starts_at_ms: None,
                 }),
         );
         capture_gaps.sort_by(|left, right| {
@@ -1537,8 +1554,37 @@ impl WorkspaceService {
         Ok(CaptureState {
             input_finalized: stored.input_finalized(),
             started_at_unix_ms: stored.create().started_at_unix_ms.0,
+            client_started_at_unix_ms: browser_client_clock_origin(&stored),
             segments: stored.segment_summaries(),
         })
+    }
+
+    pub fn capture_chunk_end_before(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+        segment_id: &str,
+        lane_id: &LaneId,
+        sequence: u64,
+    ) -> Result<Option<u64>> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        self.runtime
+            .storage()
+            .latest_chunk_end_before(session_id, segment_id, lane_id, sequence)
+    }
+
+    pub fn capture_chunk_metadata(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+        segment_id: &str,
+        lane_id: &LaneId,
+        sequence: u64,
+    ) -> Result<Option<AudioChunkV1>> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        self.runtime
+            .storage()
+            .audio_chunk_metadata(session_id, segment_id, lane_id, sequence)
     }
 
     /// Owner-scoped version for browser capture routes. The producer token is
@@ -1580,6 +1626,7 @@ impl WorkspaceService {
             CaptureState {
                 input_finalized: stored.input_finalized(),
                 started_at_unix_ms: stored.create().started_at_unix_ms.0,
+                client_started_at_unix_ms: browser_client_clock_origin(&stored),
                 segments: stored.segment_summaries(),
             },
             replay,

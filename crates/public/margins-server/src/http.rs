@@ -887,19 +887,73 @@ async fn workspace_memo(
         .unwrap_or_else(service_error)
 }
 
+#[derive(serde::Deserialize)]
+struct WorkspaceMemoHttpUpdate {
+    request_id: String,
+    expected_revision: String,
+    /// Omitted by browser clients so the server stamps memo and audio on its
+    /// own clock. Native capture may still provide an exact device offset.
+    observed_at_ms: Option<SessionMillis>,
+    paused: bool,
+    text: String,
+}
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 async fn workspace_update_memo(
     State(state): State<ServerState>,
     Path((workspace, session)): Path<(String, String)>,
     headers: HeaderMap,
-    Json(request): Json<WorkspaceMemoUpdateV1>,
+    Json(request): Json<WorkspaceMemoHttpUpdate>,
 ) -> Response {
     let principal = match workspace_auth(&state, &headers, Some(&workspace)) {
         Ok(value) => value,
         Err(response) => return response,
     };
+    let session_id = SessionId(session);
+    let observed_at_ms = match request.observed_at_ms {
+        Some(value) => value,
+        None => {
+            let summary = match state.workspace_service.session(&principal, &session_id) {
+                Ok(value) => value,
+                Err(error) => return service_error(error),
+            };
+            let started = match chrono::DateTime::parse_from_rfc3339(&summary.started_at) {
+                Ok(value) => value.timestamp_millis().max(0) as u64,
+                Err(_) => {
+                    return workspace_error(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "invalid_session_time",
+                        false,
+                        "Meeting start time is invalid",
+                    )
+                }
+            };
+            let observed = now_unix_ms().saturating_sub(started);
+            SessionMillis(if summary.input_finalized {
+                summary
+                    .capture_duration_ms
+                    .map_or(observed, |duration| observed.min(duration.0))
+            } else {
+                observed
+            })
+        }
+    };
+    let update = WorkspaceMemoUpdateV1 {
+        request_id: request.request_id,
+        expected_revision: request.expected_revision,
+        observed_at_ms,
+        paused: request.paused,
+        text: request.text,
+    };
     state
         .workspace_service
-        .update_memo(&principal, &SessionId(session), &request)
+        .update_memo(&principal, &session_id, &update)
         .map(workspace_ok)
         .unwrap_or_else(service_error)
 }

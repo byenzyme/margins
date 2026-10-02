@@ -404,6 +404,23 @@ export class BrowserCaptureOwner {
     return current.recorderStop;
   }
 
+  private settledWhileAway(current: LocalCapture, state: PanelState): PanelState {
+    this.capture = null;
+    ++this.generation;
+    this.heartbeatRecovering = false;
+    current.levelMonitor?.dispose();
+    current.reachability.dispose();
+    clearInterval(current.heartbeat);
+    void this.stopSegment(current);
+    current.stream.getTracks().forEach((track) => track.stop());
+    void current.uploads.close().catch(() => undefined);
+    current.uploads.releaseRetained();
+    this.endedRecordingId = current.sessionId;
+    writeStored(null);
+    this.acceptPanel(current.sessionId, state);
+    return state;
+  }
+
   private async recover(stored: StoredCapture) {
     if (this.recoveryStarted || this.capture) return;
     this.recoveryStarted = true;
@@ -429,26 +446,16 @@ export class BrowserCaptureOwner {
         }
         const serverNextSequence = snapshot.nextSequence!;
         const localExpected = stored.expectedNextSequence ?? stored.nextSequence;
-        if (localExpected > serverNextSequence) {
-          const error: HostError = { code: "browser_chunk_gap", retryable: false,
-            message: `Browser audio sequence ${serverNextSequence} was lost when this page reloaded. The recording is incomplete.`,
-          };
-          stored.pendingControl = { kind: "stop", operationId: id(), segmentTimeUnixMs: Date.now() };
-          stored.stopGapError = error;
-          stored.stopGapSequence = serverNextSequence;
-          writeStored(stored);
-          this.incompleteStopPanel(stored, error);
-          return;
-        }
-        stored.nextSequence = serverNextSequence;
-        stored.expectedNextSequence = serverNextSequence;
+        const resumedSequence = Math.max(localExpected, serverNextSequence);
+        stored.nextSequence = resumedSequence;
+        stored.expectedNextSequence = resumedSequence;
         const shouldRecord = stored.pendingControl?.kind === "resume" || !stored.paused;
         const stream = await this.dependencies.acquireMicrophone();
         try {
           if (snapshot.state === "recording") {
             const paused = await this.dependencies.rpc<PanelState>(this.pluginId, "pause", {
               sessionId: stored.sessionId, client, operationId: id(),
-              expectedNextSequence: serverNextSequence, segmentEndedUnixMs: Date.now(), recoveredAfterReload: true,
+              expectedNextSequence: resumedSequence, segmentEndedUnixMs: Date.now(), recoveredAfterReload: true,
             });
             if (paused.error || paused.state !== "paused") {
               throw new Error(paused.error?.message || "Could not rotate the browser audio segment after reload");
@@ -550,6 +557,9 @@ export class BrowserCaptureOwner {
           this.acceptPanel(current.sessionId, state);
           return state;
         }
+        if (state.state === "saved" && state.lastSessionId === current.sessionId) {
+          return this.settledWhileAway(current, state);
+        }
         const gap = state.error ? missingBrowserAudioSequence(state.error) : null;
         if (gap === null || replayed.has(gap)) {
           return this.incompleteControlPanel(current, new Error(state.error?.message || "Pause was not acknowledged"), "pause");
@@ -583,6 +593,9 @@ export class BrowserCaptureOwner {
         segmentStartedUnixMs: pendingControl.segmentTimeUnixMs,
       });
       if (this.capture !== current) return state;
+      if (state.state === "saved" && state.lastSessionId === current.sessionId) {
+        return this.settledWhileAway(current, state);
+      }
       if (state.error !== null || state.state !== "recording") {
         return this.incompleteControlPanel(current, new Error(state.error?.message || "Resume was not acknowledged"), "resume");
       }

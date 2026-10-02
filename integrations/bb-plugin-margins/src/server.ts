@@ -24,6 +24,7 @@ const SESSION_PREFIX = "session:";
 const RECORDING_PREFIX = "recording:";
 const LIVE_PREFIX = "live:";
 const LAST_SESSION_PREFIX = "last-session:";
+const FINISHED_AWAY_PREFIX = "finished-away:";
 const PROJECT_WORKSPACE_PREFIX = "project-workspace:";
 const MEETING_ORIGIN_PREFIX = "meeting-origin:";
 const MEETING_ARCHIVE_PREFIX = "meeting-archive:";
@@ -38,6 +39,7 @@ function sessionKey(sessionId: string) { return `${SESSION_PREFIX}${sessionId}`;
 function recordingKey(recordingId: string) { return `${RECORDING_PREFIX}${recordingId}`; }
 function liveKey(workspaceId: string) { return `${LIVE_PREFIX}${workspaceId}`; }
 function lastSessionKey(workspaceId: string) { return `${LAST_SESSION_PREFIX}${workspaceId}`; }
+function finishedAwayKey(workspaceId: string) { return `${FINISHED_AWAY_PREFIX}${workspaceId}`; }
 function originKey(workspaceId: string, sessionId: string) { return `${MEETING_ORIGIN_PREFIX}${workspaceId}:${sessionId}`; }
 function noteThreadKey(workspaceId: string, sessionId: string) { return `${NOTE_THREAD_PREFIX}${workspaceId}:${sessionId}`; }
 function archiveKey(workspaceId: string, sessionId: string) { return `${MEETING_ARCHIVE_PREFIX}${workspaceId}:${sessionId}`; }
@@ -201,12 +203,26 @@ export default function marginsPlugin(bb: BbPluginApi) {
     };
   }
 
+  function finishedAwayPanel(projectId: string, client: ClientCapabilities, sessionId: string): PanelState {
+    return { ...basePanel(projectId, "saved", client, { lastSessionId: sessionId }),
+      title: "Finished while you were away (incomplete)",
+      detail: "Margins saved the audio it received. Some audio is missing; the transcript marks the gap.",
+      primaryAction: "start", primaryLabel: "Record another meeting" };
+  }
+
+  async function rememberFinishedAway(capture: CaptureRecord) {
+    await bb.storage.kv.set(lastSessionKey(capture.workspaceId), capture.sessionId);
+    await bb.storage.kv.set(finishedAwayKey(capture.workspaceId), capture.sessionId);
+    await clearCapture(capture);
+  }
+
   async function getPanelStateForTarget(target: ProjectTarget, client: ClientCapabilities): Promise<PanelState> {
     const authority = await callHost(target, "captureAuthority", { target });
     if (!authority.ok) return basePanel(target.projectId, "unavailable", client, { error: authority.error });
     const workspaceId = authority.workspaceId as string;
     const capture = await readLiveCapture(workspaceId);
     const lastSessionId = await readLastSession(workspaceId);
+    const finishedAwayId = await bb.storage.kv.get(finishedAwayKey(workspaceId));
     if (capture) {
       const owns = capture.clientId === client.clientId;
       if (!owns) return basePanel(target.projectId, "recording_elsewhere", client, { capture, lastSessionId });
@@ -214,10 +230,18 @@ export default function marginsPlugin(bb: BbPluginApi) {
         projectRoot: capture.projectRoot, workspaceId: capture.workspaceId };
       const result = await callHost(captureTarget, "readCapture", { target: captureTarget, recordingId: capture.recordingId, ownerId: capture.ownerId }) as HostResult;
       if (!result.ok) {
+        if (result.error.code === "browser_lease_expired") {
+          await rememberFinishedAway(capture);
+          return finishedAwayPanel(target.projectId, client, capture.sessionId);
+        }
         const withinGrace = Date.now() - capture.lastHeartbeatUnixMs <= DISCONNECT_GRACE_MS;
         return basePanel(target.projectId, withinGrace ? "recovering" : "needs_attention", client, { capture, lastSessionId, error: result.error });
       }
       if (!result.snapshot || result.snapshot.status === "saving") {
+        if (result.snapshot?.incomplete) {
+          await rememberFinishedAway(capture);
+          return finishedAwayPanel(target.projectId, client, capture.sessionId);
+        }
         await bb.storage.kv.set(lastSessionKey(capture.workspaceId), capture.sessionId);
         await clearCapture(capture);
         return basePanel(target.projectId, "saved", client, { lastSessionId: capture.sessionId });
@@ -225,6 +249,9 @@ export default function marginsPlugin(bb: BbPluginApi) {
       const state = result.snapshot.status === "paused" ? "paused" : "recording";
       return basePanel(target.projectId, state, client, { capture, lastSessionId,
         notepad: result.snapshot.notepad, nextSequence: result.snapshot.nextSequence });
+    }
+    if (lastSessionId && finishedAwayId === lastSessionId) {
+      return finishedAwayPanel(target.projectId, client, lastSessionId);
     }
     if (client.platform === "macos" && !sourceFor(client)) return basePanel(target.projectId, "needs_setup", client);
     if (!sourceFor(client)) return basePanel(target.projectId, "unavailable", client);
@@ -276,9 +303,15 @@ export default function marginsPlugin(bb: BbPluginApi) {
         ...(segmentTimeUnixMs !== undefined ? { segmentEndedUnixMs: segmentTimeUnixMs } : {}) } : {}),
       ...(operation === "pause" && recoveredAfterReload ? { recoveredAfterReload: true } : {}),
       ...(operation === "resume" && segmentTimeUnixMs !== undefined ? { segmentStartedUnixMs: segmentTimeUnixMs } : {}) }) as HostResult;
+    if (!result.ok && result.error.code === "browser_lease_expired") {
+      await rememberFinishedAway(capture);
+      bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: "lease_expired" });
+      return finishedAwayPanel(target.projectId, client, capture.sessionId);
+    }
     if (result.ok) {
       if (operation === "stop") {
         await bb.storage.kv.set(lastSessionKey(capture.workspaceId), capture.sessionId);
+        await bb.storage.kv.delete(finishedAwayKey(capture.workspaceId));
       } else {
         capture.lastHeartbeatUnixMs = operation === "heartbeat" ? Date.now() : capture.lastHeartbeatUnixMs;
         await saveCapture(capture);
@@ -302,8 +335,18 @@ export default function marginsPlugin(bb: BbPluginApi) {
     const target: ProjectTarget = { projectId: capture.projectId, hostId: capture.hostId,
       projectRoot: capture.projectRoot, workspaceId: capture.workspaceId };
     const result = await callHost(target, "readCapture", { target, recordingId: capture.recordingId, ownerId: capture.ownerId }) as HostResult;
-    if (!result.ok) return basePanel(capture.projectId, "needs_attention", client, { capture, error: result.error });
+    if (!result.ok) {
+      if (result.error.code === "browser_lease_expired") {
+        await rememberFinishedAway(capture);
+        return finishedAwayPanel(capture.projectId, client, capture.sessionId);
+      }
+      return basePanel(capture.projectId, "needs_attention", client, { capture, error: result.error });
+    }
     if (!result.snapshot || result.snapshot.status === "saving") {
+      if (result.snapshot?.incomplete) {
+        await rememberFinishedAway(capture);
+        return finishedAwayPanel(capture.projectId, client, capture.sessionId);
+      }
       await bb.storage.kv.set(lastSessionKey(capture.workspaceId), capture.sessionId);
       await clearCapture(capture);
       return basePanel(capture.projectId, "saved", client, { lastSessionId: capture.sessionId });
@@ -327,6 +370,7 @@ export default function marginsPlugin(bb: BbPluginApi) {
         workspaceId, sessionId: result.snapshot.sessionId, recordingId: result.snapshot.recordingId, clientId: client.clientId,
         ownerId, lastHeartbeatUnixMs: Date.now(),
       });
+      await bb.storage.kv.delete(finishedAwayKey(workspaceId));
       await bb.storage.kv.set(originKey(workspaceId, result.snapshot.sessionId), target.projectId);
       bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: "start" });
       return getPanelStateForTarget(target, client);

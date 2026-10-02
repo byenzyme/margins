@@ -292,7 +292,7 @@ describe("ProjectServerManager remote adapter", () => {
         if (options?.method === "PUT") {
           const body = JSON.parse(String(options.body));
           expect(body).toMatchObject({ expected_revision: "rev-1", text: "First point\nSecond point", paused: false });
-          expect(body.observed_at_ms).toBeGreaterThanOrEqual(0);
+          expect(body).not.toHaveProperty("observed_at_ms");
           expect(body.request_id).toBeTruthy();
           memo = { revision: "rev-2", lines: [{ text: "First point" }, { text: "Second point" }] };
         }

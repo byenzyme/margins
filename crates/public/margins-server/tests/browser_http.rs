@@ -370,6 +370,7 @@ async fn user_can_finish_with_saved_audio_and_explicit_missing_ranges() {
     assert_eq!(summary["result"]["input_finalized"], true, "{summary}");
     assert_eq!(summary["result"]["capture_incomplete"], true, "{summary}");
     assert_eq!(summary["result"]["capture_gaps"][0]["start_sequence"], 1);
+    assert_eq!(summary["result"]["capture_gaps"][0]["starts_at_ms"], 1_000);
     let (_, job) = call(
         &app,
         Method::GET,
@@ -454,6 +455,15 @@ async fn expired_owner_lease_finalizes_out_of_order_audio_as_incomplete() {
         sweep_expired_browser_captures(&state, observed_unix_ms).unwrap(),
         1
     );
+    let (status, resumed) = post(
+        &app,
+        &format!("{base}/{session}/resume"),
+        json!({"ownerId": OWNER, "segmentStartedUnixMs": START + 4_000}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{resumed}");
+    assert_eq!(resumed["error"]["code"], "browser_lease_expired");
+    assert_eq!(resumed["error"]["retryable"], false);
     let (_, summary) = call(
         &app,
         Method::GET,
@@ -576,6 +586,117 @@ async fn reload_rotates_webm_segment_and_uses_server_durable_cursor() {
     assert_eq!(summary["result"]["capture_incomplete"], true, "{summary}");
     assert_eq!(summary["result"]["capture_gaps"][0]["start_sequence"], 1);
     assert_eq!(summary["result"]["capture_gaps"][0]["end_exclusive"], 1);
+}
+
+#[tokio::test]
+async fn reload_during_upload_marks_gap_and_keeps_recording() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = server_state(temp.path());
+    state.workspace_service.set_asr_available(true);
+    state.asr_setup = SpeechSetup::new(true, true);
+    state.remote_asr_jobs = RemoteAsrJobs::with_backend(Arc::new(TimingAsr));
+    let service = state.workspace_service.clone();
+    let principal = state.service_principal.clone();
+    let app = build_router(state);
+    let base = "/v1/workspaces/practice/browser/sessions";
+    let (_, started) = post(
+        &app,
+        base,
+        json!({"ownerId": OWNER, "name": "Reload during upload", "startedAtUnixMs": START}),
+    )
+    .await;
+    let session = started["result"]["sessionId"].as_str().unwrap();
+    let webm = include_bytes!("fixtures/legacy-browser.webm").to_vec();
+    let (status, receipt) = upload_at(
+        &app,
+        &format!("{base}/{session}/chunks/0"),
+        webm.clone(),
+        START,
+        START + 1_000,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    // Sequence 1 was assigned by the old page but never reached the server.
+    let (status, paused) = post(
+        &app,
+        &format!("{base}/{session}/pause"),
+        json!({"ownerId": OWNER, "expectedNextSequence": 2,
+            "segmentEndedUnixMs": START + 5_000, "recoveredAfterReload": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{paused}");
+    assert_eq!(paused["result"]["status"], "paused");
+    assert_eq!(paused["result"]["nextSequence"], 2);
+    let (status, resumed) = post(
+        &app,
+        &format!("{base}/{session}/resume"),
+        json!({"ownerId": OWNER, "segmentStartedUnixMs": START + 10_000}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+    let (status, receipt) = upload_at(
+        &app,
+        &format!("{base}/{session}/chunks/2"),
+        webm,
+        START + 10_000,
+        START + 11_000,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    let (status, finished) = post(
+        &app,
+        &format!("{base}/{session}/stop"),
+        json!({"ownerId": OWNER, "expectedNextSequence": 3,
+            "segmentEndedUnixMs": START + 11_000}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{finished}");
+    assert_eq!(finished["result"]["incomplete"], true);
+    let (_, summary) = call(
+        &app,
+        Method::GET,
+        &format!("/v1/workspaces/practice/sessions/{session}"),
+        vec![],
+        false,
+    )
+    .await;
+    let gaps = summary["result"]["capture_gaps"].as_array().unwrap();
+    assert!(
+        gaps.iter().any(|gap| gap["start_sequence"] == 1
+            && gap["end_exclusive"] == 2
+            && gap["starts_at_ms"] == 1_000),
+        "{summary}"
+    );
+    for _ in 0..100 {
+        let job = service
+            .latest_job(&principal, &session.into())
+            .unwrap()
+            .unwrap();
+        if job.status == "complete" {
+            break;
+        }
+        if job.status == "failed" {
+            panic!("ASR job failed: {:?}", job.failure);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let (_, transcript) = call(
+        &app,
+        Method::GET,
+        &format!("/v1/workspaces/practice/sessions/{session}/transcript"),
+        vec![],
+        false,
+    )
+    .await;
+    let body = transcript["result"]["body"].as_str().unwrap();
+    assert!(
+        body.contains("at 00:01: browser-000000 chunks 1..2"),
+        "{body}"
+    );
+    assert!(
+        body.contains("[00:11] you (mic): spoken evidence"),
+        "{body}"
+    );
 }
 
 #[tokio::test]
@@ -707,5 +828,132 @@ async fn pause_time_remains_between_memo_and_later_transcript_words() {
     assert!(
         body.contains("[00:11] you (mic): spoken evidence"),
         "{body}"
+    );
+}
+
+#[tokio::test]
+async fn server_clock_stamps_memo_and_bounds_backwards_or_future_browser_time() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = server_state(temp.path());
+    let service = state.workspace_service.clone();
+    let app = build_router(state);
+    let base = "/v1/workspaces/practice/browser/sessions";
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let (_, started) = post(
+        &app,
+        base,
+        json!({"ownerId": OWNER, "name": "Remote clock", "startedAtUnixMs": START}),
+    )
+    .await;
+    let session = started["result"]["sessionId"].as_str().unwrap();
+    let (_, summary) = call(
+        &app,
+        Method::GET,
+        &format!("/v1/workspaces/practice/sessions/{session}"),
+        vec![],
+        false,
+    )
+    .await;
+    let server_start =
+        chrono::DateTime::parse_from_rfc3339(summary["result"]["started_at"].as_str().unwrap())
+            .unwrap()
+            .timestamp_millis();
+    assert!(
+        server_start >= before - 1_000 && server_start <= before + 5_000,
+        "{summary}"
+    );
+    let (status, receipt) = upload_at(
+        &app,
+        &format!("{base}/{session}/chunks/0"),
+        vec![b'A'],
+        START,
+        START + 1,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    let (_, memo) = call(
+        &app,
+        Method::GET,
+        &format!("/v1/workspaces/practice/sessions/{session}/memo"),
+        vec![],
+        false,
+    )
+    .await;
+    let (status, saved_memo) = call(
+        &app,
+        Method::PUT,
+        &format!("/v1/workspaces/practice/sessions/{session}/memo"),
+        serde_json::to_vec(&json!({"request_id": "server-clock-memo",
+            "expected_revision": memo["result"]["revision"], "paused": false,
+            "text": "Observed on project host"}))
+        .unwrap(),
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved_memo}");
+    assert!(
+        saved_memo["result"]["lines"][0]["created_secs"]
+            .as_f64()
+            .unwrap()
+            < 5.0
+    );
+    let (status, paused) = post(
+        &app,
+        &format!("{base}/{session}/pause"),
+        json!({"ownerId": OWNER, "expectedNextSequence": 1,
+            "segmentEndedUnixMs": START + 1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{paused}");
+    // The wall clock stepped back an hour during Pause. Resume and the new
+    // WebM stream must remain valid on the server's monotonic capture lane.
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    let stepped_back = START - 3_600_000;
+    let (status, resumed) = post(
+        &app,
+        &format!("{base}/{session}/resume"),
+        json!({"ownerId": OWNER, "segmentStartedUnixMs": stepped_back}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+    let (status, receipt) = upload_at(
+        &app,
+        &format!("{base}/{session}/chunks/1"),
+        vec![b'B'],
+        stepped_back,
+        stepped_back + 1_000,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    // A later forward jump is capped at server receive time plus tolerance.
+    let jumped_forward = START + 24 * 60 * 60 * 1_000;
+    let (status, receipt) = upload_at(
+        &app,
+        &format!("{base}/{session}/chunks/2"),
+        vec![b'C'],
+        jumped_forward,
+        jumped_forward + 1_000,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    let (status, finished) = post(
+        &app,
+        &format!("{base}/{session}/stop"),
+        json!({"ownerId": OWNER, "expectedNextSequence": 3,
+            "segmentEndedUnixMs": jumped_forward + 1_000}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{finished}");
+    let segments = canonical::get_session_meta(service.margins_dir(), session)
+        .unwrap()
+        .segments;
+    assert_eq!(segments.len(), 2);
+    assert!(
+        segments[1].offset_ms >= 20 && segments[1].offset_ms <= 31_000,
+        "unexpected second segment offset: {}",
+        segments[1].offset_ms
     );
 }

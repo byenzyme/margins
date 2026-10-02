@@ -556,13 +556,17 @@ fn transcribe_remote_session(
             .capture_gaps
             .iter()
             .map(|gap| {
+                let when = gap
+                    .starts_at_ms
+                    .map(|time| format!("at {}: ", elapsed(time.0)))
+                    .unwrap_or_default();
                 if gap.start_sequence < gap.end_exclusive {
                     format!(
-                        "{} chunks {}..{} ({})",
+                        "{when}{} chunks {}..{} ({})",
                         gap.segment_id, gap.start_sequence, gap.end_exclusive, gap.reason
                     )
                 } else {
-                    format!("{} ({})", gap.segment_id, gap.reason)
+                    format!("{when}{} ({})", gap.segment_id, gap.reason)
                 }
             })
             .collect::<Vec<_>>()

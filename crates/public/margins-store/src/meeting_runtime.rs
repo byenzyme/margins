@@ -564,6 +564,56 @@ impl SqliteMeetingRuntimeStorage {
     pub fn database_path(&self) -> PathBuf {
         canonical::database_path(&self.directory)
     }
+
+    /// Last durable audio endpoint before a lane sequence. This reads only
+    /// committed metadata, so a missing-upload marker never uses a later
+    /// out-of-order chunk as its time anchor.
+    pub fn latest_chunk_end_before(
+        &self,
+        session_id: &SessionId,
+        segment_id: &str,
+        lane_id: &LaneId,
+        sequence: u64,
+    ) -> Result<Option<u64>> {
+        let connection = self.connection()?;
+        let metadata: Option<String> = connection
+            .query_row(
+                "SELECT metadata_json FROM meeting_chunks WHERE session_id = ?1 AND segment_id = ?2 AND lane_id = ?3 AND sequence < ?4 ORDER BY sequence DESC LIMIT 1",
+                params![session_id.as_ref(), segment_id, lane_id.as_ref(), i64::try_from(sequence)?],
+                |row| row.get(0),
+            )
+            .optional()?;
+        metadata
+            .map(|value| {
+                let chunk: AudioChunkV1 = serde_json::from_str(&value)?;
+                chunk
+                    .starts_at_ms
+                    .0
+                    .checked_add(chunk.duration_ms.0)
+                    .context("durable browser chunk time overflows")
+            })
+            .transpose()
+    }
+
+    pub fn audio_chunk_metadata(
+        &self,
+        session_id: &SessionId,
+        segment_id: &str,
+        lane_id: &LaneId,
+        sequence: u64,
+    ) -> Result<Option<AudioChunkV1>> {
+        let connection = self.connection()?;
+        let metadata: Option<String> = connection
+            .query_row(
+                "SELECT metadata_json FROM meeting_chunks WHERE session_id = ?1 AND segment_id = ?2 AND lane_id = ?3 AND sequence = ?4",
+                params![session_id.as_ref(), segment_id, lane_id.as_ref(), i64::try_from(sequence)?],
+                |row| row.get(0),
+            )
+            .optional()?;
+        metadata
+            .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .transpose()
+    }
     fn blob_dir(&self) -> PathBuf {
         self.directory.join("meeting-blobs")
     }

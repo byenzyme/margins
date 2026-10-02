@@ -1579,6 +1579,10 @@ pub struct WorkspaceCaptureGapV1 {
     pub start_sequence: u64,
     pub end_exclusive: u64,
     pub reason: String,
+    /// Session-relative point where the missing or undecodable audio begins.
+    /// Older processing records may not carry a trustworthy time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starts_at_ms: Option<SessionMillis>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

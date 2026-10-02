@@ -29,6 +29,7 @@ use std::collections::BTreeMap;
 
 const LANE: &str = "mic";
 const MAX_BROWSER_CHUNK_DURATION_MS: u64 = 5 * 60 * 1_000;
+const MAX_BROWSER_FUTURE_SKEW_MS: u64 = 30_000;
 /// A normal page heartbeats frequently. Thirty minutes permits long pauses
 /// and short host outages while bounding orphaned capture recovery.
 pub const BROWSER_OWNER_LEASE_MS: u64 = 30 * 60 * 1_000;
@@ -48,6 +49,7 @@ pub struct BrowserSnapshot {
     pub session_id: String,
     pub next_sequence: u64,
     pub status: BrowserStatus,
+    pub incomplete: bool,
     pub notepad: BrowserNotepad,
 }
 
@@ -182,10 +184,20 @@ fn layout(state: &CaptureState) -> Result<Layout> {
     })
 }
 
-fn session_millis(capture: &CaptureState, unix_ms: Option<u64>, fallback_ms: u64) -> u64 {
-    unix_ms
-        .map(|value| value.saturating_sub(capture.started_at_unix_ms))
-        .unwrap_or(fallback_ms)
+fn session_millis(
+    capture: &CaptureState,
+    client_unix_ms: Option<u64>,
+    received_unix_ms: u64,
+    fallback_ms: u64,
+) -> u64 {
+    let Some(client_unix_ms) = client_unix_ms else {
+        return fallback_ms;
+    };
+    let adjusted = i128::from(client_unix_ms) - i128::from(capture.client_started_at_unix_ms);
+    let future_limit = received_unix_ms
+        .saturating_sub(capture.started_at_unix_ms)
+        .saturating_add(MAX_BROWSER_FUTURE_SKEW_MS);
+    adjusted.clamp(0, i128::from(future_limit)) as u64
 }
 
 fn current_lane<'a>(
@@ -278,7 +290,25 @@ fn gap_response(sequence: u64) -> Response {
 }
 
 fn browser_error(error: anyhow::Error) -> Response {
+    if error
+        .to_string()
+        .contains("browser capture owner lease expired")
+        || error
+            .to_string()
+            .contains("browser capture owner lease is no longer active")
+    {
+        return lease_expired_response();
+    }
     http::service_error(error)
+}
+
+fn lease_expired_response() -> Response {
+    http::workspace_error(
+        StatusCode::CONFLICT,
+        "browser_lease_expired",
+        false,
+        "Finished while you were away (incomplete). Audio already received was saved.",
+    )
 }
 
 fn required_unix_ms(headers: &HeaderMap, name: &'static str) -> std::result::Result<u64, Response> {
@@ -331,6 +361,11 @@ fn snapshot_value(
         } else {
             BrowserStatus::Recording
         },
+        incomplete: capture.input_finalized
+            && state
+                .workspace_service
+                .session(principal, session)?
+                .capture_incomplete,
         notepad: BrowserNotepad {
             text: memo
                 .lines
@@ -385,7 +420,8 @@ pub async fn start(
             .map(http::workspace_ok)
             .unwrap_or_else(browser_error);
     }
-    let started = UnixMillis(body.started_at_unix_ms.unwrap_or_else(|| now().0));
+    let started = now();
+    let client_started = body.started_at_unix_ms.unwrap_or(started.0);
     let create = command(
         &session,
         format!("browser-create-{}", session.as_ref()),
@@ -416,7 +452,10 @@ pub async fn start(
                     producer_version: Some(env!("CARGO_PKG_VERSION").into()),
                     mode: CaptureModeV1::Live,
                     observed_at_unix_ms: started,
-                    attributes: BTreeMap::new(),
+                    attributes: BTreeMap::from([(
+                        "client_started_at_unix_ms".into(),
+                        client_started.to_string(),
+                    )]),
                 }],
             },
         }),
@@ -488,13 +527,6 @@ pub async fn pause(
         Ok(value) => value,
         Err(error) => return browser_error(error),
     };
-    if let Err(error) =
-        state
-            .workspace_service
-            .touch_capture_producer(&principal, &body.owner_id, &session)
-    {
-        return browser_error(error);
-    }
     let capture = match state.workspace_service.capture_state_for_producer(
         &principal,
         &body.owner_id,
@@ -503,10 +535,37 @@ pub async fn pause(
         Ok(value) => value,
         Err(error) => return browser_error(error),
     };
-    let position = match complete_through(&capture, body.expected_next_sequence) {
+    if capture.input_finalized {
+        let incomplete = state
+            .workspace_service
+            .session(&principal, &session)
+            .map(|summary| summary.capture_incomplete)
+            .unwrap_or(true);
+        return if incomplete {
+            lease_expired_response()
+        } else {
+            http::workspace_error(
+                StatusCode::CONFLICT,
+                "browser_already_saved",
+                false,
+                "This recording was already saved",
+            )
+        };
+    }
+    if let Err(error) =
+        state
+            .workspace_service
+            .touch_capture_producer(&principal, &body.owner_id, &session)
+    {
+        return browser_error(error);
+    }
+    let position = match layout(&capture) {
         Ok(value) => value,
-        Err(response) => return response,
+        Err(error) => return browser_error(error),
     };
+    if body.expected_next_sequence < position.closed_total {
+        return gap_response(body.expected_next_sequence);
+    }
     if body.expected_next_sequence == position.closed_total
         && capture
             .segments
@@ -528,9 +587,42 @@ pub async fn pause(
             .unwrap_or_else(browser_error);
     }
     let local = body.expected_next_sequence - position.closed_total;
+    let (missing, latest_gap_end_ms) = if body.recovered_after_reload {
+        match declare_missing_chunks(
+            &state,
+            &principal,
+            Some(&body.owner_id),
+            &session,
+            &capture,
+            &position,
+            local,
+        ) {
+            Ok(value) => value,
+            Err(error) => return browser_error(error),
+        }
+    } else {
+        (Vec::new(), 0)
+    };
+    let covered = if missing.is_empty() {
+        capture.clone()
+    } else {
+        match state.workspace_service.capture_state_for_producer(
+            &principal,
+            &body.owner_id,
+            &session,
+        ) {
+            Ok(value) => value,
+            Err(error) => return browser_error(error),
+        }
+    };
+    let position = match complete_through(&covered, body.expected_next_sequence) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     let ended_at_ms = session_millis(
         &capture,
         body.segment_ended_unix_ms,
+        now().0,
         position
             .current_latest_end_ms
             .max(position.latest_close_end_ms),
@@ -540,7 +632,7 @@ pub async fn pause(
     // A fresh MediaRecorder stream cannot be appended to the prior WebM
     // segment. The browser may also have lost its final unflushed timeslice
     // during reload, even when every assigned sequence was acknowledged.
-    if body.recovered_after_reload {
+    if body.recovered_after_reload && missing.is_empty() {
         let discontinuity = CaptureDiscontinuityV1 {
             discontinuity_id: DiscontinuityId(format!(
                 "browser-reload-tail-{}",
@@ -574,7 +666,7 @@ pub async fn pause(
     let close = CloseSegmentV1 {
         segment_id: segment_id(position.closed_count),
         ended_at_ms: SessionMillis(
-            ended_at_ms.max(
+            ended_at_ms.max(latest_gap_end_ms).max(
                 position
                     .current_latest_end_ms
                     .saturating_add(u64::from(body.recovered_after_reload)),
@@ -616,13 +708,6 @@ pub async fn resume(
         Ok(value) => value,
         Err(error) => return browser_error(error),
     };
-    if let Err(error) =
-        state
-            .workspace_service
-            .touch_capture_producer(&principal, &body.owner_id, &session)
-    {
-        return browser_error(error);
-    }
     let capture = match state.workspace_service.capture_state_for_producer(
         &principal,
         &body.owner_id,
@@ -631,20 +716,37 @@ pub async fn resume(
         Ok(value) => value,
         Err(error) => return browser_error(error),
     };
+    if capture.input_finalized {
+        let incomplete = state
+            .workspace_service
+            .session(&principal, &session)
+            .map(|summary| summary.capture_incomplete)
+            .unwrap_or(true);
+        return if incomplete {
+            lease_expired_response()
+        } else {
+            http::workspace_error(
+                StatusCode::CONFLICT,
+                "browser_already_saved",
+                false,
+                "This recording was already saved",
+            )
+        };
+    }
+    if let Err(error) =
+        state
+            .workspace_service
+            .touch_capture_producer(&principal, &body.owner_id, &session)
+    {
+        return browser_error(error);
+    }
     let position = match layout(&capture) {
         Ok(value) => value,
         Err(error) => return browser_error(error),
     };
-    if body.segment_started_unix_ms.is_some()
-        && session_millis(&capture, body.segment_started_unix_ms, 0) < position.latest_close_end_ms
-    {
-        return http::workspace_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid_segment_time",
-            false,
-            "Resumed browser segment begins before its previous close",
-        );
-    }
+    // A browser wall clock can step backwards while paused. Resume still
+    // opens a new WebM segment; its first chunk is positioned on the server
+    // receive clock when its client time precedes the durable close.
     let resume_id = MessageId(format!("browser-resume-{}", position.closed_count));
     if state
         .workspace_service
@@ -784,23 +886,80 @@ pub async fn chunk(
     if !replaying_closed && sequence < base {
         return gap_response(sequence);
     }
-    if !replaying_closed
-        && captured_start_unix_ms.saturating_sub(capture.started_at_unix_ms)
-            < capture
-                .segments
-                .iter()
-                .filter_map(|segment| segment.close.as_ref())
-                .map(|close| close.command.ended_at_ms.0)
-                .max()
-                .unwrap_or(0)
-    {
-        return http::workspace_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid_chunk_time",
-            false,
-            "Browser audio chunk begins before the previous segment closed",
-        );
+    let payload = body.to_vec();
+    let digest = format!("{:x}", Sha256::digest(&payload));
+    // A lost ACK can cause a retry after the server's receive-time clamp has
+    // moved. Compare the durable digest before normalizing the client clock.
+    match state.workspace_service.capture_chunk_metadata(
+        &principal,
+        &session,
+        segment.as_ref(),
+        &LANE.into(),
+        local_sequence,
+    ) {
+        Ok(Some(existing)) if existing.payload_digest.hex == digest => {
+            return http::workspace_ok(json!({"sequence": sequence, "durable": true}));
+        }
+        Ok(Some(_)) => {
+            return http::workspace_error(
+                StatusCode::CONFLICT,
+                "browser_chunk_conflict",
+                false,
+                "Browser audio sequence is already durable with different content",
+            );
+        }
+        Ok(None) => {}
+        Err(error) => return browser_error(error),
     }
+    let prior_chunk_end = match state.workspace_service.capture_chunk_end_before(
+        &principal,
+        &session,
+        segment.as_ref(),
+        &LANE.into(),
+        local_sequence,
+    ) {
+        Ok(value) => value.unwrap_or(0),
+        Err(error) => return browser_error(error),
+    };
+    let previous_close_end = if replaying_closed {
+        0
+    } else {
+        capture
+            .segments
+            .iter()
+            .filter_map(|segment| segment.close.as_ref())
+            .map(|close| close.command.ended_at_ms.0)
+            .max()
+            .unwrap_or(0)
+    };
+    let floor_ms = prior_chunk_end.max(previous_close_end);
+    let received_unix_ms = now().0;
+    let server_received_at_ms = received_unix_ms.saturating_sub(capture.started_at_unix_ms);
+    let backwards_after_pause = !replaying_closed
+        && segment_index > 0
+        && captured_start_unix_ms
+            < capture
+                .client_started_at_unix_ms
+                .saturating_add(previous_close_end);
+    let floor_ms = if backwards_after_pause {
+        floor_ms.max(server_received_at_ms)
+    } else {
+        floor_ms
+    };
+    let starts_at_ms = session_millis(
+        &capture,
+        Some(captured_start_unix_ms),
+        received_unix_ms,
+        floor_ms,
+    )
+    .max(floor_ms);
+    let ends_at_ms = session_millis(
+        &capture,
+        Some(captured_end_unix_ms),
+        received_unix_ms,
+        starts_at_ms,
+    )
+    .max(starts_at_ms.saturating_add(1));
     if let Err(error) = state.workspace_service.recover_capture_for_producer(
         &principal,
         owner,
@@ -809,7 +968,6 @@ pub async fn chunk(
     ) {
         return browser_error(error);
     }
-    let payload = body.to_vec();
     let result = state.workspace_service.execute_capture(
         &principal,
         owner,
@@ -820,13 +978,11 @@ pub async fn chunk(
                 segment_id: segment,
                 lane_id: LANE.into(),
                 sequence: local_sequence,
-                starts_at_ms: SessionMillis(
-                    captured_start_unix_ms.saturating_sub(capture.started_at_unix_ms),
-                ),
-                duration_ms: DurationMillis(duration_ms),
+                starts_at_ms: SessionMillis(starts_at_ms),
+                duration_ms: DurationMillis(ends_at_ms - starts_at_ms),
                 payload_digest: ContentDigestV1 {
                     algorithm: DigestAlgorithmV1::Sha256,
-                    hex: format!("{:x}", Sha256::digest(&payload)),
+                    hex: digest,
                 },
                 payload,
             }),
@@ -879,6 +1035,60 @@ fn completion_capture(
             .capture_state_for_producer(principal, owner, session),
         None => state.workspace_service.capture_state(principal, session),
     }
+}
+
+fn declare_missing_chunks(
+    state: &ServerState,
+    principal: &ServicePrincipal,
+    owner: Option<&str>,
+    session: &SessionId,
+    capture: &CaptureState,
+    position: &Layout,
+    local_horizon: u64,
+) -> Result<(Vec<SequenceRangeV1>, u64)> {
+    let missing = missing_ranges(capture, local_horizon);
+    let mut latest_gap_end_ms = 0;
+    let segment = segment_id(position.closed_count);
+    for range in &missing {
+        let anchor_ms = state
+            .workspace_service
+            .capture_chunk_end_before(
+                principal,
+                session,
+                segment.as_ref(),
+                &LANE.into(),
+                range.start,
+            )?
+            .unwrap_or(position.latest_close_end_ms);
+        latest_gap_end_ms = latest_gap_end_ms.max(anchor_ms.saturating_add(1));
+        let discontinuity = CaptureDiscontinuityV1 {
+            discontinuity_id: DiscontinuityId(format!(
+                "browser-missing-{}-{}-{}",
+                position.closed_count, range.start, range.end_exclusive
+            )),
+            segment_id: segment.clone(),
+            lane_id: LANE.into(),
+            sequence_range: *range,
+            starts_at_ms: SessionMillis(anchor_ms),
+            duration_ms: DurationMillis(1),
+            reason: DiscontinuityReasonV1::NetworkLoss,
+            detail: Some("Browser audio upload was not durably received".into()),
+        };
+        execute_completion_command(
+            state,
+            principal,
+            owner,
+            command(
+                session,
+                format!(
+                    "browser-missing-command-{}-{}-{}",
+                    position.closed_count, range.start, range.end_exclusive
+                ),
+                ClientMessageBodyV1::CaptureDiscontinuity(discontinuity),
+            ),
+        )?;
+    }
+    Ok((missing, latest_gap_end_ms))
 }
 
 fn schedule_finalized_audio(state: &ServerState) {
@@ -947,6 +1157,7 @@ fn finalize_incomplete(
     let ended_at_ms = session_millis(
         &capture,
         ended_unix_ms,
+        now().0,
         position
             .current_latest_end_ms
             .max(position.latest_close_end_ms),
@@ -954,40 +1165,19 @@ fn finalize_incomplete(
     .max(position.current_latest_end_ms)
     .max(position.latest_close_end_ms)
     .max(1);
-    let missing = missing_ranges(&capture, local_horizon);
-    for range in &missing {
-        let discontinuity = CaptureDiscontinuityV1 {
-            discontinuity_id: DiscontinuityId(format!(
-                "browser-missing-{}-{}-{}",
-                position.closed_count, range.start, range.end_exclusive
-            )),
-            segment_id: segment_id(position.closed_count),
-            lane_id: LANE.into(),
-            sequence_range: *range,
-            // The sequence range is the precise loss record. A missing Blob
-            // has no trustworthy capture timestamp; place its audit marker
-            // inside the observed session boundary without inventing audio.
-            starts_at_ms: SessionMillis(ended_at_ms - 1),
-            duration_ms: DurationMillis(1),
-            reason: DiscontinuityReasonV1::NetworkLoss,
-            detail: Some("Browser audio upload was not durably received".into()),
-        };
-        if let Err(error) = execute_completion_command(
-            state,
-            principal,
-            owner,
-            command(
-                session,
-                format!(
-                    "browser-missing-command-{}-{}-{}",
-                    position.closed_count, range.start, range.end_exclusive
-                ),
-                ClientMessageBodyV1::CaptureDiscontinuity(discontinuity),
-            ),
-        ) {
-            return browser_error(error);
-        }
-    }
+    let (missing, latest_gap_end_ms) = match declare_missing_chunks(
+        state,
+        principal,
+        owner,
+        session,
+        &capture,
+        &position,
+        local_horizon,
+    ) {
+        Ok(value) => value,
+        Err(error) => return browser_error(error),
+    };
+    let ended_at_ms = ended_at_ms.max(latest_gap_end_ms);
     let covered = match completion_capture(state, principal, owner, session) {
         Ok(value) => value,
         Err(error) => return browser_error(error),
@@ -1200,6 +1390,7 @@ pub async fn stop(
     let ended_at_ms = session_millis(
         &capture,
         body.segment_ended_unix_ms,
+        now().0,
         position
             .current_latest_end_ms
             .max(position.latest_close_end_ms),
@@ -1302,6 +1493,7 @@ mod contract_tests {
             session_id: "browser-contract-session".into(),
             next_sequence: 3,
             status: BrowserStatus::Paused,
+            incomplete: false,
             notepad: BrowserNotepad {
                 text: "Review launch plan".into(),
                 revision: "memo-revision".into(),
