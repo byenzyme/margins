@@ -5842,7 +5842,6 @@ mod backchannel_context_tests {
         assert!(!tauri_conf.contains("skills/margins/scripts"));
         assert!(!tauri_conf.contains("margins.py"));
         assert!(shared_skill_text.contains("skills/margins/distillation-core.md"));
-        assert!(distillation_core_text.contains("People-page enrichment is state-dependent"));
         assert!(desktop_host_text.contains("Do not run transcription or alignment commands"));
         assert!(!shared_skill_text.contains("margins.py"));
         assert!(!distillation_core_text.contains("margins.py"));

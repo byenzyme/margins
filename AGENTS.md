@@ -112,6 +112,30 @@ The Codex plugin is parked outside core; see
 
 ## Portable and macOS Platform Test Lanes
 
+Use the single local gate entrypoint from the repository root. The
+"Orchestrating Multi-Agent Work and Filing PRs" section defines when each
+mode is required.
+
+```bash
+scripts/local-gate quick src/cli.rs crates/public/margins-workflows
+scripts/local-gate quick integrations/bb-plugin-margins/src
+scripts/local-gate public
+scripts/local-gate linux
+# On the attached Mac host:
+scripts/local-gate macos
+```
+
+`quick` accepts changed paths or Cargo package names. It tests affected root
+workspace crates and checks shipped binaries. BB plugin paths also run its
+typecheck, tests, build, and committed `dist/` check; `desktop/` paths are
+reported as parked. `public` builds and tests the root workspace with default features
+disabled and the private recall engine and its nested `ese` crate excluded.
+`linux` runs the full portable recall suite, the isolated
+Google onboarding fixture, setup rollout contracts, BB plugin checks, and shipped
+Linux binary checks. `macos` runs the native private and public composition suites and checks
+the extracted `margins-server` when present. Every mode uses one disposable
+`scripts/cargo-lane` invocation and prints a pass/fail summary.
+
 The default agent lane is portable and must run inside the managed sandbox with
 no permission escalation. `recall` includes lookup, indexing, hosted-generator
 policy, and orchestration; it deliberately does not link llama.cpp. Use the
