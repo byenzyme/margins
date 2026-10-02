@@ -65,7 +65,7 @@ fn model_feature_graph_is_exact() {
     for edge in [
         "parakeet-onnx = [\"dep:libloading\", \"dep:ndarray\", \"dep:ort\", \"dep:realfft\"]",
         "parakeet-onnx-dynamic = [\"parakeet-onnx\", \"ort/load-dynamic\"]",
-        "coreml-asr = [\"dep:block2\", \"dep:objc2\", \"dep:objc2-core-ml\", \"dep:objc2-foundation\"]",
+        "coreml-asr = [\"dep:block2\", \"dep:fs4\", \"dep:objc2\", \"dep:objc2-core-ml\", \"dep:objc2-foundation\"]",
         "polyvoice-diarization = [\"dep:polyvoice\"]",
         "polyvoice-coreml = [\"polyvoice-diarization\", \"polyvoice/coreml\"]",
     ] {

@@ -932,6 +932,11 @@ fn official_workspace_scan_does_not_create_an_implicit_workspace() {
 fn retention_apply_materialization_refreshes_official_recall_index() {
     let temp = tempfile::tempdir().unwrap();
     let margins_home = temp.path().join("margins-home");
+    let preprocessor_cache = temp.path().join("coreml-preprocessor-cache");
+    // Mac builds exercise the CoreML fallback here; its diagnostic belongs in
+    // the CLI log, leaving the JSON error as the only stderr output.
+    let blocked_preprocessor_cache = temp.path().join("blocked-preprocessor-cache");
+    fs::write(&blocked_preprocessor_cache, b"force fallback diagnostics").unwrap();
     let notes = temp.path().join("notes");
     fs::create_dir_all(&notes).unwrap();
     fs::write(notes.join("home.md"), "# Home\n\nRetention fixture.").unwrap();
@@ -982,6 +987,7 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
         .args(["--workspace", "retention-cli", "init"])
         .env_clear()
         .env("MARGINS_HOME", &margins_home)
+        .env("MARGINS_COREML_PREPROCESSOR_CACHE_DIR", &preprocessor_cache)
         .output()
         .unwrap();
     assert!(
@@ -1011,6 +1017,7 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
         ])
         .env_clear()
         .env("MARGINS_HOME", &margins_home)
+        .env("MARGINS_COREML_PREPROCESSOR_CACHE_DIR", &preprocessor_cache)
         .output()
         .unwrap();
     assert!(status.status.success());
@@ -1039,6 +1046,7 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
         ])
         .env_clear()
         .env("MARGINS_HOME", &margins_home)
+        .env("MARGINS_COREML_PREPROCESSOR_CACHE_DIR", &preprocessor_cache)
         .output()
         .unwrap();
     assert!(
@@ -1070,6 +1078,10 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
         ])
         .env_clear()
         .env("MARGINS_HOME", &margins_home)
+        .env(
+            "MARGINS_COREML_PREPROCESSOR_CACHE_DIR",
+            &blocked_preprocessor_cache,
+        )
         .output()
         .unwrap();
     assert!(!failed_apply.status.success());
@@ -1124,6 +1136,7 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
         ])
         .env_clear()
         .env("MARGINS_HOME", &margins_home)
+        .env("MARGINS_COREML_PREPROCESSOR_CACHE_DIR", &preprocessor_cache)
         .output()
         .unwrap();
     assert!(
