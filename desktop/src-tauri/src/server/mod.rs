@@ -2,8 +2,6 @@
 // server/ — WP2 headless axum server transport
 // ---------------------------------------------------------------------------
 
-#[cfg(all(feature = "parakeet-asr", target_os = "linux"))]
-mod asr_prepare;
 pub mod asr_state;
 pub mod assets;
 pub mod auth;
@@ -31,7 +29,7 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 /// The Mac project service uses the same CoreML assets as local recording.
 pub fn prepare_asr() -> anyhow::Result<()> {
     #[cfg(all(feature = "parakeet-asr", target_os = "linux"))]
-    asr_prepare::configure_env()?;
+    margins_media::model_registry::parakeet::configure_env()?;
     prepare_asr_assets(&|message, progress| {
         eprintln!("[margins-server] {message} {progress:?}");
     })?;
@@ -48,33 +46,21 @@ fn prepare_asr_assets(
 ) -> anyhow::Result<()> {
     #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
     {
-        use std::sync::atomic::AtomicBool;
-        struct Progress<'a>(&'a (dyn Fn(String, Option<f32>) + Send + Sync));
-        impl crate::ctx::EventSink for Progress<'_> {
-            fn emit(&self, event: &str, payload: serde_json::Value) {
-                if event == "speech-model-progress" {
-                    (self.0)(
-                        payload["message"]
-                            .as_str()
-                            .unwrap_or("Preparing transcription model")
-                            .to_string(),
-                        payload["progress"].as_f64().map(|value| value as f32),
-                    );
-                }
-            }
-        }
         if !crate::speech_models::transcription_runtime_available(&crate::settings::load_settings())
         {
-            crate::speech_models::download_fluid_coreml_model(
-                &Progress(progress),
-                &Arc::new(AtomicBool::new(false)),
-            )
-            .map_err(anyhow::Error::msg)?;
+            margins_media::model_registry::prepare_model(
+                margins_media::model_registry::ModelKind::CoreMl,
+                progress,
+            )?;
         }
         return Ok(());
     }
     #[cfg(all(feature = "parakeet-asr", target_os = "linux"))]
-    return asr_prepare::prepare(progress);
+    return margins_media::model_registry::prepare_model(
+        margins_media::model_registry::ModelKind::ParakeetOnnx,
+        progress,
+    )
+    .map(|_| ());
     #[cfg(not(any(
         all(feature = "coreml-asr", target_os = "macos"),
         all(feature = "parakeet-asr", target_os = "linux")
@@ -94,7 +80,7 @@ fn prepare_asr_assets(
 /// Blocks until the server exits.
 pub fn run() -> anyhow::Result<()> {
     #[cfg(all(feature = "parakeet-asr", target_os = "linux"))]
-    asr_prepare::configure_env()?;
+    margins_media::model_registry::parakeet::configure_env()?;
     // Build a tokio runtime — server_main just calls this synchronous wrapper.
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

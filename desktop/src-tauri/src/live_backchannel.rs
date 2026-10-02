@@ -468,7 +468,14 @@ pub(crate) fn start_live_backchannel(
     session_name: String,
     transcription_mode: LiveTranscriptionMode,
 ) -> Result<Option<LiveBackchannelHandle>, String> {
-    start_live_backchannel_with_callbacks(settings, margins_dir, session_name, transcription_mode, None, None)
+    start_live_backchannel_with_callbacks(
+        settings,
+        margins_dir,
+        session_name,
+        transcription_mode,
+        None,
+        None,
+    )
 }
 
 #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
@@ -526,7 +533,10 @@ pub(crate) fn start_live_backchannel_with_callbacks(
                 on_ready,
                 on_degraded,
             };
-            match handoff.activate_tx.send(PrewarmActivation::Run(Box::new(launch))) {
+            match handoff
+                .activate_tx
+                .send(PrewarmActivation::Run(Box::new(launch)))
+            {
                 Ok(()) => {
                     // Trace emitted from the worker side (used_prewarm:true).
                     handoff.thread_handle
@@ -567,7 +577,9 @@ pub(crate) fn start_live_backchannel_with_callbacks(
                                 od,
                             );
                         })
-                        .map_err(|e| format!("Failed to start live CoreML transcript worker: {e}"))?
+                        .map_err(|e| {
+                            format!("Failed to start live CoreML transcript worker: {e}")
+                        })?
                 }
             }
         }
@@ -685,10 +697,7 @@ pub(crate) fn prewarm_live_models(_settings: Settings) {}
 /// Schedule a re-prewarm after a session ends. Skips if the slot is already
 /// occupied or if another recording is currently active.
 #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
-pub(crate) fn schedule_post_session_prewarm(
-    settings: Settings,
-    recording_active: bool,
-) {
+pub(crate) fn schedule_post_session_prewarm(settings: Settings, recording_active: bool) {
     if recording_active {
         eprintln!(
             "{}",
@@ -938,135 +947,14 @@ fn prewarm_live_models_with_reason(settings: Settings, reason: &'static str) {
 
 #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
 pub(crate) fn resolved_live_model_dir(settings: &Settings) -> Option<PathBuf> {
-    let override_dir = std::env::var("MARGINS_FLUID_COREML_MODEL_DIR")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-    resolved_live_model_dir_from(settings, override_dir, default_fluid_coreml_model_dir())
-}
-
-#[cfg(all(feature = "coreml-asr", target_os = "macos"))]
-fn resolved_live_model_dir_from(
-    settings: &Settings,
-    override_dir: Option<PathBuf>,
-    default_dir: Option<PathBuf>,
-) -> Option<PathBuf> {
-    match override_dir {
-        Some(dir) => has_coreml_assets(&dir).then_some(dir),
-        None => settings_coreml_model_dir(settings).or(default_dir),
-    }
+    margins_media::model_registry::resolve_coreml_dir_with_fallback(
+        settings.parakeet_model_dir.as_deref(),
+    )
 }
 
 #[cfg(not(all(feature = "coreml-asr", target_os = "macos")))]
 pub(crate) fn resolved_live_model_dir(_settings: &Settings) -> Option<std::path::PathBuf> {
     None
-}
-
-#[cfg(all(feature = "coreml-asr", target_os = "macos"))]
-fn settings_coreml_model_dir(settings: &Settings) -> Option<PathBuf> {
-    settings
-        .parakeet_model_dir
-        .as_deref()
-        .map(str::trim)
-        .filter(|dir| !dir.is_empty())
-        .map(crate::expand_tilde)
-        .map(PathBuf::from)
-        .filter(|dir| has_coreml_assets(dir))
-}
-
-#[cfg(all(feature = "coreml-asr", target_os = "macos"))]
-fn default_fluid_coreml_model_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    let root = home.join("Library/Application Support/FluidAudio/Models");
-    let preferred = match std::env::var("MARGINS_FLUID_COREML_VERSION")
-        .ok()
-        .map(|v| v.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("v3") | Some("3") => "parakeet-tdt-0.6b-v3",
-        _ => "parakeet-tdt-0.6b-v2",
-    };
-    [
-        root.join(preferred),
-        root.join("parakeet-tdt-0.6b-v2"),
-        root.join("parakeet-tdt-0.6b-v3"),
-    ]
-    .into_iter()
-    .find(|dir| has_coreml_assets(dir))
-}
-
-#[cfg(all(feature = "coreml-asr", target_os = "macos"))]
-fn has_coreml_assets(dir: &std::path::Path) -> bool {
-    dir.join("Preprocessor.mlmodelc").exists()
-        && dir.join("Encoder.mlmodelc").exists()
-        && dir.join("Decoder.mlmodelc").exists()
-        && dir.join("JointDecision.mlmodelc").exists()
-        && dir.join("parakeet_vocab.json").exists()
-}
-
-/// Public re-export for use by the speech_models probe without duplicating logic.
-#[cfg(all(feature = "coreml-asr", target_os = "macos"))]
-pub(crate) fn has_coreml_assets_pub(dir: &std::path::Path) -> bool {
-    has_coreml_assets(dir)
-}
-
-#[cfg(all(test, feature = "coreml-asr", target_os = "macos"))]
-mod model_dir_tests {
-    use super::*;
-
-    fn write_coreml_asset_stubs(dir: &std::path::Path) {
-        for name in [
-            "Preprocessor.mlmodelc",
-            "Encoder.mlmodelc",
-            "Decoder.mlmodelc",
-            "JointDecision.mlmodelc",
-        ] {
-            std::fs::create_dir_all(dir.join(name)).unwrap();
-        }
-        std::fs::write(dir.join("parakeet_vocab.json"), b"{}").unwrap();
-    }
-
-    #[test]
-    fn override_wins_over_profile_and_shared_live_lookup() {
-        let root = std::env::temp_dir().join(format!(
-            "live_model_override_precedence_{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        let override_dir = root.join("override");
-        let profile_dir = root.join("profile");
-        let default_dir = root.join("shared");
-        write_coreml_asset_stubs(&override_dir);
-        write_coreml_asset_stubs(&profile_dir);
-        write_coreml_asset_stubs(&default_dir);
-        let mut settings = Settings::default();
-        settings.parakeet_model_dir = Some(profile_dir.to_string_lossy().into_owned());
-
-        assert_eq!(
-            resolved_live_model_dir_from(&settings, Some(override_dir.clone()), Some(default_dir)),
-            Some(override_dir)
-        );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn missing_override_is_authoritative_for_live_lookup() {
-        let root = std::env::temp_dir().join(format!("live_model_override_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let override_dir = root.join("missing");
-        let default_dir = root.join("default");
-        write_coreml_asset_stubs(&default_dir);
-        assert_eq!(
-            resolved_live_model_dir_from(
-                &Settings::default(),
-                Some(override_dir),
-                Some(default_dir)
-            ),
-            None
-        );
-        let _ = std::fs::remove_dir_all(&root);
-    }
 }
 
 #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
@@ -2571,8 +2459,8 @@ mod capture_first_tests {
     use super::*;
     use crate::live_asr_worker::{AUDIO_QUEUE_MAX_SAMPLES, WORKER_WARMING};
     use margins::recorder::{LiveAudioChannel, LiveAudioChunk, LiveAudioSink, LiveGenerationClock};
-    use std::sync::{Arc, Mutex};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
 
     fn make_not_ready_client() -> LiveBackchannelClient {
         let health = WorkerHealth::new();
@@ -2801,7 +2689,10 @@ mod prewarm_slot_tests {
             Err(e) => panic!("expected Cancel within timeout, got: {e:?}"),
         }
         // Slot should be empty after mismatch.
-        assert!(take_from_slot(&slot, &dir_a).is_none(), "slot should be empty");
+        assert!(
+            take_from_slot(&slot, &dir_a).is_none(),
+            "slot should be empty"
+        );
     }
 
     #[test]
@@ -2821,7 +2712,9 @@ mod prewarm_slot_tests {
         // Send Cancel.
         let _ = activate_tx.send(PrewarmActivation::Cancel);
         // Thread should exit quickly.
-        handle.join().expect("thread should have exited after Cancel");
+        handle
+            .join()
+            .expect("thread should have exited after Cancel");
         assert!(
             barrier.load(Ordering::Acquire),
             "thread should have been unparked by Cancel"
@@ -2830,15 +2723,24 @@ mod prewarm_slot_tests {
     }
 
     /// Helper: install a dummy handoff into a local test slot.
-    fn install_into_slot(slot: &Mutex<Option<PrewarmHandoff>>, model_dir: PathBuf) -> mpsc::Receiver<PrewarmActivation> {
+    fn install_into_slot(
+        slot: &Mutex<Option<PrewarmHandoff>>,
+        model_dir: PathBuf,
+    ) -> mpsc::Receiver<PrewarmActivation> {
         let (activate_tx, activate_rx) = mpsc::sync_channel::<PrewarmActivation>(1);
         let (dummy_tx, dummy_rx) = mpsc::sync_channel::<PrewarmActivation>(1);
         let _ = dummy_tx; // keep sender alive so the thread doesn't exit on recv
         let handle = std::thread::Builder::new()
             .name("test-prewarm-install".into())
-            .spawn(move || { let _ = dummy_rx.recv(); })
+            .spawn(move || {
+                let _ = dummy_rx.recv();
+            })
             .expect("spawn install thread");
-        let handoff = PrewarmHandoff { activate_tx, model_dir, thread_handle: handle };
+        let handoff = PrewarmHandoff {
+            activate_tx,
+            model_dir,
+            thread_handle: handle,
+        };
         *slot.lock().unwrap() = Some(handoff);
         activate_rx
     }
@@ -2851,12 +2753,18 @@ mod prewarm_slot_tests {
     #[test]
     fn prewarm_slot_occupied_reports_correctly() {
         let slot: Mutex<Option<PrewarmHandoff>> = Mutex::new(None);
-        assert!(!slot_occupied(&slot), "empty slot should report not occupied");
+        assert!(
+            !slot_occupied(&slot),
+            "empty slot should report not occupied"
+        );
         let dir = std::env::temp_dir().join(format!("prewarm_occupied_{}", std::process::id()));
         let _rx = install_into_slot(&slot, dir.clone());
         assert!(slot_occupied(&slot), "occupied slot should report occupied");
         let _ = take_from_slot(&slot, &dir);
-        assert!(!slot_occupied(&slot), "after take slot should report not occupied");
+        assert!(
+            !slot_occupied(&slot),
+            "after take slot should report not occupied"
+        );
     }
 
     #[test]
@@ -2872,10 +2780,16 @@ mod prewarm_slot_tests {
         // thread would skip installation entirely. The slot should still hold the original.
         // We just verify the guard predicate is true (no real thread spawned in tests).
         let should_skip = slot_occupied(&slot);
-        assert!(should_skip, "guard should detect occupied slot and prevent double-install");
+        assert!(
+            should_skip,
+            "guard should detect occupied slot and prevent double-install"
+        );
 
         // Slot still holds the original handoff, not replaced.
-        assert!(slot_occupied(&slot), "original handoff should still be in slot");
+        assert!(
+            slot_occupied(&slot),
+            "original handoff should still be in slot"
+        );
     }
 
     #[test]

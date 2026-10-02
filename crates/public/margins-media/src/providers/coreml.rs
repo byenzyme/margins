@@ -1014,11 +1014,17 @@ impl margins_core::AsrBackend for CoreMlAsrBackend {
         &self,
         request: margins_core::AsrRequest,
     ) -> std::result::Result<margins_core::AsrResult, margins_core::TranscriptError> {
-        if request.sample_rate_hz != SAMPLE_RATE || request.samples.is_empty() {
+        if request.sample_rate_hz != SAMPLE_RATE {
             return Err(margins_core::TranscriptError {
                 code: margins_core::TranscriptErrorCode::InvalidAudio,
-                message: "CoreML ASR requires non-empty mono 16 kHz f32 PCM".into(),
+                message: "CoreML ASR requires mono 16 kHz f32 PCM".into(),
                 retryable: false,
+            });
+        }
+        if request.samples.is_empty() {
+            return Ok(margins_core::AsrResult {
+                words: Vec::new(),
+                detected_language: None,
             });
         }
         let mut backend =
@@ -1788,6 +1794,54 @@ impl StereoCoreMlAsrSession {
             mic: CoreMlAsrSession::new(mic_asr, config.clone()),
             system: CoreMlAsrSession::new(system_asr, config),
         }
+    }
+}
+
+impl margins_core::AsrStreamDecoder for CoreMlAsrSession {
+    fn append_audio(&mut self, mono_16k: &[f32]) {
+        CoreMlAsrSession::append_audio(self, mono_16k);
+    }
+
+    fn update_until(
+        &mut self,
+        end_ms: u64,
+    ) -> std::result::Result<margins_core::AsrStreamUpdate, margins_core::TranscriptError> {
+        CoreMlAsrSession::update_until(self, end_ms)
+            .map(coreml_stream_update)
+            .map_err(coreml_stream_error)
+    }
+
+    fn finish_until(
+        &mut self,
+        end_ms: u64,
+    ) -> std::result::Result<margins_core::AsrStreamUpdate, margins_core::TranscriptError> {
+        CoreMlAsrSession::finish_until(self, end_ms)
+            .map(coreml_stream_update)
+            .map_err(coreml_stream_error)
+    }
+}
+
+fn coreml_stream_update(update: StreamingTranscriptUpdate) -> margins_core::AsrStreamUpdate {
+    let convert = |word: WordTiming| margins_core::TranscriptWord {
+        start_ms: word.start_ms,
+        end_ms: word.end_ms,
+        text: word.text,
+        speaker: None,
+        confidence_per_mille: None,
+    };
+    margins_core::AsrStreamUpdate {
+        committed: update.committed.into_iter().map(convert).collect(),
+        hypothesis: update.hypothesis.into_iter().map(convert).collect(),
+        decoded_until_ms: update.decoded_until_ms,
+        committed_until_ms: update.committed_until_ms,
+    }
+}
+
+fn coreml_stream_error(error: anyhow::Error) -> margins_core::TranscriptError {
+    margins_core::TranscriptError {
+        code: margins_core::TranscriptErrorCode::InferenceFailed,
+        message: error.to_string(),
+        retryable: false,
     }
 }
 

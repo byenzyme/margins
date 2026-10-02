@@ -11,6 +11,7 @@ categories = ["multimedia::audio", "algorithms"]
 
 [features]
 default = []
+model-download = ["dep:fs4", "dep:libc", "dep:reqwest", "dep:sha2", "dep:tempfile"]
 parakeet-onnx = ["dep:libloading", "dep:ndarray", "dep:ort", "dep:realfft"]
 parakeet-onnx-dynamic = ["parakeet-onnx", "ort/load-dynamic"]
 coreml-asr = ["dep:block2", "dep:objc2", "dep:objc2-core-ml", "dep:objc2-foundation"]
@@ -19,16 +20,22 @@ polyvoice-coreml = ["polyvoice-diarization", "polyvoice/coreml"]
 
 [dependencies]
 anyhow = "1"
+dirs = "6"
 hound = "3.5"
+fs4 = { version = "0.13", optional = true }
+libc = { version = "0.2", optional = true }
 libloading = { version = "0.9", optional = true }
 margins-core = { version = "0.1.0", path = "../margins-core" }
 ndarray = { version = "0.17", optional = true }
 ort = { version = "=2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "api-24", "download-binaries", "copy-dylibs", "tls-rustls"] }
 polyvoice = { version = "=0.6.7", optional = true, features = ["onnx", "download", "segmentation", "embedder", "clusterer", "resegmentation", "profile-balanced"] }
 realfft = { version = "3", optional = true }
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = { version = "0.10", optional = true }
 symphonia = { version = "0.6", default-features = false, features = ["aac", "alac", "flac", "isomp4", "mp3", "wav", "pcm"] }
+tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -192,11 +192,7 @@ fn fluid_coreml_download_target_from(
 }
 
 fn fluid_coreml_model_dir_override() -> Option<std::path::PathBuf> {
-    std::env::var("MARGINS_FLUID_COREML_MODEL_DIR")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .map(std::path::PathBuf::from)
+    margins_media::model_registry::env_path("MARGINS_FLUID_COREML_MODEL_DIR")
 }
 
 pub(crate) fn prepare_speech_models_blocking(
@@ -258,12 +254,7 @@ pub(crate) fn prepare_speech_models_blocking(
         // the model. Emit a separate "warmup" stage with indeterminate progress
         // so the frontend does not reuse the download percent (which would look
         // like the bar jumping backwards).
-        emit_speech_model_progress(
-            sink.as_ref(),
-            "warmup",
-            "Warming up transcription...",
-            None,
-        );
+        emit_speech_model_progress(sink.as_ref(), "warmup", "Warming up transcription...", None);
         check_speech_model_cancelled(&cancel)?;
         match prepare_transcription_model_now(&settings, &cancel) {
             Ok(message) => {
@@ -370,7 +361,8 @@ fn probe_transcription(
             return ("missing".to_string(), None);
         };
         let dir = std::path::PathBuf::from(crate::expand_tilde(&path));
-        let kind = configured_parakeet_model_kind();
+        let kind = margins_media::model_registry::parakeet_kind_from_env()
+            .unwrap_or(margins::asr::AsrModelKind::Tdt);
         let ready = margins::asr::missing_model_files(&dir, kind).is_empty();
         return (
             if ready { "ready" } else { "missing" }.to_string(),
@@ -421,205 +413,22 @@ pub(crate) fn download_fluid_coreml_model(
     sink: &dyn EventSink,
     cancel: &Arc<AtomicBool>,
 ) -> Result<std::path::PathBuf, String> {
-    // This downloader fetches the v2 repo into the v2 dir only. If the user has
-    // pinned v3 via MARGINS_FLUID_COREML_VERSION, the loader will look in the v3
-    // dir and the post-download re-check would still report "missing", so warn
-    // loudly rather than silently downloading the wrong version.
-    if let Ok(v) = std::env::var("MARGINS_FLUID_COREML_VERSION") {
-        let v = v.trim().to_ascii_lowercase();
-        if !v.is_empty() && v != "v2" && v != "2" {
-            eprintln!(
-                "[speech_models] MARGINS_FLUID_COREML_VERSION={v} but the built-in downloader \
-                 only provides v2; downloading v2 into parakeet-tdt-0.6b-v2. Provide the v{v} \
-                 assets manually or set MARGINS_FLUID_COREML_MODEL_DIR to use v{v}."
-            );
-        }
-    }
-
-    // 1. Enumerate files from HF tree API.
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(|e| format!("Could not create download client: {e}"))?;
-
-    let entries: Vec<HfTreeEntry> = client
-        .get(HF_TREE_API)
-        .send()
-        .and_then(|r| r.error_for_status())
-        .map_err(|e| format!("Could not fetch model file list: {e}"))?
-        .json()
-        .map_err(|e| format!("Could not parse model file list: {e}"))?;
-
-    // Only the five assets our loader consumes — the repo also ships several
-    // alternate bundles (~2.5 GB total) we must not download. See
-    // `is_required_asset_path`.
-    let file_entries: Vec<&HfTreeEntry> = entries
-        .iter()
-        .filter(|e| e.entry_type == "file" && is_required_asset_path(&e.path))
-        .collect();
-
-    let total_bytes: u64 = file_entries.iter().map(|e| e.blob_size()).sum();
-
-    // 2. Create a temp dir beside the target. The explicit env override is
-    // the full final model directory, so first-run/E2E can isolate downloads
-    // without changing the normal shared cache contract.
-    let final_dir = fluid_coreml_download_target()?;
-    let models_parent = final_dir.parent().ok_or_else(|| {
-        format!(
-            "Model directory {} has no parent directory.",
-            final_dir.display()
-        )
-    })?;
-    std::fs::create_dir_all(&models_parent)
-        .map_err(|e| format!("Could not create models directory: {e}"))?;
-
-    let target_name = final_dir
-        .file_name()
-        .ok_or_else(|| {
-            format!(
-                "Model directory {} has no final directory name.",
-                final_dir.display()
-            )
-        })?
-        .to_string_lossy();
-    let tmp_dir = models_parent.join(format!(".{target_name}.downloading-{}", std::process::id()));
-    // Clean up any leftover temp dir.
-    if tmp_dir.exists() {
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-    }
-    std::fs::create_dir_all(&tmp_dir)
-        .map_err(|e| format!("Could not create temp download directory: {e}"))?;
-
-    let cleanup_tmp = |result: Result<std::path::PathBuf, String>| {
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        result
-    };
-
-    // 3. Download each file.
-    let mut downloaded_bytes: u64 = 0;
-    let mut last_emit_bytes: u64 = 0;
-    const EMIT_INTERVAL: u64 = 1024 * 1024; // ~1 MB
-
-    for entry in &file_entries {
-        check_speech_model_cancelled(cancel).map_err(|e| {
-            let _ = std::fs::remove_dir_all(&tmp_dir);
-            e
-        })?;
-
-        let url = hf_resolve_url(&entry.path);
-        let mut response = client
-            .get(&url)
-            .send()
-            .and_then(|r| r.error_for_status())
-            .map_err(|e| {
-                let _ = std::fs::remove_dir_all(&tmp_dir);
-                format!("Could not download {}: {e}", entry.path)
-            })?;
-
-        // Create parent dirs inside temp dir.
-        let dest_path = tmp_dir.join(&entry.path);
-        if let Some(parent) = dest_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                let _ = std::fs::remove_dir_all(&tmp_dir);
-                format!("Could not create directory {}: {e}", parent.display())
-            })?;
-        }
-
-        let mut file = std::fs::File::create(&dest_path).map_err(|e| {
-            let _ = std::fs::remove_dir_all(&tmp_dir);
-            format!("Could not create {}: {e}", dest_path.display())
-        })?;
-
-        // Stream download with progress.
-        use std::io::Read;
-        let mut buf = [0u8; 65536];
-        let mut file_bytes: u64 = 0;
-        loop {
-            if cancel.load(Ordering::SeqCst) {
-                return cleanup_tmp(Err("Model preparation canceled.".to_string()));
-            }
-            match response.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    use std::io::Write;
-                    file.write_all(&buf[..n]).map_err(|e| {
-                        let _ = std::fs::remove_dir_all(&tmp_dir);
-                        format!("Write error: {e}")
-                    })?;
-                    file_bytes += n as u64;
-                    downloaded_bytes += n as u64;
-                    if downloaded_bytes - last_emit_bytes >= EMIT_INTERVAL {
-                        last_emit_bytes = downloaded_bytes;
-                        let progress = if total_bytes > 0 {
-                            Some((downloaded_bytes as f32 / total_bytes as f32).min(0.99))
-                        } else {
-                            None
-                        };
-                        emit_speech_model_progress(
-                            sink,
-                            "transcription",
-                            "Downloading local transcription model...",
-                            progress,
-                        );
-                    }
-                }
-                Err(e) => {
-                    return cleanup_tmp(Err(format!("Download error for {}: {e}", entry.path)));
-                }
-            }
-        }
-
-        // Guard against a truncated download: the HF tree gives us the expected
-        // size, so a short read means the transfer was cut off mid-stream and
-        // has_coreml_assets_in_dir (presence-only) would falsely accept it.
-        let expected = entry.blob_size();
-        if expected > 0 && file_bytes != expected {
-            return cleanup_tmp(Err(format!(
-                "Incomplete download for {} ({file_bytes} of {expected} bytes). Please try again.",
-                entry.path
-            )));
-        }
-    }
-
-    // 4. Verify assets in temp dir.
-    if !has_coreml_assets_in_dir(&tmp_dir) {
-        return cleanup_tmp(Err(
-            "Downloaded model files are incomplete. Please try again.".to_string(),
-        ));
-    }
-
-    // 5. Atomic rename temp dir -> final target.
-    if final_dir.exists() {
-        // Move old dir aside then remove.
-        let old = models_parent.join(format!(".{target_name}.old-{}", std::process::id()));
-        let _ = std::fs::rename(&final_dir, &old);
-        let _ = std::fs::remove_dir_all(&old);
-    }
-
-    std::fs::rename(&tmp_dir, &final_dir).map_err(|e| {
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        format!("Could not install model: {e}")
-    })?;
-
-    emit_speech_model_progress(
-        sink,
-        "transcription",
-        "Local transcription model installed.",
-        Some(1.0),
-    );
-
-    Ok(final_dir)
+    check_speech_model_cancelled(cancel)?;
+    margins_media::model_registry::prepare_model_with_cancel(
+        margins_media::model_registry::ModelKind::CoreMl,
+        &|message, progress| {
+            emit_speech_model_progress(sink, "transcription", &message, progress);
+        },
+        &|| cancel.load(Ordering::SeqCst),
+    )
+    .map_err(|error| format!("{error:#}"))
 }
 
 /// Check whether `dir` contains all required CoreML assets.
 /// Mirrors live_backchannel::has_coreml_assets but available here for use
 /// in the downloader verify step.
 pub(crate) fn has_coreml_assets_in_dir(dir: &std::path::Path) -> bool {
-    dir.join("Preprocessor.mlmodelc").exists()
-        && dir.join("Encoder.mlmodelc").exists()
-        && dir.join("Decoder.mlmodelc").exists()
-        && dir.join("JointDecision.mlmodelc").exists()
-        && dir.join("parakeet_vocab.json").exists()
+    margins_media::model_registry::coreml::valid_model(dir)
 }
 
 // ---------------------------------------------------------------------------
@@ -696,54 +505,23 @@ fn check_fluid_coreml_model() -> (bool, String, Option<String>) {
     feature = "parakeet-asr"
 ))]
 fn check_parakeet_onnx_model(settings: &Settings) -> (bool, String, Option<String>) {
-    let Some(dir) = std::env::var("MARGINS_PARAKEET_MODEL_DIR")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| settings.parakeet_model_dir.clone())
-        .map(|path| crate::expand_tilde(&path))
-        .map(std::path::PathBuf::from)
-    else {
-        return (
+    match margins_media::model_registry::resolve_parakeet_model_with_fallback(
+        settings.parakeet_model_dir.as_deref(),
+    ) {
+        Ok(Some((dir, _))) => {
+            let path = dir.to_string_lossy().to_string();
+            (
+                true,
+                format!("Parakeet ONNX transcription assets found in {path}."),
+                Some(path),
+            )
+        }
+        Ok(None) => (
             false,
-            "Parakeet ONNX assets were not found. Set MARGINS_PARAKEET_MODEL_DIR or choose a model folder.".to_string(),
+            "Parakeet ONNX assets were not found. Set MARGINS_PARAKEET_MODEL_DIR.".to_string(),
             None,
-        );
-    };
-
-    let kind = configured_parakeet_model_kind();
-    let path = dir.to_string_lossy().to_string();
-    let missing = margins::asr::missing_model_files(&dir, kind);
-    if missing.is_empty() {
-        (
-            true,
-            format!("Parakeet ONNX transcription assets found in {path}."),
-            Some(path),
-        )
-    } else {
-        (
-            false,
-            format!(
-                "Parakeet ONNX transcription assets in {path} are missing: {}.",
-                missing.join(", ")
-            ),
-            Some(path),
-        )
-    }
-}
-
-#[cfg(all(
-    not(all(feature = "coreml-asr", target_os = "macos")),
-    feature = "parakeet-asr"
-))]
-fn configured_parakeet_model_kind() -> margins::asr::AsrModelKind {
-    match std::env::var("MARGINS_PARAKEET_MODEL_KIND")
-        .unwrap_or_else(|_| "tdt".to_string())
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "ctc" => margins::asr::AsrModelKind::Ctc,
-        _ => margins::asr::AsrModelKind::Tdt,
+        ),
+        Err(error) => (false, error.to_string(), None),
     }
 }
 
@@ -773,13 +551,12 @@ pub(crate) fn emit_speech_model_progress(
 }
 
 fn resolved_fluid_coreml_model_dir(settings: &Settings) -> Option<std::path::PathBuf> {
-    resolved_fluid_coreml_model_dir_from(
-        settings,
-        fluid_coreml_model_dir_override(),
-        default_fluid_coreml_model_dir(),
+    margins_media::model_registry::resolve_coreml_dir_with_fallback(
+        settings.parakeet_model_dir.as_deref(),
     )
 }
 
+#[cfg(test)]
 fn resolved_fluid_coreml_model_dir_from(
     settings: &Settings,
     override_dir: Option<std::path::PathBuf>,
@@ -800,24 +577,9 @@ fn resolved_fluid_coreml_model_dir_from(
         .or(default_dir)
 }
 
+#[cfg(test)]
 fn default_fluid_coreml_model_dir() -> Option<std::path::PathBuf> {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
-    let root = home.join("Library/Application Support/FluidAudio/Models");
-    let preferred = match std::env::var("MARGINS_FLUID_COREML_VERSION")
-        .ok()
-        .map(|v| v.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("v3") | Some("3") => "parakeet-tdt-0.6b-v3",
-        _ => "parakeet-tdt-0.6b-v2",
-    };
-    [
-        root.join(preferred),
-        root.join("parakeet-tdt-0.6b-v2"),
-        root.join("parakeet-tdt-0.6b-v3"),
-    ]
-    .into_iter()
-    .find(|dir| has_coreml_assets_in_dir(dir))
+    margins_media::model_registry::resolve_coreml_dir()
 }
 
 #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
@@ -828,17 +590,17 @@ fn prepare_transcription_model_now(
     let model_dir = live_backchannel::resolved_live_model_dir(settings).ok_or_else(|| {
         "FluidAudio CoreML transcription assets were not found. Install FluidAudio models or set MARGINS_FLUID_COREML_MODEL_DIR.".to_string()
     })?;
-    let mut asr = margins::coreml_asr::FluidCoreMlAsr::from_dir_auto(&model_dir)
-        .map_err(|e| format!("Could not load FluidAudio CoreML transcription model: {e}"))?;
+    let mut asr =
+        margins::coreml_asr::FluidCoreMlAsr::from_dir_auto(&model_dir).map_err(|error| {
+            format!("Could not load FluidAudio CoreML transcription model: {error}")
+        })?;
     check_speech_model_cancelled(cancel)?;
-    let warmup = asr
-        .warmup_models()
-        .map_err(|e| format!("Could not warm FluidAudio CoreML transcription model: {e}"))?;
+    let warmup = asr.warmup_models().map_err(|error| {
+        format!("Could not warm FluidAudio CoreML transcription model: {error}")
+    })?;
     Ok(format!(
         "FluidAudio CoreML transcription model loaded and warmed from {} (frontend {} ms, decode {} ms).",
-        model_dir.display(),
-        warmup.frontend_ms,
-        warmup.decode_ms
+        model_dir.display(), warmup.frontend_ms, warmup.decode_ms
     ))
 }
 
@@ -850,29 +612,14 @@ fn prepare_transcription_model_now(
     settings: &Settings,
     cancel: &AtomicBool,
 ) -> Result<String, String> {
-    let Some(dir) = std::env::var("MARGINS_PARAKEET_MODEL_DIR")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| settings.parakeet_model_dir.clone())
-        .map(|path| crate::expand_tilde(&path))
-        .map(std::path::PathBuf::from)
-    else {
-        return Err(
-            "Set MARGINS_PARAKEET_MODEL_DIR or choose a Parakeet ONNX model folder.".to_string(),
-        );
-    };
-    let kind = match std::env::var("MARGINS_PARAKEET_MODEL_KIND")
-        .unwrap_or_else(|_| "tdt".to_string())
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "ctc" => margins::asr::AsrModelKind::Ctc,
-        _ => margins::asr::AsrModelKind::Tdt,
-    };
+    let (dir, kind) = margins_media::model_registry::resolve_parakeet_model_with_fallback(
+        settings.parakeet_model_dir.as_deref(),
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "Set MARGINS_PARAKEET_MODEL_DIR to a Parakeet ONNX model folder.".to_string())?;
     check_speech_model_cancelled(cancel)?;
-    let _asr = margins::asr::parakeet::ParakeetAsr::from_dir(&dir, kind)
-        .map_err(|e| format!("Could not load Parakeet ONNX transcription model: {e}"))?;
+    let _asr = margins_media::providers::parakeet::ParakeetOnnxBackend::from_dir(&dir, kind)
+        .map_err(|error| format!("Could not load Parakeet ONNX transcription model: {error}"))?;
     Ok(format!(
         "Parakeet ONNX transcription model loaded from {}.",
         dir.display()

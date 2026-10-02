@@ -139,9 +139,14 @@ fn transcribe_remote_session(
     session_id: &SessionId,
 ) -> Result<String> {
     #[cfg(not(all(feature = "coreml-asr", target_os = "macos")))]
-    let mut backend = {
-        let (model_dir, kind) = margins::offline_asr::resolve_parakeet_model_dir()?;
-        margins::asr::parakeet::ParakeetAsr::from_dir(&model_dir, kind)
+    let backend = {
+        let settings = crate::settings::load_settings();
+        let (model_dir, kind) =
+            margins_media::model_registry::resolve_parakeet_model_with_fallback(
+                settings.parakeet_model_dir.as_deref(),
+            )?
+            .context("Set MARGINS_PARAKEET_MODEL_DIR to a Parakeet TDT ONNX model folder.")?;
+        margins_media::providers::parakeet::ParakeetOnnxBackend::from_dir(&model_dir, kind)
             .with_context(|| format!("failed to load ASR model from {}", model_dir.display()))?
     };
     let record = service
@@ -206,6 +211,9 @@ fn transcribe_remote_session(
             lane_id
         };
         channel_labels.insert(channel_order, label.to_string());
+        if mono_16k.is_empty() {
+            continue;
+        }
         #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
         entries.extend(
             margins::offline_asr::transcribe_mono_16k(&mono_16k)?
@@ -222,7 +230,19 @@ fn transcribe_remote_session(
         #[cfg(not(all(feature = "coreml-asr", target_os = "macos")))]
         entries.extend(
             margins::asr::words_to_transcript_entries(
-                &backend.transcribe_words(&mono_16k)?,
+                &margins_core::AsrBackend::transcribe(
+                    &backend,
+                    margins_core::AsrRequest {
+                        samples: mono_16k,
+                        sample_rate_hz: 16_000,
+                        session_offset_ms: 0,
+                        language: None,
+                    },
+                )?
+                .words
+                .iter()
+                .map(margins::asr::WordTiming::from)
+                .collect::<Vec<_>>(),
                 channel_order,
                 segment.start_offset_ms,
             )
@@ -518,7 +538,9 @@ mod tests {
                 critical: &[],
             },
         ];
-        let (model_dir, kind) = margins::offline_asr::resolve_parakeet_model_dir().unwrap();
+        let (model_dir, kind) = margins_media::model_registry::resolve_parakeet_model()
+            .unwrap()
+            .unwrap();
         assert_eq!(kind, margins::asr::AsrModelKind::Tdt);
         assert!(
             model_dir.to_string_lossy().contains("v2"),

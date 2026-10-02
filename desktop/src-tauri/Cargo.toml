@@ -71,6 +71,8 @@ tauri-build = { version = "2", features = [], optional = true }
 
 [dependencies]
 margins = { path = "../..", default-features = false }
+margins-core = { path = "../../crates/public/margins-core" }
+margins-media = { path = "../../crates/public/margins-media" }
 margins-meeting-protocol = { path = "../../crates/public/margins-meeting-protocol" }
 margins-meeting-runtime = { path = "../../crates/public/margins-meeting-runtime" }
 margins-workflows = { path = "../../crates/public/margins-workflows" }

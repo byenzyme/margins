@@ -87,6 +87,38 @@ pub trait AsrBackend: Send + Sync {
     fn transcribe(&self, request: AsrRequest) -> Result<AsrResult, TranscriptError>;
 }
 
+/// A decoder fed with bounded, mono PCM windows by a live capture adapter.
+///
+/// The caller owns overlap, cadence and checkpoint durability. Each request is
+/// independent and its word times are relative to `session_offset_ms`. A batch
+/// backend can therefore serve a live stream without a second provider API.
+pub trait AsrChunkDecoder: Send {
+    fn decode_chunk(&mut self, request: AsrRequest) -> Result<AsrResult, TranscriptError>;
+}
+
+impl<T: AsrBackend> AsrChunkDecoder for T {
+    fn decode_chunk(&mut self, request: AsrRequest) -> Result<AsrResult, TranscriptError> {
+        self.transcribe(request)
+    }
+}
+
+/// Cumulative update from a provider with native incremental decoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AsrStreamUpdate {
+    pub committed: Vec<TranscriptWord>,
+    pub hypothesis: Vec<TranscriptWord>,
+    pub decoded_until_ms: u64,
+    pub committed_until_ms: u64,
+}
+
+/// Native stateful decoder over mono 16 kHz PCM. The live adapter owns capture
+/// and calls `finish_until` once for a terminal checkpoint.
+pub trait AsrStreamDecoder {
+    fn append_audio(&mut self, mono_16k: &[f32]);
+    fn update_until(&mut self, end_ms: u64) -> Result<AsrStreamUpdate, TranscriptError>;
+    fn finish_until(&mut self, end_ms: u64) -> Result<AsrStreamUpdate, TranscriptError>;
+}
+
 /// One speaker turn emitted by a diarization backend.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpeakerSegment {

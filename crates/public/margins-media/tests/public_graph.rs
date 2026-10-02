@@ -29,6 +29,9 @@ fn portable_sources_do_not_reference_private_capture_or_desktop_types() {
         include_str!("../src/diarization.rs"),
         include_str!("../src/info.rs"),
         include_str!("../src/lib.rs"),
+        include_str!("../src/model_registry/mod.rs"),
+        include_str!("../src/model_registry/coreml.rs"),
+        include_str!("../src/model_registry/parakeet.rs"),
         include_str!("../src/providers/coreml.rs"),
         include_str!("../src/providers/mod.rs"),
         include_str!("../src/providers/parakeet.rs"),
@@ -84,6 +87,7 @@ fn public_module_exports_are_allowlisted() {
             "audio",
             "diarization",
             "info",
+            "model_registry",
             "providers",
             "timeline",
             "transcript"
