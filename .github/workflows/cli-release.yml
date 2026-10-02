@@ -112,7 +112,7 @@ jobs:
           cargo build --release --locked
           --manifest-path desktop/src-tauri/Cargo.toml
           --target-dir target
-          --no-default-features --features ${{ runner.os == 'macOS' && 'hosted-web,coreml-asr' || 'hosted-web' }}
+          --no-default-features --features ${{ runner.os == 'macOS' && 'server,coreml-asr' || 'hosted-web' }}
           --bin margins-server
           --target "${{ matrix.target }}"
 
