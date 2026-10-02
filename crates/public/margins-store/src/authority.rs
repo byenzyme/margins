@@ -12,6 +12,8 @@ pub struct AuthorityMemoReceipt {
     pub revision: String,
     pub lines: Vec<TimedMemoLine>,
     pub replayed: bool,
+    /// Informational only. Until T5 moves TUI writes into this authority,
+    /// automatically refreshing the mirror can clobber direct Markdown edits.
     pub mirror_stale: bool,
 }
 

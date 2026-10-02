@@ -2129,7 +2129,9 @@ impl<S: MeetingRuntimeStorage> Recorder<'_, S> {
 
     /// Validate a lane handle before the first chunk, or after a pause. A
     /// resumed capture uses a fresh segment ID; no extra protocol command is
-    /// needed because the next audio chunk opens it durably.
+    /// needed because the next audio chunk opens it durably. After a crash,
+    /// call `recover` before reopening a lane or resending unacked chunks:
+    /// `open_lane` rejects segments already closed in durable state.
     pub fn open_lane(
         &self,
         session_id: &SessionId,
@@ -2260,8 +2262,9 @@ impl<S: MeetingRuntimeStorage> Recorder<'_, S> {
         )
     }
 
-    /// Reopen after process or transport loss. Returns the persisted state and
-    /// bounded event replay using the existing `ResumeSessionV1` command.
+    /// Reopen after process or transport loss before choosing a lane or
+    /// resending unacked chunks. Returns persisted state and bounded event
+    /// replay using the existing `ResumeSessionV1` command.
     pub fn recover(
         &self,
         session_id: &SessionId,
