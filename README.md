@@ -223,7 +223,7 @@ it with the vault-local publishing config above.
 
 ## How it works
 
-**Recording**: Rust binary captures mic audio via cpal and system audio via Core Audio tap, writing 48kHz stereo WAV. Switch mic devices mid-session with `Ctrl+D` — each switch creates a new audio segment with proper timeline offsets.
+**Recording**: Rust captures mic audio via cpal and system audio via Core Audio tap. It stores separate mic/system lanes as durable 16 kHz PCM batches while you record. `margins audio-export [meeting_id]` creates scriptable stereo WAV files when you need them. Existing session WAVs remain available. Switch mic devices mid-session with `Ctrl+D` — each switch creates a new audio segment with proper timeline offsets.
 
 **Transcription**: the native Rust CLI preserves recorder stereo as separate mic/system channels. Mono group audio can be diarized with `--speakers N`; multipart sessions inherit their persisted segment offsets automatically.
 
@@ -248,7 +248,7 @@ src/
   text_helpers.rs   Word/char boundary helpers
 ```
 
-Sessions are stored in `.margins/` as WAV segments + JSON metadata + markdown memo.
+Sessions are stored in `.margins/` with SQLite session and memo records and durable audio chunks. WAV exports and transcript artifacts are available alongside them.
 
 ## License
 

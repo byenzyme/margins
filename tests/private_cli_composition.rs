@@ -19,10 +19,10 @@ fn production_binary_uses_private_composition_not_public_standalone_entrypoint()
 
 #[test]
 fn production_new_composes_native_recorder_and_memo_tui() {
-    let composition = source("src/cli.rs");
+    let composition = source("src/cli/capture_local.rs");
     assert!(composition.contains("crate::recorder::RecorderHandle::start"));
     assert!(composition.contains("crate::tui::run_tui"));
-    assert!(composition.contains("stop_and_write"));
+    assert!(composition.contains("stop_and_flush"));
     assert!(!composition.contains("UnavailableCaptureProvider"));
 }
 
@@ -89,14 +89,15 @@ fn production_source_add_help_exposes_granola_workspace_source() {
 
 #[test]
 fn production_capture_preflights_and_opens_native_lanes_before_session_reservation() {
-    let composition = source("src/cli.rs");
+    let composition = source("src/cli/capture_local.rs");
     let interactive = composition
         .split("impl InteractiveSession for NativeInteractiveSession")
         .nth(1)
         .unwrap();
     assert!(interactive.contains("ensure_capture_permissions(&NativeCapturePermissionSource)?"));
 
-    let create = composition
+    let local = source("src/cli/capture_local.rs");
+    let create = local
         .split("fn create_native_session")
         .nth(1)
         .unwrap()
@@ -106,25 +107,23 @@ fn production_capture_preflights_and_opens_native_lanes_before_session_reservati
     let create_start = create
         .find("RecorderHandle::start_with_live_audio")
         .unwrap();
-    assert!(create_start < create.find("create_session(").unwrap());
-    assert!(
-        create_start
-            < create
-                .find("std::fs::write(margins_dir.join(\"current\")")
-                .unwrap()
-    );
+    assert!(create_start < create.find("LocalMeetingProducer::reserve").unwrap());
+    assert!(create_start < create.find("write_current_session(").unwrap());
 
-    let attach = composition
+    let attach = local
         .split("fn attach_native_session")
         .nth(1)
         .unwrap()
-        .split("fn start_live_transcript_worker")
+        .split("fn run_segment")
         .next()
         .unwrap();
+    let recover = attach.find("LocalMeetingProducer::recover").unwrap();
     let attach_start = attach
         .find("RecorderHandle::start_with_live_audio")
         .unwrap();
-    assert!(attach_start < attach.find("add_segment(").unwrap());
+    assert!(recover < attach.find("meeting.recover_pending_segment").unwrap());
+    assert!(attach.find("meeting.recover_pending_segment").unwrap() < attach_start);
+    assert!(attach_start < attach.find("write_current_session(").unwrap());
 }
 
 #[test]

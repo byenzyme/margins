@@ -150,6 +150,12 @@ pub enum Command {
         #[arg(long, value_enum, default_value = "text")]
         format: TranscriptFormat,
     },
+    /// Materialize scriptable WAV files for a meeting from its durable audio
+    #[command(name = "audio-export")]
+    AudioExport {
+        /// Meeting id from `margins recent`; defaults to `latest`
+        meeting_id: Option<String>,
+    },
     /// List registered artifacts for a meeting as XML
     Artifacts {
         /// Stable meeting id from `margins recent`, or `latest`

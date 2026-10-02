@@ -21,6 +21,7 @@ pub struct SessionInfoDto {
     pub duration_secs: f64,
     pub memo_line_count: usize,
     pub status: String,
+    pub capture_state: String,
     pub vault_note_path: Option<String>,
     pub failure_message: Option<String>,
     pub processing_state: Option<String>,
@@ -186,7 +187,7 @@ pub fn list_sessions_with_notes(
             .map(|c| c.lines().filter(|l| !l.trim().is_empty()).count())
             .unwrap_or(0);
 
-        let is_recording = recording_name == Some(s.name.as_str());
+        let is_recording = recording_name == Some(s.name.as_str()) && s.lifecycle_state == "active";
         let frontmatter = read_note_frontmatter(vault_note.as_deref());
         let people = if frontmatter.people_present {
             frontmatter.people.clone()
@@ -255,6 +256,7 @@ pub fn list_sessions_with_notes(
             duration_secs: duration,
             memo_line_count: memo_count,
             status: display_status,
+            capture_state: s.lifecycle_state.clone(),
             vault_note_path: vault_note,
             failure_message,
             processing_state,
@@ -418,6 +420,7 @@ fn list_procured_vault_notes(
             duration_secs: 0.0,
             memo_line_count: 0,
             status: "synthesized".to_string(),
+            capture_state: "ended".to_string(),
             vault_note_path: Some(path_key),
             failure_message: None,
             processing_state: Some("done".to_string()),

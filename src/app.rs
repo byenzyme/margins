@@ -1,9 +1,9 @@
 use chrono::{DateTime, Local};
-use margins_core::{MemoMoment, TimedMemoDocument};
+use margins_core::{MemoMoment, TimedMemoDocument, TimedMemoLine};
 use ratatui::layout::Rect;
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8};
 use std::sync::Arc;
 
 use crate::text_helpers::*;
@@ -43,6 +43,8 @@ pub struct App {
     pub spk_silence: Arc<AtomicU64>,
     pub spk_frames: Arc<AtomicU64>,
     pub spk_rate: u32,
+    pub native_spool_overflow: Arc<AtomicBool>,
+    pub native_store_retrying: Arc<AtomicBool>,
     pub live_transcription_status: Arc<AtomicU8>,
     pub capture_paused: bool,
     pub remote_delivery_state: Arc<AtomicU8>,
@@ -50,6 +52,15 @@ pub struct App {
     pub remote_pending_bytes: Arc<AtomicU64>,
     pause_block_ordinal: u32,
     workspace_authority: Option<(PathBuf, String)>,
+    observed_memo: Option<(String, Vec<TimedMemoLine>)>,
+    pending_conflict: Option<PendingMemoConflict>,
+}
+
+struct PendingMemoConflict {
+    path: PathBuf,
+    lines: Vec<TimedMemoLine>,
+    viewing_draft: bool,
+    draft_scroll: usize,
 }
 
 impl App {
@@ -74,6 +85,8 @@ impl App {
             spk_silence: Arc::new(AtomicU64::new(0)),
             spk_frames: Arc::new(AtomicU64::new(0)),
             spk_rate: 0,
+            native_spool_overflow: Arc::new(AtomicBool::new(false)),
+            native_store_retrying: Arc::new(AtomicBool::new(false)),
             live_transcription_status: Arc::new(AtomicU8::new(LIVE_TRANSCRIPTION_OFF)),
             capture_paused: false,
             remote_delivery_state: Arc::new(AtomicU8::new(REMOTE_DELIVERY_LOCAL)),
@@ -81,6 +94,8 @@ impl App {
             remote_pending_bytes: Arc::new(AtomicU64::new(0)),
             pause_block_ordinal: 0,
             workspace_authority: None,
+            observed_memo: None,
+            pending_conflict: None,
         }
     }
 
@@ -117,6 +132,8 @@ impl App {
             spk_silence: Arc::new(AtomicU64::new(0)),
             spk_frames: Arc::new(AtomicU64::new(0)),
             spk_rate: 0,
+            native_spool_overflow: Arc::new(AtomicBool::new(false)),
+            native_store_retrying: Arc::new(AtomicBool::new(false)),
             live_transcription_status: Arc::new(AtomicU8::new(LIVE_TRANSCRIPTION_OFF)),
             capture_paused: false,
             remote_delivery_state: Arc::new(AtomicU8::new(REMOTE_DELIVERY_LOCAL)),
@@ -124,11 +141,56 @@ impl App {
             remote_pending_bytes: Arc::new(AtomicU64::new(0)),
             pause_block_ordinal: 0,
             workspace_authority: None,
+            observed_memo: None,
+            pending_conflict: None,
         }
     }
 
     pub fn bind_workspace_authority(&mut self, margins_dir: PathBuf, session_id: String) {
         self.workspace_authority = Some((margins_dir, session_id));
+    }
+
+    pub fn observe_memo(&mut self, revision: String, lines: Vec<TimedMemoLine>) {
+        self.observed_memo = Some((revision, lines));
+        self.pending_conflict = None;
+    }
+
+    pub fn conflict_draft_path(&self) -> Option<&std::path::Path> {
+        self.pending_conflict
+            .as_ref()
+            .map(|draft| draft.path.as_path())
+    }
+
+    pub fn viewing_conflict_draft(&self) -> bool {
+        self.pending_conflict
+            .as_ref()
+            .is_some_and(|draft| draft.viewing_draft)
+    }
+
+    pub fn conflict_draft_lines(&self) -> Option<&[TimedMemoLine]> {
+        self.pending_conflict
+            .as_ref()
+            .filter(|draft| draft.viewing_draft)
+            .map(|draft| draft.lines.as_slice())
+    }
+
+    pub fn conflict_draft_scroll(&self) -> usize {
+        self.pending_conflict
+            .as_ref()
+            .map_or(0, |draft| draft.draft_scroll)
+    }
+
+    pub fn scroll_conflict_draft(&mut self, delta: isize, visible_lines: usize) {
+        if let Some(draft) = &mut self.pending_conflict {
+            let last = draft.lines.len().saturating_sub(visible_lines.max(1));
+            draft.draft_scroll = draft.draft_scroll.saturating_add_signed(delta).min(last);
+        }
+    }
+
+    pub fn toggle_conflict_draft(&mut self) {
+        if let Some(draft) = &mut self.pending_conflict {
+            draft.viewing_draft = !draft.viewing_draft;
+        }
     }
 
     pub fn mark_edited(&mut self, line: usize) {
@@ -456,36 +518,313 @@ impl App {
     }
 
     pub fn save(&mut self) -> io::Result<()> {
+        self.message = None;
         self.commit_uncommitted_at(Local::now());
         let content = self.export();
         if let Some((margins_dir, session_id)) = &self.workspace_authority {
             let authority = margins_store::SqliteWorkspaceAuthorityStorage::open(margins_dir)
                 .map_err(io::Error::other)?;
-            let current = authority.memo(session_id).map_err(io::Error::other)?;
-            if current.lines != self.memo.lines() {
-                let desired = self.memo.revision();
-                let request_id = format!(
-                    "native-memo-{}-{}",
-                    current.revision.chars().take(32).collect::<String>(),
-                    desired.chars().take(32).collect::<String>()
-                );
-                authority
-                    .replace_memo_lines(
-                        session_id,
-                        "native-cli",
-                        &request_id,
-                        &current.revision,
-                        self.memo.lines(),
-                    )
-                    .map_err(io::Error::other)?;
+            let (mut revision, mut base) = match &self.observed_memo {
+                Some(observed) => observed.clone(),
+                None => {
+                    let receipt = authority.memo(session_id).map_err(io::Error::other)?;
+                    (receipt.revision, receipt.lines)
+                }
+            };
+            let mut desired = self.memo.lines().to_vec();
+            let mut saved = false;
+            for _ in 0..3 {
+                let request_id = format!("native-memo-{}", uuid::Uuid::new_v4());
+                match authority.replace_memo_lines(
+                    session_id,
+                    "native-cli",
+                    &request_id,
+                    &revision,
+                    &desired,
+                ) {
+                    Ok(receipt) => {
+                        self.observed_memo = Some((receipt.revision, receipt.lines.clone()));
+                        if receipt.lines != self.memo.lines() {
+                            self.memo = TimedMemoDocument::resume(
+                                receipt.lines,
+                                MemoMoment::recording(elapsed_between(
+                                    self.start_time,
+                                    Local::now(),
+                                )),
+                            );
+                            self.cursor_line = self.memo.len().saturating_sub(1);
+                            self.cursor_col = 0;
+                        }
+                        if receipt.mirror_stale {
+                            self.message =
+                                Some("Memo saved in SQLite; Markdown mirror needs repair".into());
+                        }
+                        saved = true;
+                        break;
+                    }
+                    Err(error)
+                        if error
+                            .downcast_ref::<margins_store::MemoRevisionConflict>()
+                            .is_some() =>
+                    {
+                        let current = authority.memo(session_id).map_err(io::Error::other)?;
+                        if let Some(merged) = merge_memo_lines(&base, &desired, &current.lines) {
+                            desired = merged;
+                            revision = current.revision;
+                            base = current.lines;
+                        } else {
+                            let draft = margins_dir.join(format!(
+                                "{session_id}.memo-conflict-{}.md",
+                                uuid::Uuid::new_v4()
+                            ));
+                            std::fs::write(&draft, &content)?;
+                            self.observed_memo = Some((current.revision, current.lines.clone()));
+                            self.memo = TimedMemoDocument::resume(
+                                current.lines,
+                                MemoMoment::recording(elapsed_between(
+                                    self.start_time,
+                                    Local::now(),
+                                )),
+                            );
+                            self.cursor_line = self.memo.len().saturating_sub(1);
+                            self.cursor_col = 0;
+                            self.scroll = self.cursor_line.saturating_sub(10);
+                            self.pending_conflict = Some(PendingMemoConflict {
+                                path: draft.clone(),
+                                lines: desired,
+                                viewing_draft: false,
+                                draft_scroll: 0,
+                            });
+                            self.message = Some(format!(
+                                "Memo changed elsewhere. Remote text is shown; press Ctrl+G to view your local draft at {}.",
+                                draft.display()
+                            ));
+                            return Err(io::Error::other(format!(
+                                "memo conflict; local draft saved to {}",
+                                draft.display()
+                            )));
+                        }
+                    }
+                    Err(error) => return Err(io::Error::other(error)),
+                }
+            }
+            if !saved {
+                return Err(io::Error::other("memo changed repeatedly; retry save"));
             }
         } else {
             std::fs::write(&self.output_path, &content)?;
         }
         let count = content.lines().count();
-        self.message = Some(format!("Saved {} lines to {}", count, self.output_path));
+        if self.message.is_none() {
+            self.message = Some(format!("Saved {} lines to {}", count, self.output_path));
+        }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct MemoHunk {
+    start: usize,
+    end: usize,
+    replacement: Vec<TimedMemoLine>,
+}
+
+/// Find changed spans against the common document. A bounded LCS keeps the
+/// result stable for insertions and deletions without treating later lines as
+/// edits merely because their indexes shifted.
+fn memo_hunks(base: &[TimedMemoLine], changed: &[TimedMemoLine]) -> Option<Vec<MemoHunk>> {
+    let rows = base.len().checked_add(1)?;
+    let cols = changed.len().checked_add(1)?;
+    if rows.checked_mul(cols)? > 4_000_000 {
+        let old = base
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        let new = changed
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        let mut hunks = Vec::new();
+        let mut pending: Option<(usize, usize, usize, usize)> = None;
+        for op in similar::capture_diff_slices(similar::Algorithm::Patience, &old, &new) {
+            if op.tag() == similar::DiffTag::Equal {
+                if let Some((start, end, new_start, new_end)) = pending.take() {
+                    hunks.push(MemoHunk {
+                        start,
+                        end,
+                        replacement: changed[new_start..new_end].to_vec(),
+                    });
+                }
+                continue;
+            }
+            let old_range = op.old_range();
+            let new_range = op.new_range();
+            match &mut pending {
+                Some((_, end, _, new_end))
+                    if *end == old_range.start && *new_end == new_range.start =>
+                {
+                    *end = old_range.end;
+                    *new_end = new_range.end;
+                }
+                _ => {
+                    if let Some((start, end, new_start, new_end)) = pending.take() {
+                        hunks.push(MemoHunk {
+                            start,
+                            end,
+                            replacement: changed[new_start..new_end].to_vec(),
+                        });
+                    }
+                    pending = Some((
+                        old_range.start,
+                        old_range.end,
+                        new_range.start,
+                        new_range.end,
+                    ));
+                }
+            }
+        }
+        if let Some((start, end, new_start, new_end)) = pending {
+            hunks.push(MemoHunk {
+                start,
+                end,
+                replacement: changed[new_start..new_end].to_vec(),
+            });
+        }
+        return Some(hunks);
+    }
+    let mut lcs = vec![vec![0usize; cols]; rows];
+    for i in (0..base.len()).rev() {
+        for j in (0..changed.len()).rev() {
+            lcs[i][j] = if base[i] == changed[j] {
+                1 + lcs[i + 1][j + 1]
+            } else {
+                lcs[i + 1][j].max(lcs[i][j + 1])
+            };
+        }
+    }
+    let (mut i, mut j) = (0usize, 0usize);
+    let (mut from_base, mut from_changed) = (0usize, 0usize);
+    let mut hunks = Vec::new();
+    while i < base.len() && j < changed.len() {
+        if base[i] == changed[j] {
+            if from_base < i || from_changed < j {
+                hunks.push(MemoHunk {
+                    start: from_base,
+                    end: i,
+                    replacement: changed[from_changed..j].to_vec(),
+                });
+            }
+            i += 1;
+            j += 1;
+            from_base = i;
+            from_changed = j;
+        } else if lcs[i + 1][j] >= lcs[i][j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    if from_base < base.len() || from_changed < changed.len() {
+        hunks.push(MemoHunk {
+            start: from_base,
+            end: base.len(),
+            replacement: changed[from_changed..].to_vec(),
+        });
+    }
+    Some(hunks)
+}
+
+/// Merge edits against the lines both clients observed. Different insertions
+/// at one boundary are retained in remote-then-local order; identical ones
+/// appear once. Overlapping replacements need a human decision.
+fn merge_memo_lines(
+    base: &[TimedMemoLine],
+    local: &[TimedMemoLine],
+    remote: &[TimedMemoLine],
+) -> Option<Vec<TimedMemoLine>> {
+    let local_hunks = memo_hunks(base, local)?;
+    let remote_hunks = memo_hunks(base, remote)?;
+    let mut merged = Vec::with_capacity(local.len() + remote.len());
+    let (mut position, mut li, mut ri) = (0usize, 0usize, 0usize);
+    loop {
+        let local_insert = local_hunks
+            .get(li)
+            .filter(|h| h.start == position && h.end == position);
+        let remote_insert = remote_hunks
+            .get(ri)
+            .filter(|h| h.start == position && h.end == position);
+        match (local_insert, remote_insert) {
+            (Some(local), Some(remote)) => {
+                merged.extend(remote.replacement.iter().cloned());
+                if !same_memo_text(&local.replacement, &remote.replacement) {
+                    merged.extend(local.replacement.iter().cloned());
+                }
+                li += 1;
+                ri += 1;
+            }
+            (Some(local), None) => {
+                merged.extend(local.replacement.iter().cloned());
+                li += 1;
+            }
+            (None, Some(remote)) => {
+                merged.extend(remote.replacement.iter().cloned());
+                ri += 1;
+            }
+            (None, None) => {}
+        }
+        if position == base.len() {
+            return Some(merged);
+        }
+        let local_edit = local_hunks
+            .get(li)
+            .filter(|h| h.start == position && h.end > position);
+        let remote_edit = remote_hunks
+            .get(ri)
+            .filter(|h| h.start == position && h.end > position);
+        match (local_edit, remote_edit) {
+            (Some(local), Some(remote)) => {
+                if local.end != remote.end
+                    || !same_memo_text(&local.replacement, &remote.replacement)
+                {
+                    return None;
+                }
+                merged.extend(local.replacement.iter().cloned());
+                position = local.end;
+                li += 1;
+                ri += 1;
+            }
+            (Some(local), None) => {
+                if remote_hunks.get(ri).is_some_and(|h| h.start < local.end) {
+                    return None;
+                }
+                merged.extend(local.replacement.iter().cloned());
+                position = local.end;
+                li += 1;
+            }
+            (None, Some(remote)) => {
+                if local_hunks.get(li).is_some_and(|h| h.start < remote.end) {
+                    return None;
+                }
+                merged.extend(remote.replacement.iter().cloned());
+                position = remote.end;
+                ri += 1;
+            }
+            (None, None) => {
+                merged.push(base[position].clone());
+                position += 1;
+            }
+        }
+    }
+}
+
+fn same_memo_text(left: &[TimedMemoLine], right: &[TimedMemoLine]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| left.text == right.text)
 }
 
 fn elapsed_between(start: DateTime<Local>, time: DateTime<Local>) -> f64 {
@@ -594,5 +933,186 @@ mod tests {
             std::fs::read_to_string(output).unwrap(),
             app.memo.export_markdown()
         );
+    }
+
+    #[test]
+    fn remote_and_local_appends_merge_against_observed_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join(".margins");
+        margins_store::canonical::create_session(
+            &dir,
+            "meeting",
+            &Local::now(),
+            ".margins/meeting.md",
+        )
+        .unwrap();
+        let authority = margins_store::SqliteWorkspaceAuthorityStorage::open(&dir).unwrap();
+        let base = authority.memo("meeting").unwrap();
+        let mut app = App::from_memo(
+            TimedMemoDocument::from_committed(base.lines.clone()),
+            dir.join("meeting.md").to_string_lossy().into_owned(),
+            make_start(),
+            "mic".into(),
+        );
+        app.bind_workspace_authority(dir.clone(), "meeting".into());
+        app.observe_memo(base.revision.clone(), base.lines);
+        type_text(&mut app, "local line");
+        authority
+            .update_memo(
+                "meeting",
+                "bb",
+                "remote-1",
+                &base.revision,
+                1000,
+                false,
+                "remote line",
+            )
+            .unwrap();
+        app.save().unwrap();
+        let saved = authority.memo("meeting").unwrap();
+        assert!(saved.lines.iter().any(|line| line.text == "remote line"));
+        assert!(saved.lines.iter().any(|line| line.text == "local line"));
+        assert!(!saved.mirror_stale);
+    }
+
+    #[test]
+    fn divergent_line_keeps_remote_and_preserves_local_draft() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join(".margins");
+        margins_store::canonical::create_session(
+            &dir,
+            "meeting",
+            &Local::now(),
+            ".margins/meeting.md",
+        )
+        .unwrap();
+        let authority = margins_store::SqliteWorkspaceAuthorityStorage::open(&dir).unwrap();
+        let initial = authority.memo("meeting").unwrap();
+        let base = authority
+            .update_memo(
+                "meeting",
+                "bb",
+                "seed",
+                &initial.revision,
+                1000,
+                false,
+                "base",
+            )
+            .unwrap();
+        let mut app = App::from_memo(
+            TimedMemoDocument::from_committed(base.lines.clone()),
+            dir.join("meeting.md").to_string_lossy().into_owned(),
+            make_start(),
+            "mic".into(),
+        );
+        app.bind_workspace_authority(dir.clone(), "meeting".into());
+        app.observe_memo(base.revision.clone(), base.lines);
+        app.memo = TimedMemoDocument::from_committed(vec![TimedMemoLine::at(
+            "local",
+            MemoMoment::recording(2.0),
+        )]);
+        authority
+            .replace_memo_lines(
+                "meeting",
+                "bb",
+                "remote-2",
+                &base.revision,
+                &[
+                    TimedMemoLine::at("remote", MemoMoment::recording(2.0)),
+                    TimedMemoLine::at("remote-only", MemoMoment::recording(2.1)),
+                ],
+            )
+            .unwrap();
+        let error = app.save().unwrap_err();
+        assert!(error.to_string().contains("memo conflict"));
+        assert_eq!(authority.memo("meeting").unwrap().lines[0].text, "remote");
+        assert_eq!(app.memo.line(0).unwrap().text, "remote");
+        assert_eq!(app.memo.line(1).unwrap().text, "remote-only");
+        assert!(app.conflict_draft_path().is_some());
+        app.toggle_conflict_draft();
+        assert_eq!(app.conflict_draft_lines().unwrap()[0].text, "local");
+        app.toggle_conflict_draft();
+        let draft = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.to_string_lossy().contains("memo-conflict"))
+            .unwrap();
+        assert!(std::fs::read_to_string(draft).unwrap().contains("local"));
+        let first_message = app.message.clone();
+        app.enter();
+        type_text(&mut app, "new local note");
+        app.save().unwrap();
+        let saved = authority.memo("meeting").unwrap();
+        assert!(saved.lines.iter().any(|line| line.text == "remote"));
+        assert!(saved.lines.iter().any(|line| line.text == "remote-only"));
+        assert!(saved.lines.iter().any(|line| line.text == "new local note"));
+        assert!(app.conflict_draft_path().is_some());
+        assert!(first_message
+            .as_deref()
+            .unwrap()
+            .contains("Remote text is shown"));
+        assert_eq!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().to_string_lossy().contains("memo-conflict"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn line_merge_keeps_insertions_in_place_and_deduplicates_identical_appends() {
+        let lines = |values: &[&str]| {
+            values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    TimedMemoLine::at(*value, MemoMoment::recording(index as f64))
+                })
+                .collect::<Vec<_>>()
+        };
+        let base = lines(&["A", "B", "C"]);
+        let mut local = base.clone();
+        local.insert(1, TimedMemoLine::at("X", MemoMoment::recording(1.5)));
+        let mut remote = base.clone();
+        remote.push(TimedMemoLine::at("R", MemoMoment::recording(4.0)));
+        let merged = merge_memo_lines(&base, &local, &remote).unwrap();
+        assert_eq!(
+            merged
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "X", "B", "C", "R"]
+        );
+
+        let appended = TimedMemoLine::at("same", MemoMoment::recording(5.0));
+        let mut left = base.clone();
+        left.push(appended.clone());
+        let mut right = base.clone();
+        right.push(TimedMemoLine::at("same", MemoMoment::recording(6.0)));
+        assert_eq!(merge_memo_lines(&base, &left, &right).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn large_memo_uses_patience_diff_instead_of_conflicting_by_size() {
+        let base = (0..2_500)
+            .map(|index| TimedMemoLine::at(format!("line {index}"), MemoMoment::recording(1.0)))
+            .collect::<Vec<_>>();
+        let mut local = base.clone();
+        local.insert(
+            1_000,
+            TimedMemoLine::at("local insert", MemoMoment::recording(2.0)),
+        );
+        let mut remote = base.clone();
+        remote.push(TimedMemoLine::at(
+            "remote append",
+            MemoMoment::recording(3.0),
+        ));
+        let merged = merge_memo_lines(&base, &local, &remote).unwrap();
+        assert_eq!(merged[1_000].text, "local insert");
+        assert_eq!(merged.last().unwrap().text, "remote append");
+        assert_eq!(merged.len(), 2_502);
     }
 }

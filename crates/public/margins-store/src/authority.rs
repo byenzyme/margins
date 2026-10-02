@@ -12,8 +12,9 @@ pub struct AuthorityMemoReceipt {
     pub revision: String,
     pub lines: Vec<TimedMemoLine>,
     pub replayed: bool,
-    /// Informational only. Until T5 moves TUI writes into this authority,
-    /// automatically refreshing the mirror can clobber direct Markdown edits.
+    /// SQLite committed the memo, but its repairable Markdown projection is
+    /// missing, differs, or could not be refreshed. Native TUI writes use this
+    /// authority, so refreshes no longer clobber TUI-owned Markdown edits.
     pub mirror_stale: bool,
 }
 

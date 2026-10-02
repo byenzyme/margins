@@ -57,7 +57,9 @@ pub mod recorder;
 pub mod recorder {
     use anyhow::{bail, Result};
     use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8};
-    use std::sync::mpsc::{Sender, SyncSender};
+    use std::sync::mpsc::Sender;
+    #[cfg(target_os = "macos")]
+    use std::sync::mpsc::SyncSender;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -104,6 +106,22 @@ pub mod recorder {
     }
 
     pub struct InputDevice;
+
+    pub struct NativeSpoolSource {
+        pub path: std::path::PathBuf,
+        pub rate: u32,
+    }
+
+    impl NativeSpoolSource {
+        pub fn compact_through(&self, _bytes: u64) -> Result<bool> {
+            Ok(false)
+        }
+
+        #[cfg(test)]
+        pub fn fake(path: std::path::PathBuf, rate: u32) -> Self {
+            Self { path, rate }
+        }
+    }
 
     pub type SegmentId = u64;
     pub type CaptureToken = u64;

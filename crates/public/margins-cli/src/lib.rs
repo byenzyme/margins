@@ -345,6 +345,18 @@ fn run_inner(
                 stdout,
             );
         }
+        Some(Command::AudioExport { meeting_id }) if workspace_selected => {
+            let workspace = commands::workspace::resolve(
+                workspace_selector.as_deref(),
+                invocation_dir,
+                stderr,
+            )?;
+            return commands::sessions::export_audio(
+                &workspace_capture_root(&workspace)?,
+                meeting_id.as_deref().unwrap_or("latest"),
+                stdout,
+            );
+        }
         Some(Command::Artifacts { meeting_id }) if workspace_selected => {
             let workspace = commands::workspace::resolve(
                 workspace_selector.as_deref(),
@@ -598,7 +610,8 @@ fn run_inner(
         vault_guard::require_evidenced_vault(&project)?;
     }
     let project = match &args.command {
-        Some(Command::Transcript { meeting_id, .. }) => resolve_meeting_owner(
+        Some(Command::Transcript { meeting_id, .. })
+        | Some(Command::AudioExport { meeting_id }) => resolve_meeting_owner(
             services,
             project,
             project_selector.is_some(),
@@ -643,6 +656,11 @@ fn run_inner(
             work_dir,
             meeting_id.as_deref().unwrap_or("latest"),
             format,
+            stdout,
+        ),
+        Some(Command::AudioExport { meeting_id }) => commands::sessions::export_audio(
+            work_dir,
+            meeting_id.as_deref().unwrap_or("latest"),
             stdout,
         ),
         Some(Command::Integrations { command }) => match command {
