@@ -1,4 +1,3 @@
-pub mod alignment;
 pub mod app;
 pub mod asr;
 pub mod audio_info;
@@ -7,7 +6,6 @@ pub mod audio_pipeline;
 pub mod catalyst_model_setup;
 pub mod cli;
 mod cli_log;
-mod core_compat;
 #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
 pub mod coreml_asr;
 pub mod diarization;
@@ -17,9 +15,7 @@ pub mod included_lease;
 mod note;
 pub mod note_artifacts;
 pub mod offline_asr;
-pub mod parser;
 pub mod project;
-pub mod publish;
 #[cfg(feature = "recall")]
 pub mod recall;
 #[cfg(feature = "recall")]
@@ -29,8 +25,7 @@ mod setup_compile;
 mod speech_model_setup;
 #[cfg(feature = "recall")]
 mod workspace_recall;
-/// Portable public contracts. The root crate re-exports these and provides
-/// only lossless legacy-value conversions; it does not implement the ports.
+/// Portable public contracts re-exported by the root crate.
 pub use margins_core as core;
 
 /// Initialize the process-wide SQLite runtime before recall and Margins storage

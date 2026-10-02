@@ -11,14 +11,12 @@
 
 #![forbid(unsafe_code)]
 
-pub mod index;
 #[path = "legacy.rs"]
 pub mod canonical;
 mod authority;
 mod meeting_runtime;
 mod sqlite;
 
-pub use index::{list_session_index, SessionIndexEntry, SessionIndexQuery};
 pub use authority::{
     AuthorityMemoReceipt, ImportReceipt, SqliteWorkspaceAuthorityStorage,
 };

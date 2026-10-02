@@ -14,6 +14,14 @@ docs/
 !/docs/ssh-remote-onboarding.md
 !/docs/mac-audio-transport-verification.md
 !/docs/remote-integration-status.md
+!/docs/capture-refactor-implementation-coverage.md
+!/docs/official-cli-release.md
+!/docs/open-core-modularization.md
+!/docs/public-cli-extraction.md
+!/docs/remote-workspace-implementation-coverage.md
+!/docs/remote-workspace-operations.md
+!/docs/setup-e2e-lanes.md
+!/docs/workspace-setup-rollout-review.md
 .enzyme/
 .enzyme-embeddings/
 node_modules/
@@ -21,6 +29,7 @@ dist/
 /desktop/node_modules/
 /desktop/dist/
 /desktop/ux-shots/
+/desktop/ux-shots-*/
 /desktop/ux-e2e-runs/
 /desktop/test-harness/local-snapshot.json
 /desktop/test-harness/ux-loop/runtime/
@@ -41,5 +50,6 @@ __pycache__/
 /target-linux-server/
 /desktop/ux-shots-real/
 /integrations/bb-plugin-margins/e2e-artifacts/
+/site/.vercel/
 /.worktrees/
 !public-repository/docs/

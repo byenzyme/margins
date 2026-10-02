@@ -14,7 +14,6 @@ fn manifest_and_source_have_no_private_or_native_edge() {
     let manifest = include_str!("../Cargo.toml").to_ascii_lowercase();
     let source = [
         include_str!("../src/lib.rs"),
-        include_str!("../src/index.rs"),
         include_str!("../src/legacy.rs"),
         include_str!("../src/sqlite.rs"),
     ]
