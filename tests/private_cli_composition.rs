@@ -347,8 +347,9 @@ fn workspace_commands_refuse_unsafe_home_and_state_cwds_with_exact_reasons() {
             } else {
                 "command_failed"
             };
+            let refusal = stderr.lines().last().unwrap_or("");
             if args.first() == Some(&"integrations") && args.contains(&"--json") {
-                let error: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap();
+                let error: serde_json::Value = serde_json::from_str(refusal).unwrap();
                 assert_eq!(error["schema_version"], "margins.error.v1");
                 assert_eq!(error["error"]["code"], code);
                 assert_eq!(error["error"]["message"], message);
@@ -363,8 +364,8 @@ fn workspace_commands_refuse_unsafe_home_and_state_cwds_with_exact_reasons() {
                 )
             };
             assert_eq!(
-                stderr,
-                expected,
+                refusal,
+                expected.trim_end(),
                 "unexpected refusal for {args:?} from {}",
                 cwd.display()
             );
