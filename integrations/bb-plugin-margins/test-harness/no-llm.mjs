@@ -18,14 +18,16 @@ const required = (name) => {
 };
 const marginsBin = required("MARGINS_E2E_BIN");
 const freshRelease = process.env.MARGINS_E2E_FRESH_RELEASE === "1";
+const coldAsr = process.env.MARGINS_E2E_COLD_ASR === "1";
+if (freshRelease && coldAsr) throw new Error("Cold ASR requires a server build with automatic model setup; omit MARGINS_E2E_FRESH_RELEASE");
 const serverBin = freshRelease ? null : required("MARGINS_E2E_SERVER_BIN");
 const bbApp = required("MARGINS_E2E_BB_APP");
 const chromeBin = required("MARGINS_E2E_CHROME_BIN");
 const spokenWav = process.env.MARGINS_E2E_SPOKEN_WAV
   ? required("MARGINS_E2E_SPOKEN_WAV")
   : path.join(here, "fixtures", "launch-accessibility.wav");
-const asrModelDir = required("MARGINS_E2E_ASR_MODEL_DIR");
-const ortLibrary = required("MARGINS_E2E_ORT_LIBRARY");
+const asrModelDir = coldAsr ? null : required("MARGINS_E2E_ASR_MODEL_DIR");
+const ortLibrary = coldAsr ? null : required("MARGINS_E2E_ORT_LIBRARY");
 const realLlm = process.env.MARGINS_E2E_REAL_LLM === "1";
 const image = process.env.MARGINS_E2E_CHROME_IMAGE || "margins-bb-e2e-chrome:local";
 const artifacts = path.resolve(process.env.MARGINS_E2E_ARTIFACTS || path.join(plugin, "e2e-artifacts", new Date().toISOString().replace(/[:.]/g, "-")));
@@ -214,8 +216,10 @@ try {
   cdpPort = await freePort();
   bbEnv = { ...process.env, BB_SERVER_URL: `http://127.0.0.1:${serverPort}`, BB_DATA_DIR: bbData,
     MARGINS_HOME: home,
-    MARGINS_PARAKEET_MODEL_DIR: asrModelDir, MARGINS_PARAKEET_MODEL_KIND: "tdt",
-    ORT_DYLIB_PATH: ortLibrary,
+    ...(coldAsr ? { XDG_CACHE_HOME: path.join(temporary, "cache") } : {
+      MARGINS_PARAKEET_MODEL_DIR: asrModelDir, MARGINS_PARAKEET_MODEL_KIND: "tdt",
+      ORT_DYLIB_PATH: ortLibrary,
+    }),
     ...(freshRelease ? { MARGINS_CLI_BIN_DIR: freshCliBinDir } : { MARGINS_CLI_BIN: marginsBin }),
     // This journey exercises the explicit Make note action once. The separate
     // auto-note scheduler has its own test and must not race a paid E2E call.
@@ -226,9 +230,14 @@ try {
     delete bbEnv.MARGINS_BB_REMOTE_URL;
     delete bbEnv.MARGINS_BB_REMOTE_TOKEN;
   }
+  if (coldAsr) {
+    delete bbEnv.MARGINS_PARAKEET_MODEL_DIR;
+    delete bbEnv.MARGINS_PARAKEET_MODEL_KIND;
+    delete bbEnv.ORT_DYLIB_PATH;
+  }
   const hostData = path.join(bbData, "plugins/margins/host-data");
   mkdirSync(hostData, { recursive: true });
-  if (!freshRelease) writeFileSync(path.join(hostData, "asr-runtime.json"), `${JSON.stringify({ serverPath: serverBin,
+  if (!freshRelease && !coldAsr) writeFileSync(path.join(hostData, "asr-runtime.json"), `${JSON.stringify({ serverPath: serverBin,
     modelDir: asrModelDir, ortLibraryPath: ortLibrary })}\n`);
   const bbOut = openSync(path.join(artifacts, "bb.log"), "w");
   const bbErr = openSync(path.join(artifacts, "bb-errors.log"), "w");
@@ -364,6 +373,16 @@ try {
   assert(memos.some((name) => readFileSync(path.join(captureDir, name), "utf8").includes(revisedMemo)));
   shot("06-revised.png");
 
+  if (coldAsr) {
+    const cache = path.join(temporary, "cache/margins/asr");
+    await until("fresh ASR model and runtime install", () =>
+      existsSync(path.join(cache, "parakeet-tdt-0.6b-v2-int8/encoder-model.int8.onnx"))
+      && existsSync(path.join(cache, "parakeet-tdt-0.6b-v2-int8/decoder_joint-model.int8.onnx"))
+      && existsSync(path.join(cache, "parakeet-tdt-0.6b-v2-int8/vocab.txt"))
+      && existsSync(path.join(cache, "onnxruntime-linux-x64-1.24.2/lib/libonnxruntime.so.1.24.2")), 240_000);
+    // The directory rename precedes the server's readiness transition.
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
   browser(["find", "role", "button", "click", "--name", "Transcribe", "--exact"]);
 
   const transcript = await until("Parakeet transcript", () => {
@@ -371,7 +390,7 @@ try {
     const utterances = String(result.body || "").split("\n").filter((line) => /^\[\d{2}:\d{2}(?::\d{2})?\]/.test(line) && !/\] memo:/.test(line));
     return result.view === "aligned" && String(result.body).includes("Source: Headless parakeet-onnx transcript")
       && utterances.length > 0 ? result : null;
-  }, 120_000);
+  }, coldAsr ? 240_000 : 120_000);
   writeFileSync(path.join(artifacts, "transcript.json"), `${JSON.stringify(transcript, null, 2)}\n`);
   const threadIds = (value) => [...JSON.stringify(value).matchAll(/thr_[a-z0-9]+/g)].map((match) => match[0]).sort();
   const beforeNoteThreads = threadIds(bb(["thread", "list", "--project", projectId]));
@@ -380,7 +399,7 @@ try {
   const assertions = { projectId, threadOne, threadTwo, levels, memoSavedAfterStop: true, stopAcknowledged: true,
     overlayVisibleOnOtherThread: true, overlayClearOfComposerSubmit: composerClearance,
     projectCaptureFallbackAbsent: true, transcription: "parakeet-asr", transcriptObserved: true,
-    freshReleaseInstalled: freshRelease, noLlm: !realLlm };
+    freshReleaseInstalled: freshRelease, coldAsrInstalled: coldAsr, noLlm: !realLlm };
   writeFileSync(path.join(artifacts, "assertions.json"), `${JSON.stringify(assertions, null, 2)}\n`);
   if (process.env.MARGINS_E2E_HOLD_BEFORE_NOTE === "1") await holdBeforeNote();
   if (realLlm) {
@@ -475,6 +494,22 @@ try {
   if (interruptedSignal) process.stderr.write(`Harness interrupted by ${interruptedSignal}; cleaning up.\n`);
   else throw error;
 } finally {
+  if (coldAsr) {
+    const model = path.join(temporary, "cache/margins/asr/parakeet-tdt-0.6b-v2-int8");
+    const runtime = path.join(temporary, "cache/margins/asr/onnxruntime-linux-x64-1.24.2/lib/libonnxruntime.so.1.24.2");
+    const installed = {
+      modelInitiallyAbsent: true,
+      modelInstalled: existsSync(path.join(model, "encoder-model.int8.onnx"))
+        && existsSync(path.join(model, "decoder_joint-model.int8.onnx"))
+        && existsSync(path.join(model, "vocab.txt")),
+      runtimeInstalled: existsSync(runtime),
+    };
+    writeFileSync(path.join(artifacts, "cold-asr-install.json"), `${JSON.stringify(installed, null, 2)}\n`);
+    if (existsSync(path.join(bbData, "logs")) && !existsSync(path.join(artifacts, "bb-diagnostic-logs"))) {
+      cpSync(path.join(bbData, "logs"), path.join(artifacts, "bb-diagnostic-logs"), { recursive: true });
+    }
+    if (passMessage) assert(installed.modelInstalled && installed.runtimeInstalled, "Cold ASR assets were not installed");
+  }
   if (videoStarted && !browserCloseResult) try { browser(["record", "stop"]); } catch { /* keep prior evidence */ }
   const browserCleanup = await verifyBrowserClosed();
   writeFileSync(path.join(artifacts, "browser-cleanup.json"), `${JSON.stringify(browserCleanup, null, 2)}\n`);
