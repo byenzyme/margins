@@ -107,7 +107,12 @@ fn production_capture_preflights_and_opens_native_lanes_before_session_reservati
         .find("RecorderHandle::start_with_live_audio")
         .unwrap();
     assert!(create_start < create.find("create_session(").unwrap());
-    assert!(create_start < create.find("std::fs::write(&memo_path").unwrap());
+    assert!(
+        create_start
+            < create
+                .find("std::fs::write(margins_dir.join(\"current\")")
+                .unwrap()
+    );
 
     let attach = composition
         .split("fn attach_native_session")
