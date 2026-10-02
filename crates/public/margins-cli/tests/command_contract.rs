@@ -89,7 +89,7 @@ fn workspace_default_and_destination_are_explicit_json_reads() {
     assert_eq!(json["note_folder"], "inbox");
     assert_eq!(
         json["destination"],
-        vault.join("inbox").to_string_lossy().as_ref()
+        workspace.home_dir.join("inbox").to_string_lossy().as_ref()
     );
     restore_env("MARGINS_HOME", old.as_ref());
 }
