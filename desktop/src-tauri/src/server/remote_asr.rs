@@ -140,7 +140,11 @@ fn transcribe_remote_session(
 ) -> Result<String> {
     #[cfg(not(all(feature = "coreml-asr", target_os = "macos")))]
     let backend = {
-        let (model_dir, kind) = margins_media::model_registry::resolve_parakeet_model()?
+        let settings = crate::settings::load_settings();
+        let (model_dir, kind) =
+            margins_media::model_registry::resolve_parakeet_model_with_fallback(
+                settings.parakeet_model_dir.as_deref(),
+            )?
             .context("Set MARGINS_PARAKEET_MODEL_DIR to a Parakeet TDT ONNX model folder.")?;
         margins_media::providers::parakeet::ParakeetOnnxBackend::from_dir(&model_dir, kind)
             .with_context(|| format!("failed to load ASR model from {}", model_dir.display()))?
@@ -207,6 +211,9 @@ fn transcribe_remote_session(
             lane_id
         };
         channel_labels.insert(channel_order, label.to_string());
+        if mono_16k.is_empty() {
+            continue;
+        }
         #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
         entries.extend(
             margins::offline_asr::transcribe_mono_16k(&mono_16k)?

@@ -62,8 +62,8 @@ pub struct TranscribeResult {
     pub transcript_entries: usize,
 }
 
-/// Shared routing for channel-aware ASR. Two recorded lanes already identify
-/// mic and system; speaker diarization applies only to a mixed mono lane.
+/// Shared routing for channel-aware ASR. Explicit multi-speaker requests
+/// downmix before diarization, even when the source has two channels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioProcessingPolicy {
     SplitChannels,
@@ -78,10 +78,10 @@ pub fn processing_policy(channels: u16, speakers: usize) -> Result<AudioProcessi
     if speakers == 0 {
         bail!("speaker count must be at least 1");
     }
-    Ok(if channels >= 2 {
-        AudioProcessingPolicy::SplitChannels
-    } else if speakers > 1 {
+    Ok(if speakers > 1 {
         AudioProcessingPolicy::DiarizeMono
+    } else if channels >= 2 {
+        AudioProcessingPolicy::SplitChannels
     } else {
         AudioProcessingPolicy::Mono
     })
@@ -468,7 +468,7 @@ mod policy_tests {
     }
 
     #[test]
-    fn stereo_mic_system_stays_split_even_with_multiple_speakers() {
+    fn stereo_mic_system_stays_split_for_one_speaker() {
         let asr = FakeAsr::default();
         let diarizer = FakeDiarizer::default();
         let audio = AudioBuffer {
@@ -477,7 +477,7 @@ mod policy_tests {
             channels: 2,
         };
         let (entries, mode, _) =
-            transcribe_audio_buffer(&audio, 2, &asr, Some(&diarizer), &mut HashMap::new(), 500)
+            transcribe_audio_buffer(&audio, 1, &asr, Some(&diarizer), &mut HashMap::new(), 500)
                 .unwrap();
         assert_eq!(mode, "stereo_channels");
         assert_eq!(
@@ -496,9 +496,39 @@ mod policy_tests {
         );
         assert_eq!(asr.requests.lock().unwrap().len(), 2);
         assert!(diarizer.0.lock().unwrap().is_empty());
-        let (stored, channels) = prepare_import_audio(&audio, 2).unwrap();
+        let (stored, channels) = prepare_import_audio(&audio, 1).unwrap();
         assert_eq!(channels, 2);
         assert_eq!(stored, audio.samples);
+    }
+
+    #[test]
+    fn stereo_explicit_three_speakers_downmixes_and_diarizes() {
+        let asr = FakeAsr::default();
+        let diarizer = FakeDiarizer::default();
+        let audio = AudioBuffer {
+            samples: vec![0.5, -0.5, 0.5, -0.5],
+            sample_rate: 16_000,
+            channels: 2,
+        };
+        let (entries, mode, _) =
+            transcribe_audio_buffer(&audio, 3, &asr, Some(&diarizer), &mut HashMap::new(), 500)
+                .unwrap();
+        assert_eq!(mode, "diarized_mono");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.channel)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(asr.requests.lock().unwrap().len(), 1);
+        let requests = diarizer.0.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].max_speakers, Some(3));
+        let (stored, channels) = prepare_import_audio(&audio, 3).unwrap();
+        assert_eq!(channels, 1);
+        assert_eq!(stored, vec![0.0, 0.0]);
     }
 
     #[test]

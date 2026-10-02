@@ -1014,11 +1014,17 @@ impl margins_core::AsrBackend for CoreMlAsrBackend {
         &self,
         request: margins_core::AsrRequest,
     ) -> std::result::Result<margins_core::AsrResult, margins_core::TranscriptError> {
-        if request.sample_rate_hz != SAMPLE_RATE || request.samples.is_empty() {
+        if request.sample_rate_hz != SAMPLE_RATE {
             return Err(margins_core::TranscriptError {
                 code: margins_core::TranscriptErrorCode::InvalidAudio,
-                message: "CoreML ASR requires non-empty mono 16 kHz f32 PCM".into(),
+                message: "CoreML ASR requires mono 16 kHz f32 PCM".into(),
                 retryable: false,
+            });
+        }
+        if request.samples.is_empty() {
+            return Ok(margins_core::AsrResult {
+                words: Vec::new(),
+                detected_language: None,
             });
         }
         let mut backend =

@@ -1,7 +1,3 @@
-#[cfg(any(
-    all(feature = "coreml-asr", target_os = "macos"),
-    feature = "parakeet-asr"
-))]
 use crate::asr;
 use crate::asr::TranscriptWordEntry;
 #[cfg(any(
@@ -10,10 +6,6 @@ use crate::asr::TranscriptWordEntry;
 ))]
 use anyhow::Context;
 use anyhow::{bail, Result};
-#[cfg(any(
-    all(feature = "coreml-asr", target_os = "macos"),
-    feature = "parakeet-asr"
-))]
 use margins_core::{AsrBackend, AsrRequest};
 
 #[derive(Debug, Clone)]
@@ -23,6 +15,20 @@ pub struct OfflineTranscript {
 }
 
 pub fn transcribe_mono_16k(mono_16k: &[f32]) -> Result<OfflineTranscript> {
+    #[cfg(any(
+        all(feature = "coreml-asr", target_os = "macos"),
+        feature = "parakeet-asr"
+    ))]
+    if mono_16k.is_empty() {
+        return Ok(OfflineTranscript {
+            backend: if cfg!(all(feature = "coreml-asr", target_os = "macos")) {
+                "coreml"
+            } else {
+                "parakeet-onnx"
+            },
+            entries: Vec::new(),
+        });
+    }
     #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
     {
         return transcribe_mono_16k_coreml(mono_16k);
@@ -92,11 +98,10 @@ fn transcribe_mono_16k_parakeet(mono_16k: &[f32]) -> Result<OfflineTranscript> {
     })
 }
 
-#[cfg(any(
-    all(feature = "coreml-asr", target_os = "macos"),
-    feature = "parakeet-asr"
-))]
 fn transcribe_public(backend: &dyn AsrBackend, mono_16k: &[f32]) -> Result<Vec<asr::WordTiming>> {
+    if mono_16k.is_empty() {
+        return Ok(Vec::new());
+    }
     Ok(backend
         .transcribe(AsrRequest {
             samples: mono_16k.to_vec(),
@@ -108,4 +113,25 @@ fn transcribe_public(backend: &dyn AsrBackend, mono_16k: &[f32]) -> Result<Vec<a
         .iter()
         .map(asr::WordTiming::from)
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FailsIfCalled;
+
+    impl AsrBackend for FailsIfCalled {
+        fn transcribe(
+            &self,
+            _request: AsrRequest,
+        ) -> std::result::Result<margins_core::AsrResult, margins_core::TranscriptError> {
+            panic!("empty audio must not reach the provider")
+        }
+    }
+
+    #[test]
+    fn empty_audio_returns_no_words_without_calling_backend() {
+        assert!(transcribe_public(&FailsIfCalled, &[]).unwrap().is_empty());
+    }
 }

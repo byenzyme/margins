@@ -3413,15 +3413,11 @@ fn write_checkpoint(
     terminal: bool,
 ) -> Result<()> {
     let to_entries = |words: &[margins_core::TranscriptWord], channel| {
-        words
+        let timings = words
             .iter()
-            .map(|word| margins_media::transcript::TranscriptWordEntry {
-                channel,
-                start_ms: word.start_ms.saturating_add(offset_ms),
-                end_ms: word.end_ms.saturating_add(offset_ms),
-                text: word.text.clone(),
-            })
-            .collect::<Vec<_>>()
+            .map(crate::asr::WordTiming::from)
+            .collect::<Vec<_>>();
+        margins_media::transcript::words_to_transcript_entries(&timings, channel, offset_ms)
     };
     let mut entries = to_entries(&mic.committed, 0);
     entries.extend(to_entries(&system.committed, 1));
