@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""Run quick, public, full Linux, or release Mac gates on a managed Cargo lane."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import platform
+import subprocess
+import sys
+
+
+ROOT = Path(__file__).resolve().parent.parent
+LANE = ROOT / "scripts" / "cargo-lane"
+ROOT_PACKAGES = {
+    "margins",
+    "margins-cli",
+    "margins-core",
+    "margins-media",
+    "margins-meeting-protocol",
+    "margins-meeting-runtime",
+    "margins-store",
+    "margins-workflows",
+    "enzyme-core",
+}
+SERVER_MANIFEST = ROOT / "crates/public/margins-server/Cargo.toml"
+if SERVER_MANIFEST.exists():
+    ROOT_PACKAGES.add("margins-server")
+USAGE = "usage: scripts/local-gate quick <paths-or-crates>... | public | linux | macos"
+
+
+class GateFailure(Exception):
+    def __init__(self, label: str, code: int):
+        self.label = label
+        self.code = code
+
+
+class Gate:
+    def __init__(self, mode: str):
+        self.mode = mode
+        self.passed: list[str] = []
+        self.skipped: list[str] = []
+
+    def run(self, label: str, command: list[str], *, cwd: Path = ROOT, env=None) -> None:
+        print(f"\n==> {label}", flush=True)
+        try:
+            result = subprocess.run(command, cwd=cwd, env=env, check=False)
+        except OSError as exc:
+            print(f"local-gate: {exc}", file=sys.stderr)
+            raise GateFailure(label, 127) from exc
+        if result.returncode:
+            raise GateFailure(label, result.returncode)
+        self.passed.append(label)
+
+    def cargo(self, label: str, *args: str, cwd: Path = ROOT) -> None:
+        # The entrypoint re-executes inside cargo-lane's disposable target.
+        self.run(label, ["cargo", *args], cwd=cwd)
+
+    def summary(self, failed: GateFailure | None = None) -> None:
+        print(f"\nlocal-gate {self.mode}: {'FAIL' if failed else 'PASS'}")
+        for label in self.passed:
+            print(f"  PASS {label}")
+        for label in self.skipped:
+            print(f"  SKIP {label}")
+        if failed:
+            print(f"  FAIL {failed.label} (exit {failed.code})")
+
+
+def normalize_input(raw: str) -> str:
+    if raw in ROOT_PACKAGES or raw == "margins-desktop":
+        return raw
+    path = Path(raw)
+    if path.is_absolute():
+        try:
+            path = path.relative_to(ROOT)
+        except ValueError as exc:
+            raise ValueError(f"path is outside this checkout: {raw}") from exc
+    if ".." in path.parts:
+        raise ValueError(f"path must stay inside this checkout: {raw}")
+    return path.as_posix().removeprefix("./").rstrip("/")
+
+
+def quick_selection(inputs: list[str]) -> tuple[list[str], bool]:
+    packages: set[str] = set()
+    parked_desktop = False
+    global_rust = False
+    for raw in inputs:
+        item = normalize_input(raw)
+        if item in ROOT_PACKAGES:
+            packages.add(item)
+        elif item == "margins-desktop":
+            parked_desktop = True
+        elif item in {"Cargo.toml", "Cargo.lock"}:
+            global_rust = True
+        elif item in {"src", "tests", "examples"} or item.startswith(("src/", "tests/", "examples/")):
+            packages.add("margins")
+        elif item == "crates/public":
+            packages.update(package for package in ROOT_PACKAGES if package.startswith("margins-"))
+        elif item.startswith("crates/public/"):
+            parts = item.split("/")
+            if len(parts) >= 3 and parts[2] in ROOT_PACKAGES:
+                packages.add(parts[2])
+        elif item == "crates/private/recall-engine" or item.startswith("crates/private/recall-engine/"):
+            packages.add("enzyme-core")
+        elif item == "desktop" or item.startswith("desktop/"):
+            parked_desktop = True
+    if global_rust:
+        packages = ROOT_PACKAGES.copy()
+    return sorted(packages), parked_desktop
+
+
+def check_shipped_linux(gate: Gate, *, cli_already_built: bool = False) -> None:
+    if not cli_already_built:
+        gate.cargo(
+            "check portable private CLI",
+            "check", "-p", "margins", "--bin", "margins-private",
+            "--no-default-features", "--features", "recall", "--locked",
+        )
+    if SERVER_MANIFEST.exists():
+        gate.cargo(
+            "check shipped margins-server",
+            "check", "-p", "margins-server", "--bin", "margins-server",
+            "--no-default-features", "--features", "parakeet-asr", "--locked",
+        )
+
+
+def quick(gate: Gate, inputs: list[str]) -> None:
+    packages, parked_desktop = quick_selection(inputs)
+    if packages:
+        args = ["test", "--locked", "--no-default-features"]
+        for package in packages:
+            args.extend(["-p", package])
+        if "margins" in packages:
+            args.extend(["--features", "recall"])
+        gate.cargo("affected root workspace tests", *args)
+    if parked_desktop:
+        gate.skipped.append("parked desktop path")
+    check_shipped_linux(gate)
+
+
+def linux(gate: Gate) -> None:
+    gate.cargo(
+        "portable workspace and private composition tests",
+        "test", "--workspace", "--no-default-features", "--features", "recall", "--locked",
+    )
+    gate.cargo(
+        "build portable private CLI for onboarding",
+        "build", "-p", "margins", "--bin", "margins-private",
+        "--no-default-features", "--features", "recall", "--locked",
+    )
+    binary = Path(os.environ["CARGO_TARGET_DIR"]) / "debug" / "margins-private"
+    gate.run(
+        "isolated Google onboarding harness",
+        ["bash", "tests/test_e2e_fresh_onboarding.sh"],
+        env={**os.environ, "MARGINS_E2E_BIN": str(binary)},
+    )
+    gate.run(
+        "setup rollout capture contracts",
+        ["bash", "tests/test_workspace_setup_rollout_review.sh"],
+    )
+    check_shipped_linux(gate, cli_already_built=True)
+
+
+def public(gate: Gate) -> None:
+    # --all-targets compiles the binaries, libraries, and test targets before
+    # running tests. The vendored engine and its nested ese crate are both
+    # workspace members today; omit their excludes after cutover removes them.
+    excludes = []
+    for package, manifest in (
+        ("enzyme-core", ROOT / "crates/private/recall-engine/Cargo.toml"),
+        ("ese", ROOT / "crates/private/recall-engine/vendor/ese/Cargo.toml"),
+    ):
+        if manifest.exists():
+            excludes.extend(("--exclude", package))
+    gate.cargo(
+        "build and test workspace without private recall engine",
+        "test", "--workspace", *excludes, "--all-targets", "--no-default-features", "--locked",
+    )
+
+
+def macos(gate: Gate) -> None:
+    gate.cargo(
+        "build private release CLI",
+        "build", "--release", "-p", "margins", "--bin", "margins-private", "--locked",
+    )
+    gate.cargo(
+        "build public workspace targets",
+        "build", "--workspace", "--exclude", "margins", "--all-targets", "--locked",
+    )
+    gate.cargo(
+        "private composition, audio capture, CoreML, and recall integration",
+        "test", "-p", "margins", "--locked",
+    )
+    gate.cargo(
+        "public workspace tests",
+        "test", "--workspace", "--exclude", "margins", "--all-targets", "--locked",
+    )
+    if SERVER_MANIFEST.exists():
+        gate.cargo(
+            "check shipped macOS margins-server",
+            "check", "-p", "margins-server", "--bin", "margins-server",
+            "--no-default-features", "--features", "coreml-asr", "--locked",
+        )
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if not args or args[0] not in {"quick", "public", "linux", "macos"}:
+        print(USAGE, file=sys.stderr)
+        return 2
+    mode, inputs = args[0], args[1:]
+    if (mode == "quick" and not inputs) or (mode != "quick" and inputs):
+        print(USAGE, file=sys.stderr)
+        return 2
+    if mode == "macos" and platform.system() != "Darwin":
+        print("local-gate macos requires a Mac host", file=sys.stderr)
+        return 2
+    if os.environ.get("MARGINS_LOCAL_GATE_INSIDE") != "1":
+        env = {**os.environ, "MARGINS_LOCAL_GATE_INSIDE": "1"}
+        return subprocess.run(
+            [str(LANE), "disposable", "--", sys.executable, str(Path(__file__).resolve()), *args],
+            cwd=ROOT, env=env, check=False,
+        ).returncode
+    if os.environ.get("MARGINS_CARGO_LANE_MODE") != "disposable":
+        print("local-gate requires a disposable cargo-lane process", file=sys.stderr)
+        return 2
+    gate = Gate(mode)
+    failure = None
+    try:
+        if mode == "quick":
+            quick(gate, inputs)
+        elif mode == "public":
+            public(gate)
+        elif mode == "linux":
+            linux(gate)
+        else:
+            macos(gate)
+    except ValueError as exc:
+        print(f"local-gate: {exc}", file=sys.stderr)
+        return 2
+    except GateFailure as exc:
+        failure = exc
+    gate.summary(failure)
+    return failure.code if failure else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
