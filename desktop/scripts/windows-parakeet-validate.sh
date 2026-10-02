@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-target_dir="${CARGO_TARGET_DIR:-/Users/example/Hacks/margins-cargo-target}"
+target_dir="${CARGO_TARGET_DIR:-${HOME}/.cache/margins-cargo-target}"
 sdk_version="${MARGINS_XWIN_SDK_VERSION:-10.0.22621}"
 
 export CARGO_TARGET_DIR="$target_dir"

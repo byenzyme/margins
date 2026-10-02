@@ -35,4 +35,4 @@ Working tree holds the combined diff (35 files, +2221/−606, includes pre-exist
 
 - Models: opus = spec/review/harness judgment, sonnet = implement, haiku = mechanical. NEVER fable inside workflows — fable orchestrates only.
 - Never git checkout/restore/stash; branch has in-flight changes. Do not commit.
-- Typecheck: cd desktop && npx tsc --noEmit. Rust: export CARGO_TARGET_DIR=/Users/example/Hacks/margins-cargo-target.
+- Typecheck: cd desktop && npx tsc --noEmit. Rust: export CARGO_TARGET_DIR=$HOME/.cache/margins-cargo-target.

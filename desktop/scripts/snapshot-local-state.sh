@@ -14,7 +14,7 @@ DESKTOP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TAURI_DIR="$DESKTOP_DIR/src-tauri"
 
 OUT="${MARGINS_SNAPSHOT_OUT:-$DESKTOP_DIR/test-harness/local-snapshot.json}"
-CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/Users/example/Hacks/margins-cargo-target}"
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${HOME}/.cache/margins-cargo-target}"
 export CARGO_TARGET_DIR
 
 echo "Building + running snapshot export (this reuses the shared cargo target cache)..."

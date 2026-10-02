@@ -41,7 +41,7 @@ const GROUND_RULES = `Ground rules (non-negotiable):
 - Repo: Margins, a Tauri meeting-capture app. Frontend in desktop/src (TS + styles.css), Rust in desktop/src-tauri.
 - The working tree has in-flight uncommitted changes on branch margins-tauri-desktop-pi-sdk. NEVER run git checkout/restore/stash/reset or revert anything you did not write.
 - Do not commit. Leave changes in the working tree.
-- Typecheck after editing: cd desktop && npx tsc --noEmit. For Rust: export CARGO_TARGET_DIR=/Users/example/Hacks/margins-cargo-target then cargo check from desktop/src-tauri.
+- Typecheck after editing: cd desktop && npx tsc --noEmit. For Rust: export CARGO_TARGET_DIR=$HOME/.cache/margins-cargo-target then cargo check from desktop/src-tauri.
 - Match existing code style. UI copy must follow docs/app-copy-guidelines.md.`
 
 const tiers = (args && args.tiers) || [0]
@@ -139,7 +139,7 @@ Item #${item.id}: ${item.title}
 SPEC:
 ${JSON.stringify(spec, null, 2)}
 
-Read each file in the spec before editing. After all edits run: cd desktop && npx tsc --noEmit (and cargo check with CARGO_TARGET_DIR=/Users/example/Hacks/margins-cargo-target if you touched Rust). If the spec conflicts with what you find in the code, implement the closest faithful version and record the deviation in notes — do not silently skip.
+Read each file in the spec before editing. After all edits run: cd desktop && npx tsc --noEmit (and cargo check with CARGO_TARGET_DIR=$HOME/.cache/margins-cargo-target if you touched Rust). If the spec conflicts with what you find in the code, implement the closest faithful version and record the deviation in notes — do not silently skip.
 
 ${GROUND_RULES}`,
         { label: `impl:#${item.id}`, phase: 'Implement', schema: IMPL_SCHEMA, model: item.mechanical ? 'haiku' : 'sonnet' }

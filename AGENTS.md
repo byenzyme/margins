@@ -107,8 +107,9 @@ The Codex plugin is parked outside core; see
 - These are seams over existing contracts, not new surfaces. Do not introduce a
   second setup protocol, a new anchor schema, or a write/update mode for `scan`,
   and do not conflate setup with distillation.
-- Preserve both verification lanes in `docs/setup-e2e-lanes.md`: the exact
-  credential-free public export and the separate hosted grounded-review lane.
+- Preserve both verification lanes in `docs/setup-e2e-lanes.md`: the
+  credential-free public source lane and the separate hosted grounded-review
+  lane.
 
 ## Portable and macOS Platform Test Lanes
 
@@ -120,17 +121,17 @@ mode is required.
 scripts/local-gate quick src/cli.rs crates/public/margins-workflows
 scripts/local-gate quick integrations/bb-plugin-margins/src
 scripts/local-gate public
-scripts/local-gate linux
+scripts/with-private-recall scripts/local-gate linux
 # On the attached Mac host:
-scripts/local-gate macos
+scripts/with-private-recall scripts/local-gate macos
 ```
 
 `quick` accepts changed paths or Cargo package names. It tests affected root
 workspace crates and their reverse dependents, then checks shipped binaries.
 BB plugin paths also run its typecheck, tests, build, and committed `dist/`
 check; `desktop/` paths are reported as parked. `public` builds and tests the
-root workspace with default features disabled and the private recall engine
-and its nested `ese` crate excluded.
+root workspace with default features disabled and no private git source in its
+manifest or lockfile.
 `linux` runs the full portable recall suite, the isolated
 Google onboarding fixture, setup rollout contracts, BB plugin checks, and shipped
 Linux binary checks. `macos` runs the native private and public composition suites and checks
@@ -146,7 +147,7 @@ desktop app. For the shipped project server, check `desktop/src-tauri` with
 `scripts/cargo-lane shared`.
 
 ```bash
-scripts/cargo-lane disposable -- cargo test --workspace --no-default-features --features recall
+scripts/with-private-recall scripts/cargo-lane disposable -- cargo test --workspace --no-default-features --features recall
 # Parked desktop-only test:
 cargo test -p margins-desktop \
   --manifest-path desktop/src-tauri/Cargo.toml \

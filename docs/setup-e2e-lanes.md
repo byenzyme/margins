@@ -2,20 +2,22 @@
 
 Margins has two intentionally separate setup end-to-end lanes.
 
-## Exact public export
+## Public source
 
-The public lane materializes the literal allowlisted export, verifies it,
-builds `margins-public` from that exported tree with no provider credentials,
-checks that the exported skill and `note --print` handoff start from the latest
-Margins session, and exercises `workspace new`, `init`, `sync`, live local
-recall, Workspace/Source reporting, and Markdown source immutability:
+The public lane builds and tests the root workspace with recall off and no
+enzyme-rust access. The credential-free setup harness remains available for
+the public CLI binary built from this tree:
 
 ```bash
-scripts/e2e-public-export-workspace-setup.sh
+scripts/local-gate public
+scripts/cargo-lane shared -- cargo build -p margins-cli --bin margins-public --no-default-features --locked
+MARGINS_BIN="$(scripts/cargo-lane target-dir)/debug/margins-public" \
+  scripts/e2e-fresh-workspace-setup.sh synthetic
 ```
 
-It uses `scripts/cargo-lane disposable`; the temporary export, Cargo target,
-HOME, and MARGINS_HOME are removed on exit.
+The setup harness exercises `workspace new`, `init`, `sync`, Workspace/Source
+reporting, and Markdown Source immutability in temporary HOME and MARGINS_HOME.
+Recall lookup and generation are covered by the separate official lane.
 
 ## Official hosted composition
 
@@ -23,7 +25,7 @@ This lane spends hosted model resources. Build the official CLI on the shared
 lane, then provide an already brokered credential bundle by absolute path:
 
 ```bash
-scripts/cargo-lane shared -- cargo build --bin margins-private \
+scripts/with-private-recall scripts/cargo-lane shared -- cargo build --bin margins-private \
   --no-default-features --features recall
 MARGINS_E2E_BIN="$(scripts/cargo-lane target-dir)/debug/margins-private" \
 MARGINS_E2E_HOSTED_BUNDLE_SOURCE=/absolute/path/to/llm-config-cache.json \

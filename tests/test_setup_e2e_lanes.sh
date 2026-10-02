@@ -189,7 +189,7 @@ if grep -Fq 'fixture-secret' "$RUN_ROOT/official.out" "$OFFICIAL_LOG"; then
   exit 1
 fi
 for script in \
-  "$REPO_ROOT/scripts/e2e-public-export-workspace-setup.sh" \
+  "$REPO_ROOT/scripts/e2e-fresh-workspace-setup.sh" \
   "$REPO_ROOT/scripts/e2e-official-hosted-workspace-setup.sh"; do
   if grep -Eiq 'anchor[-_ ]?schema' "$script"; then
     printf 'setup E2E script depends on a forbidden schema: %s\n' "$script" >&2

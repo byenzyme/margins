@@ -8,10 +8,9 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 const defaults = {
   sessionName: "2026-06-24-13-47",
-  vault: "/Users/example/obsidian",
-  marginsDir: "/Users/example/obsidian/inbox/.margins",
-  piSession:
-    "/Users/example/obsidian/inbox/.margins/pi-sessions/--Users-joshuapham-obsidian--/2026-06-24T21-33-02.222Z_fd99524c.jsonl",
+  vault: process.env.MARGINS_DISTILL_PERF_VAULT || join(process.env.HOME || "/tmp", "obsidian"),
+  marginsDir: process.env.MARGINS_DISTILL_PERF_DIR || join(process.env.HOME || "/tmp", "obsidian/inbox/.margins"),
+  piSession: process.env.MARGINS_DISTILL_PERF_PI_SESSION || "",
   query:
     "Cameron DGX Spark local AI box visible agent thinking home appliance trust Qwen VPS workflow",
 };
@@ -20,6 +19,9 @@ const args = parseArgs(process.argv.slice(2));
 const sessionName = args.sessionName || defaults.sessionName;
 const marginsDir = args.marginsDir || defaults.marginsDir;
 const piSession = args.piSession || defaults.piSession;
+if (!piSession) {
+  throw new Error("Pass --pi-session or set MARGINS_DISTILL_PERF_PI_SESSION");
+}
 const vault = args.vault || defaults.vault;
 const query = args.query || defaults.query;
 

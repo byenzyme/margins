@@ -31,6 +31,22 @@ Born from two years of the same workflow: record, take sparse notes, transcribe,
 
 ## Install
 
+### Build from source
+
+Contributors can build the public CLI and run the full public workspace gate
+without credentials for the private Enzyme recall engine:
+
+```bash
+scripts/local-gate public
+scripts/cargo-lane shared -- cargo build -p margins-cli --bin margins-public --no-default-features --locked
+```
+
+The root lockfile has no private git dependency. Official recall builds inject
+the pinned engine through `scripts/with-private-recall` and require read access
+to `byenzyme/enzyme-rust`. To use Google integration in a source build, supply
+your own Desktop OAuth client JSON through `MARGINS_GOOGLE_OAUTH_CLIENT_FILE` or
+`MARGINS_GOOGLE_OAUTH_CLIENT_JSON`. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ### Official CLI
 
 Homebrew and GitHub Release binaries are official builds from the private

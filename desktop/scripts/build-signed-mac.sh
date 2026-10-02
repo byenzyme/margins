@@ -54,7 +54,7 @@ restore_if_preexisting APPLE_API_KEY "$PRESET_APPLE_API_KEY_VALUE" "${PRESET_APP
 restore_if_preexisting APPLE_API_KEY_PATH "$PRESET_APPLE_API_KEY_PATH_VALUE" "${PRESET_APPLE_API_KEY_PATH:+1}"
 
 APP_NAME="${MARGINS_APP_NAME:-Margins}"
-CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/Users/example/Hacks/margins-cargo-target}"
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${HOME}/.cache/margins-cargo-target}"
 TAURI_CONFIG="${MARGINS_TAURI_CONFIG:-tauri.bundle-mac.conf.json}"
 TAURI_BUNDLES="${MARGINS_TAURI_BUNDLES:-app,dmg}"
 
