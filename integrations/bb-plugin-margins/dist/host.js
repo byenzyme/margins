@@ -33979,7 +33979,7 @@ function pendingWorkspaceSetupMarker(workspaceId) {
 async function workspaceOptions() {
   const binary = marginsCli();
   const env = { ...process.env, MARGINS_HOME: marginsHome() };
-  const { stdout } = await execFile2(binary, ["workspace", "list", "--json"], { env, timeout: 5e3, maxBuffer: 65536 });
+  const { stdout } = await execFile2(binary, ["workspace", "list", "--json"], { env, timeout: 15e3, maxBuffer: 65536 });
   const listing = JSON.parse(stdout);
   if (!Array.isArray(listing.workspaces) || !listing.workspaces.every((item) => item && typeof item === "object" && typeof item.id === "string" && (item.name === null || typeof item.name === "string"))) {
     throw new Error("Margins Workspace list is unavailable.");
@@ -33992,7 +33992,7 @@ async function workspaceOptions() {
   let autoSelected = false;
   if (!defaultWorkspaceId && workspaces.length === 1) {
     const selected = workspaces[0].id;
-    await execFile2(binary, ["workspace", "default", "--set", selected, "--json"], { env, timeout: 5e3, maxBuffer: 65536 });
+    await execFile2(binary, ["workspace", "default", "--set", selected, "--json"], { env, timeout: 15e3, maxBuffer: 65536 });
     defaultWorkspaceId = selected;
     autoSelected = true;
   }

@@ -133,6 +133,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   const pendingDraftText = useRef("");
   const pendingNativeStart = useRef<{ projectId: string; existing: Set<string>; startedAt: number; accepted: boolean } | null>(null);
   const observedLiveSession = useRef<string | null>(null);
+  const refreshInFlight = useRef<Promise<void> | null>(null);
   const client = useRef(detectClientCapabilities()).current;
   const selected = meetings.find((item) => item.sessionId === selectedId)
     || (selectedId ? openedSummaries.get(`${projectId}/${selectedId}`) : undefined);
@@ -160,7 +161,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     return () => { disposed = true; };
   }, [client.platform]);
 
-  const refresh = useCallback(async () => {
+  const refreshNow = useCallback(async () => {
     if (!projectId) return;
     const options = await rpc.call("availableWorkspaces", { projectId });
     setWorkspaceOptions(options.workspaces);
@@ -222,6 +223,15 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
         || recent[0]?.sessionId || null;
     });
   }, [projectId, selectedId, rpc, client.clientId]);
+  const refresh = useCallback((): Promise<void> => {
+    if (refreshInFlight.current) return refreshInFlight.current;
+    const task = refreshNow();
+    refreshInFlight.current = task;
+    void task.finally(() => {
+      if (refreshInFlight.current === task) refreshInFlight.current = null;
+    }).catch(() => undefined);
+    return task;
+  }, [refreshNow]);
   useEffect(() => {
     void refresh().catch((error) => setMessage(String(error)));
     const timer = setInterval(() => void refresh().catch(() => undefined), 3_000);
@@ -252,17 +262,32 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   useEffect(() => {
     if (!projectId || !selectedId) { setMeeting(null); return; }
     let cancelled = false;
-    void rpc.call("readWorkspaceMeeting", { projectId, sessionId: selectedId }).then((result) => {
-      if (cancelled || !result.ok || !result.meeting) return;
-      rememberMeeting(`${projectId}/${selectedId}`, result.meeting);
-      setMeeting(result.meeting);
-      revision.current = result.meeting.notepad.revision;
-      if (!dirty.current) {
-        setDraft(result.meeting.notepad.text);
-        latestDraft.current = result.meeting.notepad.text;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    const retry = () => { if (!cancelled) retryTimer = setTimeout(() => void read(), 1_500); };
+    const read = async () => {
+      try {
+        const result = await rpc.call("readWorkspaceMeeting", { projectId, sessionId: selectedId });
+        if (cancelled) return;
+        if (!result.ok || !result.meeting) {
+          setMessage(result.ok ? "Meeting memo is unavailable." : result.error.message);
+          retry();
+          return;
+        }
+        rememberMeeting(`${projectId}/${selectedId}`, result.meeting);
+        setMeeting(result.meeting);
+        revision.current = result.meeting.notepad.revision;
+        if (!dirty.current) {
+          setDraft(result.meeting.notepad.text);
+          latestDraft.current = result.meeting.notepad.text;
+        }
+      } catch (error) {
+        if (cancelled) return;
+        setMessage(String(error));
+        retry();
       }
-    }).catch((error) => { if (!cancelled) setMessage(String(error)); });
-    return () => { cancelled = true; };
+    };
+    void read();
+    return () => { cancelled = true; if (retryTimer) clearTimeout(retryTimer); };
   }, [projectId, selectedId, rpc]);
 
   useEffect(() => {
@@ -464,8 +489,11 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
       }
       const next = await browserCaptureOwner.startFromProject(projectId);
       if (next.error) throw new Error(next.error.message);
+      if (next.sessionId) {
+        setSelectedId(next.sessionId);
+        navigate.toPluginPanel("meetings", { subPath: `${projectId}/${next.sessionId}` });
+      }
       await refresh();
-      if (next.sessionId) setSelectedId(next.sessionId);
     } catch (error) { setMessage(String(error)); }
   }
   async function connectMenu() {
@@ -748,7 +776,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
             </div>
           </div>}
         </footer>
-      </> : selectedId && panel?.state !== "unavailable" ? <div className="margins-meetings-empty" role="status"><h2>{selected?.title || (selected ? `Meeting · ${meetingTime(selected.startedAt)}` : "Opening meeting…")}</h2><p>Opening memo…</p></div>
+      </> : selectedId && panel?.state !== "unavailable" ? <div className="margins-meetings-empty" role="status"><h2>{selected?.title || (selected ? `Meeting · ${meetingTime(selected.startedAt)}` : "Opening meeting…")}</h2><p>Opening memo…</p>{message && <p role="alert">{message}</p>}</div>
       : panel?.state !== "unavailable" && <div className="margins-meetings-empty"><h2>{archived.length ? "No recent meetings" : "No meetings yet"}</h2>{workspaceNotice && <p>{workspaceNotice}</p>}{resolvedWorkspaceName && <p>Save to {resolvedWorkspaceName} · Started from {projects.find((item) => item.id === projectId)?.name || "this project"}</p>}{meetings.length === 0 && <button onClick={() => void start()}>Start meeting</button>}
         {message && <p role="alert">{message}</p>}</div>}
     </section>
