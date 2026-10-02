@@ -3,6 +3,8 @@ name: CI
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -29,7 +31,13 @@ jobs:
       - name: Exercise ecological setup rollout capture hard gates
         run: tests/test_workspace_setup_rollout_review.sh
 
+      - name: Test portable workspace
+        run: cargo test --workspace --no-default-features --features recall
+
+  # macOS release builds are slow and billed at a premium, so PRs rely on the
+  # portable Linux lane above and this runs on main and manual dispatch.
   build:
+    if: github.event_name != 'pull_request'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
