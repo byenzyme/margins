@@ -123,7 +123,7 @@ pub fn configure_env() -> Result<()> {
     if std::env::var_os("MARGINS_MANAGED_ASR_MODEL").is_some()
         && std::env::var_os("MARGINS_PARAKEET_MODEL_KIND").is_none()
     {
-        std::env::set_var("MARGINS_PARAKEET_MODEL_KIND", "tdt-v2");
+        std::env::set_var("MARGINS_PARAKEET_MODEL_KIND", "tdt");
     }
     Ok(())
 }

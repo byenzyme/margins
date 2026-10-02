@@ -92,13 +92,14 @@ test focused on release installation rather than a separate model download.
 
 ## Empty model cache development lane
 
-Set `MARGINS_E2E_COLD_ASR=1` with a locally built `MARGINS_E2E_SERVER_BIN`
-that supports automatic ASR setup, and omit `MARGINS_E2E_FRESH_RELEASE`,
-`MARGINS_E2E_ASR_MODEL_DIR`, and `MARGINS_E2E_ORT_LIBRARY`. The runner gives
+Set `MARGINS_E2E_COLD_ASR=1` and omit `MARGINS_E2E_ASR_MODEL_DIR` and
+`MARGINS_E2E_ORT_LIBRARY`. Use a locally built `MARGINS_E2E_SERVER_BIN` to
+test development changes, or add `MARGINS_E2E_FRESH_RELEASE=1` to test the
+published release. The runner gives
 the isolated BB host an empty `XDG_CACHE_HOME`, records while the server
 downloads its pinned model and ONNX Runtime, waits for both assets before
 clicking Transcribe, and requires a spoken transcript. This downloads about
 654 MB and removes the temporary cache on exit. `cold-asr-install.json` and
 the BB logs in the artifact folder record what was installed. This lane does
-not prove that the currently published release includes automatic setup; use
-the published-release lane above for that claim after shipping a new runtime.
+not by itself prove the published release includes automatic setup; combine it
+with the published-release lane above for that claim.
