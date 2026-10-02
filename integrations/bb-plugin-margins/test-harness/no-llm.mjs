@@ -19,7 +19,6 @@ const required = (name) => {
 const marginsBin = required("MARGINS_E2E_BIN");
 const freshRelease = process.env.MARGINS_E2E_FRESH_RELEASE === "1";
 const coldAsr = process.env.MARGINS_E2E_COLD_ASR === "1";
-if (freshRelease && coldAsr) throw new Error("Cold ASR requires a server build with automatic model setup; omit MARGINS_E2E_FRESH_RELEASE");
 const serverBin = freshRelease ? null : required("MARGINS_E2E_SERVER_BIN");
 const bbApp = required("MARGINS_E2E_BB_APP");
 const chromeBin = required("MARGINS_E2E_CHROME_BIN");
