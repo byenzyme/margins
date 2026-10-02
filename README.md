@@ -16,6 +16,8 @@ Most meeting summaries help humans keep record, but agents need something more b
 
     brew install byenzyme/margins/margins
 
+Building from source: see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 **2. Download local models and copy the setup handoff.** Run this from the folder you want to use as the Margins base, then paste the printed prompt into your agent.
 
     margins setup
