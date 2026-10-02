@@ -18,10 +18,9 @@ npm run build
 cd ..
 
 # Build the server binary.
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$(pwd)/target}"
-cargo build --manifest-path desktop/src-tauri/Cargo.toml \
+scripts/cargo-lane shared -- cargo build --manifest-path desktop/src-tauri/Cargo.toml \
   --bin margins-server \
-  --features server
+  --no-default-features --features hosted-web
 
 # Start the web app.
 npx --yes ./packages/margins
@@ -93,4 +92,4 @@ On startup, the launcher:
 - Downloading server binaries from GitHub Releases is wired in but not the primary local workflow yet.
 - The auth token is automatically printed on startup if one exists
 - Use `Ctrl+C` to gracefully shut down the server
-- System-audio capture, native file dialogs, app restart/install actions, and some desktop integrations are native-app-only.
+- This launcher serves the browser app and does not provide native system-audio capture or Mac app controls.

@@ -1,5 +1,8 @@
 # Margins for Codex
 
+**Parked (2026-10-02):** This integration is outside the core product and may
+be revived later. Its files remain here for reference.
+
 This local Codex plugin connects to one existing Margins Workspace service. It
 lets Codex check transcription readiness, list meetings, read a transcript,
 open an editable memo pad, follow one meeting's status and transcript in a

@@ -2,16 +2,9 @@ import AppKit
 import AVFoundation
 import SwiftUI
 
-enum CaptureMode: String, CaseIterable, Identifiable {
-    case mac = "On this Mac"
-    case project = "BB project"
-    var id: String { rawValue }
-}
-
 @MainActor
 final class MenuRecorder: ObservableObject {
     private let preferences = UserDefaults(suiteName: ProcessInfo.processInfo.environment["MARGINS_MENU_SETTINGS_DOMAIN"] ?? "com.byenzyme.margins.menu") ?? .standard
-    @Published var mode: CaptureMode = .mac { didSet { preferences.set(mode.rawValue, forKey: "destination") } }
     @Published var setupComplete = false { didSet { preferences.set(setupComplete, forKey: "setupComplete") } }
     @Published var title = "Meeting"
     @Published var remote = ProcessInfo.processInfo.environment["MARGINS_MENU_REMOTE"] ?? "" { didSet { preferences.set(remote, forKey: "remote") } }
@@ -27,13 +20,10 @@ final class MenuRecorder: ObservableObject {
     @Published var microphonePermission = "unknown"
     private(set) var connectedOrigin: String?
 
-    private var generation: Int?
     private var pairingServer: MenuPairingServer?
     private var grantToken: String?
     private var grantExpiresAt: Int64?
     private var bbMachineCredential: String?
-    private var localSilenceSince: Date?
-    private var localHeardAudio = false
     private var bridgeToken: String?
     private var bridgePID: Int32?
     private var pairDirectory: URL?
@@ -41,16 +31,14 @@ final class MenuRecorder: ObservableObject {
     private let bridgeOrigin = "http://127.0.0.1:18766"
 
     init() {
-        if let saved = preferences.string(forKey: "destination"), let destination = CaptureMode(rawValue: saved) {
-            mode = destination
-        }
         if ProcessInfo.processInfo.environment["MARGINS_MENU_REMOTE"] == nil {
             remote = preferences.string(forKey: "remote") ?? ""
         }
         if ProcessInfo.processInfo.environment["MARGINS_MENU_WORKSPACE"] == nil {
             workspace = preferences.string(forKey: "workspace") ?? ""
         }
-        setupComplete = preferences.bool(forKey: "setupComplete")
+        setupComplete = preferences.bool(forKey: "setupComplete") &&
+            preferences.string(forKey: "destination") == "BB project"
         microphoneChoice = preferences.string(forKey: "microphoneName") ?? ""
         refreshMicrophones()
         do { pairingServer = try MenuPairingServer(recorder: self) }
@@ -86,7 +74,7 @@ final class MenuRecorder: ObservableObject {
         microphoneBusy = true
         defer { microphoneBusy = false }
         do {
-            if mode == .project && bridgeToken != nil {
+            if bridgeToken != nil {
                 let selection: Any = name.isEmpty ? NSNull() as Any : name as Any
                 _ = try await bridgeRequest("/v1/microphone", body: ["deviceName": selection])
             }
@@ -98,7 +86,7 @@ final class MenuRecorder: ObservableObject {
     }
 
     func requestMicrophonePermission() async {
-        guard mode == .project && bridgeToken != nil && !active && !microphoneBusy else { return }
+        guard bridgeToken != nil && !active && !microphoneBusy else { return }
         microphoneBusy = true
         do {
             _ = try await bridgeRequest("/v1/microphone-permission", body: [:])
@@ -115,19 +103,9 @@ final class MenuRecorder: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
-    func chooseMac() async {
-        error = nil
-        mode = .mac
-        do {
-            try await ensureLocalRecorder()
-            setupComplete = true
-            await refresh()
-        } catch { self.error = error.localizedDescription }
-    }
-
     func chooseProject() async {
         error = nil
-        mode = .project
+        preferences.set("BB project", forKey: "destination")
         do {
             try await connectBridge()
             setupComplete = true
@@ -168,7 +146,7 @@ final class MenuRecorder: ObservableObject {
         if bridgeToken != nil { await disconnect() }
         remote = "http://127.0.0.1:18764/api/v1/plugins/margins/http/menu/relay"
         workspace = grant.workspaceId
-        mode = .project
+        preferences.set("BB project", forKey: "destination")
         connectedOrigin = origin
         bbMachineCredential = machineCredential
         grantToken = grant.token
@@ -220,39 +198,6 @@ final class MenuRecorder: ObservableObject {
         return relay
     }
 
-    private func ensureLocalRecorder() async throws {
-        if let discovery = try? readDiscovery(),
-           (try? await request(discovery.baseURL + "/v1/live/snapshot", token: discovery.token)) != nil {
-            return
-        }
-        let bundled = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/Margins Live.app").path
-        guard let app = ProcessInfo.processInfo.environment["MARGINS_MENU_LIVE_APP"] ??
-                (FileManager.default.fileExists(atPath: bundled) ? bundled : nil) else {
-            throw MenuError("Install the Margins recorder to record on this Mac")
-        }
-        var arguments = ["-n"]
-        for (source, target) in [("MARGINS_MENU_LOCAL_HOME", "MARGINS_HOME"),
-                                 ("MARGINS_MENU_LOCAL_PROFILE", "MARGINS_PROFILE"),
-                                 ("MARGINS_MENU_LOCAL_WORK_DIR", "MARGINS_WORK_DIR")] {
-            if let value = ProcessInfo.processInfo.environment[source] { arguments += ["--env", "\(target)=\(value)"] }
-        }
-        arguments += ["-a", app]
-        let launcher = Process()
-        launcher.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        launcher.arguments = arguments
-        try launcher.run()
-        launcher.waitUntilExit()
-        guard launcher.terminationStatus == 0 else { throw MenuError("Could not launch the Mac recorder") }
-        for _ in 0..<100 {
-            if let discovery = try? readDiscovery(),
-               (try? await request(discovery.baseURL + "/v1/live/snapshot", token: discovery.token)) != nil {
-                return
-            }
-            try await Task.sleep(for: .milliseconds(100))
-        }
-        throw MenuError("Mac recorder did not become ready")
-    }
-
     func refresh() async {
         if microphoneBusy { return }
         refreshMicrophones()
@@ -272,33 +217,7 @@ final class MenuRecorder: ObservableObject {
                 }
                 self.grantExpiresAt = expires
             }
-            if mode == .mac {
-                try await ensureLocalRecorder()
-                let discovery = try readDiscovery()
-                let snapshot = try await request(discovery.baseURL + "/v1/live/snapshot", token: discovery.token)
-                let session = snapshot["session"] as? [String: Any]
-                let previousSession = sessionID
-                let previousState = state
-                sessionID = session?["session_id"] as? String
-                generation = session?["generation"] as? Int
-                state = session?["status"] as? String ?? "ready"
-                let health = snapshot["health"] as? [String: Any]
-                if state == "recording" {
-                    if previousState != "recording" || previousSession != sessionID {
-                        localSilenceSince = Date()
-                        localHeardAudio = false
-                    }
-                    if (health?["microphone_peak_milli"] as? Int ?? 0) > 10 { localHeardAudio = true }
-                } else {
-                    localSilenceSince = nil
-                    localHeardAudio = false
-                }
-                let system = (health?["system_audio_observed"] as? Bool) == true ? "system audio seen" : "waiting for system audio"
-                let lines = (snapshot["rolling_transcript"] as? [[String: Any]])?.count ?? 0
-                status = localSilenceSince.map { !localHeardAudio && Date().timeIntervalSince($0) >= 3 } == true
-                    ? "No audio — check Margins Menu microphone permission"
-                    : session == nil ? "Mac recorder ready" : "\(state) · \(system) · \(lines) transcript lines"
-            } else if bridgeToken != nil {
+            if bridgeToken != nil {
                 let snapshot = try await bridgeRequest("/v1/status")
                 let permission = try await bridgeRequest("/v1/microphone-permission")
                 microphonePermission = permission["status"] as? String ?? "unknown"
@@ -316,7 +235,7 @@ final class MenuRecorder: ObservableObject {
                     ? "Open Meetings in bb to reconnect" : "Connect the Mac bridge to the BB project"
             }
         } catch {
-            status = mode == .mac ? "Mac recorder is unavailable" : "Mac bridge is unavailable"
+            status = "Mac bridge is unavailable"
             if active { self.error = error.localizedDescription }
         }
     }
@@ -324,22 +243,16 @@ final class MenuRecorder: ObservableObject {
     func start() async {
         error = nil
         do {
-            if mode == .project && !microphoneChoice.isEmpty && !microphones.contains(microphoneChoice) {
+            if !microphoneChoice.isEmpty && !microphones.contains(microphoneChoice) {
                 throw MenuError("\(microphoneChoice) is unavailable. Choose another microphone before recording.")
             }
-            if mode == .mac {
-                let discovery = try readDiscovery()
-                _ = try await request(discovery.baseURL + "/v1/live/start", token: discovery.token,
-                                      body: ["operation_id": UUID().uuidString, "name": title])
-            } else {
-                if bridgeToken == nil {
-                    if remote.contains("/plugins/margins/http/menu/relay") && grantToken == nil {
-                        throw MenuError("Reconnect from the Meetings page in bb")
-                    }
-                    try await connectBridge(origin: connectedOrigin, remoteToken: grantToken)
+            if bridgeToken == nil {
+                if remote.contains("/plugins/margins/http/menu/relay") && grantToken == nil {
+                    throw MenuError("Reconnect from the Meetings page in bb")
                 }
-                _ = try await bridgeRequest("/v1/start", body: ["title": title])
+                try await connectBridge(origin: connectedOrigin, remoteToken: grantToken)
             }
+            _ = try await bridgeRequest("/v1/start", body: ["title": title])
             await refresh()
         } catch { self.error = error.localizedDescription }
     }
@@ -347,15 +260,7 @@ final class MenuRecorder: ObservableObject {
     func control(_ action: String) async {
         error = nil
         do {
-            if mode == .mac {
-                guard let sessionID else { throw MenuError("Mac recorder has no active session") }
-                let discovery = try readDiscovery()
-                var body: [String: Any] = ["operation_id": UUID().uuidString, "session_id": sessionID]
-                if let generation { body["expected_generation"] = generation }
-                _ = try await request(discovery.baseURL + "/v1/live/\(action)", token: discovery.token, body: body)
-            } else {
-                _ = try await bridgeRequest("/v1/\(action)", body: [:])
-            }
+            _ = try await bridgeRequest("/v1/\(action)", body: [:])
             await refresh()
         } catch { self.error = error.localizedDescription }
     }
@@ -449,20 +354,6 @@ final class MenuRecorder: ObservableObject {
                                  origin: bridgeOrigin, body: body)
     }
 
-    private func readDiscovery() throws -> (baseURL: String, token: String) {
-        let fallback = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/margins/desktop-live.v1.json").path
-        let path = ProcessInfo.processInfo.environment["MARGINS_MENU_LOCAL_DISCOVERY"] ?? fallback
-        let data = try Data(contentsOf: URL(fileURLWithPath: path))
-        guard let value = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let baseURL = value["base_url"] as? String,
-              let url = URL(string: baseURL), url.scheme == "http", url.host == "127.0.0.1",
-              let token = value["token"] as? String else {
-            throw MenuError("Invalid local recorder discovery file")
-        }
-        return (baseURL, token)
-    }
-
     private func request(_ endpoint: String, token: String?, origin: String? = nil,
                          body: [String: Any]? = nil) async throws -> [String: Any] {
         guard let url = URL(string: endpoint) else { throw MenuError("Invalid recorder URL") }
@@ -508,16 +399,15 @@ private struct RecorderControls: View {
                 Text("Open Meetings in bb, set up a Workspace if asked, then click Connect. bb sends it here automatically.")
                     .font(.caption).foregroundStyle(.secondary)
                 Divider()
-                Button("On this Mac") { Task { await recorder.chooseMac() } }
                 DisclosureGroup("Manual connection (advanced)", isExpanded: $showManualConnection) {
                     TextField("SSH alias or HTTPS URL", text: $recorder.remote)
                     TextField("Workspace ID", text: $recorder.workspace)
                     Button("Connect Workspace") { Task { await recorder.chooseProject() } }
                 }
             } else {
-                Text(recorder.connectedWorkspaceName ?? recorder.mode.rawValue).font(.subheadline)
+                Text(recorder.connectedWorkspaceName ?? "BB project").font(.subheadline)
                 Text(recorder.status).font(.caption).foregroundStyle(.secondary)
-                if recorder.mode == .project {
+                Group {
                     Picker("Microphone", selection: Binding(
                         get: { recorder.microphoneChoice },
                         set: { choice in Task { await recorder.chooseMicrophone(choice) } }

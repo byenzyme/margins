@@ -4,6 +4,14 @@ This file is the canonical map for agents working in this repo. `CLAUDE.md`
 contains legacy/project notes, but new agent-facing workflow instructions should
 land here first.
 
+As of 2026-10-02, the shipped product is the `margins` CLI/TUI and the bb
+plugin's `margins-server`. The Tauri desktop app and `margins-live` are parked.
+The desktop commands below remain as historical development instructions; do
+not use app reinstall, desktop release, or live-runtime flows for core work.
+`desktop/src-tauri` still contains the hosted-web server until extraction.
+The Codex plugin is parked outside core; see
+`integrations/margins-codex/README.md` for its retained source.
+
 ## Core Rules
 
 - Preserve unrelated user changes. This repo often has a dirty worktree.
@@ -62,11 +70,11 @@ land here first.
   diagnostics.
 - For broad release/E2E/feature-matrix builds, set `CARGO_INCREMENTAL=0` to avoid
   retaining large one-off incremental graphs.
-- Restart the Tauri process after Rust/Tauri backend changes. Vite hot-reload is
-  enough for frontend-only TS/CSS changes.
-- Prefer the real-state browser/CDP harness for fast desktop UX iteration before
-  native UI automation. Use mock CDP scenarios only for fault injection or
-  hard-to-produce edge states.
+- Parked desktop workflow: restart the Tauri process after Rust/Tauri backend
+  changes. Vite hot-reload is enough for frontend-only TS/CSS changes.
+- Parked desktop workflow: prefer the real-state browser/CDP harness for fast
+  desktop UX iteration before native UI automation. Use mock CDP scenarios only
+  for fault injection or hard-to-produce edge states.
 
 ## Workspace Setup and Distillation
 
@@ -106,10 +114,15 @@ land here first.
 
 The default agent lane is portable and must run inside the managed sandbox with
 no permission escalation. `recall` includes lookup, indexing, hosted-generator
-policy, and orchestration; it deliberately does not link llama.cpp. Run:
+policy, and orchestration; it deliberately does not link llama.cpp. Use the
+root workspace command below. The `margins-desktop` test is parked with the
+desktop app. For the shipped project server, check `desktop/src-tauri` with
+`--no-default-features --features hosted-web --bin margins-server` through
+`scripts/cargo-lane shared`.
 
 ```bash
-cargo test --workspace --no-default-features --features recall
+scripts/cargo-lane disposable -- cargo test --workspace --no-default-features --features recall
+# Parked desktop-only test:
 cargo test -p margins-desktop \
   --manifest-path desktop/src-tauri/Cargo.toml \
   --no-default-features --features recall -- --test-threads=1
@@ -149,7 +162,7 @@ release binaries retain offline catalyst generation. Use `recall` alone for
 portable decision/lookup tests and `recall-local-model` only when exercising or
 shipping the native inference capability.
 
-## Native CoreML rolling harness
+## Native CoreML rolling harness (parked desktop workflow)
 
 The native rolling harness is distinct from the headless ONNX PCM injector: it
 starts the macOS CoreML live worker and feeds its real bounded queue from a WAV.
@@ -168,7 +181,7 @@ three-second checkpoint cadence. It asserts rolling words, checkpoint and final
 journal durability, Slice B audio-endpoint drain/qualification, Auto reuse vs
 explicit-speaker offline refresh selection, and a real drop-injected rejection.
 
-## Desktop UX CDP Loop
+## Desktop UX CDP Loop (parked)
 
 For screenshot-driven desktop UX work, read `desktop/UX_CDP_LOOP.md`.
 For remote/headless development, use the consolidated entrypoint documented in
@@ -197,7 +210,7 @@ Use the real-state loop for fast visual/state review against Rust HTTP backend
 behavior. The mock loop runs Chrome/Vite with mocked Tauri commands. Neither
 validates native macOS WebView behavior, real audio, packaging, or Pi auth.
 
-## Desktop Devtools / Style Tweak Loop
+## Desktop Devtools / Style Tweak Loop (parked)
 
 Use Tauri devtools mode when the user wants to tweak live desktop styles from
 Web Inspector or edit CSS/TS from Zed with dev hot-reload:
@@ -222,7 +235,7 @@ app executable directly so the `MARGINS_OPEN_DEVTOOLS=1` environment variable is
 inherited. Do not use this path for normal release/install verification; use
 `npm run app:reinstall` unless devtools are explicitly needed.
 
-## Desktop First-Run Install Test
+## Desktop First-Run Install Test (parked)
 
 When the user asks to reinstall for first-run testing, test the launch
 experience, or see what a brand-new user would see in the installed macOS app,
@@ -245,7 +258,7 @@ model-storage E2E, set `MARGINS_FIRST_RUN_MODEL_DIR` to a disposable model
 directory before `npm run app:reinstall:first-run`; it is forwarded as
 `MARGINS_FLUID_COREML_MODEL_DIR` and will trigger a separate model download.
 
-## Desktop Hybrid UX E2E Loop
+## Desktop Hybrid UX E2E Loop (parked)
 
 For product-aware end-to-end UX improvement, read:
 
@@ -336,7 +349,7 @@ per-thread worktree already provides isolation, so `full` (no sandbox) is both
 safe and required. This applies to any provider that wraps execution in
 bubblewrap.
 
-**Installed-app verification (`app:reinstall` + computer use) must run in the
+**Parked installed-app verification (`app:reinstall` + computer use) must run in the
 primary checkout, not a worktree.** Computer use itself works from any
 environment — it drives the machine-global `/Applications/Margins.app`, so a
 worktree agent CAN screenshot and click the running app (verified: a worktree
@@ -390,7 +403,7 @@ For Playwright journey work, prefer a CLI/test-runner path that records the full
 journey video. Preserve the raw Playwright video, convert to MP4 when the
 toolchain supports it, and hand stable artifact paths to judge/verifier threads.
 
-## Headless Linux E2E Harness (real backend on a VPS)
+## Headless Linux E2E Harness (parked desktop UX workflow)
 
 Running or driving Margins on this headless Linux box — the real `margins-server`
 backend over HTTP + the Vite frontend, driven with agent-browser, plus the
