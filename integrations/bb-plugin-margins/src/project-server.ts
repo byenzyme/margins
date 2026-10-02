@@ -623,10 +623,11 @@ export class ProjectMarginsTransport {
     return this.withHandle(target, dataDir, (handle) => this.snapshot(handle, recordingId, ownerId));
   }
 
-  mutate(target: ProjectTarget, dataDir: string, recordingId: string, ownerId: string, command: "heartbeat_web_recording" | "pause_recording" | "resume_recording") {
+  mutate(target: ProjectTarget, dataDir: string, recordingId: string, ownerId: string, command: "heartbeat_web_recording" | "pause_recording" | "resume_recording", expectedNextSequence?: number) {
     return this.withHandle(target, dataDir, async (handle) => {
       const action = command === "heartbeat_web_recording" ? "heartbeat" : command === "pause_recording" ? "pause" : "resume";
-      return this.request<HostCaptureSnapshot>(handle, `browser/sessions/${recordingId}/${action}`, "POST", { ownerId });
+      return this.request<HostCaptureSnapshot>(handle, `browser/sessions/${recordingId}/${action}`, "POST",
+        command === "pause_recording" ? { ownerId, expectedNextSequence } : { ownerId });
     });
   }
 

@@ -11,14 +11,16 @@ use margins_core::SessionRepository;
 use margins_meeting_protocol::{
     decode_opus_packet_blocks_v1, ArtifactId, AudioCodecV1, AudioContainerV1, AudioFormatV1,
     BeginCaptureGenerationV1, ClientMessageBodyV1, ClientMessageV1, DurationMillis, InstanceId,
-    ProtocolVersionV1, SequenceRangeV1, ServerMessageBodyV1, SessionId, WorkspaceArtifactV1,
-    WorkspaceAttachV1, WorkspaceCapabilitiesV1, WorkspaceId, WorkspaceLimitsV1,
-    WorkspaceMemoLineV1, WorkspaceMemoReplaceV1, WorkspaceMemoUpdateV1, WorkspaceMemoV1,
-    WorkspaceNoteAssociationUpdateV1, WorkspaceNoteAssociationV1, WorkspaceProcessingJobV1,
-    WorkspaceRenameV1, WorkspaceSessionPageV1, WorkspaceSessionSummaryV1, WorkspaceSummaryV1,
-    WorkspaceTranscriptV1,
+    MessageId, ProtocolVersionV1, SequenceRangeV1, ServerMessageBodyV1, SessionId, UnixMillis,
+    WorkspaceArtifactV1, WorkspaceAttachV1, WorkspaceCapabilitiesV1, WorkspaceId,
+    WorkspaceLimitsV1, WorkspaceMemoLineV1, WorkspaceMemoReplaceV1, WorkspaceMemoUpdateV1,
+    WorkspaceMemoV1, WorkspaceNoteAssociationUpdateV1, WorkspaceNoteAssociationV1,
+    WorkspaceProcessingJobV1, WorkspaceRenameV1, WorkspaceSessionPageV1, WorkspaceSessionSummaryV1,
+    WorkspaceSummaryV1, WorkspaceTranscriptV1,
 };
-use margins_meeting_runtime::{MeetingRuntime, MeetingRuntimeStorage, RuntimeResponseV1};
+use margins_meeting_runtime::{
+    MeetingRuntime, MeetingRuntimeStorage, RuntimeResponseV1, StoredSegmentSummaryV1,
+};
 use margins_store::{
     canonical, ImportReceipt, MemoWrite, SqliteMeetingRuntimeStorage, SqliteSessionRepository,
     SqliteWorkspaceAuthorityStorage,
@@ -52,6 +54,14 @@ pub const OP_JOB_READ: &str = "job.read";
 pub const OP_IMPORT_WRITE: &str = "import.write";
 pub const OP_IMPORT_RECEIPT: &str = "import.receipt";
 pub const OP_RECALL_QUERY: &str = "recall.query";
+
+/// A projection of durable recorder state; it contains no audio payloads or
+/// mutable registry state and can be reconstructed after a server restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureState {
+    pub input_finalized: bool,
+    pub segments: Vec<StoredSegmentSummaryV1>,
+}
 
 /// Preserve the typed storage conflict across the transport-neutral service.
 pub fn is_memo_revision_conflict(error: &anyhow::Error) -> bool {
@@ -401,12 +411,20 @@ impl WorkspaceService {
                 max_import_bytes: DEFAULT_MAX_IMPORT_BYTES,
                 spool_reserve_bytes: DEFAULT_SPOOL_RESERVE_BYTES,
             },
-            capture_formats: vec![AudioFormatV1 {
-                codec: AudioCodecV1::Opus,
-                container: AudioContainerV1::PacketStream,
-                sample_rate_hz: crate::remote_workspace::NATIVE_REMOTE_RATE_HZ,
-                channel_count: 1,
-            }],
+            capture_formats: vec![
+                AudioFormatV1 {
+                    codec: AudioCodecV1::Opus,
+                    container: AudioContainerV1::PacketStream,
+                    sample_rate_hz: crate::remote_workspace::NATIVE_REMOTE_RATE_HZ,
+                    channel_count: 1,
+                },
+                AudioFormatV1 {
+                    codec: AudioCodecV1::Opus,
+                    container: AudioContainerV1::Webm,
+                    sample_rate_hz: 48_000,
+                    channel_count: 1,
+                },
+            ],
             operations: principal
                 .operations
                 .iter()
@@ -452,6 +470,30 @@ impl WorkspaceService {
         principal: &ServicePrincipal,
         command: ClientMessageV1,
     ) -> Result<SessionReservation> {
+        self.reserve_session_inner(principal, command, random_secret(48))
+    }
+
+    /// Reserve with a producer identity supplied by a trusted capture
+    /// adapter. Browser owners use a cryptographically random UUIDv4 so a
+    /// lost start response can be retried without a second registry.
+    pub fn reserve_session_with_producer_token(
+        &self,
+        principal: &ServicePrincipal,
+        command: ClientMessageV1,
+        producer_token: &str,
+    ) -> Result<SessionReservation> {
+        if !is_uuid_v4(producer_token) {
+            bail!("capture producer token must be a secure UUIDv4");
+        }
+        self.reserve_session_inner(principal, command, producer_token.to_string())
+    }
+
+    fn reserve_session_inner(
+        &self,
+        principal: &ServicePrincipal,
+        command: ClientMessageV1,
+        producer_token: String,
+    ) -> Result<SessionReservation> {
         principal.require(self.workspace_id(), OP_SESSION_CREATE)?;
         if !matches!(command.body, ClientMessageBodyV1::CreateSession(_)) {
             bail!("session reservation requires create_session");
@@ -463,13 +505,17 @@ impl WorkspaceService {
                     && format.container == AudioContainerV1::PacketStream
                     && format.channel_count == 1
                     && format.sample_rate_hz == 16_000;
+                let browser_webm = format.codec == AudioCodecV1::Opus
+                    && format.container == AudioContainerV1::Webm
+                    && format.channel_count == 1
+                    && format.sample_rate_hz == 48_000;
                 let recoverable_pcm = format.codec == AudioCodecV1::PcmS16Le
                     && format.container == AudioContainerV1::Raw
                     && format.channel_count == 1
                     && matches!(format.sample_rate_hz, 16_000 | 48_000);
-                if !opus && !recoverable_pcm {
+                if !opus && !browser_webm && !recoverable_pcm {
                     bail!(
-                        "unsupported capture format for lane {}; use mono Margins Opus packet stream at 16 kHz (raw PCM s16le at 16/48 kHz is accepted only for durable recovery)",
+                        "unsupported capture format for lane {}; use mono Opus packet stream at 16 kHz, mono Opus WebM at 48 kHz, or recovery PCM s16le at 16/48 kHz",
                         lane.lane_id.as_ref()
                     );
                 }
@@ -480,7 +526,6 @@ impl WorkspaceService {
             .runtime
             .handle(command)
             .map_err(|error| anyhow::anyhow!(error))?;
-        let producer_token = random_secret(48);
         self.authority
             .reserve_producer(session_id.as_ref(), &principal.id, &producer_token)?;
         self.authority
@@ -686,6 +731,14 @@ impl WorkspaceService {
                         .max(1);
                     if chunk.duration_ms.0 != expected_duration {
                         bail!("native Opus audio chunk duration does not match its source frames");
+                    }
+                }
+                (AudioCodecV1::Opus, AudioContainerV1::Webm, 1) => {
+                    // MediaRecorder fragments are opaque at the authority
+                    // boundary. The decoder validates the assembled stream
+                    // after its ordered chunks are durably finalized.
+                    if chunk.payload.is_empty() {
+                        bail!("WebM audio chunk must not be empty");
                     }
                 }
                 _ => bail!("audio chunk uses an unsupported declared lane format"),
@@ -1312,6 +1365,107 @@ impl WorkspaceService {
             .context("capture lane was not declared")
     }
 
+    /// Reconstruct acknowledged sequence ranges and segment closes directly
+    /// from the runtime store. No browser process memory is consulted.
+    pub fn capture_state(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+    ) -> Result<CaptureState> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        let stored = self
+            .runtime
+            .storage()
+            .load_session(session_id)?
+            .context("session has no capture authority state")?;
+        Ok(CaptureState {
+            input_finalized: stored.input_finalized(),
+            segments: stored.segment_summaries(),
+        })
+    }
+
+    /// Owner-scoped version for browser capture routes. The producer token is
+    /// checked against the durable authority row before exposing state.
+    pub fn capture_state_for_producer(
+        &self,
+        principal: &ServicePrincipal,
+        producer_token: &str,
+        session_id: &SessionId,
+    ) -> Result<CaptureState> {
+        principal.require(self.workspace_id(), OP_CAPTURE_WRITE)?;
+        self.authority
+            .authorize_producer(session_id.as_ref(), &principal.id, producer_token)?;
+        self.capture_state(principal, session_id)
+    }
+
+    /// Reopen a browser producer against persisted state before opening its
+    /// lane after a process or transport loss. This also returns the bounded
+    /// runtime replay, including the durable acknowledgement watermark.
+    pub fn recover_capture_for_producer(
+        &self,
+        principal: &ServicePrincipal,
+        producer_token: &str,
+        session_id: &SessionId,
+        message_id: MessageId,
+    ) -> Result<(CaptureState, RuntimeResponseV1)> {
+        principal.require(self.workspace_id(), OP_CAPTURE_WRITE)?;
+        self.authority
+            .authorize_producer(session_id.as_ref(), &principal.id, producer_token)?;
+        let (stored, replay) = self
+            .runtime
+            .recorder()
+            // Recovery IDs are deterministic across retries. The envelope
+            // timestamp must be stable because it is part of the command
+            // fingerprint; zero is valid for this transport-generated query.
+            .recover(session_id, message_id, UnixMillis(0), None)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        Ok((
+            CaptureState {
+                input_finalized: stored.input_finalized(),
+                segments: stored.segment_summaries(),
+            },
+            replay,
+        ))
+    }
+
+    /// Check a durable command receipt without replaying or mutating capture.
+    /// Browser resume uses a deterministic message ID so a restarted adapter
+    /// can distinguish "paused" from "resumed but awaiting its first chunk".
+    pub fn capture_command_recorded(
+        &self,
+        principal: &ServicePrincipal,
+        producer_token: &str,
+        session_id: &SessionId,
+        message_id: &MessageId,
+    ) -> Result<bool> {
+        principal.require(self.workspace_id(), OP_CAPTURE_WRITE)?;
+        self.authority
+            .authorize_producer(session_id.as_ref(), &principal.id, producer_token)?;
+        let storage = self.runtime.storage();
+        let receipts = storage.load_command_receipts(session_id, message_id)?;
+        for receipt in receipts {
+            let end = receipt.response_range.end_exclusive;
+            if end == 0 {
+                continue;
+            }
+            let events = storage.load_events(
+                session_id,
+                SequenceRangeV1 {
+                    start: end - 1,
+                    end_exclusive: end,
+                },
+                1,
+            )?;
+            if events
+                .iter()
+                .any(|event| !matches!(event.body, ServerMessageBodyV1::CommandRejected(_)))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Idempotently admit the ASR-only job for the current finalized capture
     /// revision. A completed job for the same revision is never reset.
     pub fn admit_transcription_job(
@@ -1557,6 +1711,20 @@ fn processing_job(value: canonical::ProcessingJob) -> WorkspaceProcessingJobV1 {
         failure: value.failure,
         failed_stage: value.failed_stage,
     }
+}
+
+fn is_uuid_v4(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && [8, 13, 18, 23]
+            .into_iter()
+            .all(|index| bytes[index] == b'-')
+        && bytes[14] == b'4'
+        && matches!(bytes[19], b'8' | b'9' | b'a' | b'b' | b'A' | b'B')
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| [8, 13, 18, 23].contains(&index) || byte.is_ascii_hexdigit())
 }
 
 fn random_secret(length: usize) -> String {

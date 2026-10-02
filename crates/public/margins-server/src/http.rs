@@ -17,7 +17,7 @@ use margins_meeting_protocol::{
     AUDIO_CHUNK_BATCH_CONTENT_TYPE_V1,
 };
 use margins_workflows::workspace_service::{
-    ServicePrincipal, OP_CAPTURE_WRITE, OP_SESSION_WRITE, OP_WORKSPACE_READ,
+    ServicePrincipal, OP_SESSION_WRITE, OP_WORKSPACE_READ,
 };
 use serde_json::{json, Value};
 use tower_http::cors::{Any, CorsLayer};
@@ -116,6 +116,36 @@ pub fn build_router(state: ServerState) -> Router {
             post(workspace_request_transcription),
         )
         .route(
+            "/v1/workspaces/:workspace/browser/sessions",
+            post(crate::browser::start),
+        )
+        .route(
+            "/v1/workspaces/:workspace/browser/sessions/:recording/snapshot",
+            get(crate::browser::snapshot),
+        )
+        .route(
+            "/v1/workspaces/:workspace/browser/sessions/:recording/pause",
+            post(crate::browser::pause),
+        )
+        .route(
+            "/v1/workspaces/:workspace/browser/sessions/:recording/resume",
+            post(crate::browser::resume),
+        )
+        .route(
+            "/v1/workspaces/:workspace/browser/sessions/:recording/heartbeat",
+            post(crate::browser::heartbeat),
+        )
+        .route(
+            "/v1/workspaces/:workspace/browser/sessions/:recording/stop",
+            post(crate::browser::stop),
+        )
+        .route(
+            "/v1/workspaces/:workspace/browser/sessions/:recording/chunks/:sequence",
+            put(crate::browser::chunk).layer(DefaultBodyLimit::max(
+                margins_workflows::workspace_service::DEFAULT_MAX_CHUNK_BYTES as usize,
+            )),
+        )
+        .route(
             "/v1/workspaces/:workspace/imports",
             post(workspace_multipart_import).layer(DefaultBodyLimit::max(
                 margins_workflows::workspace_service::DEFAULT_MAX_IMPORT_BYTES as usize
@@ -171,7 +201,7 @@ fn workspace_auth(
         })
 }
 
-fn workspace_auth_operation(
+pub(crate) fn workspace_auth_operation(
     state: &ServerState,
     headers: &HeaderMap,
     workspace: &str,
@@ -215,7 +245,7 @@ fn workspace_instance_fence(state: &ServerState, headers: &HeaderMap) -> Result<
     Ok(())
 }
 
-fn workspace_ok<T: serde::Serialize>(value: T) -> Response {
+pub(crate) fn workspace_ok<T: serde::Serialize>(value: T) -> Response {
     Json(WorkspaceResponseV1 {
         ok: true,
         result: Some(value),
@@ -224,7 +254,7 @@ fn workspace_ok<T: serde::Serialize>(value: T) -> Response {
     .into_response()
 }
 
-fn workspace_error(
+pub(crate) fn workspace_error(
     status: StatusCode,
     code: &str,
     retryable: bool,
@@ -246,7 +276,7 @@ fn workspace_error(
         .into_response()
 }
 
-fn service_error(error: anyhow::Error) -> Response {
+pub(crate) fn service_error(error: anyhow::Error) -> Response {
     let message = error.to_string();
     let (status, code) = if message.contains("revision conflict")
         || message.contains("changed somewhere else")

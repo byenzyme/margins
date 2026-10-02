@@ -27,6 +27,21 @@ afterEach(() => {
 });
 
 describe("ProjectServerManager remote adapter", () => {
+  it("sends the durable chunk boundary with browser Pause", async () => {
+    const manager = { ensure: vi.fn(async () => ({ baseUrl: "https://margins.example.test", token: "scoped-token",
+      workspaceId: "practice", instanceId: "instance-remote" })) } as unknown as ProjectServerManager;
+    const fetchMock = vi.fn(async (_input: string | URL | Request, _options?: RequestInit) => new Response(JSON.stringify({ ok: true, result: {
+      recording_id: "recording", status: "paused", next_sequence: 4,
+    } }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await new ProjectMarginsTransport(manager).mutate(
+      { projectId: "project", projectRoot: "/tmp/project", hostId: "host" },
+      "/tmp/data", "recording", "owner", "pause_recording", 4,
+    );
+    expect(new URL(String(fetchMock.mock.calls[0]![0])).pathname).toBe("/v1/workspaces/practice/browser/sessions/recording/pause");
+    expect(JSON.parse(fetchMock.mock.calls[0]![1]!.body as string)).toEqual({ ownerId: "owner", expectedNextSequence: 4 });
+  });
+
   it("preserves a typed browser chunk gap for Stop repair", async () => {
     const manager = { ensure: vi.fn(async () => ({ baseUrl: "https://margins.example.test", token: "scoped-token",
       workspaceId: "practice", instanceId: "instance-remote" })) } as unknown as ProjectServerManager;

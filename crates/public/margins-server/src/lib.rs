@@ -1,6 +1,7 @@
 //! HTTP adapter over the public Workspace service.
 
 pub mod auth;
+pub mod browser;
 pub mod http;
 pub mod webm;
 

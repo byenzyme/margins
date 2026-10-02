@@ -25,7 +25,8 @@ describe("Margins project host entry", () => {
     } as unknown as ProjectMarginsTransport;
     const harness = experimental_createHostEntryHarness(createMarginsHostEntry(transport));
     await expect(harness.experimental_call("startBrowserCapture", { target, ownerId: "owner-1", name: "customer-call" })).resolves.toMatchObject({ ok: true, snapshot: { recordingId: "rec-1" } });
-    await expect(harness.experimental_call("pause", { target, recordingId: "rec-1", ownerId: "owner-1" })).resolves.toMatchObject({ ok: true });
+    await expect(harness.experimental_call("pause", { target, recordingId: "rec-1", ownerId: "owner-1", expectedNextSequence: 0 })).resolves.toMatchObject({ ok: true });
+    expect(transport.mutate).toHaveBeenCalledWith(target, expect.any(String), "rec-1", "owner-1", "pause_recording", 0);
     await expect(harness.experimental_call("connectedNoteContext", { target, recordingId: "rec-1" })).resolves.toMatchObject({ ok: true, context: { sessionId: "rec-1" } });
     await expect(harness.experimental_call("requestTranscription", { target, recordingId: "rec-1" })).resolves.toMatchObject({ ok: true, status: "queued" });
     expect(harness.experimental_getRetainedWorkerLeaseCount()).toBe(1);

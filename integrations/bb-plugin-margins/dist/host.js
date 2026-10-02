@@ -33493,7 +33493,7 @@ var marginsHostContract = defineRpcContract2({
   },
   readCapture: { input: ownedCaptureInputSchema, output: hostResultSchema },
   heartbeat: { input: ownedCaptureInputSchema, output: hostResultSchema },
-  pause: { input: ownedCaptureInputSchema, output: hostResultSchema },
+  pause: { input: ownedCaptureInputSchema.extend({ expectedNextSequence: external_exports2.number().int().nonnegative() }).strict(), output: hostResultSchema },
   resume: { input: ownedCaptureInputSchema, output: hostResultSchema },
   stop: { input: ownedCaptureInputSchema.extend({ expectedNextSequence: external_exports2.number().int().nonnegative() }).strict(), output: hostResultSchema },
   uploadChunk: {
@@ -33672,7 +33672,7 @@ var marginsRpcContract = defineRpcContract2({
     ])
   },
   heartbeat: { input: captureClientInputSchema, output: panelStateSchema },
-  pause: { input: captureClientInputSchema, output: panelStateSchema },
+  pause: { input: captureClientInputSchema.extend({ expectedNextSequence: external_exports2.number().int().nonnegative() }).strict(), output: panelStateSchema },
   resume: { input: captureClientInputSchema, output: panelStateSchema },
   stop: { input: captureClientInputSchema.extend({ expectedNextSequence: external_exports2.number().int().nonnegative() }).strict(), output: panelStateSchema },
   connectedNoteContext: {
@@ -33937,6 +33937,15 @@ async function verifyServerCompatibility(baseUrl, token, workspaceId, signal) {
 function hostError(code, message, retryable = true) {
   return { code, message, retryable };
 }
+var WorkspaceRequestError = class extends Error {
+  constructor(code, message, retryable) {
+    super(message);
+    this.code = code;
+    this.retryable = retryable;
+  }
+  code;
+  retryable;
+};
 function workspaceInstanceDir(dataDir, workspaceId) {
   return join2(dataDir, "workspace-servers", workspaceId);
 }
@@ -34393,8 +34402,14 @@ var ProjectMarginsTransport = class {
     });
     const value = await response.json();
     const detail = typeof value.error === "string" ? value.error : value.error?.message;
-    if (!response.ok) throw new Error(detail || `Margins could not save on the project machine (${response.status})`);
-    if (!value.ok) throw new Error(detail || "Margins could not complete the recording action");
+    if (!response.ok || !value.ok) {
+      const structured = typeof value.error === "object" ? value.error : void 0;
+      throw new WorkspaceRequestError(
+        structured?.code || "workspace_request_failed",
+        detail || `Margins could not save on the project machine (${response.status})`,
+        structured?.retryable ?? true
+      );
+    }
     return value.result;
   }
   async transcriptSummary(handle, recordingId) {
@@ -34419,7 +34434,7 @@ var ProjectMarginsTransport = class {
     try {
       return { ok: true, snapshot: await action(await this.manager.ensure(target, dataDir)) };
     } catch (cause) {
-      return { ok: false, error: hostError("project_recorder_unavailable", cause instanceof Error ? cause.message : String(cause)) };
+      return { ok: false, error: cause instanceof WorkspaceRequestError ? hostError(cause.code, cause.message, cause.retryable) : hostError("project_recorder_unavailable", cause instanceof Error ? cause.message : String(cause)) };
     }
   }
   start(target, dataDir, ownerId, name) {
@@ -34431,10 +34446,15 @@ var ProjectMarginsTransport = class {
   read(target, dataDir, recordingId, ownerId) {
     return this.withHandle(target, dataDir, (handle) => this.snapshot(handle, recordingId, ownerId));
   }
-  mutate(target, dataDir, recordingId, ownerId, command) {
+  mutate(target, dataDir, recordingId, ownerId, command, expectedNextSequence) {
     return this.withHandle(target, dataDir, async (handle) => {
       const action = command === "heartbeat_web_recording" ? "heartbeat" : command === "pause_recording" ? "pause" : "resume";
-      return this.request(handle, `browser/sessions/${recordingId}/${action}`, "POST", { ownerId });
+      return this.request(
+        handle,
+        `browser/sessions/${recordingId}/${action}`,
+        "POST",
+        command === "pause_recording" ? { ownerId, expectedNextSequence } : { ownerId }
+      );
     });
   }
   stop(target, dataDir, recordingId, ownerId, expectedNextSequence) {
@@ -34739,7 +34759,7 @@ function createMarginsHostEntry(transport) {
       },
       async pause(input2, context) {
         retain(context);
-        const result = await transport.mutate(input2.target, context.experimental_paths.dataDir, input2.recordingId, input2.ownerId, "pause_recording");
+        const result = await transport.mutate(input2.target, context.experimental_paths.dataDir, input2.recordingId, input2.ownerId, "pause_recording", input2.expectedNextSequence);
         await changed(context, input2.target.projectId, "pause", result);
         return result;
       },

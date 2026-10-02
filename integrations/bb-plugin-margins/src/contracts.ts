@@ -186,7 +186,7 @@ export const marginsHostContract = defineRpcContract({
   },
   readCapture: { input: ownedCaptureInputSchema, output: hostResultSchema },
   heartbeat: { input: ownedCaptureInputSchema, output: hostResultSchema },
-  pause: { input: ownedCaptureInputSchema, output: hostResultSchema },
+  pause: { input: ownedCaptureInputSchema.extend({ expectedNextSequence: z.number().int().nonnegative() }).strict(), output: hostResultSchema },
   resume: { input: ownedCaptureInputSchema, output: hostResultSchema },
   stop: { input: ownedCaptureInputSchema.extend({ expectedNextSequence: z.number().int().nonnegative() }).strict(), output: hostResultSchema },
   uploadChunk: {
@@ -325,7 +325,7 @@ export const marginsRpcContract = defineRpcContract({
     ]),
   },
   heartbeat: { input: captureClientInputSchema, output: panelStateSchema },
-  pause: { input: captureClientInputSchema, output: panelStateSchema },
+  pause: { input: captureClientInputSchema.extend({ expectedNextSequence: z.number().int().nonnegative() }).strict(), output: panelStateSchema },
   resume: { input: captureClientInputSchema, output: panelStateSchema },
   stop: { input: captureClientInputSchema.extend({ expectedNextSequence: z.number().int().nonnegative() }).strict(), output: panelStateSchema },
   connectedNoteContext: {

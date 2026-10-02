@@ -226,7 +226,7 @@ describe("Margins project recording server", () => {
     expect(host.harness.inspection.experimental_hostRpcCalls).toEqual(expect.arrayContaining([
       expect.objectContaining({ method: "readCapture", input: expect.objectContaining({ target: expect.objectContaining({ projectId: "proj-1", projectRoot: "/srv/project" }) }) }),
     ]));
-    await expect(host.harness.behavior.callRpc("pause", { sessionId: "rec-1", client: browser, operationId: "pause-1" })).resolves.toMatchObject({ state: "paused" });
+    await expect(host.harness.behavior.callRpc("pause", { sessionId: "rec-1", client: browser, operationId: "pause-1", expectedNextSequence: 0 })).resolves.toMatchObject({ state: "paused" });
     await expect(host.harness.behavior.callRpc("getProjectPanelState", { projectId: "proj-1", client: browser })).resolves.toMatchObject({ state: "paused" });
     await expect(host.harness.behavior.callRpc("stop", { sessionId: "rec-1", client: browser, operationId: "stop-1", expectedNextSequence: 0 })).resolves.toMatchObject({ state: "saved" });
   });

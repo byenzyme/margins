@@ -953,6 +953,10 @@ impl SqliteMeetingRuntimeStorage {
                 (AudioCodecV1::Opus, AudioContainerV1::PacketStream) => {
                     validate_opus_packet_file(staged.path())?
                 }
+                // MediaRecorder emits one WebM byte stream across its dataavailable
+                // blobs. Preserve those bytes in order; parsing and decoding belong
+                // to the media layer after the durable artifact is committed.
+                (AudioCodecV1::Opus, AudioContainerV1::Webm) => ("webm", "webm", 0),
                 _ => anyhow::bail!("finalized remote audio uses an unsupported durable format"),
             };
             install_staged_projection(staged, &path)?;
@@ -1393,6 +1397,7 @@ fn core_audio_format(format: &AudioFormatV1) -> Result<AudioFormat> {
         (format.codec, format.container),
         (AudioCodecV1::PcmS16Le, AudioContainerV1::Raw)
             | (AudioCodecV1::Opus, AudioContainerV1::PacketStream)
+            | (AudioCodecV1::Opus, AudioContainerV1::Webm)
     );
     if !supported {
         anyhow::bail!("finalized remote audio uses an unsupported durable format");

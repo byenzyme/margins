@@ -22,6 +22,9 @@ interface StoredCapture {
 interface LocalCapture extends StoredCapture {
   stream: MediaStream;
   recorder: MediaRecorder;
+  recorderStopped: boolean;
+  recorderStop: Promise<Error | null> | null;
+  recorderMime: string | null;
   uploads: WebDurableUploadQueue;
   heartbeat: ReturnType<typeof setInterval>;
   reachability: ReachabilityDeadline;
@@ -109,19 +112,11 @@ export function hostAcknowledgedCapture(state: PanelState) {
   return state.error === null && (state.state === "recording" || state.state === "paused");
 }
 
-export function applyRecorderTransition(
-  capture: { recorder: Pick<MediaRecorder, "pause" | "resume">; paused: boolean },
-  state: PanelState,
-  target: "paused" | "recording",
-) {
-  if (state.error !== null || state.state !== target) return false;
-  if (target === "paused") capture.recorder.pause();
-  else capture.recorder.resume();
-  capture.paused = target === "paused";
-  return true;
-}
-
 function id() { return crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`; }
+function secureOwnerId() {
+  if (!crypto.randomUUID) throw new Error("Secure browser capture identity is unavailable");
+  return crypto.randomUUID();
+}
 function readStored(): StoredCapture | null {
   try {
     const value = JSON.parse(sessionStorage.getItem(CAPTURE_KEY) || "null") as (Partial<StoredCapture> & { recordingId?: string }) | null;
@@ -162,7 +157,7 @@ function clientId() {
 
 function missingBrowserAudioSequence(error: HostError): number | null {
   if (error.code !== "browser_chunk_gap") return null;
-  const match = /^Missing browser audio sequence (\d+); retry the chunk before Stop\.$/.exec(error.message);
+  const match = /^Missing browser audio sequence (\d+); retry the chunk before (?:Stop|Pause)\.$/.exec(error.message);
   const sequence = Number(match?.[1]);
   return match && Number.isSafeInteger(sequence) ? sequence : null;
 }
@@ -337,7 +332,7 @@ export class BrowserCaptureOwner {
       uploadErrors.push(error);
       this.emit();
       const current = this.capture;
-      if (current?.sessionId === stored.sessionId) void this.stopAfterDisconnect(current);
+      if (current?.sessionId === stored.sessionId && !current.paused) void this.stopAfterDisconnect(current);
     }, { initialSequence: stored.nextSequence });
     bindDurableMediaRecorder(recorder, uploads);
     const generation = ++this.generation;
@@ -367,16 +362,25 @@ export class BrowserCaptureOwner {
         if (this.capture?.generation === generation) this.capture.heartbeatInFlight = false;
       });
     }, this.dependencies.heartbeatMs);
-    recorder.start(3_000);
-    if (stored.paused) recorder.pause();
+    if (!stored.paused) recorder.start(3_000);
     this.listeningSince = stored.paused ? 0 : Date.now();
     this.heardAudio = false;
-    this.capture = { ...stored, stream, recorder, uploads, heartbeat, reachability, heartbeatInFlight: false, generation, uploadErrors,
+    this.capture = { ...stored, stream, recorder, recorderStopped: stored.paused, recorderStop: null,
+      recorderMime: mime, uploads, heartbeat, reachability, heartbeatInFlight: false, generation, uploadErrors,
       levelMonitor: this.monitorLevel(stream) };
     reachability.start();
     this.heartbeatRecovering = false;
     writeStored(stored);
     this.emit();
+  }
+
+  /** MediaRecorder emits a complete, independently decodable WebM stream only
+   * after stop. Keep the stop promise so Pause and Stop cannot stop it twice. */
+  private stopSegment(current: LocalCapture): Promise<Error | null> {
+    if (current.recorderStopped) return current.recorderStop ?? Promise.resolve(null);
+    current.recorderStopped = true;
+    current.recorderStop = stopMediaRecorderWithDeadline(current.recorder);
+    return current.recorderStop;
   }
 
   private async recover(stored: StoredCapture) {
@@ -407,7 +411,7 @@ export class BrowserCaptureOwner {
     const mime = selectWebRecorderMimeType(this.dependencies.supportsMime);
     try { this.dependencies.createRecorder(stream, mime); }
     catch (cause) { stream.getTracks().forEach((track) => track.stop()); throw cause; }
-    const ownerId = id();
+    const ownerId = secureOwnerId();
     try {
       const state = await this.dependencies.rpc<PanelState>(this.pluginId, "beginProjectCapture", {
         projectId, client: detectClientCapabilities(), ownerId, ...(title ? { title } : {}),
@@ -424,7 +428,7 @@ export class BrowserCaptureOwner {
 
   async pause() {
     const current = this.capture; if (!current || !this.pluginId) return;
-    if (!current.paused) current.recorder.pause();
+    if (current.paused && !current.pendingControl) return this.panels.get(current.sessionId) ?? this.latestPanel ?? undefined;
     current.paused = true;
     const pendingControl = current.pendingControl?.kind === "pause"
       ? current.pendingControl
@@ -432,39 +436,100 @@ export class BrowserCaptureOwner {
     current.pendingControl = pendingControl;
     writeStored(current);
     this.emit();
-    const state = await this.dependencies.rpc<PanelState>(this.pluginId, "pause", {
-      sessionId: current.sessionId, client: detectClientCapabilities(),
-      operationId: pendingControl.operationId,
-    });
-    if (this.capture === current && state.error === null && state.state === "paused") {
-      current.pendingControl = undefined;
-      writeStored(current);
-      this.acceptPanel(current.sessionId, state);
+    const recorderError = await this.stopSegment(current);
+    if (this.capture !== current) return;
+    if (recorderError) return this.incompleteControlPanel(current, recorderError, "pause");
+    try {
+      await current.uploads.retryPending();
+    } catch (cause) {
+      return this.incompleteControlPanel(current, cause instanceof Error ? cause : new Error(String(cause)), "pause");
     }
-    return state;
+    if (this.capture !== current) return;
+    current.expectedNextSequence = current.uploads.expectedNextSequence;
+    writeStored(current);
+    const replayed = new Set<number>();
+    try {
+      while (this.capture === current) {
+        const state = await this.dependencies.rpc<PanelState>(this.pluginId, "pause", {
+          sessionId: current.sessionId, client: detectClientCapabilities(),
+          operationId: pendingControl.operationId,
+          expectedNextSequence: current.expectedNextSequence,
+        });
+        if (this.capture !== current) return state;
+        if (state.error === null && state.state === "paused") {
+          current.pendingControl = undefined;
+          writeStored(current);
+          this.acceptPanel(current.sessionId, state);
+          return state;
+        }
+        const gap = state.error ? missingBrowserAudioSequence(state.error) : null;
+        if (gap === null || replayed.has(gap)) {
+          return this.incompleteControlPanel(current, new Error(state.error?.message || "Pause was not acknowledged"), "pause");
+        }
+        replayed.add(gap);
+        await current.uploads.resend(gap);
+      }
+    } catch (cause) {
+      if (this.capture !== current) return;
+      return this.incompleteControlPanel(current, cause instanceof Error ? cause : new Error(String(cause)), "pause");
+    }
+    return;
   }
   async resume() {
     const current = this.capture; if (!current || !this.pluginId) return;
-    if (current.paused) current.recorder.resume();
-    current.paused = false;
-    this.listeningSince = Date.now();
-    this.heardAudio = false;
+    if (!current.paused) return this.panels.get(current.sessionId) ?? this.latestPanel ?? undefined;
+    if (current.pendingControl?.kind === "pause") {
+      const paused = await this.pause();
+      if (!paused || paused.error !== null || paused.state !== "paused") return paused;
+    }
     const pendingControl = current.pendingControl?.kind === "resume"
       ? current.pendingControl
       : { kind: "resume" as const, operationId: id() };
     current.pendingControl = pendingControl;
     writeStored(current);
     this.emit();
-    const state = await this.dependencies.rpc<PanelState>(this.pluginId, "resume", {
-      sessionId: current.sessionId, client: detectClientCapabilities(),
-      operationId: pendingControl.operationId,
-    });
-    if (this.capture === current && state.error === null && state.state === "recording") {
+    try {
+      const state = await this.dependencies.rpc<PanelState>(this.pluginId, "resume", {
+        sessionId: current.sessionId, client: detectClientCapabilities(),
+        operationId: pendingControl.operationId,
+      });
+      if (this.capture !== current) return state;
+      if (state.error !== null || state.state !== "recording") {
+        return this.incompleteControlPanel(current, new Error(state.error?.message || "Resume was not acknowledged"), "resume");
+      }
+      const recorder = this.dependencies.createRecorder(current.stream, current.recorderMime);
+      bindDurableMediaRecorder(recorder, current.uploads);
+      recorder.start(3_000);
+      current.recorder = recorder;
+      current.recorderStopped = false;
+      current.recorderStop = null;
+      current.paused = false;
+      this.listeningSince = Date.now();
+      this.heardAudio = false;
       current.pendingControl = undefined;
       writeStored(current);
       this.acceptPanel(current.sessionId, state);
+      return state;
+    } catch (cause) {
+      if (this.capture !== current) return;
+      return this.incompleteControlPanel(current, cause instanceof Error ? cause : new Error(String(cause)), "resume");
     }
-    return state;
+  }
+
+  private incompleteControlPanel(current: LocalCapture, cause: Error, action: "pause" | "resume"): PanelState {
+    const error: HostError = { code: "browser_audio_drain_incomplete", message: cause.message, retryable: true };
+    const prior = this.panels.get(current.sessionId) ?? this.latestPanel;
+    const panel: PanelState = {
+      ...(prior ?? {
+        schema: "margins.bb.recording.panel.v2", sourceLabel: null, storageLabel: null,
+        sessionId: current.sessionId, notepad: null, lastSessionId: null,
+      }),
+      state: "needs_attention", title: "Recording incomplete", detail: error.message,
+      primaryAction: action, primaryLabel: action === "pause" ? "Retry pause" : "Retry recording", canStop: true,
+      canEditNotepad: false, ownsRecording: true, recordingId: current.sessionId, error,
+    };
+    this.acceptPanel(current.sessionId, panel);
+    return panel;
   }
   async stop() {
     const current = this.capture; if (!current || !this.pluginId) return;
@@ -481,7 +546,8 @@ export class BrowserCaptureOwner {
     current.pendingControl = pendingControl;
     writeStored(current);
     this.showStopping(current);
-    const recorderStopped = releaseBrowserDevice(current);
+    const recorderStopped = this.stopSegment(current);
+    current.stream.getTracks().forEach((track) => track.stop());
     try {
       const drain = await drainBrowserMedia(current, recorderStopped);
       current.expectedNextSequence = current.uploads.expectedNextSequence;
@@ -664,7 +730,9 @@ export class BrowserCaptureOwner {
       : { kind: "stop", operationId: id() };
     writeStored(current);
     this.emit();
-    const drain = await drainBrowserMedia(current, releaseBrowserDevice(current));
+    const recorderStopped = this.stopSegment(current);
+    current.stream.getTracks().forEach((track) => track.stop());
+    const drain = await drainBrowserMedia(current, recorderStopped);
     current.expectedNextSequence = current.uploads.expectedNextSequence;
     const errors = drain.errors;
     if (errors.length > 0) {
@@ -691,7 +759,9 @@ export class BrowserCaptureOwner {
     current.levelMonitor?.dispose();
     clearInterval(current.heartbeat);
     current.reachability.dispose();
-    void releaseBrowserMedia(current);
+    const recorderStopped = this.stopSegment(current);
+    current.stream.getTracks().forEach((track) => track.stop());
+    void drainBrowserMedia(current, recorderStopped);
     this.emit();
     // Keep sessionStorage: a refresh can reacquire the microphone and continue
     // within the grace period. No explicit stop bypasses the server-side grace.
