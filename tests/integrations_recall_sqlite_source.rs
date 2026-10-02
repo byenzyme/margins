@@ -710,7 +710,11 @@ fn native_markdown_hashes_survive_binding_rename_and_additional_root() {
     let _generator = fixture_generator::FixtureGenerator::start(&margins_home);
     margins::recall::provision_workspace_for_init(&workspace).unwrap();
 
-    let namespace = native_markdown_collection_namespace(&reference.canonicalize().unwrap()).unwrap();
+    let reference_path = match &workspace.config.bindings["research"] {
+        WorkspaceBinding::NativeMarkdown { path, .. } => path,
+        _ => unreachable!("research must be a native Markdown source"),
+    };
+    let namespace = native_markdown_collection_namespace(reference_path).unwrap();
     let index = rusqlite::Connection::open(workspace.recall_path()).unwrap();
     let document_hashes_before = native_document_hashes(&index, &namespace);
     assert_eq!(document_hashes_before.len(), 4);
