@@ -278,7 +278,7 @@ try {
   }
   if (freshRelease) await until("fresh release runtime install", () =>
     existsSync(path.join(freshCliBinDir, "margins"))
-      && existsSync(path.join(hostData, "runtime", "v0.4.14", "margins-server")), 120_000);
+      && existsSync(path.join(hostData, "runtime", "v0.4.15", "margins-server")), 120_000);
   shot("01-workspace.png");
 
   // The fake microphone is this harness's deliberate browser-only choice.

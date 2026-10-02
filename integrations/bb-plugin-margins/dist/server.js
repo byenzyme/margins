@@ -18902,7 +18902,7 @@ var recordingStateSchema = external_exports.enum([
   "needs_attention",
   "unavailable"
 ]);
-var primaryActionSchema = external_exports.enum(["start", "pause", "resume", "retry", "none"]);
+var primaryActionSchema = external_exports.enum(["start", "pause", "resume", "retry", "finish_incomplete", "none"]);
 var projectTargetSchema = external_exports.object({
   projectId: external_exports.string().min(1),
   hostId: external_exports.string().min(1),
@@ -18915,13 +18915,24 @@ var workspaceMeetingSchema = external_exports.object({
   title: external_exports.string().nullable(),
   startedAt: external_exports.string().min(1),
   inputFinalized: external_exports.boolean(),
-  notepad: notepadSchema
+  notepad: notepadSchema,
+  captureIncomplete: external_exports.boolean().default(false),
+  captureGaps: external_exports.array(external_exports.object({
+    segmentId: external_exports.string(),
+    startSequence: external_exports.number().int().nonnegative(),
+    endExclusive: external_exports.number().int().nonnegative(),
+    reason: external_exports.string(),
+    startsAtMs: external_exports.number().int().nonnegative().optional()
+  }).strict()).default([])
 }).strict();
 var hostCaptureSnapshotSchema = external_exports.object({
   recordingId: external_exports.string().min(1),
   sessionId: external_exports.string().min(1),
   status: external_exports.enum(["recording", "paused", "saving"]),
-  notepad: notepadSchema
+  notepad: notepadSchema,
+  nextSequence: external_exports.number().int().nonnegative(),
+  incomplete: external_exports.boolean().optional(),
+  expiredLease: external_exports.boolean().optional()
 }).strict();
 var hostErrorSchema = external_exports.object({
   code: external_exports.string().min(1),
@@ -19101,16 +19112,34 @@ var marginsHostContract = defineRpcContract({
     output: external_exports.object({ status: external_exports.number().int().min(100).max(599), bodyBase64: external_exports.string().max(4e6) }).strict()
   },
   startBrowserCapture: {
-    input: external_exports.object({ target: projectTargetSchema, ownerId: external_exports.string().min(1), name: external_exports.string().min(1).max(160) }).strict(),
+    input: external_exports.object({
+      target: projectTargetSchema,
+      ownerId: external_exports.string().min(1),
+      name: external_exports.string().min(1).max(160),
+      startedAtUnixMs: external_exports.number().int().nonnegative().optional()
+    }).strict(),
     output: hostResultSchema
   },
   readCapture: { input: ownedCaptureInputSchema, output: hostResultSchema },
   heartbeat: { input: ownedCaptureInputSchema, output: hostResultSchema },
-  pause: { input: ownedCaptureInputSchema.extend({ expectedNextSequence: external_exports.number().int().nonnegative() }).strict(), output: hostResultSchema },
-  resume: { input: ownedCaptureInputSchema, output: hostResultSchema },
-  stop: { input: ownedCaptureInputSchema.extend({ expectedNextSequence: external_exports.number().int().nonnegative() }).strict(), output: hostResultSchema },
+  pause: { input: ownedCaptureInputSchema.extend({
+    expectedNextSequence: external_exports.number().int().nonnegative(),
+    segmentEndedUnixMs: external_exports.number().int().nonnegative().optional(),
+    recoveredAfterReload: external_exports.boolean().optional()
+  }).strict(), output: hostResultSchema },
+  resume: { input: ownedCaptureInputSchema.extend({ segmentStartedUnixMs: external_exports.number().int().nonnegative().optional() }).strict(), output: hostResultSchema },
+  stop: { input: ownedCaptureInputSchema.extend({
+    expectedNextSequence: external_exports.number().int().nonnegative(),
+    segmentEndedUnixMs: external_exports.number().int().nonnegative().optional()
+  }).strict(), output: hostResultSchema },
+  finishIncomplete: { input: ownedCaptureInputSchema.extend({ expectedNextSequence: external_exports.number().int().nonnegative() }).strict(), output: hostResultSchema },
   uploadChunk: {
-    input: ownedCaptureInputSchema.extend({ sequence: external_exports.number().int().nonnegative(), bytesBase64: external_exports.string() }).strict(),
+    input: ownedCaptureInputSchema.extend({
+      sequence: external_exports.number().int().nonnegative(),
+      bytesBase64: external_exports.string(),
+      capturedStartUnixMs: external_exports.number().int().nonnegative(),
+      capturedEndUnixMs: external_exports.number().int().nonnegative()
+    }).strict(),
     output: external_exports.object({ ok: external_exports.boolean(), error: hostErrorSchema.optional() }).strict()
   },
   connectedNoteContext: {
@@ -19155,6 +19184,7 @@ var panelStateSchema = external_exports.object({
   sessionId: external_exports.string().nullable(),
   notepad: notepadSchema.nullable(),
   lastSessionId: external_exports.string().nullable(),
+  nextSequence: external_exports.number().int().nonnegative().optional(),
   error: hostErrorSchema.nullable()
 }).strict();
 var captureClientInputSchema = external_exports.object({
@@ -19207,7 +19237,8 @@ var marginsRpcContract = defineRpcContract({
       projectId: external_exports.string().min(1),
       client: clientCapabilitiesSchema,
       ownerId: external_exports.string().min(1),
-      title: external_exports.string().trim().max(160).optional()
+      title: external_exports.string().trim().max(160).optional(),
+      startedAtUnixMs: external_exports.number().int().nonnegative().optional()
     }).strict(),
     output: panelStateSchema
   },
@@ -19285,9 +19316,18 @@ var marginsRpcContract = defineRpcContract({
     ])
   },
   heartbeat: { input: captureClientInputSchema, output: panelStateSchema },
-  pause: { input: captureClientInputSchema.extend({ expectedNextSequence: external_exports.number().int().nonnegative() }).strict(), output: panelStateSchema },
-  resume: { input: captureClientInputSchema, output: panelStateSchema },
-  stop: { input: captureClientInputSchema.extend({ expectedNextSequence: external_exports.number().int().nonnegative() }).strict(), output: panelStateSchema },
+  readCapture: { input: captureClientInputSchema, output: panelStateSchema },
+  pause: { input: captureClientInputSchema.extend({
+    expectedNextSequence: external_exports.number().int().nonnegative(),
+    segmentEndedUnixMs: external_exports.number().int().nonnegative().optional(),
+    recoveredAfterReload: external_exports.boolean().optional()
+  }).strict(), output: panelStateSchema },
+  resume: { input: captureClientInputSchema.extend({ segmentStartedUnixMs: external_exports.number().int().nonnegative().optional() }).strict(), output: panelStateSchema },
+  stop: { input: captureClientInputSchema.extend({
+    expectedNextSequence: external_exports.number().int().nonnegative(),
+    segmentEndedUnixMs: external_exports.number().int().nonnegative().optional()
+  }).strict(), output: panelStateSchema },
+  finishIncomplete: { input: captureClientInputSchema.extend({ expectedNextSequence: external_exports.number().int().nonnegative() }).strict(), output: panelStateSchema },
   connectedNoteContext: {
     input: external_exports.object({ threadId: external_exports.string().min(1).optional(), projectId: external_exports.string().min(1).optional(), sessionId: external_exports.string().min(1) }).strict(),
     output: connectedNoteResultSchema
@@ -19330,6 +19370,8 @@ var SESSION_PREFIX = "session:";
 var RECORDING_PREFIX = "recording:";
 var LIVE_PREFIX = "live:";
 var LAST_SESSION_PREFIX = "last-session:";
+var FINISHED_AWAY_PREFIX = "finished-away:";
+var SAVED_WITH_GAPS_PREFIX = "saved-with-gaps:";
 var PROJECT_WORKSPACE_PREFIX = "project-workspace:";
 var MEETING_ORIGIN_PREFIX = "meeting-origin:";
 var MEETING_ARCHIVE_PREFIX = "meeting-archive:";
@@ -19350,6 +19392,12 @@ function liveKey(workspaceId) {
 }
 function lastSessionKey(workspaceId) {
   return `${LAST_SESSION_PREFIX}${workspaceId}`;
+}
+function finishedAwayKey(workspaceId) {
+  return `${FINISHED_AWAY_PREFIX}${workspaceId}`;
+}
+function savedWithGapsKey(workspaceId) {
+  return `${SAVED_WITH_GAPS_PREFIX}${workspaceId}`;
 }
 function originKey(workspaceId, sessionId) {
   return `${MEETING_ORIGIN_PREFIX}${workspaceId}:${sessionId}`;
@@ -19543,8 +19591,39 @@ function marginsPlugin(bb) {
       sessionId: options.capture?.sessionId || options.lastSessionId || null,
       notepad: options.notepad || null,
       lastSessionId: options.lastSessionId || null,
-      error: options.error || null
+      error: options.error || null,
+      ...options.nextSequence !== void 0 ? { nextSequence: options.nextSequence } : {}
     };
+  }
+  function finishedAwayPanel(projectId, client, sessionId) {
+    return {
+      ...basePanel(projectId, "saved", client, { lastSessionId: sessionId }),
+      title: "Finished while you were away (incomplete)",
+      detail: "Margins saved the audio it received. Some audio is missing; the transcript marks the gap.",
+      primaryAction: "start",
+      primaryLabel: "Record another meeting"
+    };
+  }
+  function savedWithGapsPanel(projectId, client, sessionId) {
+    return {
+      ...basePanel(projectId, "saved", client, { lastSessionId: sessionId }),
+      title: "Saved with gaps",
+      detail: "Margins saved the audio it received. Some audio is missing; the transcript marks the gap.",
+      primaryAction: "start",
+      primaryLabel: "Record another meeting"
+    };
+  }
+  async function rememberFinishedAway(capture) {
+    await bb.storage.kv.set(lastSessionKey(capture.workspaceId), capture.sessionId);
+    await bb.storage.kv.set(finishedAwayKey(capture.workspaceId), capture.sessionId);
+    await bb.storage.kv.delete(savedWithGapsKey(capture.workspaceId));
+    await clearCapture(capture);
+  }
+  async function rememberSavedWithGaps(capture) {
+    await bb.storage.kv.set(lastSessionKey(capture.workspaceId), capture.sessionId);
+    await bb.storage.kv.set(savedWithGapsKey(capture.workspaceId), capture.sessionId);
+    await bb.storage.kv.delete(finishedAwayKey(capture.workspaceId));
+    await clearCapture(capture);
   }
   async function getPanelStateForTarget(target, client) {
     const authority = await callHost(target, "captureAuthority", { target });
@@ -19552,6 +19631,8 @@ function marginsPlugin(bb) {
     const workspaceId = authority.workspaceId;
     const capture = await readLiveCapture(workspaceId);
     const lastSessionId = await readLastSession(workspaceId);
+    const finishedAwayId = await bb.storage.kv.get(finishedAwayKey(workspaceId));
+    const savedWithGapsId = await bb.storage.kv.get(savedWithGapsKey(workspaceId));
     if (capture) {
       const owns = capture.clientId === client.clientId;
       if (!owns) return basePanel(target.projectId, "recording_elsewhere", client, { capture, lastSessionId });
@@ -19563,12 +19644,39 @@ function marginsPlugin(bb) {
       };
       const result = await callHost(captureTarget, "readCapture", { target: captureTarget, recordingId: capture.recordingId, ownerId: capture.ownerId });
       if (!result.ok) {
+        if (result.error.code === "browser_lease_expired") {
+          await rememberFinishedAway(capture);
+          return finishedAwayPanel(target.projectId, client, capture.sessionId);
+        }
         const withinGrace = Date.now() - capture.lastHeartbeatUnixMs <= DISCONNECT_GRACE_MS;
         return basePanel(target.projectId, withinGrace ? "recovering" : "needs_attention", client, { capture, lastSessionId, error: result.error });
       }
-      if (!result.snapshot) return basePanel(target.projectId, "saving", client, { capture, lastSessionId });
-      const state = result.snapshot.status === "paused" ? "paused" : result.snapshot.status === "saving" ? "saving" : "recording";
-      return basePanel(target.projectId, state, client, { capture, lastSessionId, notepad: result.snapshot.notepad });
+      if (!result.snapshot || result.snapshot.status === "saving") {
+        if (result.snapshot?.incomplete) {
+          if (result.snapshot.expiredLease) {
+            await rememberFinishedAway(capture);
+            return finishedAwayPanel(target.projectId, client, capture.sessionId);
+          }
+          await rememberSavedWithGaps(capture);
+          return savedWithGapsPanel(target.projectId, client, capture.sessionId);
+        }
+        await bb.storage.kv.set(lastSessionKey(capture.workspaceId), capture.sessionId);
+        await clearCapture(capture);
+        return basePanel(target.projectId, "saved", client, { lastSessionId: capture.sessionId });
+      }
+      const state = result.snapshot.status === "paused" ? "paused" : "recording";
+      return basePanel(target.projectId, state, client, {
+        capture,
+        lastSessionId,
+        notepad: result.snapshot.notepad,
+        nextSequence: result.snapshot.nextSequence
+      });
+    }
+    if (lastSessionId && finishedAwayId === lastSessionId) {
+      return finishedAwayPanel(target.projectId, client, lastSessionId);
+    }
+    if (lastSessionId && savedWithGapsId === lastSessionId) {
+      return savedWithGapsPanel(target.projectId, client, lastSessionId);
     }
     if (client.platform === "macos" && !sourceFor(client)) return basePanel(target.projectId, "needs_setup", client);
     if (!sourceFor(client)) return basePanel(target.projectId, "unavailable", client);
@@ -19590,13 +19698,13 @@ function marginsPlugin(bb) {
       if (startLocks.get(projectId) === queued) startLocks.delete(projectId);
     }
   }
-  async function operate(sessionId, client, operationId, operation, expectedNextSequence) {
+  async function operate(sessionId, client, operationId, operation, expectedNextSequence, segmentTimeUnixMs, recoveredAfterReload) {
     const receiptKey = `control-receipt:${sessionId}:${operationId}`;
     const capture = await readCapture(sessionId);
     if (operation !== "heartbeat") {
       const prior = await bb.storage.kv.get(receiptKey);
       if (prior) {
-        if (prior.sessionId !== sessionId || prior.operation !== operation || prior.clientId !== client.clientId || (operation === "pause" || operation === "stop") && prior.expectedNextSequence !== expectedNextSequence) {
+        if (prior.sessionId !== sessionId || prior.operation !== operation || prior.clientId !== client.clientId || (operation === "pause" || operation === "stop") && prior.expectedNextSequence !== expectedNextSequence || prior.segmentTimeUnixMs !== segmentTimeUnixMs || prior.recoveredAfterReload !== (recoveredAfterReload || void 0)) {
           return basePanel(capture?.projectId || null, "needs_attention", client, {
             capture: null,
             error: { code: "operation_conflict", message: "This control operation id was already used for different content.", retryable: false }
@@ -19622,11 +19730,23 @@ function marginsPlugin(bb) {
       target,
       recordingId: capture.recordingId,
       ownerId: capture.ownerId,
-      ...operation === "pause" || operation === "stop" ? { expectedNextSequence } : {}
+      ...operation === "pause" || operation === "stop" ? {
+        expectedNextSequence,
+        ...segmentTimeUnixMs !== void 0 ? { segmentEndedUnixMs: segmentTimeUnixMs } : {}
+      } : {},
+      ...operation === "pause" && recoveredAfterReload ? { recoveredAfterReload: true } : {},
+      ...operation === "resume" && segmentTimeUnixMs !== void 0 ? { segmentStartedUnixMs: segmentTimeUnixMs } : {}
     });
+    if (!result.ok && result.error.code === "browser_lease_expired") {
+      await rememberFinishedAway(capture);
+      bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: "lease_expired" });
+      return finishedAwayPanel(target.projectId, client, capture.sessionId);
+    }
     if (result.ok) {
       if (operation === "stop") {
         await bb.storage.kv.set(lastSessionKey(capture.workspaceId), capture.sessionId);
+        await bb.storage.kv.delete(finishedAwayKey(capture.workspaceId));
+        await bb.storage.kv.delete(savedWithGapsKey(capture.workspaceId));
       } else {
         capture.lastHeartbeatUnixMs = operation === "heartbeat" ? Date.now() : capture.lastHeartbeatUnixMs;
         await saveCapture(capture);
@@ -19638,6 +19758,8 @@ function marginsPlugin(bb) {
           operation,
           clientId: client.clientId,
           ...operation === "pause" || operation === "stop" ? { expectedNextSequence } : {},
+          ...segmentTimeUnixMs !== void 0 ? { segmentTimeUnixMs } : {},
+          ...recoveredAfterReload ? { recoveredAfterReload: true } : {},
           workspaceId: capture.workspaceId,
           projectId: capture.projectId
         });
@@ -19657,18 +19779,45 @@ function marginsPlugin(bb) {
       workspaceId: capture.workspaceId
     };
     const result = await callHost(target, "readCapture", { target, recordingId: capture.recordingId, ownerId: capture.ownerId });
-    if (!result.ok) return basePanel(capture.projectId, "needs_attention", client, { capture, error: result.error });
-    if (!result.snapshot) return basePanel(capture.projectId, "saving", client, { capture });
-    return basePanel(capture.projectId, result.snapshot.status, client, { capture, notepad: result.snapshot.notepad });
+    if (!result.ok) {
+      if (result.error.code === "browser_lease_expired") {
+        await rememberFinishedAway(capture);
+        return finishedAwayPanel(capture.projectId, client, capture.sessionId);
+      }
+      return basePanel(capture.projectId, "needs_attention", client, { capture, error: result.error });
+    }
+    if (!result.snapshot || result.snapshot.status === "saving") {
+      if (result.snapshot?.incomplete) {
+        if (result.snapshot.expiredLease) {
+          await rememberFinishedAway(capture);
+          return finishedAwayPanel(capture.projectId, client, capture.sessionId);
+        }
+        await rememberSavedWithGaps(capture);
+        return savedWithGapsPanel(capture.projectId, client, capture.sessionId);
+      }
+      await bb.storage.kv.set(lastSessionKey(capture.workspaceId), capture.sessionId);
+      await clearCapture(capture);
+      return basePanel(capture.projectId, "saved", client, { lastSessionId: capture.sessionId });
+    }
+    return basePanel(capture.projectId, result.snapshot.status, client, {
+      capture,
+      notepad: result.snapshot.notepad,
+      nextSequence: result.snapshot.nextSequence
+    });
   }
-  async function beginForTarget(target, client, ownerId, title) {
+  async function beginForTarget(target, client, ownerId, title, startedAtUnixMs) {
     if (client.nativeMacCapture || !client.secureContext || !client.browserMicrophone) return getPanelStateForTarget(target, client);
     const authority = await callHost(target, "captureAuthority", { target });
     if (!authority.ok) return basePanel(target.projectId, "unavailable", client, { error: authority.error });
     const workspaceId = authority.workspaceId;
     return locked(workspaceId, async () => {
       if (await readLiveCapture(workspaceId)) return getPanelStateForTarget(target, client);
-      const result = await callHost(target, "startBrowserCapture", { target, ownerId, name: meetingName(title) });
+      const result = await callHost(target, "startBrowserCapture", {
+        target,
+        ownerId,
+        name: meetingName(title),
+        ...startedAtUnixMs !== void 0 ? { startedAtUnixMs } : {}
+      });
       if (!result.ok || !result.snapshot) return basePanel(target.projectId, "needs_attention", client, { error: result.ok ? null : result.error });
       await saveCapture({
         projectId: target.projectId,
@@ -19681,6 +19830,8 @@ function marginsPlugin(bb) {
         ownerId,
         lastHeartbeatUnixMs: Date.now()
       });
+      await bb.storage.kv.delete(finishedAwayKey(workspaceId));
+      await bb.storage.kv.delete(savedWithGapsKey(workspaceId));
       await bb.storage.kv.set(originKey(workspaceId, result.snapshot.sessionId), target.projectId);
       bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: "start" });
       return getPanelStateForTarget(target, client);
@@ -19781,8 +19932,8 @@ function marginsPlugin(bb) {
         });
       }
     },
-    async beginProjectCapture({ projectId, client, ownerId, title }) {
-      return beginForTarget(await targetForProject(projectId), client, ownerId, title);
+    async beginProjectCapture({ projectId, client, ownerId, title, startedAtUnixMs }) {
+      return beginForTarget(await targetForProject(projectId), client, ownerId, title, startedAtUnixMs);
     },
     async listWorkspaceMeetings({ projectId }) {
       const target = await targetForProject(projectId);
@@ -19971,9 +20122,38 @@ function marginsPlugin(bb) {
       }
     },
     heartbeat: ({ sessionId, client, operationId }) => operate(sessionId, client, operationId, "heartbeat"),
-    pause: ({ sessionId, client, operationId, expectedNextSequence }) => operate(sessionId, client, operationId, "pause", expectedNextSequence),
-    resume: ({ sessionId, client, operationId }) => operate(sessionId, client, operationId, "resume"),
-    stop: ({ sessionId, client, operationId, expectedNextSequence }) => operate(sessionId, client, operationId, "stop", expectedNextSequence),
+    async readCapture({ sessionId, client }) {
+      const capture = await readCapture(sessionId);
+      if (!capture || capture.clientId !== client.clientId) return basePanel(null, "unavailable", client, {
+        error: { code: "session_not_owned", message: "This meeting is not owned by this browser.", retryable: false }
+      });
+      return panelForCapture(capture, client);
+    },
+    pause: ({ sessionId, client, operationId, expectedNextSequence, segmentEndedUnixMs, recoveredAfterReload }) => operate(sessionId, client, operationId, "pause", expectedNextSequence, segmentEndedUnixMs, recoveredAfterReload),
+    resume: ({ sessionId, client, operationId, segmentStartedUnixMs }) => operate(sessionId, client, operationId, "resume", void 0, segmentStartedUnixMs),
+    stop: ({ sessionId, client, operationId, expectedNextSequence, segmentEndedUnixMs }) => operate(sessionId, client, operationId, "stop", expectedNextSequence, segmentEndedUnixMs),
+    async finishIncomplete({ sessionId, client, expectedNextSequence }) {
+      const capture = await readCapture(sessionId);
+      if (!capture || capture.clientId !== client.clientId) return basePanel(null, "unavailable", client, {
+        error: { code: "session_not_owned", message: "This meeting is not owned by this browser.", retryable: false }
+      });
+      const target = {
+        projectId: capture.projectId,
+        hostId: capture.hostId,
+        projectRoot: capture.projectRoot,
+        workspaceId: capture.workspaceId
+      };
+      const result = await callHost(target, "finishIncomplete", {
+        target,
+        recordingId: capture.recordingId,
+        ownerId: capture.ownerId,
+        expectedNextSequence
+      });
+      if (!result.ok) return basePanel(capture.projectId, "needs_attention", client, { capture, error: result.error });
+      await rememberSavedWithGaps(capture);
+      bb.realtime.publish(REALTIME_CHANNEL, { projectId: capture.projectId, reason: "stop" });
+      return savedWithGapsPanel(capture.projectId, client, capture.sessionId);
+    },
     async connectedNoteContext({ threadId, projectId, sessionId }) {
       const target = await targetForSelection({ threadId, projectId });
       return callHost(target, "connectedNoteContext", { target, recordingId: sessionId });
@@ -19990,7 +20170,9 @@ function marginsPlugin(bb) {
     sessionId: external_exports.string().min(1),
     client: clientCapabilitiesSchema,
     sequence: external_exports.number().int().nonnegative(),
-    bytesBase64: external_exports.string().max(2e6)
+    bytesBase64: external_exports.string().max(2e6),
+    capturedStartUnixMs: external_exports.number().int().nonnegative(),
+    capturedEndUnixMs: external_exports.number().int().nonnegative()
   }).strict();
   bb.http.route("POST", "/capture/chunk", async (context) => {
     const parsed = chunkSchema.safeParse(await context.req.json().catch(() => null));
@@ -20010,7 +20192,9 @@ function marginsPlugin(bb) {
       recordingId: capture.recordingId,
       ownerId: capture.ownerId,
       sequence: parsed.data.sequence,
-      bytesBase64: parsed.data.bytesBase64
+      bytesBase64: parsed.data.bytesBase64,
+      capturedStartUnixMs: parsed.data.capturedStartUnixMs,
+      capturedEndUnixMs: parsed.data.capturedEndUnixMs
     });
     return context.json(result, result.ok ? 200 : 502);
   });

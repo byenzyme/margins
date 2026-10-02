@@ -33289,7 +33289,7 @@ var recordingStateSchema = external_exports2.enum([
   "needs_attention",
   "unavailable"
 ]);
-var primaryActionSchema = external_exports2.enum(["start", "pause", "resume", "retry", "none"]);
+var primaryActionSchema = external_exports2.enum(["start", "pause", "resume", "retry", "finish_incomplete", "none"]);
 var projectTargetSchema = external_exports2.object({
   projectId: external_exports2.string().min(1),
   hostId: external_exports2.string().min(1),
@@ -33302,13 +33302,24 @@ var workspaceMeetingSchema = external_exports2.object({
   title: external_exports2.string().nullable(),
   startedAt: external_exports2.string().min(1),
   inputFinalized: external_exports2.boolean(),
-  notepad: notepadSchema
+  notepad: notepadSchema,
+  captureIncomplete: external_exports2.boolean().default(false),
+  captureGaps: external_exports2.array(external_exports2.object({
+    segmentId: external_exports2.string(),
+    startSequence: external_exports2.number().int().nonnegative(),
+    endExclusive: external_exports2.number().int().nonnegative(),
+    reason: external_exports2.string(),
+    startsAtMs: external_exports2.number().int().nonnegative().optional()
+  }).strict()).default([])
 }).strict();
 var hostCaptureSnapshotSchema = external_exports2.object({
   recordingId: external_exports2.string().min(1),
   sessionId: external_exports2.string().min(1),
   status: external_exports2.enum(["recording", "paused", "saving"]),
-  notepad: notepadSchema
+  notepad: notepadSchema,
+  nextSequence: external_exports2.number().int().nonnegative(),
+  incomplete: external_exports2.boolean().optional(),
+  expiredLease: external_exports2.boolean().optional()
 }).strict();
 var hostErrorSchema = external_exports2.object({
   code: external_exports2.string().min(1),
@@ -33488,16 +33499,34 @@ var marginsHostContract = defineRpcContract2({
     output: external_exports2.object({ status: external_exports2.number().int().min(100).max(599), bodyBase64: external_exports2.string().max(4e6) }).strict()
   },
   startBrowserCapture: {
-    input: external_exports2.object({ target: projectTargetSchema, ownerId: external_exports2.string().min(1), name: external_exports2.string().min(1).max(160) }).strict(),
+    input: external_exports2.object({
+      target: projectTargetSchema,
+      ownerId: external_exports2.string().min(1),
+      name: external_exports2.string().min(1).max(160),
+      startedAtUnixMs: external_exports2.number().int().nonnegative().optional()
+    }).strict(),
     output: hostResultSchema
   },
   readCapture: { input: ownedCaptureInputSchema, output: hostResultSchema },
   heartbeat: { input: ownedCaptureInputSchema, output: hostResultSchema },
-  pause: { input: ownedCaptureInputSchema.extend({ expectedNextSequence: external_exports2.number().int().nonnegative() }).strict(), output: hostResultSchema },
-  resume: { input: ownedCaptureInputSchema, output: hostResultSchema },
-  stop: { input: ownedCaptureInputSchema.extend({ expectedNextSequence: external_exports2.number().int().nonnegative() }).strict(), output: hostResultSchema },
+  pause: { input: ownedCaptureInputSchema.extend({
+    expectedNextSequence: external_exports2.number().int().nonnegative(),
+    segmentEndedUnixMs: external_exports2.number().int().nonnegative().optional(),
+    recoveredAfterReload: external_exports2.boolean().optional()
+  }).strict(), output: hostResultSchema },
+  resume: { input: ownedCaptureInputSchema.extend({ segmentStartedUnixMs: external_exports2.number().int().nonnegative().optional() }).strict(), output: hostResultSchema },
+  stop: { input: ownedCaptureInputSchema.extend({
+    expectedNextSequence: external_exports2.number().int().nonnegative(),
+    segmentEndedUnixMs: external_exports2.number().int().nonnegative().optional()
+  }).strict(), output: hostResultSchema },
+  finishIncomplete: { input: ownedCaptureInputSchema.extend({ expectedNextSequence: external_exports2.number().int().nonnegative() }).strict(), output: hostResultSchema },
   uploadChunk: {
-    input: ownedCaptureInputSchema.extend({ sequence: external_exports2.number().int().nonnegative(), bytesBase64: external_exports2.string() }).strict(),
+    input: ownedCaptureInputSchema.extend({
+      sequence: external_exports2.number().int().nonnegative(),
+      bytesBase64: external_exports2.string(),
+      capturedStartUnixMs: external_exports2.number().int().nonnegative(),
+      capturedEndUnixMs: external_exports2.number().int().nonnegative()
+    }).strict(),
     output: external_exports2.object({ ok: external_exports2.boolean(), error: hostErrorSchema.optional() }).strict()
   },
   connectedNoteContext: {
@@ -33542,6 +33571,7 @@ var panelStateSchema = external_exports2.object({
   sessionId: external_exports2.string().nullable(),
   notepad: notepadSchema.nullable(),
   lastSessionId: external_exports2.string().nullable(),
+  nextSequence: external_exports2.number().int().nonnegative().optional(),
   error: hostErrorSchema.nullable()
 }).strict();
 var captureClientInputSchema = external_exports2.object({
@@ -33594,7 +33624,8 @@ var marginsRpcContract = defineRpcContract2({
       projectId: external_exports2.string().min(1),
       client: clientCapabilitiesSchema,
       ownerId: external_exports2.string().min(1),
-      title: external_exports2.string().trim().max(160).optional()
+      title: external_exports2.string().trim().max(160).optional(),
+      startedAtUnixMs: external_exports2.number().int().nonnegative().optional()
     }).strict(),
     output: panelStateSchema
   },
@@ -33672,9 +33703,18 @@ var marginsRpcContract = defineRpcContract2({
     ])
   },
   heartbeat: { input: captureClientInputSchema, output: panelStateSchema },
-  pause: { input: captureClientInputSchema.extend({ expectedNextSequence: external_exports2.number().int().nonnegative() }).strict(), output: panelStateSchema },
-  resume: { input: captureClientInputSchema, output: panelStateSchema },
-  stop: { input: captureClientInputSchema.extend({ expectedNextSequence: external_exports2.number().int().nonnegative() }).strict(), output: panelStateSchema },
+  readCapture: { input: captureClientInputSchema, output: panelStateSchema },
+  pause: { input: captureClientInputSchema.extend({
+    expectedNextSequence: external_exports2.number().int().nonnegative(),
+    segmentEndedUnixMs: external_exports2.number().int().nonnegative().optional(),
+    recoveredAfterReload: external_exports2.boolean().optional()
+  }).strict(), output: panelStateSchema },
+  resume: { input: captureClientInputSchema.extend({ segmentStartedUnixMs: external_exports2.number().int().nonnegative().optional() }).strict(), output: panelStateSchema },
+  stop: { input: captureClientInputSchema.extend({
+    expectedNextSequence: external_exports2.number().int().nonnegative(),
+    segmentEndedUnixMs: external_exports2.number().int().nonnegative().optional()
+  }).strict(), output: panelStateSchema },
+  finishIncomplete: { input: captureClientInputSchema.extend({ expectedNextSequence: external_exports2.number().int().nonnegative() }).strict(), output: panelStateSchema },
   connectedNoteContext: {
     input: external_exports2.object({ threadId: external_exports2.string().min(1).optional(), projectId: external_exports2.string().min(1).optional(), sessionId: external_exports2.string().min(1) }).strict(),
     output: connectedNoteResultSchema
@@ -33716,7 +33756,7 @@ import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 var execFile = promisify(execFileCallback);
-var RUNTIME_RELEASE_VERSION = "0.4.14";
+var RUNTIME_RELEASE_VERSION = "0.4.15";
 var RELEASE_API = `https://api.github.com/repos/byenzyme/margins/releases/tags/v${RUNTIME_RELEASE_VERSION}`;
 var MAX_ARCHIVE_BYTES = 128 * 1024 * 1024;
 function targetName(hostPlatform, arch) {
@@ -33863,7 +33903,7 @@ function createRuntimeManager(options = {}) {
       if (!target) throw new Error("Recording is not available on this project machine");
       const expectedName = `margins-${RUNTIME_RELEASE_VERSION}-${target}.tar.gz`;
       const archive = await downloadPinnedArchive(fetchImpl, expectedName, input2.signal);
-      if (!archive) throw new Error(`Margins ${RUNTIME_RELEASE_VERSION} is not published for this project machine`);
+      if (!archive) throw new Error(`Margins runtime ${RUNTIME_RELEASE_VERSION} is not published yet for this project machine; upgrade the plugin and server together after release.`);
       await installRuntime({
         archive,
         dataDir: input2.dataDir,
@@ -33903,7 +33943,15 @@ var workspaceSessionSummarySchema = external_exports2.strictObject({
   input_finalized: external_exports2.boolean(),
   capture_duration_ms: external_exports2.number().int().nonnegative().nullable(),
   capture_finalize_message_id: external_exports2.string().nullable(),
-  processing_state: external_exports2.string()
+  processing_state: external_exports2.string(),
+  capture_incomplete: external_exports2.boolean().default(false),
+  capture_gaps: external_exports2.array(external_exports2.strictObject({
+    segment_id: external_exports2.string(),
+    start_sequence: external_exports2.number().int().nonnegative(),
+    end_exclusive: external_exports2.number().int().nonnegative(),
+    reason: external_exports2.string(),
+    starts_at_ms: external_exports2.number().int().nonnegative().optional()
+  })).default([])
 });
 var workspaceSessionPageSchema = external_exports2.strictObject({
   sessions: external_exports2.array(workspaceSessionSummarySchema),
@@ -34001,9 +34049,12 @@ async function verifyServerCompatibility(baseUrl, token, workspaceId, signal) {
     signal,
     headers: { authorization: `Bearer ${token}` }
   });
-  const envelope = await response.json();
-  if (!response.ok || !envelope.ok) {
-    throw new Error(envelope.error?.message || `Margins capability check failed (${response.status})`);
+  const envelope = await response.json().catch(() => null);
+  if (response.status === 404 || response.ok && !envelope?.ok) {
+    throw new Error("Margins server version doesn't match this plugin; upgrade both");
+  }
+  if (!response.ok || !envelope?.ok) {
+    throw new Error(envelope?.error?.message || `Margins capability check failed (${response.status})`);
   }
   if (envelope.result?.protocol_version !== 1 || envelope.result.capture_protocol_version !== CAPTURE_PROTOCOL_VERSION) {
     throw new Error("Margins server version doesn't match this plugin; upgrade both");
@@ -34229,12 +34280,10 @@ var ProjectServerManager = class {
       child.kill("SIGTERM");
       throw error108;
     });
-    if (asrRuntime) {
-      await verifyServerCompatibility(baseUrl, token, workspaceId, signal).catch((error108) => {
-        child.kill("SIGTERM");
-        throw error108;
-      });
-    }
+    await verifyServerCompatibility(baseUrl, token, workspaceId, signal).catch((error108) => {
+      child.kill("SIGTERM");
+      throw error108;
+    });
     child.once("exit", () => this.handles.delete(key));
     return { baseUrl, token, workspaceId, instanceId: `bb-host-${target.hostId}`, child };
   }
@@ -34281,6 +34330,14 @@ var ProjectMarginsTransport = class {
           inputFinalized: summary.input_finalized,
           durationMs: summary.capture_duration_ms ?? null,
           audioSource,
+          captureIncomplete: summary.capture_incomplete ?? false,
+          captureGaps: (summary.capture_gaps ?? []).map((gap) => ({
+            segmentId: gap.segment_id,
+            startSequence: gap.start_sequence,
+            endExclusive: gap.end_exclusive,
+            reason: gap.reason,
+            ...gap.starts_at_ms !== void 0 ? { startsAtMs: gap.starts_at_ms } : {}
+          })),
           notePath: note?.relative_path || null,
           noteFile: noteFilePath ? { hostId: target.hostId, path: noteFilePath } : null,
           threadIds: note?.bb_thread_ids || [],
@@ -34316,6 +34373,14 @@ var ProjectMarginsTransport = class {
         title: summary.title,
         startedAt: summary.started_at,
         inputFinalized: summary.input_finalized,
+        captureIncomplete: summary.capture_incomplete ?? false,
+        captureGaps: (summary.capture_gaps ?? []).map((gap) => ({
+          segmentId: gap.segment_id,
+          startSequence: gap.start_sequence,
+          endExclusive: gap.end_exclusive,
+          reason: gap.reason,
+          ...gap.starts_at_ms !== void 0 ? { startsAtMs: gap.starts_at_ms } : {}
+        })),
         notepad: { revision: memo2.revision, text: memo2.lines.map((line) => line.text).join("\n") }
       } };
     } catch (cause) {
@@ -34325,18 +34390,9 @@ var ProjectMarginsTransport = class {
   async saveWorkspaceMemo(target, dataDir, sessionId, expectedRevision, text) {
     try {
       const handle = await this.manager.ensure(target, dataDir);
-      const summary = await this.request(
-        handle,
-        `sessions/${encodeURIComponent(sessionId)}`,
-        "GET"
-      );
-      const started = Date.parse(summary.started_at);
-      if (!Number.isFinite(started)) throw new Error("Meeting start time is invalid");
-      const observedAtMs = summary.input_finalized && summary.capture_duration_ms !== null ? summary.capture_duration_ms : Math.max(0, Date.now() - started);
       await this.request(handle, `sessions/${encodeURIComponent(sessionId)}/memo`, "PUT", {
         request_id: randomUUID(),
         expected_revision: expectedRevision,
-        observed_at_ms: Math.floor(observedAtMs),
         paused: false,
         text
       });
@@ -34517,33 +34573,52 @@ var ProjectMarginsTransport = class {
       return { ok: false, error: cause instanceof WorkspaceRequestError ? hostError(cause.code, cause.message, cause.retryable) : hostError("project_recorder_unavailable", cause instanceof Error ? cause.message : String(cause)) };
     }
   }
-  start(target, dataDir, ownerId, name) {
+  start(target, dataDir, ownerId, name, startedAtUnixMs) {
     return this.withHandle(target, dataDir, async (handle) => {
-      const snapshot = await this.request(handle, "browser/sessions", "POST", { name, ownerId });
+      const snapshot = await this.request(handle, "browser/sessions", "POST", {
+        name,
+        ownerId,
+        ...startedAtUnixMs !== void 0 ? { startedAtUnixMs } : {}
+      });
       return snapshot;
     });
   }
   read(target, dataDir, recordingId, ownerId) {
     return this.withHandle(target, dataDir, (handle) => this.snapshot(handle, recordingId, ownerId));
   }
-  mutate(target, dataDir, recordingId, ownerId, command, expectedNextSequence) {
+  mutate(target, dataDir, recordingId, ownerId, command, expectedNextSequence, segmentTimeUnixMs, recoveredAfterReload) {
     return this.withHandle(target, dataDir, async (handle) => {
       const action = command === "heartbeat_web_recording" ? "heartbeat" : command === "pause_recording" ? "pause" : "resume";
       return this.request(
         handle,
         `browser/sessions/${recordingId}/${action}`,
         "POST",
-        command === "pause_recording" ? { ownerId, expectedNextSequence } : { ownerId }
+        command === "pause_recording" ? {
+          ownerId,
+          expectedNextSequence,
+          ...segmentTimeUnixMs !== void 0 ? { segmentEndedUnixMs: segmentTimeUnixMs } : {},
+          ...recoveredAfterReload ? { recoveredAfterReload: true } : {}
+        } : command === "resume_recording" && segmentTimeUnixMs !== void 0 ? { ownerId, segmentStartedUnixMs: segmentTimeUnixMs } : { ownerId }
       );
     });
   }
-  stop(target, dataDir, recordingId, ownerId, expectedNextSequence) {
+  stop(target, dataDir, recordingId, ownerId, expectedNextSequence, segmentEndedUnixMs) {
     return this.withHandle(target, dataDir, async (handle) => {
-      await this.request(handle, `browser/sessions/${recordingId}/stop`, "POST", { ownerId, expectedNextSequence });
+      await this.request(handle, `browser/sessions/${recordingId}/stop`, "POST", {
+        ownerId,
+        expectedNextSequence,
+        ...segmentEndedUnixMs !== void 0 ? { segmentEndedUnixMs } : {}
+      });
       return null;
     });
   }
-  async upload(target, dataDir, recordingId, ownerId, sequence, bytesBase64) {
+  finishIncomplete(target, dataDir, recordingId, ownerId, expectedNextSequence) {
+    return this.withHandle(target, dataDir, async (handle) => {
+      await this.request(handle, `browser/sessions/${recordingId}/finish-incomplete`, "POST", { ownerId, expectedNextSequence });
+      return null;
+    });
+  }
+  async upload(target, dataDir, recordingId, ownerId, sequence, bytesBase64, capturedStartUnixMs, capturedEndUnixMs) {
     try {
       const handle = await this.manager.ensure(target, dataDir);
       const response = await fetch(`${handle.baseUrl}/v1/workspaces/${handle.workspaceId}/browser/sessions/${recordingId}/chunks/${sequence}`, {
@@ -34552,7 +34627,9 @@ var ProjectMarginsTransport = class {
           authorization: `Bearer ${handle.token}`,
           "content-type": "application/octet-stream",
           "x-margins-capture-owner": ownerId,
-          "X-Margins-Instance-Id": handle.instanceId
+          "X-Margins-Instance-Id": handle.instanceId,
+          "X-Margins-Captured-Start-Unix-Ms": String(capturedStartUnixMs),
+          "X-Margins-Captured-End-Unix-Ms": String(capturedEndUnixMs)
         },
         body: Buffer.from(bytesBase64, "base64")
       });
@@ -34826,7 +34903,13 @@ function createMarginsHostEntry(transport) {
       },
       async startBrowserCapture(input2, context) {
         retain(context);
-        const result = await transport.start(input2.target, context.experimental_paths.dataDir, input2.ownerId, input2.name);
+        const result = await transport.start(
+          input2.target,
+          context.experimental_paths.dataDir,
+          input2.ownerId,
+          input2.name,
+          input2.startedAtUnixMs
+        );
         await changed(context, input2.target.projectId, "start", result);
         return result;
       },
@@ -34840,25 +34923,70 @@ function createMarginsHostEntry(transport) {
       },
       async pause(input2, context) {
         retain(context);
-        const result = await transport.mutate(input2.target, context.experimental_paths.dataDir, input2.recordingId, input2.ownerId, "pause_recording", input2.expectedNextSequence);
+        const result = await transport.mutate(
+          input2.target,
+          context.experimental_paths.dataDir,
+          input2.recordingId,
+          input2.ownerId,
+          "pause_recording",
+          input2.expectedNextSequence,
+          input2.segmentEndedUnixMs,
+          input2.recoveredAfterReload
+        );
         await changed(context, input2.target.projectId, "pause", result);
         return result;
       },
       async resume(input2, context) {
         retain(context);
-        const result = await transport.mutate(input2.target, context.experimental_paths.dataDir, input2.recordingId, input2.ownerId, "resume_recording");
+        const result = await transport.mutate(
+          input2.target,
+          context.experimental_paths.dataDir,
+          input2.recordingId,
+          input2.ownerId,
+          "resume_recording",
+          void 0,
+          input2.segmentStartedUnixMs
+        );
         await changed(context, input2.target.projectId, "resume", result);
         return result;
       },
       async stop(input2, context) {
         retain(context);
-        const result = await transport.stop(input2.target, context.experimental_paths.dataDir, input2.recordingId, input2.ownerId, input2.expectedNextSequence);
+        const result = await transport.stop(
+          input2.target,
+          context.experimental_paths.dataDir,
+          input2.recordingId,
+          input2.ownerId,
+          input2.expectedNextSequence,
+          input2.segmentEndedUnixMs
+        );
+        await changed(context, input2.target.projectId, "stop", result);
+        return result;
+      },
+      async finishIncomplete(input2, context) {
+        retain(context);
+        const result = await transport.finishIncomplete(
+          input2.target,
+          context.experimental_paths.dataDir,
+          input2.recordingId,
+          input2.ownerId,
+          input2.expectedNextSequence
+        );
         await changed(context, input2.target.projectId, "stop", result);
         return result;
       },
       uploadChunk(input2, context) {
         retain(context);
-        return transport.upload(input2.target, context.experimental_paths.dataDir, input2.recordingId, input2.ownerId, input2.sequence, input2.bytesBase64);
+        return transport.upload(
+          input2.target,
+          context.experimental_paths.dataDir,
+          input2.recordingId,
+          input2.ownerId,
+          input2.sequence,
+          input2.bytesBase64,
+          input2.capturedStartUnixMs,
+          input2.capturedEndUnixMs
+        );
       },
       connectedNoteContext(input2, context) {
         retain(context);

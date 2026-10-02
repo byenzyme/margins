@@ -21,8 +21,8 @@ the machine default; without either, the panel asks for a Workspace.
   overlay slot. On bb 0.41, return to Meetings for Pause and Stop.
 - Capture controls and heartbeat route by meeting session id. Switching threads
   or bb projects that select the same Workspace does not change the live meeting.
-- A 25-second reconnect grace. After it expires, the project machine stops and
-  saves the audio it received.
+- A 30-minute server owner lease. If capture is abandoned, the project machine
+  saves the audio it received and marks the meeting incomplete.
 - A menu-recorded meeting in the same Workspace can be joined from the bb
   panel. Its active session appears with one revisioned notepad; bb does not
   start another browser recording for that meeting.
@@ -55,7 +55,7 @@ digest-verified Margins release when needed. That release contains:
 - `margins`, the normal CLI;
 - `margins-server`, the project-side recording service.
 
-The plugin pins `v0.4.14`, whose Linux and Apple Silicon macOS archives include
+The plugin pins `v0.4.15`, whose Linux and Apple Silicon macOS archives include
 both executables. That release must be published before a clean installation
 can start the project service. Development builds can use
 `MARGINS_CLI_BIN` and `MARGINS_PROJECT_SERVER_PATH` as explicit overrides.
@@ -76,7 +76,7 @@ The Mac running Margins Menu only needs its recording bridge when the project
 service is on a remote Linux host; the remote host performs ASR.
 
 For an explicitly provisioned project host, `asr-runtime.json` in the plugin's
-host data directory can select a server with the `hosted-web` feature and its
+host data directory can select a server with an ASR provider feature and its
 local Parakeet model and ONNX Runtime library instead of automatic setup. It contains absolute paths:
 
 ```json
@@ -136,9 +136,8 @@ memo through Finish and Linux transcription. This was a development bundle,
 not an installed-app first-run test. A menu-owned meeting's memo is editable in
 bb through the Workspace service; the native bridge itself carries audio and
 control only. The plugin's release-pinned installation also requires a published
-release archive containing both `margins` and `margins-server`. The currently
-published CLI does not contain the new `native-bridge` command; use the built
-`margins-private` executable for development until a matching release ships.
+release archive containing both `margins` and `margins-server`. The 0.4.15 CLI
+includes `native-bridge` for this path.
 
 `@Margins` is also withheld until the project recording service exposes a
 bounded live-context read. The control snapshot deliberately carries no rolling
