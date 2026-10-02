@@ -21,6 +21,17 @@ pub fn native_runtime_audio_export_path(
     margins_dir: &Path,
     artifact: &SessionArtifact,
 ) -> Option<PathBuf> {
+    let _lane = native_runtime_audio_lane(artifact)?;
+    let session = &artifact.session_name;
+    confined_legacy_capture_disk_path(
+        margins_dir,
+        session,
+        &format!(".margins/{session}_seg{}.wav", artifact.ordinal),
+    )
+}
+
+/// Validate a chunk-backed audio artifact and return its individual lane.
+pub fn native_runtime_audio_lane(artifact: &SessionArtifact) -> Option<&str> {
     let remainder = artifact.path.strip_prefix("meeting-runtime://")?;
     let mut parts = remainder.split('/');
     let (Some(session), Some(segment), Some(lane), None) =
@@ -35,11 +46,7 @@ pub fn native_runtime_audio_export_path(
     {
         return None;
     }
-    confined_legacy_capture_disk_path(
-        margins_dir,
-        session,
-        &format!(".margins/{session}_seg{}.wav", artifact.ordinal),
-    )
+    Some(lane)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -253,7 +260,7 @@ pub fn list_artifacts(
     margins_dir: &Path,
     session_name: &str,
 ) -> Result<Vec<ArtifactView>> {
-    let storage = margins_store::SqliteMeetingRuntimeStorage::open(margins_dir)?;
+    let storage = margins_store::SqliteMeetingRuntimeStorage::open_read_only(margins_dir);
     session_artifact_rows(margins_dir, session_name)?
         .into_iter()
         .map(|artifact| {
@@ -268,9 +275,9 @@ pub fn list_artifacts(
             )
             .is_some_and(|path| path.exists())
                 || export_path.as_ref().is_some_and(|path| path.exists());
-            let available = if export_path.is_some() {
+            let available = if let Some(lane) = native_runtime_audio_lane(&artifact) {
                 storage
-                    .native_wav_export_size(&artifact.session_name, artifact.ordinal)?
+                    .native_lane_wav_size(&artifact.session_name, artifact.ordinal, lane)?
                     .is_some()
             } else {
                 exists
@@ -291,8 +298,11 @@ pub fn session_artifact_rows(
     margins_dir: &Path,
     session_name: &str,
 ) -> Result<Vec<SessionArtifact>> {
-    let mut artifacts = canonical::list_session_artifacts(margins_dir, session_name)?;
-    let storage = margins_store::SqliteMeetingRuntimeStorage::open(margins_dir)?;
+    let mut artifacts = canonical::list_session_artifacts_read_only(margins_dir, session_name)?;
+    if !canonical::database_path(margins_dir).is_file() {
+        return Ok(artifacts);
+    }
+    let storage = margins_store::SqliteMeetingRuntimeStorage::open_read_only(margins_dir);
     for (ordinal, lane, created_at) in storage.native_runtime_artifact_lanes(session_name)? {
         let kind = format!("audio_{lane}_runtime");
         if artifacts

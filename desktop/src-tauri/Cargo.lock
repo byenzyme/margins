@@ -5372,6 +5372,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tempfile",
  "tokio",
+ "tokio-util",
  "toml 0.8.2",
  "tower-http 0.5.2",
  "window-vibrancy 0.8.0",

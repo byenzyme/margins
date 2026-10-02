@@ -6,7 +6,7 @@ use crate::ctx::Ctx;
 use crate::server::events::WsSink;
 use anyhow::Context as _;
 use axum::{
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         DefaultBodyLimit, Multipart, Path, Query, Request, State,
@@ -933,12 +933,14 @@ async fn workspace_artifact_content(
     };
     match state
         .workspace_service
-        .artifact_content(&principal, &artifact)
+        .artifact_content_file(&principal, &artifact)
     {
-        Ok(bytes) => (
+        Ok(file) => (
             StatusCode::OK,
             [("Content-Type", "application/octet-stream")],
-            bytes,
+            Body::from_stream(tokio_util::io::ReaderStream::new(
+                tokio::fs::File::from_std(file),
+            )),
         )
             .into_response(),
         Err(error) => service_error(error),

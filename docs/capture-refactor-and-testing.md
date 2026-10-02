@@ -88,7 +88,9 @@ longer rendered at stop. `margins audio-export [meeting_id]` makes a scriptable
 stereo WAV on demand; `margins process` derives one temporarily when needed.
 Artifact listing marks runtime audio as exportable and gives the WAV path and
 `margins audio-export` command without creating that large derived file. The
-Workspace artifact-content route creates the WAV only when bytes are requested.
+Workspace artifact-content route streams a temporary mono WAV for the
+requested mic or system lane and closes it after the response. It does not
+leave an export on disk; only the explicit CLI export writes a stereo WAV.
 Existing WAVs are preserved. The public CLI's unavailable capture command no
 longer writes a second set of session rows. An open segment gets a canonical
 row immediately, so session readers can see the meeting during its first

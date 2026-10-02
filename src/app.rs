@@ -786,6 +786,11 @@ fn merge_memo_lines_partial(
                     line
                 }));
             } else {
+                conflicts.extend(base[local_hunk.start..local_hunk.end].iter().map(|line| {
+                    let mut line = line.clone();
+                    line.text = format!("[replaced base] {}", line.text);
+                    line
+                }));
                 conflicts.extend(local_hunk.replacement);
             }
         } else {
@@ -1101,7 +1106,11 @@ mod tests {
         assert_eq!(app.memo.line(1).unwrap().text, "remote-only");
         assert!(app.conflict_draft_path().is_some());
         app.toggle_conflict_draft();
-        assert_eq!(app.conflict_draft_lines().unwrap()[0].text, "local");
+        assert_eq!(
+            app.conflict_draft_lines().unwrap()[0].text,
+            "[replaced base] base"
+        );
+        assert_eq!(app.conflict_draft_lines().unwrap()[1].text, "local");
         app.toggle_conflict_draft();
         let draft = std::fs::read_dir(&dir)
             .unwrap()
@@ -1196,8 +1205,9 @@ mod tests {
         );
         app.toggle_conflict_draft();
         let draft = app.conflict_draft_lines().unwrap();
-        assert_eq!(draft.len(), 1);
-        assert_eq!(draft[0].text, "local B");
+        assert_eq!(draft.len(), 2);
+        assert_eq!(draft[0].text, "[replaced base] B");
+        assert_eq!(draft[1].text, "local B");
         let contents = std::fs::read_to_string(app.conflict_draft_path().unwrap()).unwrap();
         assert!(contents.contains("local B"));
         assert!(!contents.contains("local D"));
@@ -1264,5 +1274,35 @@ mod tests {
         let merged = merge_memo_lines_partial(&base, &[], &remote).unwrap();
         assert_eq!(merged.merged[0].text, "remote edit");
         assert_eq!(merged.conflicts[0].text, "[local deletion] remove me");
+    }
+
+    #[test]
+    fn conflicting_partial_replacement_shows_all_dropped_base_lines() {
+        let lines = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| TimedMemoLine::at(*value, MemoMoment::recording(1.0)))
+                .collect::<Vec<_>>()
+        };
+        let base = lines(&["A", "B", "C", "D"]);
+        let local = lines(&["A", "replacement", "D"]);
+        let remote = lines(&["A", "remote B", "C", "D"]);
+        let merged = merge_memo_lines_partial(&base, &local, &remote).unwrap();
+        assert_eq!(
+            merged
+                .conflicts
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            ["[replaced base] B", "[replaced base] C", "replacement"]
+        );
+        assert_eq!(
+            merged
+                .merged
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "remote B", "C", "D"]
+        );
     }
 }
