@@ -61,10 +61,19 @@ pub const OP_RECALL_QUERY: &str = "recall.query";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureState {
     pub input_finalized: bool,
+    pub expired_lease_finish: bool,
     pub started_at_unix_ms: u64,
     /// Browser clock at Start. The runtime start is the server receive time.
     pub client_started_at_unix_ms: u64,
     pub segments: Vec<StoredSegmentSummaryV1>,
+}
+
+fn browser_expired_lease_finish(session: &margins_meeting_runtime::StoredSessionV1) -> bool {
+    session.finalized_input().is_some_and(|(message_id, _)| {
+        message_id
+            .as_ref()
+            .starts_with("browser-lease-incomplete-finish-")
+    })
 }
 
 fn browser_client_clock_origin(session: &margins_meeting_runtime::StoredSessionV1) -> u64 {
@@ -1553,6 +1562,7 @@ impl WorkspaceService {
             .context("session has no capture authority state")?;
         Ok(CaptureState {
             input_finalized: stored.input_finalized(),
+            expired_lease_finish: browser_expired_lease_finish(&stored),
             started_at_unix_ms: stored.create().started_at_unix_ms.0,
             client_started_at_unix_ms: browser_client_clock_origin(&stored),
             segments: stored.segment_summaries(),
@@ -1625,6 +1635,7 @@ impl WorkspaceService {
         Ok((
             CaptureState {
                 input_finalized: stored.input_finalized(),
+                expired_lease_finish: browser_expired_lease_finish(&stored),
                 started_at_unix_ms: stored.create().started_at_unix_ms.0,
                 client_started_at_unix_ms: browser_client_clock_origin(&stored),
                 segments: stored.segment_summaries(),

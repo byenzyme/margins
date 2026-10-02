@@ -431,7 +431,8 @@ impl SqliteWorkspaceAuthorityStorage {
             params![now_ms(), session_id, principal_id, digest(producer_token.as_bytes())],
         )?;
         if changed != 1 {
-            bail!("browser capture owner lease is no longer active");
+            self.authorize_producer(session_id, principal_id, producer_token)?;
+            bail!("capture producer is no longer active");
         }
         Ok(())
     }

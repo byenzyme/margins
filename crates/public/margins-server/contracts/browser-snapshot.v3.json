@@ -4,6 +4,7 @@
   "nextSequence": 3,
   "status": "paused",
   "incomplete": false,
+  "expiredLease": false,
   "notepad": {
     "text": "Review launch plan",
     "revision": "memo-revision"

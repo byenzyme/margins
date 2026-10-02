@@ -35,6 +35,7 @@ const workspaceMeetingSchema = z.object({
 export const hostCaptureSnapshotSchema = z.object({
   recordingId: z.string().min(1), sessionId: z.string().min(1), status: z.enum(["recording", "paused", "saving"]),
   notepad: notepadSchema, nextSequence: z.number().int().nonnegative(), incomplete: z.boolean().optional(),
+  expiredLease: z.boolean().optional(),
 }).strict();
 const hostErrorSchema = z.object({
   code: z.string().min(1), message: z.string().min(1), retryable: z.boolean(),

@@ -50,6 +50,7 @@ pub struct BrowserSnapshot {
     pub next_sequence: u64,
     pub status: BrowserStatus,
     pub incomplete: bool,
+    pub expired_lease: bool,
     pub notepad: BrowserNotepad,
 }
 
@@ -293,9 +294,6 @@ fn browser_error(error: anyhow::Error) -> Response {
     if error
         .to_string()
         .contains("browser capture owner lease expired")
-        || error
-            .to_string()
-            .contains("browser capture owner lease is no longer active")
     {
         return lease_expired_response();
     }
@@ -366,6 +364,7 @@ fn snapshot_value(
                 .workspace_service
                 .session(principal, session)?
                 .capture_incomplete,
+        expired_lease: capture.expired_lease_finish,
         notepad: BrowserNotepad {
             text: memo
                 .lines
@@ -501,11 +500,34 @@ pub async fn heartbeat(
         Ok(value) => value,
         Err(error) => return browser_error(error),
     };
+    let capture = match state.workspace_service.capture_state_for_producer(
+        &principal,
+        &body.owner_id,
+        &session,
+    ) {
+        Ok(value) => value,
+        Err(error) => return browser_error(error),
+    };
+    if capture.input_finalized {
+        return snapshot_value(&state, &principal, &body.owner_id, &session)
+            .map(http::workspace_ok)
+            .unwrap_or_else(browser_error);
+    }
     if let Err(error) =
         state
             .workspace_service
             .touch_capture_producer(&principal, &body.owner_id, &session)
     {
+        // Stop may release the producer between the read and lease refresh.
+        if state
+            .workspace_service
+            .capture_state_for_producer(&principal, &body.owner_id, &session)
+            .is_ok_and(|capture| capture.input_finalized)
+        {
+            return snapshot_value(&state, &principal, &body.owner_id, &session)
+                .map(http::workspace_ok)
+                .unwrap_or_else(browser_error);
+        }
         return browser_error(error);
     }
     snapshot_value(&state, &principal, &body.owner_id, &session)
@@ -536,12 +558,7 @@ pub async fn pause(
         Err(error) => return browser_error(error),
     };
     if capture.input_finalized {
-        let incomplete = state
-            .workspace_service
-            .session(&principal, &session)
-            .map(|summary| summary.capture_incomplete)
-            .unwrap_or(true);
-        return if incomplete {
+        return if capture.expired_lease_finish {
             lease_expired_response()
         } else {
             http::workspace_error(
@@ -717,12 +734,7 @@ pub async fn resume(
         Err(error) => return browser_error(error),
     };
     if capture.input_finalized {
-        let incomplete = state
-            .workspace_service
-            .session(&principal, &session)
-            .map(|summary| summary.capture_incomplete)
-            .unwrap_or(true);
-        return if incomplete {
+        return if capture.expired_lease_finish {
             lease_expired_response()
         } else {
             http::workspace_error(
@@ -941,25 +953,30 @@ pub async fn chunk(
             < capture
                 .client_started_at_unix_ms
                 .saturating_add(previous_close_end);
-    let floor_ms = if backwards_after_pause {
-        floor_ms.max(server_received_at_ms)
+    let starts_at_ms = if backwards_after_pause {
+        server_received_at_ms
+            .saturating_sub(duration_ms)
+            .max(floor_ms)
     } else {
-        floor_ms
+        session_millis(
+            &capture,
+            Some(captured_start_unix_ms),
+            received_unix_ms,
+            floor_ms,
+        )
+        .max(floor_ms)
     };
-    let starts_at_ms = session_millis(
-        &capture,
-        Some(captured_start_unix_ms),
-        received_unix_ms,
-        floor_ms,
-    )
-    .max(floor_ms);
-    let ends_at_ms = session_millis(
-        &capture,
-        Some(captured_end_unix_ms),
-        received_unix_ms,
-        starts_at_ms,
-    )
-    .max(starts_at_ms.saturating_add(1));
+    let ends_at_ms = if backwards_after_pause {
+        server_received_at_ms.max(starts_at_ms.saturating_add(1))
+    } else {
+        session_millis(
+            &capture,
+            Some(captured_end_unix_ms),
+            received_unix_ms,
+            starts_at_ms,
+        )
+        .max(starts_at_ms.saturating_add(1))
+    };
     if let Err(error) = state.workspace_service.recover_capture_for_producer(
         &principal,
         owner,
@@ -1233,7 +1250,10 @@ fn finalize_incomplete(
         owner,
         command(
             session,
-            format!("browser-incomplete-finish-{horizon}"),
+            format!(
+                "browser-{}-incomplete-finish-{horizon}",
+                if owner.is_none() { "lease" } else { "user" }
+            ),
             ClientMessageBodyV1::FinalizeSession(FinalizeSessionV1 {
                 ended_at_ms: SessionMillis(
                     ended_at_ms
@@ -1494,6 +1514,7 @@ mod contract_tests {
             next_sequence: 3,
             status: BrowserStatus::Paused,
             incomplete: false,
+            expired_lease: false,
             notepad: BrowserNotepad {
                 text: "Review launch plan".into(),
                 revision: "memo-revision".into(),

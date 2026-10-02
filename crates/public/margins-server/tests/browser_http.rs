@@ -235,6 +235,16 @@ async fn stop_rejects_gap_until_missing_webm_chunk_is_durable_after_restart() {
     .await;
     assert_eq!(status, StatusCode::OK, "{replayed}");
     assert_eq!(replayed["result"]["inputFinalized"], true);
+    let (status, late_heartbeat) = post(
+        &restarted,
+        &format!("{base}/{session}/heartbeat"),
+        json!({"ownerId": OWNER}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{late_heartbeat}");
+    assert_eq!(late_heartbeat["result"]["status"], "saving");
+    assert_eq!(late_heartbeat["result"]["incomplete"], false);
+    assert_eq!(late_heartbeat["result"]["expiredLease"], false);
 }
 
 #[tokio::test]
@@ -371,6 +381,15 @@ async fn user_can_finish_with_saved_audio_and_explicit_missing_ranges() {
     assert_eq!(summary["result"]["capture_incomplete"], true, "{summary}");
     assert_eq!(summary["result"]["capture_gaps"][0]["start_sequence"], 1);
     assert_eq!(summary["result"]["capture_gaps"][0]["starts_at_ms"], 1_000);
+    let (_, explicit_snapshot) = call(
+        &app,
+        Method::GET,
+        &format!("{base}/{session}/snapshot?ownerId={OWNER}"),
+        vec![],
+        false,
+    )
+    .await;
+    assert_eq!(explicit_snapshot["result"]["expiredLease"], false);
     let (_, job) = call(
         &app,
         Method::GET,
@@ -464,6 +483,15 @@ async fn expired_owner_lease_finalizes_out_of_order_audio_as_incomplete() {
     assert_eq!(status, StatusCode::CONFLICT, "{resumed}");
     assert_eq!(resumed["error"]["code"], "browser_lease_expired");
     assert_eq!(resumed["error"]["retryable"], false);
+    let (_, expired_snapshot) = call(
+        &app,
+        Method::GET,
+        &format!("{base}/{session}/snapshot?ownerId={OWNER}"),
+        vec![],
+        false,
+    )
+    .await;
+    assert_eq!(expired_snapshot["result"]["expiredLease"], true);
     let (_, summary) = call(
         &app,
         Method::GET,
@@ -836,6 +864,7 @@ async fn server_clock_stamps_memo_and_bounds_backwards_or_future_browser_time() 
     let temp = tempfile::tempdir().unwrap();
     let state = server_state(temp.path());
     let service = state.workspace_service.clone();
+    let principal = state.service_principal.clone();
     let app = build_router(state);
     let base = "/v1/workspaces/practice/browser/sessions";
     let before = std::time::SystemTime::now()
@@ -910,7 +939,7 @@ async fn server_clock_stamps_memo_and_bounds_backwards_or_future_browser_time() 
     assert_eq!(status, StatusCode::OK, "{paused}");
     // The wall clock stepped back an hour during Pause. Resume and the new
     // WebM stream must remain valid on the server's monotonic capture lane.
-    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
     let stepped_back = START - 3_600_000;
     let (status, resumed) = post(
         &app,
@@ -924,10 +953,21 @@ async fn server_clock_stamps_memo_and_bounds_backwards_or_future_browser_time() 
         &format!("{base}/{session}/chunks/1"),
         vec![b'B'],
         stepped_back,
-        stepped_back + 1_000,
+        stepped_back + 10,
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{receipt}");
+    let resumed_chunk = service
+        .capture_chunk_metadata(
+            &principal,
+            &session.into(),
+            "browser-000001",
+            &"mic".into(),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(resumed_chunk.duration_ms.0, 10);
     // A later forward jump is capped at server receive time plus tolerance.
     let jumped_forward = START + 24 * 60 * 60 * 1_000;
     let (status, receipt) = upload_at(
@@ -952,7 +992,7 @@ async fn server_clock_stamps_memo_and_bounds_backwards_or_future_browser_time() 
         .segments;
     assert_eq!(segments.len(), 2);
     assert!(
-        segments[1].offset_ms >= 20 && segments[1].offset_ms <= 31_000,
+        segments[1].offset_ms >= 40 && segments[1].offset_ms <= 31_000,
         "unexpected second segment offset: {}",
         segments[1].offset_ms
     );
