@@ -2,10 +2,8 @@ import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 
 export const PANEL_STATE_SCHEMA = "margins.bb.recording.panel.v2";
-// This is the existing hosted browser-capture protocol implemented by
-// desktop/src-tauri/src/web_session.rs. Keep the cross-language contract test
-// beside the plugin so a release cannot silently ship mismatched clients.
-export const CAPTURE_PROTOCOL_VERSION = 2;
+// Keep this version aligned with margins-server's browser capture adapter.
+export const CAPTURE_PROTOCOL_VERSION = 3;
 export const CAPTURE_DISCONNECT_GRACE_MS = 25_000;
 
 export const clientCapabilitiesSchema = z.object({

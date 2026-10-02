@@ -251,7 +251,7 @@ describe("ProjectServerManager remote adapter", () => {
     process.env.MARGINS_BB_REMOTE_WORKSPACE = "practice";
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       ok: true,
-      result: { workspace_id: "practice", instance_id: "instance-remote" },
+      result: { workspace_id: "practice", instance_id: "instance-remote", protocol_version: 1, capture_protocol_version: 3 },
     }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -272,12 +272,24 @@ describe("ProjectServerManager remote adapter", () => {
     );
   });
 
+  it("rejects a remote server with the previous capture protocol", async () => {
+    process.env.MARGINS_BB_REMOTE_URL = "https://margins.example.test";
+    process.env.MARGINS_BB_REMOTE_TOKEN = "scoped-token";
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      result: { workspace_id: "practice", instance_id: "older-server", protocol_version: 1, capture_protocol_version: 2 },
+    }))));
+    await expect(new ProjectServerManager().ensure({
+      projectId: "project", projectRoot: "/tmp/project", hostId: "host", workspaceId: "practice",
+    }, "/tmp/plugin-data")).rejects.toThrow("server version doesn't match this plugin; upgrade both");
+  });
+
   it("shares one Workspace server and Meetings list across bb projects", async () => {
     process.env.MARGINS_BB_REMOTE_URL = "https://margins.example.test";
     process.env.MARGINS_BB_REMOTE_TOKEN = "scoped-token";
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const path = new URL(String(input)).pathname;
-      const result = path === "/v1/capabilities" ? { workspace_id: "practice", instance_id: "instance-remote" }
+      const result = path === "/v1/capabilities" ? { workspace_id: "practice", instance_id: "instance-remote", protocol_version: 1, capture_protocol_version: 3 }
         : path.endsWith("/active-sessions") ? { sessions: [] }
           : path.endsWith("/sessions") ? { sessions: [{ session_id: "meeting-1" }] }
           : path.endsWith("/note-association") ? null
@@ -319,7 +331,8 @@ fs.appendFileSync(${JSON.stringify(join(root, "spawns"))},String(process.pid)+'\
 fs.writeFileSync(path.join(data,'token'),'fixture-token');
 http.createServer((req,res)=>{if(req.url==='/health'){res.writeHead(200);res.end('ok');return;}
 const pathname=new URL(req.url,'http://localhost').pathname;
-const result=pathname.endsWith('/active-sessions')?{sessions:[]}:
+const result=pathname==='/v1/capabilities'?{workspace_id:'practice',instance_id:'bb-host-host',protocol_version:1,capture_protocol_version:3}:
+pathname.endsWith('/active-sessions')?{sessions:[]}:
 pathname.endsWith('/sessions')?{sessions:[{session_id:'meeting-1'}]}:
 pathname.endsWith('/note-association')?null:
 {session_id:'meeting-1',title:'Shared meeting',started_at:'2026-09-25T01:00:00Z',input_finalized:true};
@@ -448,7 +461,7 @@ res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:true
     );
   });
 
-  it("transcribes a local browser capture from its finalized WAV without a remote producer job", async () => {
+  it("transcribes a local browser capture through the typed Workspace job", async () => {
     const manager = { ensure: vi.fn(async () => ({
       baseUrl: "http://127.0.0.1:8787", token: "scoped-token", workspaceId: "practice", instanceId: "instance-local", child: {},
     })) } as unknown as ProjectServerManager;
@@ -457,7 +470,7 @@ res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:true
       if (url.endsWith("/browser/sessions")) return new Response(JSON.stringify({ ok: true, result: {
         recordingId: "browser-1", sessionId: "meeting-1", status: "recording", notepad: { text: "", revision: "memo-1" },
       } }));
-      if (url.endsWith("/api/invoke/transcribe_hosted_browser_session")) return new Response(JSON.stringify({ ok: true, result: "1 transcript entry" }));
+      if (url.endsWith("/jobs/transcribe")) return new Response(JSON.stringify({ ok: true, result: { status: "queued", attempt: 1 } }));
       throw new Error(`unexpected URL ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -465,8 +478,8 @@ res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:true
     const target = { projectId: "project", projectRoot: "/tmp/project", hostId: "host" };
     expect(await transport.start(target, "/tmp/data", "owner-1", "meeting-1")).toMatchObject({ ok: true });
     expect(await transport.requestTranscription(target, "/tmp/data", "meeting-1"))
-      .toMatchObject({ ok: true, status: "complete" });
-    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/jobs/transcribe"))).toBe(false);
+      .toMatchObject({ ok: true, status: "queued" });
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/api/invoke"))).toBe(false);
   });
 
   it("rejects incomplete or non-TLS remote configuration before transport", async () => {

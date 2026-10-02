@@ -1,12 +1,15 @@
 //! HTTP adapter over the public Workspace service.
 
 pub mod auth;
+pub mod http;
+
+/// BB capture wire contract; checked against the plugin before remote use.
+pub const HOSTED_CAPTURE_PROTOCOL_VERSION: u8 = 3;
 
 #[cfg(windows)]
 mod windows_atomic_replace;
 
 use anyhow::Context as _;
-use axum::{routing::get, Router};
 use margins_workflows::{
     remote_workspace::ServiceStateV1,
     workspace,
@@ -14,6 +17,7 @@ use margins_workflows::{
 };
 use std::{io::Write as _, net::SocketAddr, path::PathBuf, sync::Arc};
 
+#[derive(Clone)]
 pub struct ServerState {
     pub workspace_service: Arc<WorkspaceService>,
     pub credential_store: ScopedCredentialStore,
@@ -90,9 +94,8 @@ async fn run_async() -> anyhow::Result<()> {
     drop(file);
     std::fs::rename(&temporary_path, &state_path)?;
     std::fs::File::open(&data_dir)?.sync_all()?;
-    let app = Router::new().route("/health", get(|| async { "ok" }));
+    let app = http::build_router(state);
     eprintln!("[margins-server] listening on http://{}", listener.local_addr()?);
     axum::serve(listener, app).await?;
-    let _ = state;
     Ok(())
 }

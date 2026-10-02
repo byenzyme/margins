@@ -5,7 +5,7 @@ import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
-import type { ConnectedNoteResult, HostCaptureSnapshot, HostError, HostResult, ProjectTarget, TranscriptionRequestResult } from "./contracts.js";
+import { CAPTURE_PROTOCOL_VERSION, type ConnectedNoteResult, type HostCaptureSnapshot, type HostError, type HostResult, type ProjectTarget, type TranscriptionRequestResult } from "./contracts.js";
 import { createRuntimeManager } from "./runtime-manager.js";
 
 const execFile = promisify(execFileCallback);
@@ -51,6 +51,28 @@ export async function readAsrRuntimeConfig(dataDir: string): Promise<AsrRuntimeC
     throw new Error("Margins ASR runtime files are not ready");
   }
   return selected;
+}
+
+async function verifyServerCompatibility(baseUrl: string, token: string, workspaceId: string, signal?: AbortSignal): Promise<string> {
+  const response = await fetch(`${baseUrl}/v1/capabilities`, {
+    signal, headers: { authorization: `Bearer ${token}` },
+  });
+  const envelope = await response.json() as {
+    ok?: boolean;
+    result?: { workspace_id?: string; instance_id?: string; protocol_version?: number; capture_protocol_version?: number };
+    error?: { message?: string };
+  };
+  if (!response.ok || !envelope.ok) {
+    throw new Error(envelope.error?.message || `Margins capability check failed (${response.status})`);
+  }
+  if (envelope.result?.protocol_version !== 1 || envelope.result.capture_protocol_version !== CAPTURE_PROTOCOL_VERSION) {
+    throw new Error("Margins server version doesn't match this plugin; upgrade both");
+  }
+  if (envelope.result.workspace_id !== workspaceId) {
+    throw new Error("Margins capability Workspace does not match configured Workspace");
+  }
+  if (!envelope.result.instance_id) throw new Error("Margins capability response lacks an instance identity");
+  return envelope.result.instance_id;
 }
 
 function hostError(code: string, message: string, retryable = true): HostError {
@@ -244,23 +266,8 @@ export class ProjectServerManager {
         throw new Error("remote Margins requires HTTPS or loopback HTTP");
       }
       const baseUrl = remoteUrl.replace(/\/$/, "");
-      const response = await fetch(`${baseUrl}/v1/capabilities`, {
-        signal,
-        headers: { authorization: `Bearer ${remoteToken}` },
-      });
-      const envelope = await response.json() as {
-        ok?: boolean;
-        result?: { workspace_id?: string; instance_id?: string };
-        error?: { message?: string };
-      };
-      if (!response.ok || !envelope.ok) {
-        throw new Error(envelope.error?.message || `remote Margins capability check failed (${response.status})`);
-      }
-      if (envelope.result?.workspace_id !== workspaceId) {
-        throw new Error("remote Margins capability Workspace does not match configured Workspace");
-      }
-      if (!envelope.result.instance_id) throw new Error("remote Margins capability response lacks an instance identity");
-      return { baseUrl, token: remoteToken, workspaceId, instanceId: envelope.result.instance_id };
+      const instanceId = await verifyServerCompatibility(baseUrl, remoteToken, workspaceId, signal);
+      return { baseUrl, token: remoteToken, workspaceId, instanceId };
     }
     const asrRuntime = await readAsrRuntimeConfig(dataDir);
     const binary = asrRuntime?.serverPath ?? await this.runtime.ensureProjectServer({ dataDir, signal });
@@ -292,6 +299,12 @@ export class ProjectServerManager {
       child.kill("SIGTERM");
       throw error;
     });
+    if (asrRuntime) {
+      await verifyServerCompatibility(baseUrl, token, workspaceId, signal).catch((error) => {
+        child.kill("SIGTERM");
+        throw error;
+      });
+    }
     child.once("exit", () => this.handles.delete(key));
     return { baseUrl, token, workspaceId, instanceId: `bb-host-${target.hostId}`, child };
   }
@@ -305,14 +318,9 @@ export class ProjectServerManager {
 }
 
 export class ProjectMarginsTransport {
-  private readonly browserSessions = new Set<string>();
   constructor(private readonly manager = new ProjectServerManager()) {}
 
   async prepareCli(dataDir: string) { await this.manager.ensureCli(dataDir); }
-
-  private browserSessionKey(handle: ServerHandle, sessionId: string) {
-    return `${handle.instanceId}:${handle.workspaceId}:${sessionId}`;
-  }
 
   async listWorkspaceMeetings(target: ProjectTarget, dataDir: string) {
     try {
@@ -593,7 +601,6 @@ export class ProjectMarginsTransport {
   start(target: ProjectTarget, dataDir: string, ownerId: string, name: string) {
     return this.withHandle(target, dataDir, async (handle) => {
       const snapshot = await this.request<HostCaptureSnapshot>(handle, "browser/sessions", "POST", { name, ownerId });
-      this.browserSessions.add(this.browserSessionKey(handle, snapshot.sessionId));
       return snapshot;
     });
   }
@@ -671,33 +678,12 @@ export class ProjectMarginsTransport {
   async requestTranscription(target: ProjectTarget, dataDir: string, recordingId: string): Promise<TranscriptionRequestResult> {
     try {
       const handle = await this.manager.ensure(target, dataDir);
-      if (handle.child && this.browserSessions.has(this.browserSessionKey(handle, recordingId))) {
-        await this.transcribeHostedBrowserSession(handle, recordingId);
-        return { ok: true, status: "complete", attempt: 1 };
-      }
-      let job: { status: "queued" | "running" | "complete" | "failed"; attempt: number };
-      try {
-        job = await this.request(handle, `sessions/${recordingId}/jobs/transcribe`, "POST");
-      } catch (error) {
-        // A browser session reopened after a worker restart is absent from the
-        // in-memory set, but still has finalized local WAV segments.
-        if (!handle.child || !(error instanceof Error) || !error.message.includes("session has no capture authority state")) throw error;
-        await this.transcribeHostedBrowserSession(handle, recordingId);
-        return { ok: true, status: "complete", attempt: 1 };
-      }
+      const job = await this.request<{ status: "queued" | "running" | "complete" | "failed"; attempt: number }>(
+        handle, `sessions/${recordingId}/jobs/transcribe`, "POST");
       return { ok: true, status: job.status, attempt: job.attempt };
     } catch (cause) {
       return { ok: false, error: hostError("transcription_unavailable", cause instanceof Error ? cause.message : String(cause)) };
     }
-  }
-
-  private async transcribeHostedBrowserSession(handle: ServerHandle, sessionId: string) {
-    const response = await fetch(`${handle.baseUrl}/api/invoke/transcribe_hosted_browser_session`, {
-      method: "POST", headers: { authorization: `Bearer ${handle.token}`, "content-type": "application/json" },
-      body: JSON.stringify({ name: sessionId }),
-    });
-    const result = await response.json() as { ok?: boolean; error?: string };
-    if (!response.ok || !result.ok) throw new Error(result.error || `Hosted browser transcription failed (${response.status})`);
   }
 
   dispose() { return this.manager.dispose(); }

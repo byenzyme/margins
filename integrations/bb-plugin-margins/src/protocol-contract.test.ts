@@ -5,10 +5,10 @@ import { CAPTURE_PROTOCOL_VERSION } from "./contracts.js";
 
 describe("hosted capture protocol", () => {
   it("matches the existing Margins project recording service", async () => {
-    const rustPath = fileURLToPath(new URL("../../../desktop/src-tauri/src/web_session.rs", import.meta.url));
+    const rustPath = fileURLToPath(new URL("../../../crates/public/margins-server/src/lib.rs", import.meta.url));
     const source = await readFile(rustPath, "utf8");
     const rustVersion = source.match(/HOSTED_CAPTURE_PROTOCOL_VERSION:\s*u8\s*=\s*(\d+)/)?.[1];
     expect(rustVersion, "Rust capture protocol constant").toBe(String(CAPTURE_PROTOCOL_VERSION));
-    expect(CAPTURE_PROTOCOL_VERSION).toBe(2);
+    expect(CAPTURE_PROTOCOL_VERSION).toBe(3);
   });
 });

@@ -33268,6 +33268,7 @@ function date8(params) {
 
 // src/contracts.ts
 var PANEL_STATE_SCHEMA = "margins.bb.recording.panel.v2";
+var CAPTURE_PROTOCOL_VERSION = 3;
 var clientCapabilitiesSchema = external_exports2.object({
   clientId: external_exports2.string().min(1),
   platform: external_exports2.enum(["macos", "mobile", "other"]),
@@ -33915,6 +33916,24 @@ async function readAsrRuntimeConfig(dataDir) {
   }
   return selected;
 }
+async function verifyServerCompatibility(baseUrl, token, workspaceId, signal) {
+  const response = await fetch(`${baseUrl}/v1/capabilities`, {
+    signal,
+    headers: { authorization: `Bearer ${token}` }
+  });
+  const envelope = await response.json();
+  if (!response.ok || !envelope.ok) {
+    throw new Error(envelope.error?.message || `Margins capability check failed (${response.status})`);
+  }
+  if (envelope.result?.protocol_version !== 1 || envelope.result.capture_protocol_version !== CAPTURE_PROTOCOL_VERSION) {
+    throw new Error("Margins server version doesn't match this plugin; upgrade both");
+  }
+  if (envelope.result.workspace_id !== workspaceId) {
+    throw new Error("Margins capability Workspace does not match configured Workspace");
+  }
+  if (!envelope.result.instance_id) throw new Error("Margins capability response lacks an instance identity");
+  return envelope.result.instance_id;
+}
 function hostError(code, message, retryable = true) {
   return { code, message, retryable };
 }
@@ -34088,19 +34107,8 @@ var ProjectServerManager = class {
         throw new Error("remote Margins requires HTTPS or loopback HTTP");
       }
       const baseUrl2 = remoteUrl.replace(/\/$/, "");
-      const response = await fetch(`${baseUrl2}/v1/capabilities`, {
-        signal,
-        headers: { authorization: `Bearer ${remoteToken}` }
-      });
-      const envelope = await response.json();
-      if (!response.ok || !envelope.ok) {
-        throw new Error(envelope.error?.message || `remote Margins capability check failed (${response.status})`);
-      }
-      if (envelope.result?.workspace_id !== workspaceId) {
-        throw new Error("remote Margins capability Workspace does not match configured Workspace");
-      }
-      if (!envelope.result.instance_id) throw new Error("remote Margins capability response lacks an instance identity");
-      return { baseUrl: baseUrl2, token: remoteToken, workspaceId, instanceId: envelope.result.instance_id };
+      const instanceId = await verifyServerCompatibility(baseUrl2, remoteToken, workspaceId, signal);
+      return { baseUrl: baseUrl2, token: remoteToken, workspaceId, instanceId };
     }
     const asrRuntime = await readAsrRuntimeConfig(dataDir);
     const binary = asrRuntime?.serverPath ?? await this.runtime.ensureProjectServer({ dataDir, signal });
@@ -34132,6 +34140,12 @@ var ProjectServerManager = class {
       child.kill("SIGTERM");
       throw error108;
     });
+    if (asrRuntime) {
+      await verifyServerCompatibility(baseUrl, token, workspaceId, signal).catch((error108) => {
+        child.kill("SIGTERM");
+        throw error108;
+      });
+    }
     child.once("exit", () => this.handles.delete(key));
     return { baseUrl, token, workspaceId, instanceId: `bb-host-${target.hostId}`, child };
   }
@@ -34147,12 +34161,8 @@ var ProjectMarginsTransport = class {
     this.manager = manager;
   }
   manager;
-  browserSessions = /* @__PURE__ */ new Set();
   async prepareCli(dataDir) {
     await this.manager.ensureCli(dataDir);
-  }
-  browserSessionKey(handle, sessionId) {
-    return `${handle.instanceId}:${handle.workspaceId}:${sessionId}`;
   }
   async listWorkspaceMeetings(target, dataDir) {
     try {
@@ -34415,7 +34425,6 @@ var ProjectMarginsTransport = class {
   start(target, dataDir, ownerId, name) {
     return this.withHandle(target, dataDir, async (handle) => {
       const snapshot = await this.request(handle, "browser/sessions", "POST", { name, ownerId });
-      this.browserSessions.add(this.browserSessionKey(handle, snapshot.sessionId));
       return snapshot;
     });
   }
@@ -34485,31 +34494,15 @@ var ProjectMarginsTransport = class {
   async requestTranscription(target, dataDir, recordingId) {
     try {
       const handle = await this.manager.ensure(target, dataDir);
-      if (handle.child && this.browserSessions.has(this.browserSessionKey(handle, recordingId))) {
-        await this.transcribeHostedBrowserSession(handle, recordingId);
-        return { ok: true, status: "complete", attempt: 1 };
-      }
-      let job;
-      try {
-        job = await this.request(handle, `sessions/${recordingId}/jobs/transcribe`, "POST");
-      } catch (error108) {
-        if (!handle.child || !(error108 instanceof Error) || !error108.message.includes("session has no capture authority state")) throw error108;
-        await this.transcribeHostedBrowserSession(handle, recordingId);
-        return { ok: true, status: "complete", attempt: 1 };
-      }
+      const job = await this.request(
+        handle,
+        `sessions/${recordingId}/jobs/transcribe`,
+        "POST"
+      );
       return { ok: true, status: job.status, attempt: job.attempt };
     } catch (cause) {
       return { ok: false, error: hostError("transcription_unavailable", cause instanceof Error ? cause.message : String(cause)) };
     }
-  }
-  async transcribeHostedBrowserSession(handle, sessionId) {
-    const response = await fetch(`${handle.baseUrl}/api/invoke/transcribe_hosted_browser_session`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${handle.token}`, "content-type": "application/json" },
-      body: JSON.stringify({ name: sessionId })
-    });
-    const result = await response.json();
-    if (!response.ok || !result.ok) throw new Error(result.error || `Hosted browser transcription failed (${response.status})`);
   }
   dispose() {
     return this.manager.dispose();
