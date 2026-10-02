@@ -5275,7 +5275,6 @@ dependencies = [
  "margins-store",
  "margins-workflows",
  "ratatui",
- "regex",
  "reqwest 0.12.28",
  "rtrb",
  "serde",

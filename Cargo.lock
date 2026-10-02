@@ -3233,7 +3233,6 @@ dependencies = [
  "margins-store",
  "margins-workflows",
  "ratatui",
- "regex",
  "reqwest",
  "rtrb",
  "serde",

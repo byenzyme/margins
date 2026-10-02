@@ -566,12 +566,6 @@ where
         _ => None,
     };
     let Some((create, title, selected, create_if_missing)) = interactive_command else {
-        let refresh_after_reconcile = matches!(
-            &parsed.command,
-            Some(Command::Integrations {
-                command: margins_cli::args::IntegrationsCommand::Reconcile { .. }
-            })
-        );
         let retention_apply = matches!(
             &parsed.command,
             Some(Command::Retention {
@@ -588,7 +582,7 @@ where
         // any required recall refresh. This preserves typed errors while never
         // publishing a materialization purge as complete ahead of Enzyme's
         // generic source reconciliation.
-        let buffer_mutation = refresh_after_reconcile || retention_apply || granola_import;
+        let buffer_mutation = retention_apply || granola_import;
         let (code, mutation_stdout, mutation_stderr) = if buffer_mutation {
             let services = margins_cli::standalone_services();
             let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
@@ -627,7 +621,7 @@ where
             }
         }
         #[cfg(feature = "recall")]
-        if (refresh_after_reconcile || retention_apply) && workspace_selector.is_some() {
+        if retention_apply && workspace_selector.is_some() {
             let retention_requires_refresh = retention_apply
                 && serde_json::from_slice::<serde_json::Value>(&mutation_stdout)
                     .ok()
@@ -637,7 +631,6 @@ where
                             .and_then(|v| v.as_bool())
                     })
                     == Some(true);
-            let refresh_required = refresh_after_reconcile || retention_requires_refresh;
             let workspace = match resolve_workspace(workspace_selector.as_deref()) {
                 Ok(workspace) => workspace,
                 Err(error) => {
@@ -647,18 +640,11 @@ where
                     ))
                 }
             };
-            // A mixed reconcile still commits successful connector deltas. Refresh
-            // those ledger writes before preserving integration_failed's exit.
-            if refresh_required && workspace.ledger_path().is_file() {
+            if retention_requires_refresh && workspace.ledger_path().is_file() {
                 if let Err(error) = crate::recall::provision_workspace_for_init(&workspace) {
-                    let error_code = if retention_apply {
-                        "retention_index_refresh_failed"
-                    } else {
-                        "integration_index_refresh_failed"
-                    };
                     return report_json_cli_error(
                         margins_cli::CliError::new(
-                            error_code,
+                            "retention_index_refresh_failed",
                             margins_user_message(&format!(
                                 "authoritative ledger mutation committed, but refreshing workspace recall failed: {error:#}"
                             )),
