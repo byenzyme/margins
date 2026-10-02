@@ -19,7 +19,8 @@ this bb project automatically.
 - Small pause/stop controls and one full, editable notepad.
 - Recording ownership survives panel close and thread navigation because a bb
   content script owns the browser stream. An app overlay provides persistent
-  controls for browser and paired Mac recordings.
+  controls for browser and paired Mac recordings on bb hosts that support the
+  overlay slot. On bb 0.41, return to Meetings for Pause and Stop.
 - Capture controls and heartbeat route by meeting session id. Switching threads
   or bb projects that select the same Workspace does not change the live meeting.
 - A 25-second reconnect grace. After it expires, the project machine stops and
@@ -57,7 +58,7 @@ digest-verified Margins release when needed. That release contains:
 - `margins`, the normal CLI;
 - `margins-server`, the project-side recording service.
 
-The plugin pins `v0.4.13`, whose Linux and Apple Silicon macOS archives include
+The plugin pins `v0.4.14`, whose Linux and Apple Silicon macOS archives include
 both executables. That release must be published before a clean installation
 can start the project service. Development builds can use
 `MARGINS_CLI_BIN` and `MARGINS_PROJECT_SERVER_PATH` as explicit overrides.

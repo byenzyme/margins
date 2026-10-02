@@ -127,9 +127,15 @@ impl FluidCoreMlBundle {
         let root = resolve_model_root(model_dir.as_ref(), version)?;
         let source_preprocessor = root.join("Preprocessor.mlmodelc");
         let preprocessor = if version == FluidCoreMlModelVersion::V2 {
-            runtime_v2_preprocessor(&source_preprocessor)?
+            runtime_v2_preprocessor(&source_preprocessor).unwrap_or_else(|error| {
+                eprintln!(
+                    "CoreML v2 preprocessor cache unavailable ({error:#}); using original {}",
+                    source_preprocessor.display()
+                );
+                source_preprocessor.clone()
+            })
         } else {
-            source_preprocessor
+            source_preprocessor.clone()
         };
         let encoder = root.join("Encoder.mlmodelc");
         let decoder = root.join("Decoder.mlmodelc");

@@ -490,9 +490,15 @@ function MarginsSettings() {
 
 export default definePluginApp((app) => {
   app.contentScripts.register({ id: "recording-owner", mount: (context) => browserCaptureOwner.install(context) });
-  app.slots.experimental_appOverlay({ id: "recording-status", component: RecordingOverlay });
+  // Older bb hosts can still render Meetings and the thread panel even when
+  // they do not provide the newer persistent overlay slot.
+  const hasOverlaySlot = typeof app.slots.experimental_appOverlay === "function";
+  if (hasOverlaySlot) {
+    app.slots.experimental_appOverlay({ id: "recording-status", component: RecordingOverlay });
+  }
   app.slots.navPanel({ id: "meetings", title: "Meetings", icon: "Mic", path: "meetings",
-    component: MeetingsPage, experimental_sidebarAccessory: MeetingsAccessory });
+    component: (props) => <><MeetingsPage {...props} />{!hasOverlaySlot && <RecordingOverlay />}</>,
+    experimental_sidebarAccessory: MeetingsAccessory });
   app.slots.settingsSection({ id: "recording", title: "Margins recording", component: MarginsSettings });
   app.slots.threadPanelAction({
     id: "live", title: "Margins", icon: "Mic", layout: "flush",
