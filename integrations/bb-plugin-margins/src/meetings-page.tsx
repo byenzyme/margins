@@ -762,7 +762,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
         <footer className={selected.inputFinalized ? "margins-meeting-actions" : undefined}>
           {selected.inputFinalized && <div className="margins-meeting-trail">{shownTranscript !== "ready" && <span>{shownTranscript === "pending" ? "Transcribing…" : shownTranscript === "checking" ? "Checking transcript…" : shownTranscript === "failed" ? "Transcript unavailable" : "Transcript not ready"}</span>}
             {shownTranscript === "ready" && <button onClick={() => void viewTranscript()}>{transcriptOpen ? "Hide transcript" : "View transcript"}</button>}
-            {(shownTranscript === "failed" || shownTranscript === "not_ready") && <button onClick={() => void retryTranscription()}>{shownTranscript === "failed" ? "Retry" : "Transcribe"}</button>}
+            {(shownTranscript === "failed" || shownTranscript === "not_ready") && <button disabled={speechSetup?.state === "preparing"} onClick={() => void retryTranscription()}>{shownTranscript === "failed" ? "Retry" : "Transcribe"}</button>}
           </div>}
           {transcriptOpen && <div className="margins-meeting-transcript" aria-label="Meeting transcript">{transcriptBody || "Transcript is empty."}</div>}
           {memoChangedSinceNote && <span>Note uses an earlier memo revision</span>}

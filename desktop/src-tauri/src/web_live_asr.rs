@@ -498,6 +498,15 @@ pub(crate) fn start(
     margins_dir: PathBuf,
     session_name: String,
 ) -> Result<Option<WebLiveAsrHandle>, String> {
+    // The managed first-run download can still be in progress when a browser
+    // begins recording. WebM remains durable, and offline ASR will run after
+    // the runtime is ready; live PCM decoding is optional for that capture.
+    if (std::env::var_os("MARGINS_MANAGED_ASR_MODEL").is_some()
+        || std::env::var_os("MARGINS_MANAGED_ASR_RUNTIME").is_some())
+        && !crate::speech_models::transcription_runtime_available(&crate::settings::load_settings())
+    {
+        return Ok(None);
+    }
     let Some((model_dir, kind)) = resolve_model()? else {
         return Ok(None);
     };
