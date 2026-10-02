@@ -685,11 +685,21 @@ fn connection_commands_do_not_implicitly_create_a_workspace() {
         .env_clear()
         .env("HOME", &machine_home)
         .env("MARGINS_HOME", &margins_home)
+        .env("MARGINS_CONNECT_NO_BROWSER", "1")
+        // A failed suppression guard must still be unable to find open/xdg-open.
+        .env("PATH", temp.path())
         .output()
         .unwrap();
-    assert!(!connect.status.success());
-    assert!(connect.stdout.is_empty());
-    assert!(!margins_home.join("workspaces").exists());
+    assert!(
+        String::from_utf8_lossy(&connect.stderr)
+            .contains("Browser launch suppressed by MARGINS_CONNECT_NO_BROWSER=1."),
+        "{}",
+        String::from_utf8_lossy(&connect.stderr)
+    );
+    assert!(
+        !margins_home.exists(),
+        "connect must not create Workspace or machine state"
+    );
 
     let disconnect = Command::new(env!("CARGO_BIN_EXE_margins-private"))
         .args([
