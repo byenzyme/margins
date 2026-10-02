@@ -53,13 +53,15 @@ async fn run_async() -> anyhow::Result<()> {
     std::fs::create_dir_all(&data_dir)?;
     let work_dir = std::env::var("MARGINS_WORK_DIR")
         .map(PathBuf::from)
-        .context("MARGINS_WORK_DIR is required for margins-server")?;
+        .unwrap_or(std::env::current_dir().context("cannot resolve server working directory")?);
     let margins_home = std::env::var("MARGINS_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| data_dir.join("margins-home"));
     let workspace_id = std::env::var("MARGINS_WORKSPACE")
         .context("MARGINS_WORKSPACE is required for margins-server")?;
-    let workspace = if std::env::var_os("MARGINS_SERVICE_PROVISION").is_some() {
+    let workspace = if std::env::var_os("MARGINS_SERVICE_PROVISION").is_some()
+        || std::env::var_os("MARGINS_BB_CAPTURE_WORKSPACE").is_some()
+    {
         workspace::ensure_service_workspace(
             &margins_home,
             &workspace_id,

@@ -240,6 +240,60 @@ describe("browser capture ownership", () => {
     expect(sessionStorage.getItem("margins.bb.capture.v1")).toBeNull();
   });
 
+  it("replays a server-reported missing sequence before retrying Stop", async () => {
+    const order: string[] = [];
+    const uploaded: Array<{ sequence: number; bytesBase64: string }> = [];
+    const uploadFetch = vi.fn(async (_url: string, options: RequestInit) => {
+      const body = JSON.parse(String(options.body)) as { sequence: number; bytesBase64: string };
+      uploaded.push(body);
+      order.push(`upload-${body.sequence}`);
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", uploadFetch);
+    const stopInputs: Array<{ operationId: string; expectedNextSequence: number }> = [];
+    const rpc: BrowserCaptureDependencies["rpc"] = async (_plugin, method, input) => {
+      if (method === "beginProjectCapture") return state({}) as never;
+      if (method === "stop") {
+        stopInputs.push(input as { operationId: string; expectedNextSequence: number });
+        const gap = stopInputs.length === 1;
+        order.push(gap ? "stop-gap" : "stop-saved");
+        return state(gap ? {
+          state: "needs_attention",
+          error: {
+            code: "browser_chunk_gap",
+            message: "Missing browser audio sequence 0; retry the chunk before Stop.",
+            retryable: true,
+          },
+        } : { state: "saved", error: null }) as never;
+      }
+      return state({}) as never;
+    };
+    const { owner } = controllerFixture(rpc, function () {
+      this.ondataavailable?.({ data: new Blob(["final-webm"]) } as BlobEvent);
+      this.onstop?.(new Event("stop"));
+    });
+    await owner.startFromProject("proj-1");
+
+    await expect(owner.stop()).resolves.toMatchObject({
+      state: "needs_attention",
+      error: { code: "browser_chunk_gap" },
+      recordingId: "rec-1",
+    });
+    expect(order).toEqual(["upload-0", "stop-gap"]);
+    expect(sessionStorage.getItem("margins.bb.capture.v1")).not.toBeNull();
+    await expect(owner.retryPendingStop()).resolves.toMatchObject({ state: "saved", error: null });
+
+    expect(order).toEqual(["upload-0", "stop-gap", "upload-0", "stop-saved"]);
+    expect(uploaded[1]).toEqual(uploaded[0]);
+    expect(stopInputs).toHaveLength(2);
+    expect(stopInputs[1]).toEqual(stopInputs[0]);
+    expect(stopInputs[0]?.expectedNextSequence).toBe(1);
+    expect(sessionStorage.getItem("margins.bb.capture.v1")).toBeNull();
+  });
+
   it("does not report saved or discard recovery identity after a failed final upload", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: false, error: "disk full" }), {
       status: 502,

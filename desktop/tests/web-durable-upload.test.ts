@@ -63,6 +63,42 @@ test("never-settling durable upload is aborted and cannot hang Finish", async ()
   assert.equal(queue.pendingCount, 1);
 });
 
+test("close deadline retains pending Blobs for retry without starting a later sequence", async () => {
+  const attempts: Array<{ chunk: Blob; sequence: number }> = [];
+  const uploaded: string[] = [];
+  const failures: string[] = [];
+  let stall = true;
+  const queue = new WebDurableUploadQueue(async (chunk, sequence) => {
+    attempts.push({ chunk, sequence });
+    if (stall) await new Promise<void>(() => {});
+    uploaded.push(await chunk.text());
+  }, error => failures.push(error.message), {
+    maxAttempts: 3,
+    uploadTimeoutMs: 1_000,
+    closeDeadlineMs: 20,
+  });
+  const first = new Blob(["first"]);
+  const second = new Blob(["second"]);
+  queue.enqueue(first);
+  queue.enqueue(second);
+
+  await assert.rejects(queue.close(), /drain exceeded 20ms; recording is incomplete/);
+  assert.equal(queue.pendingCount, 2);
+  assert.equal(queue.expectedNextSequence, 2);
+  assert.deepEqual(attempts.map(({ sequence }) => sequence), [0]);
+  assert.deepEqual(uploaded, []);
+  assert.equal(failures.length, 1);
+
+  stall = false;
+  await queue.retryPending();
+  assert.deepEqual(attempts.map(({ sequence }) => sequence), [0, 0, 1]);
+  assert.equal(attempts[0]!.chunk, first);
+  assert.equal(attempts[1]!.chunk, first);
+  assert.equal(attempts[2]!.chunk, second);
+  assert.deepEqual(uploaded, ["first", "second"]);
+  assert.equal(queue.pendingCount, 0);
+});
+
 test("fake server rejects a later upload while a timed-out earlier request is still late", async () => {
   const attempted: number[] = [];
   const failures: string[] = [];
@@ -111,21 +147,28 @@ test("lost ACK retries the exact sequence and stores one durable chunk", async (
 test("failed durable chunk blocks later uploads until its retained Blob succeeds", async () => {
   const uploaded: string[] = [];
   const failures: string[] = [];
+  const badAttempts: Blob[] = [];
   let fail = true;
   const queue = new WebDurableUploadQueue(async chunk => {
     const value = await chunk.text();
-    if (value === "bad" && fail) throw new Error("HTTP 200 ok:false");
+    if (value === "bad") {
+      badAttempts.push(chunk);
+      if (fail) throw new Error("HTTP 200 ok:false");
+    }
     uploaded.push(value);
   }, error => failures.push(error.message), { maxAttempts: 2, uploadTimeoutMs: 100, closeDeadlineMs: 100 });
 
+  const bad = new Blob(["bad"]);
   queue.enqueue(new Blob(["good-a"]));
-  queue.enqueue(new Blob(["bad"]));
+  queue.enqueue(bad);
   queue.enqueue(new Blob(["good-b"]));
   await assert.rejects(queue.close(), /HTTP 200 ok:false/);
   assert.deepEqual(uploaded, ["good-a"]);
   assert.equal(queue.pendingCount, 2);
+  assert.deepEqual(badAttempts, [bad, bad]);
   fail = false;
   await queue.retryPending();
+  assert.deepEqual(badAttempts, [bad, bad, bad]);
   assert.deepEqual(uploaded, ["good-a", "bad", "good-b"]);
   assert.deepEqual(failures, ["HTTP 200 ok:false"]);
 });

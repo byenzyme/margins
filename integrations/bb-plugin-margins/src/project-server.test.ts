@@ -27,6 +27,25 @@ afterEach(() => {
 });
 
 describe("ProjectServerManager remote adapter", () => {
+  it("preserves a typed browser chunk gap for Stop repair", async () => {
+    const manager = { ensure: vi.fn(async () => ({ baseUrl: "https://margins.example.test", token: "scoped-token",
+      workspaceId: "practice", instanceId: "instance-remote" })) } as unknown as ProjectServerManager;
+    const fetchMock = vi.fn(async (_input: string | URL | Request, _options?: RequestInit) => new Response(JSON.stringify({ ok: false, error: {
+      code: "browser_chunk_gap", retryable: true,
+      message: "Missing browser audio sequence 1; retry the chunk before Stop.",
+    } }), { status: 409 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await new ProjectMarginsTransport(manager).stop(
+      { projectId: "project", projectRoot: "/tmp/project", hostId: "host" },
+      "/tmp/data", "recording", "owner", 3,
+    );
+    expect(result).toEqual({ ok: false, error: {
+      code: "browser_chunk_gap", retryable: true,
+      message: "Missing browser audio sequence 1; retry the chunk before Stop.",
+    } });
+    expect(JSON.parse(fetchMock.mock.calls[0]![1]!.body as string)).toEqual({ ownerId: "owner", expectedNextSequence: 3 });
+  });
+
   it("reads speech setup progress and retries through the selected host", async () => {
     const manager = { ensure: vi.fn(async () => ({ baseUrl: "https://margins.example.test", token: "scoped-token",
       workspaceId: "practice", instanceId: "instance-remote" })) } as unknown as ProjectServerManager;

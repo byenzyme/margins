@@ -19108,7 +19108,7 @@ var marginsHostContract = defineRpcContract({
   heartbeat: { input: ownedCaptureInputSchema, output: hostResultSchema },
   pause: { input: ownedCaptureInputSchema, output: hostResultSchema },
   resume: { input: ownedCaptureInputSchema, output: hostResultSchema },
-  stop: { input: ownedCaptureInputSchema, output: hostResultSchema },
+  stop: { input: ownedCaptureInputSchema.extend({ expectedNextSequence: external_exports.number().int().nonnegative() }).strict(), output: hostResultSchema },
   uploadChunk: {
     input: ownedCaptureInputSchema.extend({ sequence: external_exports.number().int().nonnegative(), bytesBase64: external_exports.string() }).strict(),
     output: external_exports.object({ ok: external_exports.boolean(), error: hostErrorSchema.optional() }).strict()
@@ -19287,7 +19287,7 @@ var marginsRpcContract = defineRpcContract({
   heartbeat: { input: captureClientInputSchema, output: panelStateSchema },
   pause: { input: captureClientInputSchema, output: panelStateSchema },
   resume: { input: captureClientInputSchema, output: panelStateSchema },
-  stop: { input: captureClientInputSchema, output: panelStateSchema },
+  stop: { input: captureClientInputSchema.extend({ expectedNextSequence: external_exports.number().int().nonnegative() }).strict(), output: panelStateSchema },
   connectedNoteContext: {
     input: external_exports.object({ threadId: external_exports.string().min(1).optional(), projectId: external_exports.string().min(1).optional(), sessionId: external_exports.string().min(1) }).strict(),
     output: connectedNoteResultSchema
@@ -19590,13 +19590,13 @@ function marginsPlugin(bb) {
       if (startLocks.get(projectId) === queued) startLocks.delete(projectId);
     }
   }
-  async function operate(sessionId, client, operationId, operation) {
+  async function operate(sessionId, client, operationId, operation, expectedNextSequence) {
     const receiptKey = `control-receipt:${sessionId}:${operationId}`;
     const capture = await readCapture(sessionId);
     if (operation !== "heartbeat") {
       const prior = await bb.storage.kv.get(receiptKey);
       if (prior) {
-        if (prior.sessionId !== sessionId || prior.operation !== operation || prior.clientId !== client.clientId) {
+        if (prior.sessionId !== sessionId || prior.operation !== operation || prior.clientId !== client.clientId || operation === "stop" && prior.expectedNextSequence !== expectedNextSequence) {
           return basePanel(capture?.projectId || null, "needs_attention", client, {
             capture: null,
             error: { code: "operation_conflict", message: "This control operation id was already used for different content.", retryable: false }
@@ -19618,7 +19618,12 @@ function marginsPlugin(bb) {
       projectRoot: capture.projectRoot,
       workspaceId: capture.workspaceId
     };
-    const result = await callHost(target, operation, { target, recordingId: capture.recordingId, ownerId: capture.ownerId });
+    const result = await callHost(target, operation, {
+      target,
+      recordingId: capture.recordingId,
+      ownerId: capture.ownerId,
+      ...operation === "stop" ? { expectedNextSequence } : {}
+    });
     if (result.ok) {
       if (operation === "stop") {
         await bb.storage.kv.set(lastSessionKey(capture.workspaceId), capture.sessionId);
@@ -19632,6 +19637,7 @@ function marginsPlugin(bb) {
           canonicalSessionId: capture.sessionId,
           operation,
           clientId: client.clientId,
+          ...operation === "stop" ? { expectedNextSequence } : {},
           workspaceId: capture.workspaceId,
           projectId: capture.projectId
         });
@@ -19967,7 +19973,7 @@ function marginsPlugin(bb) {
     heartbeat: ({ sessionId, client, operationId }) => operate(sessionId, client, operationId, "heartbeat"),
     pause: ({ sessionId, client, operationId }) => operate(sessionId, client, operationId, "pause"),
     resume: ({ sessionId, client, operationId }) => operate(sessionId, client, operationId, "resume"),
-    stop: ({ sessionId, client, operationId }) => operate(sessionId, client, operationId, "stop"),
+    stop: ({ sessionId, client, operationId, expectedNextSequence }) => operate(sessionId, client, operationId, "stop", expectedNextSequence),
     async connectedNoteContext({ threadId, projectId, sessionId }) {
       const target = await targetForSelection({ threadId, projectId });
       return callHost(target, "connectedNoteContext", { target, recordingId: sessionId });

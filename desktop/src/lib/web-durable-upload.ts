@@ -4,6 +4,7 @@ export interface WebDurableUploadOptions {
   closeDeadlineMs?: number;
   initialSequence?: number;
   maxAttempts?: number;
+  maxReplayBytes?: number;
 }
 
 export type DurableChunkUpload = (chunk: Blob, sequence: number, signal: AbortSignal) => Promise<void>;
@@ -16,8 +17,8 @@ export function bindDurableMediaRecorder<T extends { data: Blob }>(
 }
 
 /** Ask MediaRecorder for its final chunk without allowing a missing `stop`
- * event to hold Finish open forever. A timeout is returned as transport
- * damage so the caller can still finalize the server-received subset. */
+ * event to hold Finish open forever. A timeout leaves recording completeness
+ * unknown and must be surfaced to the caller. */
 export function stopMediaRecorderWithDeadline(
   recorder: Pick<MediaRecorder, "onstop" | "stop">,
   timeoutMs = 5_000,
@@ -34,7 +35,7 @@ export function stopMediaRecorderWithDeadline(
     const deadline = Math.max(1, timeoutMs);
     recorder.onstop = () => finish(null);
     timer = setTimeout(() => finish(new Error(
-      `MediaRecorder stop event exceeded ${deadline}ms; Finish continued with the server-received subset.`,
+      `MediaRecorder stop event exceeded ${deadline}ms; recording may be incomplete.`,
     )), deadline);
     try {
       recorder.stop();
@@ -58,6 +59,9 @@ export class WebDurableUploadQueue {
   private readonly uploadTimeoutMs: number;
   private readonly closeDeadlineMs: number;
   private readonly maxAttempts: number;
+  private readonly maxReplayBytes: number;
+  private readonly replay = new Map<number, Blob>();
+  private replayBytes = 0;
   private worker: Promise<void> | null = null;
   private active: AbortController | null = null;
   private accepting = true;
@@ -77,6 +81,7 @@ export class WebDurableUploadQueue {
     this.uploadTimeoutMs = Math.max(1, options.uploadTimeoutMs ?? 10_000);
     this.closeDeadlineMs = Math.max(1, options.closeDeadlineMs ?? 12_000);
     this.maxAttempts = Math.max(1, Math.trunc(options.maxAttempts ?? 3));
+    this.maxReplayBytes = Math.max(0, Math.trunc(options.maxReplayBytes ?? 64 * 1024 * 1024));
     this.nextSequence = Math.max(0, Math.trunc(options.initialSequence ?? 0));
   }
 
@@ -88,6 +93,29 @@ export class WebDurableUploadQueue {
   get expectedNextSequence(): number { return this.nextSequence; }
 
   get recoverablePendingCount(): number { return this.queue.length; }
+
+  /** Replay an acknowledged chunk when Stop reports that its sequence is
+   * missing. The server must accept an identical duplicate idempotently. */
+  async resend(sequence: number): Promise<void> {
+    const chunk = this.replay.get(sequence);
+    if (!chunk) throw new Error(`Browser audio sequence ${sequence} is no longer available to retry; recording is incomplete`);
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
+      try {
+        await this.uploadWithTimeout(chunk, sequence);
+        return;
+      } catch (error) {
+        lastError = asError(error);
+      }
+    }
+    throw lastError ?? new Error(`Browser audio sequence ${sequence} could not be retried`);
+  }
+
+  /** Release replay bytes after the authority has durably finalized Stop. */
+  releaseRetained(): void {
+    this.replay.clear();
+    this.replayBytes = 0;
+  }
 
   enqueue(chunk: Blob): void {
     if (!this.accepting || chunk.size === 0) return;
@@ -162,6 +190,10 @@ export class WebDurableUploadQueue {
           break;
         } catch (error) {
           lastError = asError(error);
+          // close() may have reached its deadline and aborted this attempt.
+          // Leave this Blob and every later sequence queued for an explicit
+          // retry; do not start another attempt after the Stop deadline.
+          if (this.blocked) return;
         }
       }
       if (lastError) {
@@ -171,7 +203,23 @@ export class WebDurableUploadQueue {
         return;
       }
       this.queue.shift();
+      this.retainForReplay(item);
     }
+  }
+
+  private retainForReplay(item: { chunk: Blob; sequence: number }): void {
+    // Server ACKs are durable, so old replay copies may be evicted without
+    // affecting the normal path. A later gap on an evicted sequence remains
+    // visibly incomplete rather than finalizing with missing audio.
+    if (item.chunk.size > this.maxReplayBytes) return;
+    while (this.replayBytes + item.chunk.size > this.maxReplayBytes) {
+      const oldest = this.replay.keys().next().value;
+      if (oldest === undefined) break;
+      this.replayBytes -= this.replay.get(oldest)!.size;
+      this.replay.delete(oldest);
+    }
+    this.replay.set(item.sequence, item.chunk);
+    this.replayBytes += item.chunk.size;
   }
 
   private async uploadWithTimeout(chunk: Blob, sequence: number): Promise<void> {

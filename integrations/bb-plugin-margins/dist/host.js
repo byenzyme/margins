@@ -33495,7 +33495,7 @@ var marginsHostContract = defineRpcContract2({
   heartbeat: { input: ownedCaptureInputSchema, output: hostResultSchema },
   pause: { input: ownedCaptureInputSchema, output: hostResultSchema },
   resume: { input: ownedCaptureInputSchema, output: hostResultSchema },
-  stop: { input: ownedCaptureInputSchema, output: hostResultSchema },
+  stop: { input: ownedCaptureInputSchema.extend({ expectedNextSequence: external_exports2.number().int().nonnegative() }).strict(), output: hostResultSchema },
   uploadChunk: {
     input: ownedCaptureInputSchema.extend({ sequence: external_exports2.number().int().nonnegative(), bytesBase64: external_exports2.string() }).strict(),
     output: external_exports2.object({ ok: external_exports2.boolean(), error: hostErrorSchema.optional() }).strict()
@@ -33674,7 +33674,7 @@ var marginsRpcContract = defineRpcContract2({
   heartbeat: { input: captureClientInputSchema, output: panelStateSchema },
   pause: { input: captureClientInputSchema, output: panelStateSchema },
   resume: { input: captureClientInputSchema, output: panelStateSchema },
-  stop: { input: captureClientInputSchema, output: panelStateSchema },
+  stop: { input: captureClientInputSchema.extend({ expectedNextSequence: external_exports2.number().int().nonnegative() }).strict(), output: panelStateSchema },
   connectedNoteContext: {
     input: external_exports2.object({ threadId: external_exports2.string().min(1).optional(), projectId: external_exports2.string().min(1).optional(), sessionId: external_exports2.string().min(1) }).strict(),
     output: connectedNoteResultSchema
@@ -34437,9 +34437,9 @@ var ProjectMarginsTransport = class {
       return this.request(handle, `browser/sessions/${recordingId}/${action}`, "POST", { ownerId });
     });
   }
-  stop(target, dataDir, recordingId, ownerId) {
+  stop(target, dataDir, recordingId, ownerId, expectedNextSequence) {
     return this.withHandle(target, dataDir, async (handle) => {
-      await this.request(handle, `browser/sessions/${recordingId}/stop`, "POST", { ownerId });
+      await this.request(handle, `browser/sessions/${recordingId}/stop`, "POST", { ownerId, expectedNextSequence });
       return null;
     });
   }
@@ -34751,7 +34751,7 @@ function createMarginsHostEntry(transport) {
       },
       async stop(input2, context) {
         retain(context);
-        const result = await transport.stop(input2.target, context.experimental_paths.dataDir, input2.recordingId, input2.ownerId);
+        const result = await transport.stop(input2.target, context.experimental_paths.dataDir, input2.recordingId, input2.ownerId, input2.expectedNextSequence);
         await changed(context, input2.target.projectId, "stop", result);
         return result;
       },

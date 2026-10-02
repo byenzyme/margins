@@ -79,6 +79,12 @@ function hostError(code: string, message: string, retryable = true): HostError {
   return { code, message, retryable };
 }
 
+class WorkspaceRequestError extends Error {
+  constructor(readonly code: string, message: string, readonly retryable: boolean) {
+    super(message);
+  }
+}
+
 export function workspaceInstanceDir(dataDir: string, workspaceId: string) {
   return join(dataDir, "workspace-servers", workspaceId);
 }
@@ -554,10 +560,16 @@ export class ProjectMarginsTransport {
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
-    const value = await response.json() as { ok: boolean; result?: T; error?: string | { message?: string } };
+    const value = await response.json() as { ok: boolean; result?: T; error?: string | { code?: string; message?: string; retryable?: boolean } };
     const detail = typeof value.error === "string" ? value.error : value.error?.message;
-    if (!response.ok) throw new Error(detail || `Margins could not save on the project machine (${response.status})`);
-    if (!value.ok) throw new Error(detail || "Margins could not complete the recording action");
+    if (!response.ok || !value.ok) {
+      const structured = typeof value.error === "object" ? value.error : undefined;
+      throw new WorkspaceRequestError(
+        structured?.code || "workspace_request_failed",
+        detail || `Margins could not save on the project machine (${response.status})`,
+        structured?.retryable ?? true,
+      );
+    }
     return value.result as T;
   }
 
@@ -594,7 +606,9 @@ export class ProjectMarginsTransport {
     try {
       return { ok: true, snapshot: await action(await this.manager.ensure(target, dataDir)) };
     } catch (cause) {
-      return { ok: false, error: hostError("project_recorder_unavailable", cause instanceof Error ? cause.message : String(cause)) };
+      return { ok: false, error: cause instanceof WorkspaceRequestError
+        ? hostError(cause.code, cause.message, cause.retryable)
+        : hostError("project_recorder_unavailable", cause instanceof Error ? cause.message : String(cause)) };
     }
   }
 

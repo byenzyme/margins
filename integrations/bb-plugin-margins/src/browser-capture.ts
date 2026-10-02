@@ -15,6 +15,8 @@ interface StoredCapture {
   paused: boolean;
   pendingControl?: { kind: "pause" | "resume" | "stop"; operationId: string };
   stopDrainError?: HostError;
+  stopGapError?: HostError;
+  stopGapSequence?: number;
 }
 
 interface LocalCapture extends StoredCapture {
@@ -142,6 +144,8 @@ function writeStored(value: StoredCapture | null) {
         paused: value.paused,
         ...(value.pendingControl ? { pendingControl: value.pendingControl } : {}),
         ...(value.stopDrainError ? { stopDrainError: value.stopDrainError } : {}),
+        ...(value.stopGapError ? { stopGapError: value.stopGapError } : {}),
+        ...(value.stopGapSequence !== undefined ? { stopGapSequence: value.stopGapSequence } : {}),
       };
       sessionStorage.setItem(CAPTURE_KEY, JSON.stringify(stored));
     }
@@ -154,6 +158,13 @@ function clientId() {
     if (prior) return prior;
     const next = id(); sessionStorage.setItem(CLIENT_KEY, next); return next;
   } catch { return id(); }
+}
+
+function missingBrowserAudioSequence(error: HostError): number | null {
+  if (error.code !== "browser_chunk_gap") return null;
+  const match = /^Missing browser audio sequence (\d+); retry the chunk before Stop\.$/.exec(error.message);
+  const sequence = Number(match?.[1]);
+  return match && Number.isSafeInteger(sequence) ? sequence : null;
 }
 
 export function detectClientCapabilities(): ClientCapabilities {
@@ -487,7 +498,6 @@ export class BrowserCaptureOwner {
       // The host owns finalization, so it must not close chunk admission until
       // the browser's bounded final-data drain has settled.
       const result = await this.reconcileStop(current);
-      if (result.state === "saved") this.pendingCapture = null;
       return result;
     } finally {
       this.emit();
@@ -514,8 +524,28 @@ export class BrowserCaptureOwner {
       stored.stopDrainError = undefined;
       writeStored(stored);
     }
+    if (stored.stopGapError) {
+      if (!pending || stored.stopGapSequence === undefined) {
+        return this.incompleteStopPanel(stored, {
+          ...stored.stopGapError,
+          message: `${stored.stopGapError.message} The missing chunk is unavailable in this browser; recording is incomplete.`,
+          retryable: false,
+        });
+      }
+      try {
+        await pending.uploads.resend(stored.stopGapSequence);
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        const unavailable = message.includes("no longer available to retry");
+        return this.incompleteStopPanel(stored, {
+          code: "browser_chunk_gap", message, retryable: !unavailable,
+        });
+      }
+      stored.stopGapError = undefined;
+      stored.stopGapSequence = undefined;
+      writeStored(stored);
+    }
     const result = await this.reconcileStop(stored);
-    if (result.state === "saved") this.pendingCapture = null;
     return result;
   }
 
@@ -560,13 +590,23 @@ export class BrowserCaptureOwner {
           expectedNextSequence: Math.max(stored.expectedNextSequence ?? stored.nextSequence,
             latest.expectedNextSequence ?? latest.nextSequence),
           stopDrainError: stored.stopDrainError ?? latest.stopDrainError,
+          stopGapError: stored.stopGapError ?? latest.stopGapError,
+          stopGapSequence: stored.stopGapSequence ?? latest.stopGapSequence,
         }
       : stored;
-    if (state.error === null && state.state === "saved" && !recovery.stopDrainError) {
+    if (state.error === null && state.state === "saved" && !recovery.stopDrainError && !recovery.stopGapError) {
       this.endedRecordingId = recovery.sessionId;
       writeStored(null);
+      if (this.pendingCapture?.sessionId === recovery.sessionId) {
+        this.pendingCapture.uploads.releaseRetained();
+        this.pendingCapture = null;
+      }
       this.acceptPanel(recovery.sessionId, state);
       return state;
+    }
+    if (state.error?.code === "browser_chunk_gap") {
+      recovery.stopGapError = state.error;
+      recovery.stopGapSequence = missingBrowserAudioSequence(state.error) ?? undefined;
     }
     const error = recovery.stopDrainError ?? state.error ?? {
       code: "authority_stop_unconfirmed",
