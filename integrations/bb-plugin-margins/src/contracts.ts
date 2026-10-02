@@ -15,32 +15,32 @@ export const clientCapabilitiesSchema = z.object({
   browserMicrophone: z.boolean(),
   nativeMacCapture: z.boolean(),
 }).strict();
-export const recordingStateSchema = z.enum([
+const recordingStateSchema = z.enum([
   "needs_setup", "ready", "getting_ready", "recording", "paused",
   "recovering", "saving", "saved", "recording_elsewhere", "needs_attention", "unavailable",
 ]);
-export const primaryActionSchema = z.enum(["start", "pause", "resume", "retry", "none"]);
-export const projectTargetSchema = z.object({
+const primaryActionSchema = z.enum(["start", "pause", "resume", "retry", "none"]);
+const projectTargetSchema = z.object({
   projectId: z.string().min(1), hostId: z.string().min(1), projectRoot: z.string().min(1),
   workspaceId: z.string().min(1).optional(),
 }).strict();
-export const notepadSchema = z.object({ text: z.string(), revision: z.string().min(1) }).strict();
-export const workspaceMeetingSchema = z.object({
+const notepadSchema = z.object({ text: z.string(), revision: z.string().min(1) }).strict();
+const workspaceMeetingSchema = z.object({
   sessionId: z.string().min(1), title: z.string().nullable(),
   startedAt: z.string().min(1), inputFinalized: z.boolean(), notepad: notepadSchema,
 }).strict();
-export const hostCaptureSnapshotSchema = z.object({
+const hostCaptureSnapshotSchema = z.object({
   recordingId: z.string().min(1), sessionId: z.string().min(1), status: z.enum(["recording", "paused", "saving"]),
   notepad: notepadSchema,
 }).strict();
-export const hostErrorSchema = z.object({
+const hostErrorSchema = z.object({
   code: z.string().min(1), message: z.string().min(1), retryable: z.boolean(),
 }).strict();
-export const workspaceMeetingResultSchema = z.discriminatedUnion("ok", [
+const workspaceMeetingResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), meeting: workspaceMeetingSchema.nullable(), candidates: z.array(z.string()) }).strict(),
   z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
 ]);
-export const workspaceMeetingSummarySchema = workspaceMeetingSchema.omit({ notepad: true }).extend({
+const workspaceMeetingSummarySchema = workspaceMeetingSchema.omit({ notepad: true }).extend({
   durationMs: z.number().nonnegative().nullable().default(null),
   audioSource: z.string().nullable().default(null),
   workspaceId: z.string().nullable().default(null),
@@ -54,23 +54,23 @@ export const workspaceMeetingSummarySchema = workspaceMeetingSchema.omit({ notep
   threadLinks: z.array(z.object({ id: z.string(), title: z.string() }).strict()).default([]),
   distilledMemoRevision: z.string().nullable().default(null),
 }).strict();
-export const workspaceMeetingsResultSchema = z.discriminatedUnion("ok", [
+const workspaceMeetingsResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), meetings: z.array(workspaceMeetingSummarySchema) }).strict(),
   z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
 ]);
-export const workspaceMeetingActionResultSchema = z.discriminatedUnion("ok", [
+const workspaceMeetingActionResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true) }).strict(),
   z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
 ]);
-export const workspaceTranscriptResultSchema = z.discriminatedUnion("ok", [
+const workspaceTranscriptResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), body: z.string() }).strict(),
   z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
 ]);
-export const hostResultSchema = z.discriminatedUnion("ok", [
+const hostResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), snapshot: hostCaptureSnapshotSchema.nullable() }).strict(),
   z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
 ]);
-export const connectedNoteContextSchema = z.object({
+const connectedNoteContextSchema = z.object({
   schema: z.literal("margins.bb.connected-note-context.v1"),
   instanceId: z.string().min(1),
   workspaceId: z.string().min(1),
@@ -82,15 +82,15 @@ export const connectedNoteContextSchema = z.object({
   noteAssociation: z.object({ sourceId: z.string().min(1), relativePath: z.string().min(1), revision: z.number().int().nonnegative() }).strict().nullable(),
   instructions: z.string().min(1),
 }).strict();
-export const connectedNoteResultSchema = z.discriminatedUnion("ok", [
+const connectedNoteResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), context: connectedNoteContextSchema }).strict(),
   z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
 ]);
-export const transcriptionRequestResultSchema = z.discriminatedUnion("ok", [
+const transcriptionRequestResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), status: z.enum(["queued", "running", "complete", "failed"]), attempt: z.number().int().positive() }).strict(),
   z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
 ]);
-export const speechSetupResultSchema = z.discriminatedUnion("ok", [
+const speechSetupResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), state: z.enum(["preparing", "ready", "failed", "unavailable"]), message: z.string(), progress: z.number().min(0).max(1).nullable() }).strict(),
   z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
 ]);
@@ -191,10 +191,6 @@ export const marginsHostContract = defineRpcContract({
   pause: { input: ownedCaptureInputSchema, output: hostResultSchema },
   resume: { input: ownedCaptureInputSchema, output: hostResultSchema },
   stop: { input: ownedCaptureInputSchema, output: hostResultSchema },
-  updateNotepad: {
-    input: ownedCaptureInputSchema.extend({ expectedRevision: z.string().min(1), text: z.string().max(100_000) }).strict(),
-    output: hostResultSchema,
-  },
   uploadChunk: {
     input: ownedCaptureInputSchema.extend({ sequence: z.number().int().nonnegative(), bytesBase64: z.string() }).strict(),
     output: z.object({ ok: z.boolean(), error: hostErrorSchema.optional() }).strict(),
@@ -211,7 +207,7 @@ export const marginsHostContract = defineRpcContract({
 export const hostSignals = {
   changed: { payload: z.object({
     projectId: z.string().min(1),
-    reason: z.enum(["start", "pause", "resume", "stop", "notepad"]),
+    reason: z.enum(["start", "pause", "resume", "stop"]),
   }).strict() },
 };
 
@@ -221,7 +217,7 @@ export const captureRecordSchema = z.object({
   sessionId: z.string().min(1), recordingId: z.string().min(1), clientId: z.string().min(1), ownerId: z.string().min(1),
   lastHeartbeatUnixMs: z.number().int().nonnegative(),
 });
-export const panelStateSchema = z.object({
+const panelStateSchema = z.object({
   schema: z.literal(PANEL_STATE_SCHEMA), state: recordingStateSchema,
   title: z.string().min(1), detail: z.string().min(1),
   sourceLabel: z.string().nullable(), storageLabel: z.string().nullable(),
@@ -232,9 +228,6 @@ export const panelStateSchema = z.object({
   error: hostErrorSchema.nullable(),
 }).strict();
 
-const threadClientInputSchema = z.object({
-  threadId: z.string().min(1), client: clientCapabilitiesSchema,
-}).strict();
 const captureClientInputSchema = z.object({
   sessionId: z.string().min(1), client: clientCapabilitiesSchema,
   operationId: z.string().min(1),
@@ -333,19 +326,10 @@ export const marginsRpcContract = defineRpcContract({
       z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
     ]),
   },
-  getPanelState: { input: threadClientInputSchema, output: panelStateSchema },
-  beginBrowserCapture: {
-    input: threadClientInputSchema.extend({ ownerId: z.string().min(1), title: z.string().trim().max(160).optional() }).strict(),
-    output: panelStateSchema,
-  },
   heartbeat: { input: captureClientInputSchema, output: panelStateSchema },
   pause: { input: captureClientInputSchema, output: panelStateSchema },
   resume: { input: captureClientInputSchema, output: panelStateSchema },
   stop: { input: captureClientInputSchema, output: panelStateSchema },
-  updateNotepad: {
-    input: captureClientInputSchema.extend({ expectedRevision: z.string().min(1), text: z.string().max(100_000) }).strict(),
-    output: panelStateSchema,
-  },
   connectedNoteContext: {
     input: z.object({ threadId: z.string().min(1).optional(), projectId: z.string().min(1).optional(), sessionId: z.string().min(1) }).strict(),
     output: connectedNoteResultSchema,
@@ -361,13 +345,10 @@ export const marginsRpcContract = defineRpcContract({
 });
 
 export type ClientCapabilities = z.infer<typeof clientCapabilitiesSchema>;
-export type RecordingState = z.infer<typeof recordingStateSchema>;
-export type PrimaryAction = z.infer<typeof primaryActionSchema>;
 export type ProjectTarget = z.infer<typeof projectTargetSchema>;
 export type HostError = z.infer<typeof hostErrorSchema>;
 export type HostCaptureSnapshot = z.infer<typeof hostCaptureSnapshotSchema>;
 export type HostResult = z.infer<typeof hostResultSchema>;
-export type ConnectedNoteContext = z.infer<typeof connectedNoteContextSchema>;
 export type ConnectedNoteResult = z.infer<typeof connectedNoteResultSchema>;
 export type TranscriptionRequestResult = z.infer<typeof transcriptionRequestResultSchema>;
 export type CaptureRecord = z.infer<typeof captureRecordSchema>;

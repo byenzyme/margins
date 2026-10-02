@@ -15,7 +15,6 @@ describe("Margins project host entry", () => {
       read: vi.fn(async () => ({ ok: true as const, snapshot })),
       mutate: vi.fn(async () => ({ ok: true as const, snapshot })),
       stop: vi.fn(async () => ({ ok: true as const, snapshot: null })),
-      updateNotepad: vi.fn(async () => ({ ok: true as const, snapshot })),
       upload: vi.fn(async () => ({ ok: true as const })),
       connectedNoteContext: vi.fn(async () => ({ ok: true as const, context: {
         schema: "margins.bb.connected-note-context.v1" as const, instanceId: "instance-1", workspaceId: "workspace-1", sessionId: "rec-1", title: null,

@@ -29,18 +29,16 @@ const MEETING_ORIGIN_PREFIX = "meeting-origin:";
 const MEETING_ARCHIVE_PREFIX = "meeting-archive:";
 const MENU_GRANT_PREFIX = "menu-grant:";
 const MENU_GRANT_EPOCH_PREFIX = "menu-grant-epoch:";
-const AUTO_NOTE_PENDING_PREFIX = "auto-note-pending:";
 const NOTE_THREAD_PREFIX = "note-thread:";
 const MENU_GRANT_TTL_MS = 60 * 60 * 1_000;
 const REALTIME_CHANNEL = "margins-recording";
-export const DISCONNECT_GRACE_MS = CAPTURE_DISCONNECT_GRACE_MS;
+const DISCONNECT_GRACE_MS = CAPTURE_DISCONNECT_GRACE_MS;
 
 function sessionKey(sessionId: string) { return `${SESSION_PREFIX}${sessionId}`; }
 function recordingKey(recordingId: string) { return `${RECORDING_PREFIX}${recordingId}`; }
 function liveKey(workspaceId: string) { return `${LIVE_PREFIX}${workspaceId}`; }
 function lastSessionKey(workspaceId: string) { return `${LAST_SESSION_PREFIX}${workspaceId}`; }
 function originKey(workspaceId: string, sessionId: string) { return `${MEETING_ORIGIN_PREFIX}${workspaceId}:${sessionId}`; }
-function pendingNoteKey(workspaceId: string, sessionId: string) { return `${AUTO_NOTE_PENDING_PREFIX}${workspaceId}:${sessionId}`; }
 function noteThreadKey(workspaceId: string, sessionId: string) { return `${NOTE_THREAD_PREFIX}${workspaceId}:${sessionId}`; }
 function archiveKey(workspaceId: string, sessionId: string) { return `${MEETING_ARCHIVE_PREFIX}${workspaceId}:${sessionId}`; }
 function meetingName(value: string | null | undefined) {
@@ -202,16 +200,6 @@ export default function marginsPlugin(bb: BbPluginApi) {
     };
   }
 
-  async function getPanelState(threadId: string, client: ClientCapabilities): Promise<PanelState> {
-    let target: ProjectTarget;
-    try { target = await targetForThread(threadId); }
-    catch (cause) {
-      const error = { code: "project_folder_unavailable", message: cause instanceof Error ? cause.message : String(cause), retryable: false };
-      return basePanel(null, "unavailable", client, { error });
-    }
-    return getPanelStateForTarget(target, client);
-  }
-
   async function getPanelStateForTarget(target: ProjectTarget, client: ClientCapabilities): Promise<PanelState> {
     const authority = await callHost(target, "captureAuthority", { target });
     if (!authority.ok) return basePanel(target.projectId, "unavailable", client, { error: authority.error });
@@ -318,7 +306,6 @@ export default function marginsPlugin(bb: BbPluginApi) {
         ownerId, lastHeartbeatUnixMs: Date.now(),
       });
       await bb.storage.kv.set(originKey(workspaceId, result.snapshot.sessionId), target.projectId);
-      await bb.storage.kv.set(pendingNoteKey(workspaceId, result.snapshot.sessionId), { projectId: target.projectId, workspaceId, sessionId: result.snapshot.sessionId });
       bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: "start" });
       return getPanelStateForTarget(target, client);
     });
@@ -365,7 +352,6 @@ export default function marginsPlugin(bb: BbPluginApi) {
         pluginMetadata: { sessionId, workspaceId: context.workspaceId },
       });
       await bb.storage.kv.set(noteThreadKey(context.workspaceId, sessionId), { threadId: thread.id, memoRevision: context.memo.revision });
-      await bb.storage.kv.delete(pendingNoteKey(context.workspaceId, sessionId));
       bb.realtime.publish(REALTIME_CHANNEL, { projectId, reason: "note-thread-started", sessionId });
       return { threadId: thread.id };
     } finally { noteThreadLocks.delete(lockKey); }
@@ -495,9 +481,6 @@ export default function marginsPlugin(bb: BbPluginApi) {
         error: { code: "meeting_not_found", message: "Meeting has not appeared in this Workspace yet.", retryable: true } };
       const key = originKey(authority.workspaceId, sessionId);
       if (!await bb.storage.kv.get(key)) await bb.storage.kv.set(key, projectId);
-      if (!await bb.storage.kv.get(noteThreadKey(authority.workspaceId, sessionId))) {
-        await bb.storage.kv.set(pendingNoteKey(authority.workspaceId, sessionId), { projectId, workspaceId: authority.workspaceId, sessionId });
-      }
       return { ok: true as const };
     },
     async discardWorkspaceMeeting({ projectId, sessionId }) {
@@ -575,23 +558,10 @@ export default function marginsPlugin(bb: BbPluginApi) {
         return { ok: false as const, error: { code: "native_session_unavailable", message: cause instanceof Error ? cause.message : String(cause), retryable: true } };
       }
     },
-    getPanelState: ({ threadId, client }) => getPanelState(threadId, client),
-    async beginBrowserCapture({ threadId, client, ownerId, title }) {
-      return beginForTarget(await targetForThread(threadId), client, ownerId, title);
-    },
     heartbeat: ({ sessionId, client, operationId }) => operate(sessionId, client, operationId, "heartbeat"),
     pause: ({ sessionId, client, operationId }) => operate(sessionId, client, operationId, "pause"),
     resume: ({ sessionId, client, operationId }) => operate(sessionId, client, operationId, "resume"),
     stop: ({ sessionId, client, operationId }) => operate(sessionId, client, operationId, "stop"),
-    async updateNotepad({ sessionId, client, expectedRevision, text }) {
-      const capture = await readCapture(sessionId);
-      if (!capture || capture.clientId !== client.clientId) return basePanel(null, "unavailable", client);
-      const target: ProjectTarget = { projectId: capture.projectId, hostId: capture.hostId,
-        projectRoot: capture.projectRoot, workspaceId: capture.workspaceId };
-      const result = await callHost(target, "updateNotepad", { target, recordingId: capture.recordingId, ownerId: capture.ownerId, expectedRevision, text }) as HostResult;
-      if (!result.ok) return basePanel(target.projectId, "needs_attention", client, { capture, error: result.error });
-      return panelForCapture(capture, client);
-    },
     async connectedNoteContext({ threadId, projectId, sessionId }): Promise<ConnectedNoteResult> {
       const target = await targetForSelection({ threadId, projectId });
       return callHost(target, "connectedNoteContext", { target, recordingId: sessionId }) as Promise<ConnectedNoteResult>;
@@ -603,37 +573,6 @@ export default function marginsPlugin(bb: BbPluginApi) {
     async startConnectedNoteThread({ projectId, sessionId }) {
       return startConnectedNoteThread(projectId, sessionId);
     },
-  });
-
-  const pendingNoteSchema = z.object({ projectId: z.string().min(1), workspaceId: z.string().min(1), sessionId: z.string().min(1) }).strict();
-  bb.background.schedule("auto-connected-notes", "* * * * *", async () => {
-    if (process.env.MARGINS_BB_E2E_DISABLE_AUTO_NOTE === "1") return;
-    for (const key of (await bb.storage.kv.list(AUTO_NOTE_PENDING_PREFIX)).slice(0, 20)) {
-      const parsed = pendingNoteSchema.safeParse(await bb.storage.kv.get(key));
-      if (!parsed.success || key !== pendingNoteKey(parsed.data.workspaceId, parsed.data.sessionId)) {
-        await bb.storage.kv.delete(key);
-        continue;
-      }
-      const { projectId, workspaceId, sessionId } = parsed.data;
-      try {
-        if (await bb.storage.kv.get(noteThreadKey(workspaceId, sessionId))) {
-          await bb.storage.kv.delete(key);
-          continue;
-        }
-        const target = await targetForProject(projectId);
-        const meeting = await callHost(target, "readWorkspaceMeeting", { target, sessionId });
-        if (!meeting.ok || !meeting.meeting?.inputFinalized) continue;
-        const result = await callHost(target, "connectedNoteContext", { target, recordingId: sessionId }) as ConnectedNoteResult;
-        if (!result.ok || result.context.workspaceId !== workspaceId) continue;
-        if (result.context.noteAssociation) { await bb.storage.kv.delete(key); continue; }
-        if (!result.context.transcript.available) {
-          await callHost(target, "requestTranscription", { target, recordingId: sessionId });
-          continue;
-        }
-        if (!result.context.transcript.terminal || result.context.transcript.live) continue;
-        await startConnectedNoteThread(projectId, sessionId);
-      } catch { /* Keep this session queued for a later sweep; other meetings can proceed. */ }
-    }
   });
 
   const chunkSchema = z.object({
@@ -699,11 +638,6 @@ export default function marginsPlugin(bb: BbPluginApi) {
           if (typeof created.session_id === "string" && created.session_id.length > 0 && created.session_id.length <= 300) {
             const key = originKey(grant.workspaceId, created.session_id);
             if (!await bb.storage.kv.get(key)) await bb.storage.kv.set(key, grant.target.projectId);
-            if (!await bb.storage.kv.get(noteThreadKey(grant.workspaceId, created.session_id))) {
-              await bb.storage.kv.set(pendingNoteKey(grant.workspaceId, created.session_id), {
-                projectId: grant.target.projectId, workspaceId: grant.workspaceId, sessionId: created.session_id,
-              });
-            }
           }
         } catch { /* A successful relay is never changed by optional project attribution. */ }
       }

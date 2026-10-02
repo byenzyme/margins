@@ -143,7 +143,7 @@ export async function workspacePaths(workspaceId: string): Promise<{ notes: stri
   return { notes: destination.destination, recordings: capture.path };
 }
 
-export async function workspaceNoteDestination(workspaceId: string) {
+async function workspaceNoteDestination(workspaceId: string) {
   if (!/^[a-z0-9][a-z0-9-]*$/.test(workspaceId)) throw new Error("Invalid Margins Workspace id");
   const { stdout } = await execFile(marginsCli(), ["--workspace", workspaceId, "workspace", "destination", "--json"], {
     env: { ...process.env, MARGINS_HOME: marginsHome() }, timeout: 5_000, maxBuffer: 65_536,
@@ -613,12 +613,6 @@ export class ProjectMarginsTransport {
     return this.withHandle(target, dataDir, async (handle) => {
       await this.request(handle, `browser/sessions/${recordingId}/stop`, "POST", { ownerId });
       return null;
-    });
-  }
-
-  updateNotepad(target: ProjectTarget, dataDir: string, recordingId: string, ownerId: string, expectedRevision: string, text: string) {
-    return this.withHandle(target, dataDir, async (handle) => {
-      return this.request<HostCaptureSnapshot>(handle, `browser/sessions/${recordingId}/notepad`, "PUT", { ownerId, expectedRevision, text });
     });
   }
 

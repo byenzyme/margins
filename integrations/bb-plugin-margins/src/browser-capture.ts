@@ -75,7 +75,7 @@ type BrowserMedia = {
 
 /** Synchronously detach the local producer, returning only the bounded final
  * recorder event. The caller can update UI before awaiting any transport. */
-export function releaseBrowserDevice(input: Pick<BrowserMedia, "recorder" | "stream">): Promise<Error | null> {
+function releaseBrowserDevice(input: Pick<BrowserMedia, "recorder" | "stream">): Promise<Error | null> {
   const recorderStopped = stopMediaRecorderWithDeadline(input.recorder).catch((cause) => (
     cause instanceof Error ? cause : new Error(String(cause))
   ));
@@ -85,7 +85,7 @@ export function releaseBrowserDevice(input: Pick<BrowserMedia, "recorder" | "str
 
 /** Drain final recorder data and queued uploads before authority finalization.
  * Both waits are bounded by their respective transport primitives. */
-export async function drainBrowserMedia(
+async function drainBrowserMedia(
   input: Pick<BrowserMedia, "uploads">,
   recorderStopped: Promise<Error | null>,
 ): Promise<{ errors: Error[] }> {
@@ -170,7 +170,7 @@ export function detectClientCapabilities(): ClientCapabilities {
 async function rpc<T>(pluginId: string, method: string, input: object): Promise<T> {
   // A cold project recorder may initialize the ASR model during the first
   // capture request. Keep the ordinary control calls on their short deadline.
-  const timeoutMs = method === "beginBrowserCapture" || method === "beginProjectCapture" ? 30_000 : 10_000;
+  const timeoutMs = method === "beginProjectCapture" ? 30_000 : 10_000;
   const value = await fetchJsonWithDeadline<{ ok: boolean; result?: T; error?: { message?: string } }>(
     `/api/v1/plugins/${encodeURIComponent(pluginId)}/rpc/${method}`,
     {
@@ -218,15 +218,12 @@ export class BrowserCaptureOwner {
   private heartbeatRecovering = false;
   private endedRecordingId: string | null = null;
   private generation = 0;
-  private refreshGeneration = 0;
-  private refreshInFlight: Promise<PanelState> | null = null;
   private readonly panels = new Map<string, PanelState>();
   private readonly routePanels = new Map<string, PanelState>();
   private latestPanel: PanelState | null = null;
   private inputLevel = 0;
   private listeningSince = 0;
   private heardAudio = false;
-  private readonly drafts = new Map<string, string>();
 
   constructor(private readonly dependencies: BrowserCaptureDependencies = defaultDependencies) {}
 
@@ -267,28 +264,6 @@ export class BrowserCaptureOwner {
     this.emit();
     return state;
   }
-  draft(recordingId: string) { return this.drafts.get(recordingId); }
-  retainDraft(recordingId: string, text: string) { this.drafts.set(recordingId, text); }
-  clearDraft(recordingId: string) { this.drafts.delete(recordingId); }
-
-  /** One bounded refresh at a time. Generations prevent an old response from
-   * replacing a newer control result or a newly selected session. */
-  refresh(threadId: string, load: () => Promise<PanelState>): Promise<PanelState> {
-    if (this.refreshInFlight) {
-      return this.refreshInFlight.then(() => this.refresh(threadId, load));
-    }
-    const generation = ++this.refreshGeneration;
-    const request = load().then(state => {
-      if (generation === this.refreshGeneration) this.acceptPanel(threadId, state);
-      return state;
-    }).finally(() => {
-      if (this.refreshInFlight === request) this.refreshInFlight = null;
-    });
-    this.refreshInFlight = request;
-    return request;
-  }
-
-  private fenceRefreshes() { ++this.refreshGeneration; }
 
   private monitorLevel(stream: MediaStream): { dispose(): void } | undefined {
     if (typeof AudioContext === "undefined") return undefined;
@@ -403,15 +378,11 @@ export class BrowserCaptureOwner {
     finally { this.recoveryStarted = false; }
   }
 
-  async start(threadId: string, title?: string) {
-    return this.begin("beginBrowserCapture", { threadId }, title);
-  }
-
   async startFromProject(projectId: string, title?: string) {
-    return this.begin("beginProjectCapture", { projectId }, title);
+    return this.begin(projectId, title);
   }
 
-  private async begin(method: "beginBrowserCapture" | "beginProjectCapture", target: { threadId: string } | { projectId: string }, title?: string) {
+  private async begin(projectId: string, title?: string) {
     if (!this.pluginId) throw new Error("Margins is still loading");
     if (this.capture) throw new Error("This bb window is already recording");
     this.endedRecordingId = null;
@@ -423,8 +394,8 @@ export class BrowserCaptureOwner {
     catch (cause) { stream.getTracks().forEach((track) => track.stop()); throw cause; }
     const ownerId = id();
     try {
-      const state = await this.dependencies.rpc<PanelState>(this.pluginId, method, {
-        ...target, client: detectClientCapabilities(), ownerId, ...(title ? { title } : {}),
+      const state = await this.dependencies.rpc<PanelState>(this.pluginId, "beginProjectCapture", {
+        projectId, client: detectClientCapabilities(), ownerId, ...(title ? { title } : {}),
       });
       if (!state.recordingId || !state.ownsRecording) throw new Error(state.detail);
       await this.createLocal({ sessionId: state.recordingId, startedAtMs: Date.now(), nextSequence: 0, paused: false }, stream);
@@ -446,7 +417,6 @@ export class BrowserCaptureOwner {
     current.pendingControl = pendingControl;
     writeStored(current);
     this.emit();
-    this.fenceRefreshes();
     const state = await this.dependencies.rpc<PanelState>(this.pluginId, "pause", {
       sessionId: current.sessionId, client: detectClientCapabilities(),
       operationId: pendingControl.operationId,
@@ -470,7 +440,6 @@ export class BrowserCaptureOwner {
     current.pendingControl = pendingControl;
     writeStored(current);
     this.emit();
-    this.fenceRefreshes();
     const state = await this.dependencies.rpc<PanelState>(this.pluginId, "resume", {
       sessionId: current.sessionId, client: detectClientCapabilities(),
       operationId: pendingControl.operationId,
@@ -486,7 +455,6 @@ export class BrowserCaptureOwner {
     const current = this.capture; if (!current || !this.pluginId) return;
     this.capture = null;
     ++this.generation;
-    this.fenceRefreshes();
     this.heartbeatRecovering = false;
     current.levelMonitor?.dispose();
     current.reachability.dispose();

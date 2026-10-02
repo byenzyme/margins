@@ -554,7 +554,7 @@ __export(core_exports2, {
   parseAsync: () => parseAsync,
   parseURLObject: () => parseURLObject,
   prettifyError: () => prettifyError,
-  process: () => process2,
+  process: () => process,
   regexes: () => regexes_exports,
   registry: () => registry,
   safeDecode: () => safeDecode,
@@ -15158,7 +15158,7 @@ function handleUnrepresentable(schema, ctx, json2, params, message) {
   Object.assign(json2, result);
   return true;
 }
-function process2(schema, ctx, _params = { path: [], schemaPath: [] }) {
+function process(schema, ctx, _params = { path: [], schemaPath: [] }) {
   var _a3;
   const def = schema._zod.def;
   const seen = ctx.seen.get(schema);
@@ -15197,7 +15197,7 @@ function process2(schema, ctx, _params = { path: [], schemaPath: [] }) {
     if (parent) {
       if (!result.ref)
         result.ref = parent;
-      process2(parent, ctx, params);
+      process(parent, ctx, params);
       ctx.seen.get(parent).isParent = true;
     }
   }
@@ -15632,14 +15632,14 @@ function isTransforming(_schema, _ctx) {
 }
 var createToJSONSchemaMethod = (schema, processors = {}) => (params) => {
   const ctx = initializeContext({ ...params, processors });
-  process2(schema, ctx);
+  process(schema, ctx);
   extractDefs(ctx, schema);
   return finalize(ctx, schema);
 };
 var createStandardJSONSchemaMethod = (schema, io, processors = {}) => (params) => {
   const { libraryOptions, target } = params ?? {};
   const ctx = initializeContext({ ...libraryOptions ?? {}, target, io, processors });
-  process2(schema, ctx);
+  process(schema, ctx);
   extractDefs(ctx, schema);
   return finalize(ctx, schema);
 };
@@ -15871,7 +15871,7 @@ var arrayProcessor = (schema, ctx, _json, params) => {
   if (typeof maximum === "number")
     json2.maxItems = maximum;
   json2.type = "array";
-  json2.items = process2(def.element, ctx, {
+  json2.items = process(def.element, ctx, {
     ...params,
     path: [...params.path, "items"]
   });
@@ -15897,7 +15897,7 @@ var objectProcessor = (schema, ctx, _json, params) => {
   json2.type = "object";
   json2.properties = {};
   for (const key in shape) {
-    assignProp(json2.properties, key, process2(shape[key], ctx, {
+    assignProp(json2.properties, key, process(shape[key], ctx, {
       ...params,
       path: [...params.path, "properties", key]
     }));
@@ -15920,7 +15920,7 @@ var objectProcessor = (schema, ctx, _json, params) => {
     if (ctx.io === "output")
       json2.additionalProperties = false;
   } else if (def.catchall) {
-    json2.additionalProperties = process2(def.catchall, ctx, {
+    json2.additionalProperties = process(def.catchall, ctx, {
       ...params,
       path: [...params.path, "additionalProperties"]
     });
@@ -15929,7 +15929,7 @@ var objectProcessor = (schema, ctx, _json, params) => {
 var unionProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
   const isExclusive = def.inclusive === false;
-  const options = def.options.map((x, i) => process2(x, ctx, {
+  const options = def.options.map((x, i) => process(x, ctx, {
     ...params,
     path: [...params.path, isExclusive ? "oneOf" : "anyOf", i]
   }));
@@ -15941,11 +15941,11 @@ var unionProcessor = (schema, ctx, json2, params) => {
 };
 var intersectionProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
-  const a = process2(def.left, ctx, {
+  const a = process(def.left, ctx, {
     ...params,
     path: [...params.path, "allOf", 0]
   });
-  const b = process2(def.right, ctx, {
+  const b = process(def.right, ctx, {
     ...params,
     path: [...params.path, "allOf", 1]
   });
@@ -15963,11 +15963,11 @@ var tupleProcessor = (schema, ctx, _json, params) => {
   json2.type = "array";
   const prefixPath = ctx.target === "draft-2020-12" ? "prefixItems" : "items";
   const restPath = ctx.target === "draft-2020-12" ? "items" : ctx.target === "openapi-3.0" ? "items" : "additionalItems";
-  const prefixItems = def.items.map((x, i) => process2(x, ctx, {
+  const prefixItems = def.items.map((x, i) => process(x, ctx, {
     ...params,
     path: [...params.path, prefixPath, i]
   }));
-  const rest = def.rest ? process2(def.rest, ctx, {
+  const rest = def.rest ? process(def.rest, ctx, {
     ...params,
     path: [...params.path, restPath, ...ctx.target === "openapi-3.0" ? [def.items.length] : []]
   }) : null;
@@ -16092,7 +16092,7 @@ var recordProcessor = (schema, ctx, _json, params) => {
   const keyBag = keyType._zod.bag;
   const patterns = keyBag?.patterns;
   if (def.mode === "loose" && patterns && patterns.size > 0) {
-    const valueSchema = process2(def.valueType, ctx, {
+    const valueSchema = process(def.valueType, ctx, {
       ...params,
       path: [...params.path, "patternProperties", "*"]
     });
@@ -16102,7 +16102,7 @@ var recordProcessor = (schema, ctx, _json, params) => {
     }
   } else {
     if (ctx.target === "draft-07" || ctx.target === "draft-2020-12") {
-      json2.propertyNames = process2(def.keyType, ctx, {
+      json2.propertyNames = process(def.keyType, ctx, {
         ...params,
         path: [...params.path, "propertyNames"]
       });
@@ -16114,7 +16114,7 @@ var recordProcessor = (schema, ctx, _json, params) => {
       }
       pending.push(schema);
     }
-    json2.additionalProperties = process2(def.valueType, ctx, {
+    json2.additionalProperties = process(def.valueType, ctx, {
       ...params,
       path: [...params.path, "additionalProperties"]
     });
@@ -16130,7 +16130,7 @@ var recordProcessor = (schema, ctx, _json, params) => {
 };
 var nullableProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
-  const inner = process2(def.innerType, ctx, params);
+  const inner = process(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   if (ctx.target === "openapi-3.0") {
     seen.ref = def.innerType;
@@ -16141,7 +16141,7 @@ var nullableProcessor = (schema, ctx, json2, params) => {
 };
 var nonoptionalProcessor = (schema, ctx, _json, params) => {
   const def = schema._zod.def;
-  process2(def.innerType, ctx, params);
+  process(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = def.innerType;
 };
@@ -16161,7 +16161,7 @@ function serializeDefaultValue(value, schema, ctx, json2, params) {
 }
 var defaultProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
-  process2(def.innerType, ctx, params);
+  process(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = def.innerType;
   const value = serializeDefaultValue(def.defaultValue, schema, ctx, json2, params);
@@ -16170,7 +16170,7 @@ var defaultProcessor = (schema, ctx, json2, params) => {
 };
 var prefaultProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
-  process2(def.innerType, ctx, params);
+  process(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = def.innerType;
   if (ctx.io !== "input")
@@ -16181,7 +16181,7 @@ var prefaultProcessor = (schema, ctx, json2, params) => {
 };
 var catchProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
-  process2(def.innerType, ctx, params);
+  process(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = def.innerType;
   let catchValue;
@@ -16197,32 +16197,32 @@ var pipeProcessor = (schema, ctx, _json, params) => {
   const def = schema._zod.def;
   const inIsTransform = def.in._zod.traits.has("$ZodTransform");
   const innerType = ctx.io === "input" ? inIsTransform ? def.out : def.in : def.out;
-  process2(innerType, ctx, params);
+  process(innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = innerType;
 };
 var readonlyProcessor = (schema, ctx, json2, params) => {
   const def = schema._zod.def;
-  process2(def.innerType, ctx, params);
+  process(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = def.innerType;
   json2.readOnly = true;
 };
 var promiseProcessor = (schema, ctx, _json, params) => {
   const def = schema._zod.def;
-  process2(def.innerType, ctx, params);
+  process(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = def.innerType;
 };
 var optionalProcessor = (schema, ctx, _json, params) => {
   const def = schema._zod.def;
-  process2(def.innerType, ctx, params);
+  process(def.innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = def.innerType;
 };
 var lazyProcessor = (schema, ctx, _json, params) => {
   const innerType = schema._zod.innerType;
-  process2(innerType, ctx, params);
+  process(innerType, ctx, params);
   const seen = ctx.seen.get(schema);
   seen.ref = innerType;
 };
@@ -16274,7 +16274,7 @@ function toJSONSchema(input2, params) {
     const defs = {};
     for (const entry of registry2._idmap.entries()) {
       const [_, schema] = entry;
-      process2(schema, ctx2);
+      process(schema, ctx2);
     }
     const schemas = {};
     const external = {
@@ -16297,7 +16297,7 @@ function toJSONSchema(input2, params) {
     return { schemas };
   }
   const ctx = initializeContext({ ...params, processors: allProcessors });
-  process2(input2, ctx);
+  process(input2, ctx);
   extractDefs(ctx, input2);
   return finalize(ctx, input2);
 }
@@ -16356,7 +16356,7 @@ var JSONSchemaGenerator = class {
    * This must be called before emit().
    */
   process(schema, _params = { path: [], schemaPath: [] }) {
-    return process2(schema, this.ctx, _params);
+    return process(schema, this.ctx, _params);
   }
   /**
    * Emit the final JSON Schema after processing.
@@ -19109,10 +19109,6 @@ var marginsHostContract = defineRpcContract({
   pause: { input: ownedCaptureInputSchema, output: hostResultSchema },
   resume: { input: ownedCaptureInputSchema, output: hostResultSchema },
   stop: { input: ownedCaptureInputSchema, output: hostResultSchema },
-  updateNotepad: {
-    input: ownedCaptureInputSchema.extend({ expectedRevision: external_exports.string().min(1), text: external_exports.string().max(1e5) }).strict(),
-    output: hostResultSchema
-  },
   uploadChunk: {
     input: ownedCaptureInputSchema.extend({ sequence: external_exports.number().int().nonnegative(), bytesBase64: external_exports.string() }).strict(),
     output: external_exports.object({ ok: external_exports.boolean(), error: hostErrorSchema.optional() }).strict()
@@ -19129,7 +19125,7 @@ var marginsHostContract = defineRpcContract({
 var hostSignals = {
   changed: { payload: external_exports.object({
     projectId: external_exports.string().min(1),
-    reason: external_exports.enum(["start", "pause", "resume", "stop", "notepad"])
+    reason: external_exports.enum(["start", "pause", "resume", "stop"])
   }).strict() }
 };
 var captureRecordSchema = external_exports.object({
@@ -19160,10 +19156,6 @@ var panelStateSchema = external_exports.object({
   notepad: notepadSchema.nullable(),
   lastSessionId: external_exports.string().nullable(),
   error: hostErrorSchema.nullable()
-}).strict();
-var threadClientInputSchema = external_exports.object({
-  threadId: external_exports.string().min(1),
-  client: clientCapabilitiesSchema
 }).strict();
 var captureClientInputSchema = external_exports.object({
   sessionId: external_exports.string().min(1),
@@ -19292,19 +19284,10 @@ var marginsRpcContract = defineRpcContract({
       external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
     ])
   },
-  getPanelState: { input: threadClientInputSchema, output: panelStateSchema },
-  beginBrowserCapture: {
-    input: threadClientInputSchema.extend({ ownerId: external_exports.string().min(1), title: external_exports.string().trim().max(160).optional() }).strict(),
-    output: panelStateSchema
-  },
   heartbeat: { input: captureClientInputSchema, output: panelStateSchema },
   pause: { input: captureClientInputSchema, output: panelStateSchema },
   resume: { input: captureClientInputSchema, output: panelStateSchema },
   stop: { input: captureClientInputSchema, output: panelStateSchema },
-  updateNotepad: {
-    input: captureClientInputSchema.extend({ expectedRevision: external_exports.string().min(1), text: external_exports.string().max(1e5) }).strict(),
-    output: panelStateSchema
-  },
   connectedNoteContext: {
     input: external_exports.object({ threadId: external_exports.string().min(1).optional(), projectId: external_exports.string().min(1).optional(), sessionId: external_exports.string().min(1) }).strict(),
     output: connectedNoteResultSchema
@@ -19352,7 +19335,6 @@ var MEETING_ORIGIN_PREFIX = "meeting-origin:";
 var MEETING_ARCHIVE_PREFIX = "meeting-archive:";
 var MENU_GRANT_PREFIX = "menu-grant:";
 var MENU_GRANT_EPOCH_PREFIX = "menu-grant-epoch:";
-var AUTO_NOTE_PENDING_PREFIX = "auto-note-pending:";
 var NOTE_THREAD_PREFIX = "note-thread:";
 var MENU_GRANT_TTL_MS = 60 * 60 * 1e3;
 var REALTIME_CHANNEL = "margins-recording";
@@ -19371,9 +19353,6 @@ function lastSessionKey(workspaceId) {
 }
 function originKey(workspaceId, sessionId) {
   return `${MEETING_ORIGIN_PREFIX}${workspaceId}:${sessionId}`;
-}
-function pendingNoteKey(workspaceId, sessionId) {
-  return `${AUTO_NOTE_PENDING_PREFIX}${workspaceId}:${sessionId}`;
 }
 function noteThreadKey(workspaceId, sessionId) {
   return `${NOTE_THREAD_PREFIX}${workspaceId}:${sessionId}`;
@@ -19567,16 +19546,6 @@ function marginsPlugin(bb) {
       error: options.error || null
     };
   }
-  async function getPanelState(threadId, client) {
-    let target;
-    try {
-      target = await targetForThread(threadId);
-    } catch (cause) {
-      const error61 = { code: "project_folder_unavailable", message: cause instanceof Error ? cause.message : String(cause), retryable: false };
-      return basePanel(null, "unavailable", client, { error: error61 });
-    }
-    return getPanelStateForTarget(target, client);
-  }
   async function getPanelStateForTarget(target, client) {
     const authority = await callHost(target, "captureAuthority", { target });
     if (!authority.ok) return basePanel(target.projectId, "unavailable", client, { error: authority.error });
@@ -19707,7 +19676,6 @@ function marginsPlugin(bb) {
         lastHeartbeatUnixMs: Date.now()
       });
       await bb.storage.kv.set(originKey(workspaceId, result.snapshot.sessionId), target.projectId);
-      await bb.storage.kv.set(pendingNoteKey(workspaceId, result.snapshot.sessionId), { projectId: target.projectId, workspaceId, sessionId: result.snapshot.sessionId });
       bb.realtime.publish(REALTIME_CHANNEL, { projectId: target.projectId, reason: "start" });
       return getPanelStateForTarget(target, client);
     });
@@ -19763,7 +19731,6 @@ function marginsPlugin(bb) {
         pluginMetadata: { sessionId, workspaceId: context.workspaceId }
       });
       await bb.storage.kv.set(noteThreadKey(context.workspaceId, sessionId), { threadId: thread.id, memoRevision: context.memo.revision });
-      await bb.storage.kv.delete(pendingNoteKey(context.workspaceId, sessionId));
       bb.realtime.publish(REALTIME_CHANNEL, { projectId, reason: "note-thread-started", sessionId });
       return { threadId: thread.id };
     } finally {
@@ -19910,9 +19877,6 @@ function marginsPlugin(bb) {
       };
       const key = originKey(authority.workspaceId, sessionId);
       if (!await bb.storage.kv.get(key)) await bb.storage.kv.set(key, projectId);
-      if (!await bb.storage.kv.get(noteThreadKey(authority.workspaceId, sessionId))) {
-        await bb.storage.kv.set(pendingNoteKey(authority.workspaceId, sessionId), { projectId, workspaceId: authority.workspaceId, sessionId });
-      }
       return { ok: true };
     },
     async discardWorkspaceMeeting({ projectId, sessionId }) {
@@ -20000,27 +19964,10 @@ function marginsPlugin(bb) {
         return { ok: false, error: { code: "native_session_unavailable", message: cause instanceof Error ? cause.message : String(cause), retryable: true } };
       }
     },
-    getPanelState: ({ threadId, client }) => getPanelState(threadId, client),
-    async beginBrowserCapture({ threadId, client, ownerId, title }) {
-      return beginForTarget(await targetForThread(threadId), client, ownerId, title);
-    },
     heartbeat: ({ sessionId, client, operationId }) => operate(sessionId, client, operationId, "heartbeat"),
     pause: ({ sessionId, client, operationId }) => operate(sessionId, client, operationId, "pause"),
     resume: ({ sessionId, client, operationId }) => operate(sessionId, client, operationId, "resume"),
     stop: ({ sessionId, client, operationId }) => operate(sessionId, client, operationId, "stop"),
-    async updateNotepad({ sessionId, client, expectedRevision, text }) {
-      const capture = await readCapture(sessionId);
-      if (!capture || capture.clientId !== client.clientId) return basePanel(null, "unavailable", client);
-      const target = {
-        projectId: capture.projectId,
-        hostId: capture.hostId,
-        projectRoot: capture.projectRoot,
-        workspaceId: capture.workspaceId
-      };
-      const result = await callHost(target, "updateNotepad", { target, recordingId: capture.recordingId, ownerId: capture.ownerId, expectedRevision, text });
-      if (!result.ok) return basePanel(target.projectId, "needs_attention", client, { capture, error: result.error });
-      return panelForCapture(capture, client);
-    },
     async connectedNoteContext({ threadId, projectId, sessionId }) {
       const target = await targetForSelection({ threadId, projectId });
       return callHost(target, "connectedNoteContext", { target, recordingId: sessionId });
@@ -20031,40 +19978,6 @@ function marginsPlugin(bb) {
     },
     async startConnectedNoteThread({ projectId, sessionId }) {
       return startConnectedNoteThread(projectId, sessionId);
-    }
-  });
-  const pendingNoteSchema = external_exports.object({ projectId: external_exports.string().min(1), workspaceId: external_exports.string().min(1), sessionId: external_exports.string().min(1) }).strict();
-  bb.background.schedule("auto-connected-notes", "* * * * *", async () => {
-    if (process.env.MARGINS_BB_E2E_DISABLE_AUTO_NOTE === "1") return;
-    for (const key of (await bb.storage.kv.list(AUTO_NOTE_PENDING_PREFIX)).slice(0, 20)) {
-      const parsed = pendingNoteSchema.safeParse(await bb.storage.kv.get(key));
-      if (!parsed.success || key !== pendingNoteKey(parsed.data.workspaceId, parsed.data.sessionId)) {
-        await bb.storage.kv.delete(key);
-        continue;
-      }
-      const { projectId, workspaceId, sessionId } = parsed.data;
-      try {
-        if (await bb.storage.kv.get(noteThreadKey(workspaceId, sessionId))) {
-          await bb.storage.kv.delete(key);
-          continue;
-        }
-        const target = await targetForProject(projectId);
-        const meeting = await callHost(target, "readWorkspaceMeeting", { target, sessionId });
-        if (!meeting.ok || !meeting.meeting?.inputFinalized) continue;
-        const result = await callHost(target, "connectedNoteContext", { target, recordingId: sessionId });
-        if (!result.ok || result.context.workspaceId !== workspaceId) continue;
-        if (result.context.noteAssociation) {
-          await bb.storage.kv.delete(key);
-          continue;
-        }
-        if (!result.context.transcript.available) {
-          await callHost(target, "requestTranscription", { target, recordingId: sessionId });
-          continue;
-        }
-        if (!result.context.transcript.terminal || result.context.transcript.live) continue;
-        await startConnectedNoteThread(projectId, sessionId);
-      } catch {
-      }
     }
   });
   const chunkSchema = external_exports.object({
@@ -20146,13 +20059,6 @@ function marginsPlugin(bb) {
           if (typeof created.session_id === "string" && created.session_id.length > 0 && created.session_id.length <= 300) {
             const key = originKey(grant.workspaceId, created.session_id);
             if (!await bb.storage.kv.get(key)) await bb.storage.kv.set(key, grant.target.projectId);
-            if (!await bb.storage.kv.get(noteThreadKey(grant.workspaceId, created.session_id))) {
-              await bb.storage.kv.set(pendingNoteKey(grant.workspaceId, created.session_id), {
-                projectId: grant.target.projectId,
-                workspaceId: grant.workspaceId,
-                sessionId: created.session_id
-              });
-            }
           }
         } catch {
         }
