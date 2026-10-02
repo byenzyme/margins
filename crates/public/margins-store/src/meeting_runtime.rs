@@ -13,10 +13,10 @@ use margins_meeting_protocol::{
 use margins_meeting_runtime::{
     MeetingRuntimeStorage, SessionDeltaV1, StorageCommit, StoredCommandReceiptV1, StoredSessionV1,
 };
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -41,6 +41,7 @@ pub struct MeetingRuntimeStorageStats {
 #[derive(Debug, Clone)]
 pub struct SqliteMeetingRuntimeStorage {
     directory: PathBuf,
+    read_only: bool,
     fail_before_metadata_commit: Arc<AtomicBool>,
     adopt_legacy_once: Arc<AtomicBool>,
 }
@@ -49,12 +50,24 @@ impl SqliteMeetingRuntimeStorage {
     pub fn open(directory: impl Into<PathBuf>) -> Result<Self> {
         let storage = Self {
             directory: directory.into(),
+            read_only: false,
             fail_before_metadata_commit: Arc::new(AtomicBool::new(false)),
             adopt_legacy_once: Arc::new(AtomicBool::new(false)),
         };
         std::fs::create_dir_all(storage.blob_dir())?;
         storage.connection()?;
         Ok(storage)
+    }
+
+    /// Open existing runtime tables for inventory without creating a directory,
+    /// blob store, schema, or a writer connection.
+    pub fn open_read_only(directory: impl Into<PathBuf>) -> Self {
+        Self {
+            directory: directory.into(),
+            read_only: true,
+            fail_before_metadata_commit: Arc::new(AtomicBool::new(false)),
+            adopt_legacy_once: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     pub fn directory(&self) -> &Path {
@@ -186,6 +199,59 @@ impl SqliteMeetingRuntimeStorage {
         Ok(path)
     }
 
+    /// Derive just one lane into an anonymous temporary WAV. Closing the file
+    /// removes it; HTTP can keep it open until its response finishes streaming.
+    pub fn temporary_native_lane_wav(
+        &self,
+        session_id: &str,
+        ordinal: i64,
+        lane: &str,
+    ) -> Result<File> {
+        if session_id.is_empty()
+            || session_id == "."
+            || session_id == ".."
+            || session_id.contains('/')
+            || session_id.contains('\\')
+            || ordinal < 0
+            || !matches!(lane, "mic" | "system")
+        {
+            anyhow::bail!("invalid native audio export identity");
+        }
+        let connection = self.connection()?;
+        let segment_id: String = connection.query_row(
+            "SELECT p.segment_id FROM meeting_segment_projection p JOIN session_segments s ON s.session_name = p.session_id AND s.segment_index = p.canonical_ordinal WHERE p.session_id = ?1 AND p.canonical_ordinal = ?2 AND s.duration_secs IS NOT NULL",
+            params![session_id, ordinal],
+            |row| row.get(0),
+        )?;
+        let mut statement = connection.prepare(
+            "SELECT blob_path FROM meeting_chunks WHERE session_id = ?1 AND segment_id = ?2 AND lane_id = ?3 ORDER BY sequence",
+        )?;
+        let paths = statement
+            .query_map(params![session_id, segment_id, lane], |row| {
+                row.get::<_, String>(0)
+            })?
+            .map(|row| Ok(self.blob_dir().join(row?)))
+            .collect::<Result<Vec<_>>>()?;
+        anyhow::ensure!(!paths.is_empty(), "native audio lane has no chunks");
+        let mut samples = PcmChunkSamples::new(paths);
+        let mut file = tempfile::tempfile()?;
+        let mut writer = hound::WavWriter::new(
+            &mut file,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 16_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )?;
+        while let Some(sample) = samples.next_sample()? {
+            writer.write_sample(sample)?;
+        }
+        writer.finalize()?;
+        file.seek(SeekFrom::Start(0))?;
+        Ok(file)
+    }
+
     /// Size of the WAV that can be derived from a finalized native segment,
     /// without writing the derived file merely to list its audio artifacts.
     pub fn native_wav_export_size(&self, session_id: &str, ordinal: i64) -> Result<Option<u64>> {
@@ -246,6 +312,53 @@ impl SqliteMeetingRuntimeStorage {
         ))
     }
 
+    /// Size of one derived mono lane, without materializing its WAV.
+    pub fn native_lane_wav_size(
+        &self,
+        session_id: &str,
+        ordinal: i64,
+        lane: &str,
+    ) -> Result<Option<u64>> {
+        anyhow::ensure!(
+            matches!(lane, "mic" | "system"),
+            "invalid native audio lane"
+        );
+        if session_id.is_empty()
+            || session_id == "."
+            || session_id == ".."
+            || session_id.contains('/')
+            || session_id.contains('\\')
+            || ordinal < 0
+        {
+            anyhow::bail!("invalid native audio export identity");
+        }
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT c.blob_path FROM meeting_segment_projection p JOIN session_segments s ON s.session_name = p.session_id AND s.segment_index = p.canonical_ordinal JOIN meeting_chunks c ON c.session_id = p.session_id AND c.segment_id = p.segment_id WHERE p.session_id = ?1 AND p.canonical_ordinal = ?2 AND s.duration_secs IS NOT NULL AND c.lane_id = ?3 ORDER BY c.sequence",
+        )?;
+        let mut bytes = 0u64;
+        for row in statement.query_map(params![session_id, ordinal, lane], |row| {
+            row.get::<_, String>(0)
+        })? {
+            bytes = bytes
+                .checked_add(std::fs::metadata(self.blob_dir().join(row?))?.len())
+                .context("native audio size overflow")?;
+        }
+        if bytes == 0 {
+            return Ok(None);
+        }
+        anyhow::ensure!(
+            bytes % 2 == 0,
+            "native runtime PCM has a partial s16 sample"
+        );
+        if bytes > u32::MAX as u64 {
+            return Ok(None);
+        }
+        Ok(Some(
+            bytes.checked_add(44).context("native WAV size overflow")?,
+        ))
+    }
+
     /// Read-time inventory for TUI sessions finalized before audio artifact
     /// registry rows were added. It does not export or duplicate any audio.
     pub fn native_runtime_artifact_lanes(
@@ -261,6 +374,14 @@ impl SqliteMeetingRuntimeStorage {
             anyhow::bail!("invalid native session id");
         }
         let connection = self.connection()?;
+        let has_projection: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meeting_segment_projection')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_projection {
+            return Ok(Vec::new());
+        }
         let mut statement = connection.prepare(
             "SELECT DISTINCT p.canonical_ordinal, p.segment_id, s.wav_path, s.started_at, c.lane_id FROM meeting_segment_projection p JOIN session_segments s ON s.session_name = p.session_id AND s.segment_index = p.canonical_ordinal JOIN meeting_chunks c ON c.session_id = p.session_id AND c.segment_id = p.segment_id WHERE p.session_id = ?1 AND s.duration_secs IS NOT NULL ORDER BY p.canonical_ordinal, c.lane_id",
         )?;
@@ -529,6 +650,14 @@ impl SqliteMeetingRuntimeStorage {
     }
 
     fn connection(&self) -> Result<Connection> {
+        if self.read_only {
+            let connection = Connection::open_with_flags(
+                canonical::database_path(&self.directory),
+                OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )?;
+            connection.busy_timeout(Duration::from_secs(5))?;
+            return Ok(connection);
+        }
         std::fs::create_dir_all(&self.directory)?;
         let connection = canonical::open_db(&self.directory)?;
         connection.busy_timeout(Duration::from_secs(5))?;

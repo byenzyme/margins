@@ -27,6 +27,8 @@ use rand::{distributions::Alphanumeric, Rng};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
+use std::fs::File;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -1062,6 +1064,7 @@ impl WorkspaceService {
     ) -> Result<Vec<WorkspaceArtifactV1>> {
         principal.require(self.workspace_id(), OP_SESSION_READ)?;
         let session_id = resolve_session_id(&self.margins_dir, session_id)?;
+        let storage = SqliteMeetingRuntimeStorage::open_read_only(&self.margins_dir);
         crate::artifacts::session_artifact_rows(&self.margins_dir, &session_id)?
             .into_iter()
             .map(|artifact| {
@@ -1072,15 +1075,8 @@ impl WorkspaceService {
                 );
                 let size_bytes = if let Some(path) = path {
                     path.metadata().ok().map(|value| value.len())
-                } else if crate::artifacts::native_runtime_audio_export_path(
-                    &self.margins_dir,
-                    &artifact,
-                )
-                .is_some()
-                {
-                    self.runtime
-                        .storage()
-                        .native_wav_export_size(&session_id, artifact.ordinal)?
+                } else if let Some(lane) = crate::artifacts::native_runtime_audio_lane(&artifact) {
+                    storage.native_lane_wav_size(&session_id, artifact.ordinal, lane)?
                 } else {
                     None
                 };
@@ -1105,6 +1101,19 @@ impl WorkspaceService {
         principal: &ServicePrincipal,
         artifact_id: &str,
     ) -> Result<Vec<u8>> {
+        let mut file = self.artifact_content_file(principal, artifact_id)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Keep the temporary lane WAV alive until the caller finishes streaming.
+    /// The file has no permanent path and disappears when the handle closes.
+    pub fn artifact_content_file(
+        &self,
+        principal: &ServicePrincipal,
+        artifact_id: &str,
+    ) -> Result<File> {
         principal.require(self.workspace_id(), OP_SESSION_READ)?;
         let mut parts = artifact_id.rsplitn(3, ':');
         let ordinal: i64 = parts.next().context("invalid artifact id")?.parse()?;
@@ -1114,12 +1123,9 @@ impl WorkspaceService {
             .into_iter()
             .find(|value| value.kind == kind && value.ordinal == ordinal)
             .context("artifact not found")?;
-        if let Some(expected_path) =
-            crate::artifacts::native_runtime_audio_export_path(&self.margins_dir, &artifact)
-        {
-            let path = self.runtime.storage().export_native_wav(session, ordinal)?;
-            anyhow::ensure!(path == expected_path, "native audio export path changed");
-            return Ok(std::fs::read(path)?);
+        if let Some(lane) = crate::artifacts::native_runtime_audio_lane(&artifact) {
+            let storage = SqliteMeetingRuntimeStorage::open_read_only(&self.margins_dir);
+            return storage.temporary_native_lane_wav(session, ordinal, lane);
         }
         let path = crate::artifacts::confined_session_artifact_access_disk_path(
             &self.margins_dir,
@@ -1127,7 +1133,7 @@ impl WorkspaceService {
             &artifact.path,
         )
         .context("artifact path is outside its session scope")?;
-        Ok(std::fs::read(path)?)
+        Ok(File::open(path)?)
     }
 
     pub fn memo(

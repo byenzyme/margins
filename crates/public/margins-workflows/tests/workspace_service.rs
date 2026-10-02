@@ -394,15 +394,38 @@ fn native_runtime_audio_is_listed_as_exportable_and_downloads_as_wav() {
     assert_eq!(artifacts.len(), 2);
     assert!(artifacts
         .iter()
-        .all(|artifact| artifact.size_bytes == Some(12_844)));
+        .all(|artifact| artifact.size_bytes == Some(6_444)));
     assert!(!wav.exists(), "listing must not double stored audio");
-    let bytes = service
-        .artifact_content(&reader, artifacts[0].artifact_id.as_ref())
+    for artifact in &artifacts {
+        let bytes = service
+            .artifact_content(&reader, artifact.artifact_id.as_ref())
+            .unwrap();
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+        assert_eq!(u16::from_le_bytes(bytes[22..24].try_into().unwrap()), 1);
+        assert_eq!(bytes.len(), 6_444);
+        let expected = if artifact.kind == "audio_mic_runtime" {
+            0x1100
+        } else {
+            0x2200
+        };
+        assert_eq!(
+            i16::from_le_bytes(bytes[44..46].try_into().unwrap()),
+            expected
+        );
+        assert!(
+            !wav.exists(),
+            "artifact download must not leave a derived WAV"
+        );
+    }
+    let exported = margins_store::SqliteMeetingRuntimeStorage::open(&margins)
+        .unwrap()
+        .export_native_wav("tui-a", 0)
         .unwrap();
-    assert_eq!(&bytes[..4], b"RIFF");
-    assert_eq!(&bytes[8..12], b"WAVE");
-    assert_eq!(bytes.len(), 12_844);
-    assert_eq!(std::fs::read(wav).unwrap(), bytes);
+    assert_eq!(exported, wav);
+    let stereo = std::fs::read(wav).unwrap();
+    assert_eq!(u16::from_le_bytes(stereo[22..24].try_into().unwrap()), 2);
+    assert_eq!(stereo.len(), 12_844);
 }
 
 #[test]

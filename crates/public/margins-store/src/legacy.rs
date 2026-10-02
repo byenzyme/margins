@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local};
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -926,7 +926,13 @@ mod lifecycle_read_tests {
         let directory = tempfile::tempdir().unwrap();
         let dir = directory.path();
         let started = Local::now() - chrono::Duration::hours(25);
-        create_session(dir, "paused-elsewhere", &started, ".margins/paused-elsewhere.md").unwrap();
+        create_session(
+            dir,
+            "paused-elsewhere",
+            &started,
+            ".margins/paused-elsewhere.md",
+        )
+        .unwrap();
         add_segment(
             dir,
             "paused-elsewhere",
@@ -1140,6 +1146,36 @@ pub fn rewrite_session_artifact_paths(
 
 pub fn list_session_artifacts(dir: &Path, session_name: &str) -> Result<Vec<SessionArtifact>> {
     let conn = open_db(dir)?;
+    list_session_artifacts_with_connection(&conn, session_name)
+}
+
+/// Inspect existing artifact rows without initializing storage or taking a
+/// SQLite writer connection. A directory without a database has no artifacts.
+pub fn list_session_artifacts_read_only(
+    dir: &Path,
+    session_name: &str,
+) -> Result<Vec<SessionArtifact>> {
+    let path = database_path(dir);
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    let has_artifacts: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_artifacts')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_artifacts {
+        return Ok(Vec::new());
+    }
+    list_session_artifacts_with_connection(&conn, session_name)
+}
+
+fn list_session_artifacts_with_connection(
+    conn: &Connection,
+    session_name: &str,
+) -> Result<Vec<SessionArtifact>> {
     let mut stmt = conn.prepare(
         r#"
         SELECT session_name, kind, ordinal, path, retention_class, created_at, expires_at
