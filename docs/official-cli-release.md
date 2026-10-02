@@ -18,7 +18,8 @@ the user-facing `margins` executable alongside `margins-server`, for:
 - `x86_64-unknown-linux-gnu` on Ubuntu with
   `audio-capture,parakeet-asr`.
 
-The Apple Silicon archive also includes `margins-live`.
+The Apple Silicon archive no longer includes `margins-live`; the desktop app
+and its live runtime were retired on 2026-10-02 (PR #100).
 
 Each native runner creates its archive, extracts it, and executes that exact
 packaged binary's `__release-smoke` contract. A separate publish job verifies
@@ -31,6 +32,26 @@ before secrets become available.
 The publish job exports and verifies the public source tree, then commits and
 tags that tree before uploading the matching binary archives. Tags and releases
 are not created by setup or validation work.
+
+## Release order and BB plugin runtime pairing
+
+The BB plugin pins its runtime exactly (`RUNTIME_RELEASE_VERSION` in
+`integrations/bb-plugin-margins/src/runtime-manager.ts`) and installs from the
+`dist/` committed on `main`. Plugin and server upgrade as a pair; there is no
+back-compat layer. A remote or overridden server with a mismatched protocol
+fails with an explicit "upgrade both" error.
+
+Release in this order:
+
+1. The full local Linux gate passes on `main` (`scripts/local-gate linux`).
+2. The macOS gate and the Mac smoke checklist pass on the attached Mac bb host.
+3. Merge the PR that bumps `RUNTIME_RELEASE_VERSION` and its rebuilt `dist/`
+   **immediately** before tagging. Between that merge and the published release,
+   fresh plugin installs point at a runtime that does not exist yet.
+4. Tag `vX.Y.Z`; `cli-release.yml` builds, signs, notarizes and publishes on
+   GitHub. This is the only validation-adjacent work that runs on GitHub runners.
+5. Verify the published archives and a fresh BB plugin install against the new
+   release.
 
 ## Required secrets and permissions
 
