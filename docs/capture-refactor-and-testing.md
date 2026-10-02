@@ -70,14 +70,30 @@ authoritative capture lifecycle when their consumers move to explicit job facts.
 ### Native TUI authority (2026-10-02)
 
 `margins new` and local attach reserve or recover an in-process meeting runtime
-session. After the native recorder seals each stereo WAV, the TUI sends its two
-16 kHz PCM lanes through the runtime Recorder facade, closes the segment, and
-finalizes the session. The store projects runtime segment metadata and links the
-same native WAV for the existing audio processing path. The public CLI's
-unavailable capture command no longer writes a second set of session rows.
-Attach replays an interrupted runtime ingest of a sealed WAV and repairs a
-missing WAV link after segment finalization. Native samples still held by the
-recorder before WAV seal are outside this recovery path.
+session. A background writer reads the native recorder's lane spools during
+capture, downsamples to two 16 kHz mono s16 PCM lanes, and appends five-second batches
+through the runtime Recorder facade. The runtime chunk blobs are the single
+canonical audio copy. At stop/pause, the TUI saves memo edits first, seals the
+spools, flushes only their tail, closes the segment, and finalizes the session.
+After each successful chunk commit, the native spool actor replaces its file
+with only the unread tail. At a 48 kHz native rate, a healthy five-second
+batch is about 0.96 MB per lane, or 1.92 MB for both; the hard 60-second active
+spool cap is 23.04 MB for both lanes. A compaction copy can briefly double the
+bytes for a stalled backlog. If the runtime writer falls that far behind, the
+TUI shows a storage warning and stops capture instead of allowing unbounded
+disk growth. It saves the memo, closes and finalizes committed audio with an
+error reason, and tells the user to run `margins attach` to continue. The spools
+are transient and removed after sealing. A full-length WAV is no
+longer rendered at stop. `margins audio-export [meeting_id]` makes a scriptable
+stereo WAV on demand; `margins process` derives one temporarily when needed.
+Existing WAVs are preserved. The public CLI's unavailable capture command no
+longer writes a second set of session rows. An open segment gets a canonical
+row immediately, so session readers can see the meeting during its first
+segment. Attach replays runtime state before reopening lanes, finalizes durable
+chunks after a crash, and imports an older sealed WAV if one exists. With a
+writer keeping pace, a hard crash can lose the unflushed five-second batch per
+lane. A stalled writer may have up to 60 seconds of bounded transient spool
+backlog before capture stops and reports the error.
 
 The TUI remembers the memo revision and lines it actually read. On save, it
 compares and replaces against that revision. Independent line edits are merged
@@ -89,9 +105,10 @@ needs to account for TUI writes made directly to Markdown. A stale projection
 can be refreshed with `SqliteWorkspaceAuthorityStorage::refresh_memo_mirror`.
 
 Older sessions can retain `lifecycle_state = active` in SQLite despite finalized
-audio. Readers report them as ended when they have a finalized segment and no
-meeting-runtime row. This is a read-time interpretation and leaves historical
-rows unchanged.
+audio. Readers report them as ended only when they have a finalized segment,
+no meeting-runtime row, no matching `current` pointer, and no activity for 24
+hours. This conservative read-time interpretation leaves historical rows
+unchanged and keeps a paused recording on another process active.
 
 ## 4. Control, data, and processing boundaries
 

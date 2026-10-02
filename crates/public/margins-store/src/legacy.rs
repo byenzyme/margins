@@ -823,12 +823,24 @@ pub fn list_sessions(dir: &Path) -> Result<Vec<SessionInfo>> {
     } else {
         ""
     };
+    let current_session = std::fs::read_to_string(dir.join("current"))
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    // Legacy producers have no runtime lease. A current pointer is the only
+    // durable sign that a paused producer may return, so stale lifecycle rows
+    // are interpreted as ended only after a full day of inactivity and only
+    // when that pointer names another session (or is absent).
+    let inactive_before = (chrono::Utc::now() - chrono::Duration::hours(24)).timestamp();
     let query = format!(
         r#"
         SELECT s.name, s.start_time, s.notes_path, COUNT(seg.segment_index) AS segment_count,
             CASE WHEN s.lifecycle_state = 'active'
                 {runtime_condition}
+                AND s.name != ?1
+                AND COALESCE(MAX(CAST(strftime('%s', seg.started_at) AS INTEGER) + CAST(COALESCE(seg.duration_secs, 0) AS INTEGER)), CAST(strftime('%s', s.lifecycle_updated_at) AS INTEGER), CAST(strftime('%s', s.start_time) AS INTEGER), 0) < ?2
                 AND EXISTS (SELECT 1 FROM session_segments finished WHERE finished.session_name = s.name AND finished.duration_secs IS NOT NULL)
+                AND NOT EXISTS (SELECT 1 FROM session_segments unfinished WHERE unfinished.session_name = s.name AND unfinished.duration_secs IS NULL)
                 THEN 'ended' ELSE COALESCE(s.lifecycle_state, 'active') END AS effective_lifecycle
         FROM sessions s
         LEFT JOIN session_segments seg ON seg.session_name = s.name
@@ -838,7 +850,7 @@ pub fn list_sessions(dir: &Path) -> Result<Vec<SessionInfo>> {
         "#
     );
     let mut stmt = conn.prepare(&query)?;
-    let rows = stmt.query_map([], |row| {
+    let rows = stmt.query_map(params![current_session, inactive_before], |row| {
         Ok(SessionInfo {
             name: row.get(0)?,
             start_time: row.get(1)?,
@@ -873,6 +885,13 @@ mod lifecycle_read_tests {
         let dir = directory.path();
         create_session(dir, "old", &Local::now(), ".margins/old.md").unwrap();
         add_segment(dir, "old", 0, ".margins/old_seg0.wav", 0, Some(1.0)).unwrap();
+        open_db(dir)
+            .unwrap()
+            .execute(
+                "UPDATE session_segments SET started_at = '2020-01-01T00:00:00Z' WHERE session_name = 'old'",
+                [],
+            )
+            .unwrap();
         assert_eq!(list_sessions(dir).unwrap()[0].lifecycle_state, "ended");
         let stored: String = open_db(dir)
             .unwrap()
@@ -883,6 +902,48 @@ mod lifecycle_read_tests {
             )
             .unwrap();
         assert_eq!(stored, "active");
+    }
+
+    #[test]
+    fn paused_legacy_current_session_remains_active() {
+        let directory = tempfile::tempdir().unwrap();
+        let dir = directory.path();
+        create_session(dir, "paused", &Local::now(), ".margins/paused.md").unwrap();
+        add_segment(dir, "paused", 0, ".margins/paused_seg0.wav", 0, Some(1.0)).unwrap();
+        open_db(dir)
+            .unwrap()
+            .execute(
+                "UPDATE session_segments SET started_at = '2020-01-01T00:00:00Z' WHERE session_name = 'paused'",
+                [],
+            )
+            .unwrap();
+        std::fs::write(dir.join("current"), "paused\n").unwrap();
+        assert_eq!(list_sessions(dir).unwrap()[0].lifecycle_state, "active");
+    }
+
+    #[test]
+    fn recently_finished_legacy_segment_remains_active_without_current_pointer() {
+        let directory = tempfile::tempdir().unwrap();
+        let dir = directory.path();
+        let started = Local::now() - chrono::Duration::hours(25);
+        create_session(dir, "paused-elsewhere", &started, ".margins/paused-elsewhere.md").unwrap();
+        add_segment(
+            dir,
+            "paused-elsewhere",
+            0,
+            ".margins/paused-elsewhere_seg0.wav",
+            0,
+            Some(24.5 * 3600.0),
+        )
+        .unwrap();
+        open_db(dir)
+            .unwrap()
+            .execute(
+                "UPDATE session_segments SET started_at = ?1 WHERE session_name = 'paused-elsewhere'",
+                [started.to_rfc3339()],
+            )
+            .unwrap();
+        assert_eq!(list_sessions(dir).unwrap()[0].lifecycle_state, "active");
     }
 }
 

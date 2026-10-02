@@ -117,12 +117,32 @@ pub fn process_session(
     if !request.align_only {
         // Buffer the full result before the first transcript/artifact write.
         // Provider failures therefore leave existing durable output unchanged.
-        let mut segments = meta.segments.iter().collect::<Vec<_>>();
+        let mut segments = meta
+            .segments
+            .iter()
+            .filter(|segment| segment.duration_secs.is_some())
+            .collect::<Vec<_>>();
+        if segments.is_empty() {
+            bail!(
+                "Session '{}' has no finished audio segments.",
+                request.session_name
+            );
+        }
         segments.sort_by_key(|segment| segment.segment_index);
         for segment in segments {
             let path = resolve_input_path(request.work_dir, &segment.wav_path);
+            let exported = if !path.is_file() {
+                margins_store::SqliteMeetingRuntimeStorage::open(request.margins_dir)?
+                    .export_native_wav(request.session_name, segment.segment_index)?;
+                true
+            } else {
+                false
+            };
             let audio = load_audio_any(&path)
                 .with_context(|| format!("failed to decode session segment {}", path.display()))?;
+            if exported {
+                std::fs::remove_file(&path)?;
+            }
             let offset = segment.offset_ms.max(0) as u64;
             let (part, _, part_backends) = transcribe_audio_buffer(
                 &audio,

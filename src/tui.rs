@@ -133,6 +133,18 @@ fn event_loop(
     loop {
         terminal.draw(|f| render(f, app))?;
 
+        if app.native_spool_overflow.load(Ordering::Acquire) {
+            app.message = Some(
+                "Audio storage fell over 60s behind. Capture is stopping; run margins attach to resume."
+                    .into(),
+            );
+            terminal.draw(|f| render(f, app))?;
+            std::thread::sleep(std::time::Duration::from_millis(750));
+            return Err(Box::new(io::Error::other(
+                "audio storage fell over 60 seconds behind; recording stopped. Run margins attach to resume this session",
+            )));
+        }
+
         if event::poll(std::time::Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key) => {

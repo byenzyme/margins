@@ -200,3 +200,83 @@ pub fn unique_session_name(
         "could not allocate a unique session id",
     ))
 }
+
+pub fn export_audio(
+    work_dir: &Path,
+    meeting_id: &str,
+    stdout: &mut dyn Write,
+) -> Result<(), CliError> {
+    let margins_dir = work_dir.join(".margins");
+    let session = if meeting_id == "latest" {
+        margins_store::canonical::list_sessions(&margins_dir)
+            .map_err(CliError::from_anyhow)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| CliError::new("session_not_found", "No meeting to export."))?
+            .name
+    } else {
+        meeting_id.to_owned()
+    };
+    let meta = margins_store::canonical::get_session_meta(&margins_dir, &session)
+        .map_err(CliError::from_anyhow)?;
+    let storage = margins_store::SqliteMeetingRuntimeStorage::open(&margins_dir)
+        .map_err(CliError::from_anyhow)?;
+    let mut exported = 0;
+    for segment in meta.segments {
+        if segment.duration_secs.is_none() {
+            continue;
+        }
+        let declared = Path::new(&segment.wav_path);
+        let existing = if declared.is_absolute() {
+            declared.to_path_buf()
+        } else {
+            work_dir.join(declared)
+        };
+        let path = if existing.is_file() {
+            existing
+        } else {
+            storage
+                .export_native_wav(&session, segment.segment_index)
+                .map_err(CliError::from_anyhow)?
+        };
+        line(stdout, format_args!("{}", path.display())).map_err(CliError::from_anyhow)?;
+        exported += 1;
+    }
+    if exported == 0 {
+        return Err(CliError::new(
+            "audio_unavailable",
+            "This meeting has no finished audio segments.",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod audio_export_tests {
+    use super::*;
+
+    #[test]
+    fn existing_legacy_wav_is_reported_without_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let margins = root.path().join(".margins");
+        std::fs::create_dir_all(&margins).unwrap();
+        let started = chrono::Local::now();
+        margins_store::canonical::create_session(&margins, "older", &started, ".margins/older.md")
+            .unwrap();
+        margins_store::canonical::add_segment(
+            &margins,
+            "older",
+            0,
+            ".margins/older_seg0.wav",
+            0,
+            Some(1.0),
+        )
+        .unwrap();
+        let wav = margins.join("older_seg0.wav");
+        std::fs::write(&wav, b"older user WAV").unwrap();
+        let mut output = Vec::new();
+        export_audio(root.path(), "latest", &mut output).unwrap();
+        assert_eq!(String::from_utf8(output).unwrap().trim(), wav.to_str().unwrap());
+        assert_eq!(std::fs::read(wav).unwrap(), b"older user WAV");
+    }
+}

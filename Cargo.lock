@@ -3348,6 +3348,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "hound",
  "libsql-rusqlite",
  "log",
  "margins-core",

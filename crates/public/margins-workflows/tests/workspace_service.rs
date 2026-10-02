@@ -281,6 +281,40 @@ fn discard_finished_session_removes_source_material_and_preserves_home_note() {
 }
 
 #[test]
+fn native_open_segment_is_visible_to_workspace_reader_before_audio_arrives() {
+    let temp = tempfile::tempdir().unwrap();
+    let notes = temp.path().join("notes");
+    let captures = temp.path().join("captures");
+    std::fs::create_dir_all(&notes).unwrap();
+    let workspace =
+        ensure_service_workspace(&temp.path().join("state"), "team", None, &notes, &captures)
+            .unwrap();
+    let service = WorkspaceService::open("host", workspace).unwrap();
+    let producer = ServicePrincipal::full("native-producer", "team");
+    let reader = ServicePrincipal::scoped(
+        "bb-reader",
+        ["team".to_string()],
+        [OP_SESSION_READ.to_string()],
+    );
+    service
+        .reserve_session(&producer, create("visible"))
+        .unwrap();
+    assert!(service
+        .sessions(&reader, None, 10)
+        .unwrap()
+        .sessions
+        .is_empty());
+    let storage =
+        margins_store::SqliteMeetingRuntimeStorage::open(&captures.join(".margins")).unwrap();
+    storage.open_native_segment("visible", 0, 0).unwrap();
+    let sessions = service.sessions(&reader, None, 10).unwrap().sessions;
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].session_id.as_ref(), "visible");
+    assert_eq!(sessions[0].segment_count, 1);
+    assert!(!sessions[0].input_finalized);
+}
+
+#[test]
 fn workspace_reader_can_follow_an_unclosed_capture_without_producer_access() {
     let temp = tempfile::tempdir().unwrap();
     let notes = temp.path().join("notes");

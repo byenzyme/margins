@@ -17,9 +17,9 @@ use std::time::{Duration, Instant};
 mod coreaudio_mic;
 mod segment_writer;
 pub use segment_writer::{
-    target_frame, CaptureLane, CaptureSink, CaptureToken, LaneTelemetry, MicSink, PacketDesc,
-    RationalResampler, RetireAck, SealedSegment, SegmentId, SegmentWriter, SegmentWriterTelemetry,
-    SystemSink, DRAIN_BATCH_MILLIS, LANE_QUEUE_CAPACITY,
+    target_frame, CaptureLane, CaptureSink, CaptureToken, LaneTelemetry, MicSink,
+    NativeSpoolSource, PacketDesc, RationalResampler, RetireAck, SealedSegment, SegmentId,
+    SegmentWriter, SegmentWriterTelemetry, SystemSink, DRAIN_BATCH_MILLIS, LANE_QUEUE_CAPACITY,
 };
 
 pub type InputDevice = cpal::Device;
@@ -1026,7 +1026,37 @@ impl RecorderHandle {
         self.spk_rate
     }
 
+    pub fn native_spool_sources(&self) -> [NativeSpoolSource; 2] {
+        self.writer.native_spool_sources()
+    }
+
+    pub fn bound_native_spool(&self) -> Result<Arc<AtomicBool>> {
+        let overflow = Arc::new(AtomicBool::new(false));
+        self.writer.bound_spool(60, overflow.clone())?;
+        Ok(overflow)
+    }
+
     pub fn stop_and_write(self, path: &str) -> Result<f64> {
+        let sealed = self.stop_capture_and_seal()?;
+        let duration = sealed.write_wav(path)?;
+        if duration == 0.0 {
+            eprintln!("No audio captured.");
+        } else {
+            crate::cli_log::event(
+                "capture_wav_written",
+                format!("duration_s={duration:.1} path={path}"),
+            );
+        }
+        Ok(duration)
+    }
+
+    /// Seal the native spools and drain their remaining samples into the
+    /// canonical runtime chunks. No full-length WAV is rendered on this path.
+    pub fn stop_and_flush(self, flush: impl FnOnce() -> Result<()>) -> Result<f64> {
+        self.stop_capture_and_seal()?.finish_without_wav(flush)
+    }
+
+    fn stop_capture_and_seal(self) -> Result<segment_writer::SealedSegment> {
         self.external_stop_flag.store(true, Ordering::SeqCst);
         self.mic.retire().context("mic retirement failed")?;
         self.system.retire().context("system retirement failed")?;
@@ -1040,18 +1070,7 @@ impl RecorderHandle {
                 format!("mic={mic_dropped} speaker={spk_dropped}"),
             );
         }
-        let sealed = self.writer.seal()?;
-        let duration = sealed.write_wav(path)?;
-        if duration == 0.0 {
-            // A genuine failure: keep this on stderr.
-            eprintln!("No audio captured.");
-        } else {
-            crate::cli_log::event(
-                "capture_wav_written",
-                format!("duration_s={duration:.1} path={path}"),
-            );
-        }
-        Ok(duration)
+        self.writer.seal()
     }
 }
 
@@ -3154,14 +3173,14 @@ mod tests {
         let reader = hound::WavReader::open(file.path()).unwrap();
         assert_eq!(reader.spec().sample_rate, 16_000);
         assert_eq!(reader.spec().bits_per_sample, 16);
-        let all_samples: Vec<i16> = reader
-            .into_samples::<i16>()
-            .map(Result::unwrap)
-            .collect();
+        let all_samples: Vec<i16> = reader.into_samples::<i16>().map(Result::unwrap).collect();
         let mic: Vec<i16> = all_samples.into_iter().step_by(2).collect();
         // 9.0 clamped to 1.0 would be i16::MAX (32767). The purge fence must
         // have removed those samples — no frame should saturate at i16::MAX.
-        assert!(!mic.contains(&i16::MAX), "purge-fence samples must be removed");
+        assert!(
+            !mic.contains(&i16::MAX),
+            "purge-fence samples must be removed"
+        );
         // After purging, there must be leading silence followed by non-silent samples.
         // 0.25 → i16 ≈ 8192, resampled; check at least one sample is clearly non-zero.
         assert!(mic.iter().any(|&s| s != 0), "must have non-silent samples");
@@ -3218,10 +3237,7 @@ mod tests {
         let reader = hound::WavReader::open(file.path()).unwrap();
         assert_eq!(reader.spec().sample_rate, 16_000);
         assert_eq!(reader.spec().bits_per_sample, 16);
-        let all_samples: Vec<i16> = reader
-            .into_samples::<i16>()
-            .map(Result::unwrap)
-            .collect();
+        let all_samples: Vec<i16> = reader.into_samples::<i16>().map(Result::unwrap).collect();
         let mic: Vec<i16> = all_samples.into_iter().step_by(2).collect();
         // The last input sample was index 49 → 0.49 → i16 ≈ 16055.
         // After 16x upsampling (1kHz→16kHz) the max mic value in the archive

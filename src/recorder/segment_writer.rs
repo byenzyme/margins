@@ -3,8 +3,8 @@ use anyhow::{bail, Context, Result};
 use margins_media::timeline::scale_frames;
 pub use margins_media::timeline::{target_frame, RationalResampler};
 use std::collections::VecDeque;
-use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
@@ -222,6 +222,15 @@ enum LaneMsg {
         rate: u32,
         ack: mpsc::Sender<Result<()>>,
     },
+    BoundSpool {
+        max_seconds: u64,
+        overflow: Arc<AtomicBool>,
+        ack: mpsc::Sender<Result<()>>,
+    },
+    CompactSpool {
+        through_bytes: u64,
+        ack: mpsc::Sender<Result<()>>,
+    },
     Abort,
 }
 
@@ -327,6 +336,47 @@ struct LaneActorHandle {
     sender: SyncSender<LaneMsg>,
     join: Option<JoinHandle<()>>,
     rate: Arc<AtomicU32>,
+    spool_path: PathBuf,
+}
+
+/// Readable native lane spool with an acknowledgement channel. The runtime
+/// worker acknowledges bytes only after their PCM chunk has committed.
+pub struct NativeSpoolSource {
+    pub path: PathBuf,
+    pub rate: u32,
+    compact: Option<SyncSender<LaneMsg>>,
+}
+
+impl NativeSpoolSource {
+    pub fn compact_through(&self, bytes: u64) -> Result<bool> {
+        let Some(sender) = &self.compact else {
+            return Ok(false);
+        };
+        let (ack, response) = mpsc::channel();
+        if sender
+            .send(LaneMsg::CompactSpool {
+                through_bytes: bytes,
+                ack,
+            })
+            .is_err()
+        {
+            // The actor has sealed. The remaining spool is removed on drop.
+            return Ok(false);
+        }
+        response
+            .recv()
+            .context("lane actor dropped spool compaction ACK")??;
+        Ok(true)
+    }
+
+    #[cfg(test)]
+    pub fn fake(path: PathBuf, rate: u32) -> Self {
+        Self {
+            path,
+            rate,
+            compact: None,
+        }
+    }
 }
 
 /// Segment-scoped coordinator. It owns no spool mutex: each lane actor has
@@ -441,6 +491,32 @@ impl SegmentWriter {
 
     pub fn system_lane_rate(&self) -> u32 {
         self.system.rate.load(Ordering::Acquire)
+    }
+
+    pub fn native_spool_sources(&self) -> [NativeSpoolSource; 2] {
+        [(&self.mic), (&self.system)].map(|lane| NativeSpoolSource {
+            path: lane.spool_path.clone(),
+            rate: lane.rate.load(Ordering::Acquire),
+            compact: Some(lane.sender.clone()),
+        })
+    }
+
+    pub fn bound_spool(&self, max_seconds: u64, overflow: Arc<AtomicBool>) -> Result<()> {
+        for actor in [&self.mic, &self.system] {
+            let (ack, response) = mpsc::channel();
+            actor
+                .sender
+                .send(LaneMsg::BoundSpool {
+                    max_seconds,
+                    overflow: overflow.clone(),
+                    ack,
+                })
+                .context("lane actor stopped before spool bound")?;
+            response
+                .recv()
+                .context("lane actor dropped spool bound ACK")??;
+        }
+        Ok(())
     }
 
     pub fn set_unattached_lane_rate(&self, lane: CaptureLane, rate: u32) -> Result<()> {
@@ -589,6 +665,11 @@ pub struct SealedSegment {
 }
 
 impl SealedSegment {
+    pub fn finish_without_wav(self, flush: impl FnOnce() -> Result<()>) -> Result<f64> {
+        flush()?;
+        Ok(self.shared_frame as f64 / self.output_rate as f64)
+    }
+
     pub fn write_wav(self, path: impl AsRef<Path>) -> Result<f64> {
         if !self.ever_attached && self.shared_frame == 0 {
             return Ok(0.0);
@@ -631,7 +712,7 @@ fn spawn_lane(
                 ever_attached,
             ) {
                 Ok(actor) => {
-                    let _ = ready_tx.send(Ok(()));
+                    let _ = ready_tx.send(Ok(actor.spool_path.clone()));
                     actor.run(receiver)
                 }
                 Err(error) => {
@@ -641,20 +722,21 @@ fn spawn_lane(
                 }
             }
         })?;
-    match ready_rx
+    let spool_path = match ready_rx
         .recv()
         .context("lane actor did not report startup")?
     {
-        Ok(()) => {}
+        Ok(path) => path,
         Err(message) => {
             let _ = join.join();
             bail!(message);
         }
-    }
+    };
     Ok(LaneActorHandle {
         sender,
         join: Some(join),
         rate: rate_atomic,
+        spool_path,
     })
 }
 
@@ -668,6 +750,8 @@ struct LaneActor {
     lane_ever_attached: bool,
     spool_path: PathBuf,
     writer: Option<BufWriter<File>>,
+    spool_max_seconds: Option<u64>,
+    spool_overflow: Option<Arc<AtomicBool>>,
     durable_frame: u64,
     live_frame_enqueued: u64,
     timeline_frame: u64,
@@ -714,6 +798,8 @@ impl LaneActor {
             lane_ever_attached: false,
             spool_path,
             writer: Some(writer),
+            spool_max_seconds: None,
+            spool_overflow: None,
             durable_frame: 0,
             live_frame_enqueued: 0,
             timeline_frame: 0,
@@ -848,6 +934,24 @@ impl LaneActor {
                 };
                 let _ = ack.send(result);
             }
+            LaneMsg::BoundSpool {
+                max_seconds,
+                overflow,
+                ack,
+            } => {
+                let result = if max_seconds == 0 {
+                    bail_result("spool bound must be positive")
+                } else {
+                    self.spool_max_seconds = Some(max_seconds);
+                    self.spool_overflow = Some(overflow);
+                    Ok(())
+                };
+                let _ = ack.send(result);
+            }
+            LaneMsg::CompactSpool { through_bytes, ack } => {
+                let result = self.compact_spool(through_bytes);
+                let _ = ack.send(result);
+            }
             LaneMsg::Abort => return true,
         }
         false
@@ -973,6 +1077,14 @@ impl LaneActor {
             self.pending_overlap_trim -= trim as u64;
         }
         self.write_samples(&converted)?;
+        if self
+            .spool_overflow
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
+        {
+            self.publish_cursors();
+            return Ok(());
+        }
         let media_now = self.clock.media_nanos();
         self.activity
             .own(self.lane)
@@ -1141,6 +1253,7 @@ impl LaneActor {
 
     fn write_silence(&mut self, frames: u64) -> Result<()> {
         const ZERO_BLOCK: [u8; 16 * 1024] = [0; 16 * 1024];
+        let frames = self.bounded_frames(frames)?;
         let writer = self.writer.as_mut().context("lane spool is sealed")?;
         let mut bytes = frames
             .checked_mul(4)
@@ -1158,14 +1271,70 @@ impl LaneActor {
     }
 
     fn write_samples(&mut self, samples: &[f32]) -> Result<()> {
+        let count = self.bounded_frames(samples.len() as u64)? as usize;
         let writer = self.writer.as_mut().context("lane spool is sealed")?;
-        for sample in samples {
+        for sample in &samples[..count] {
             writer.write_all(&sample.to_le_bytes())?;
         }
         self.durable_frame = self
             .durable_frame
-            .checked_add(samples.len() as u64)
+            .checked_add(count as u64)
             .context("durable frame overflow")?;
+        Ok(())
+    }
+
+    fn bounded_frames(&mut self, requested: u64) -> Result<u64> {
+        let Some(max_seconds) = self.spool_max_seconds else {
+            return Ok(requested);
+        };
+        let overflow = self
+            .spool_overflow
+            .as_ref()
+            .expect("bounded spool has flag");
+        if overflow.load(Ordering::Acquire) {
+            return Ok(0);
+        }
+        let writer = self.writer.as_ref().context("lane spool is sealed")?;
+        let current = writer.get_ref().metadata()?.len() + writer.buffer().len() as u64;
+        let max_bytes = max_seconds
+            .checked_mul(self.rate as u64)
+            .and_then(|frames| frames.checked_mul(4))
+            .context("spool bound overflow")?;
+        let allowed = requested.min(max_bytes.saturating_sub(current) / 4);
+        if allowed < requested {
+            overflow.store(true, Ordering::Release);
+            self.fail_timeline();
+        }
+        Ok(allowed)
+    }
+
+    fn compact_spool(&mut self, through_bytes: u64) -> Result<()> {
+        let writer = self.writer.as_mut().context("lane spool is sealed")?;
+        writer.flush()?;
+        let mut old = File::open(&self.spool_path)?;
+        let length = old.metadata()?.len();
+        if through_bytes == 0 {
+            return Ok(());
+        }
+        if through_bytes > length || through_bytes % 4 != 0 {
+            bail!("invalid native spool acknowledgement");
+        }
+        old.seek(SeekFrom::Start(through_bytes))?;
+        let temporary = self.spool_path.with_extension(format!(
+            "{}.{}.compact",
+            std::process::id(),
+            SPOOL_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut next = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        std::io::copy(&mut old, &mut next)?;
+        next.sync_all()?;
+        std::fs::rename(&temporary, &self.spool_path)?;
+        self.writer = Some(BufWriter::new(
+            OpenOptions::new().append(true).open(&self.spool_path)?,
+        ));
         Ok(())
     }
 
@@ -1532,6 +1701,76 @@ mod tests {
     }
 
     #[test]
+    fn acknowledged_native_spool_stays_bounded_over_a_simulated_hour() {
+        let clock = Arc::new(TestClock(AtomicU64::new(1)));
+        let writer = SegmentWriter::start_with_clock(
+            9,
+            100,
+            100,
+            None,
+            Arc::new(SegmentMediaClock::with_source(clock)),
+        )
+        .unwrap();
+        let overflow = Arc::new(AtomicBool::new(false));
+        writer.bound_spool(60, overflow.clone()).unwrap();
+        let [mic_source, system_source] = writer.native_spool_sources();
+        let mic = writer.mic_sink(1);
+        let system = writer.system_sink(2);
+        mic.attach(100, 0).unwrap();
+        system.attach(100, 0).unwrap();
+        let five_seconds = vec![0.25; 500];
+        let mut largest_spool = 0;
+        for _ in 0..720 {
+            mic.samples(100, five_seconds.clone(), Vec::new()).unwrap();
+            system
+                .samples(100, five_seconds.clone(), Vec::new())
+                .unwrap();
+            // Force the actor's buffered bytes to disk, then inspect its peak
+            // before acknowledging the batch as committed.
+            mic_source.compact_through(0).unwrap();
+            system_source.compact_through(0).unwrap();
+            largest_spool = largest_spool.max(
+                std::fs::metadata(&mic_source.path).unwrap().len()
+                    + std::fs::metadata(&system_source.path).unwrap().len(),
+            );
+            // The fake runtime has durably committed this five-second batch.
+            mic_source.compact_through(500 * 4).unwrap();
+            system_source.compact_through(500 * 4).unwrap();
+            assert_eq!(std::fs::metadata(&mic_source.path).unwrap().len(), 0);
+            assert_eq!(std::fs::metadata(&system_source.path).unwrap().len(), 0);
+        }
+        assert!(!overflow.load(Ordering::Acquire));
+        assert_eq!(largest_spool, 2 * 500 * 4);
+        assert!(largest_spool <= 2 * 500 * 4);
+        mic.retire().unwrap();
+        system.retire().unwrap();
+        writer.seal_at(360_000).unwrap();
+    }
+
+    #[test]
+    fn stalled_native_spool_sets_overflow_and_stops_at_sixty_seconds() {
+        let clock = Arc::new(TestClock(AtomicU64::new(1)));
+        let writer = SegmentWriter::start_with_clock(
+            10,
+            100,
+            100,
+            None,
+            Arc::new(SegmentMediaClock::with_source(clock)),
+        )
+        .unwrap();
+        let overflow = Arc::new(AtomicBool::new(false));
+        writer.bound_spool(60, overflow.clone()).unwrap();
+        let mic_path = writer.native_spool_sources()[0].path.clone();
+        let mic = writer.mic_sink(1);
+        mic.attach(100, 0).unwrap();
+        mic.samples(100, vec![0.25; 6_100], Vec::new()).unwrap();
+        mic.retire().unwrap();
+        assert!(overflow.load(Ordering::Acquire));
+        assert!(std::fs::metadata(mic_path).unwrap().len() <= 60 * 100 * 4);
+        writer.seal_at(0).unwrap();
+    }
+
+    #[test]
     fn deferred_writer_locks_first_attach_and_missing_mic_to_system_rate() {
         let writer = SegmentWriter::start_deferred(8, None).unwrap();
         let system = writer.system_sink(1);
@@ -1564,10 +1803,7 @@ mod tests {
         assert_eq!(reader.spec().sample_rate, 16_000);
         assert_eq!(reader.spec().bits_per_sample, 16);
         assert_eq!(reader.spec().sample_format, hound::SampleFormat::Int);
-        let total: Vec<i16> = reader
-            .into_samples::<i16>()
-            .map(Result::unwrap)
-            .collect();
+        let total: Vec<i16> = reader.into_samples::<i16>().map(Result::unwrap).collect();
         // 1440 frames @ 48k → ~480 frames @ 16k; 2 channels → ~960 i16 samples.
         let frame_count = total.len() / 2;
         assert!(
@@ -1607,10 +1843,7 @@ mod tests {
         assert_eq!(reader.spec().bits_per_sample, 16);
         assert_eq!(reader.spec().sample_format, hound::SampleFormat::Int);
         // 27 frames @ 48kHz → ~9 frames @ 16kHz; 2 channels → ~18 samples.
-        let total: Vec<i16> = reader
-            .into_samples::<i16>()
-            .map(Result::unwrap)
-            .collect();
+        let total: Vec<i16> = reader.into_samples::<i16>().map(Result::unwrap).collect();
         assert!(total.len() > 0, "archive must not be empty");
         assert_eq!(total.len() % 2, 0, "must be stereo (even sample count)");
     }
@@ -1780,10 +2013,7 @@ mod tests {
         assert_eq!(reader.spec().bits_per_sample, 16);
         assert_eq!(reader.spec().sample_format, hound::SampleFormat::Int);
         // Resampled from 64 frames @ 48kHz → ≈ 21 frames @ 16kHz (2:6 ratio).
-        let total_samples: Vec<i16> = reader
-            .into_samples::<i16>()
-            .map(Result::unwrap)
-            .collect();
+        let total_samples: Vec<i16> = reader.into_samples::<i16>().map(Result::unwrap).collect();
         // 2 channels: total must be even, and > 0.
         assert!(total_samples.len() > 0);
         assert_eq!(total_samples.len() % 2, 0);

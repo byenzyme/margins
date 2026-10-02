@@ -99,7 +99,6 @@ fn create_native_session(work_dir: &Path, title: Option<&str>) -> Result<()> {
         &started_at.format("%Y-%m-%d-%H-%M-%S").to_string(),
     )?;
     let memo_path = work_dir.join(".margins").join(format!("{name}.md"));
-    let audio_path = work_dir.join(".margins").join(format!("{name}_seg0.wav"));
     let initial_offset_ms = 0i64;
     let live_artifact_ordinal: i64 = 0;
     let checkpoint_uri = format!(".margins/{name}_seg{live_artifact_ordinal}.live-transcript.json");
@@ -135,7 +134,6 @@ fn create_native_session(work_dir: &Path, title: Option<&str>) -> Result<()> {
         title,
         started_at,
     )?;
-    meeting.open(0)?;
     margins_cli::commands::sessions::write_current_session(
         &margins_cli::standalone_services(),
         &margins_dir,
@@ -156,10 +154,7 @@ fn create_native_session(work_dir: &Path, title: Option<&str>) -> Result<()> {
 
     let action = run_segment(
         &mut app,
-        &margins_dir,
-        &name,
         0,
-        audio_path,
         live,
         live_artifact_ordinal,
         started_at,
@@ -203,7 +198,6 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
     let authority = margins_store::SqliteWorkspaceAuthorityStorage::open(&margins_dir)?;
     let observed = authority.memo(&name)?;
     let parsed = margins_core::TimedMemoDocument::from_committed(observed.lines.clone());
-    let mut ordinal = margins_store::canonical::next_segment_index(&margins_dir, &name)?;
     let offset_ms = (Local::now() - started_at).num_milliseconds().max(0);
     let mut meeting = capture_local_runtime::LocalMeetingProducer::recover(
         &margins_dir,
@@ -212,24 +206,10 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
         meta.title.as_deref(),
         started_at,
     )?;
-    let pending_wav = margins_dir.join(format!("{name}_seg{ordinal}.wav"));
-    if pending_wav.exists() {
-        let prior_offset = meeting.existing_segment_start(ordinal)?.unwrap_or_else(|| {
-            let frames = hound::WavReader::open(&pending_wav)
-                .map(|reader| reader.duration() as u64)
-                .unwrap_or(0);
-            (offset_ms as u64).saturating_sub(frames * 1000 / 16_000)
-        });
-        meeting.open(ordinal)?;
-        meeting.ingest_wav_and_close(
-            ordinal,
-            &pending_wav,
-            prior_offset,
-            margins_meeting_protocol::SegmentCloseReasonV1::Error,
-        )?;
-        ordinal = margins_store::canonical::next_segment_index(&margins_dir, &name)?;
+    if let Some((pending, offset)) = meeting.pending_segment()? {
+        meeting.recover_pending_segment(pending, offset)?;
     }
-    let audio_path = margins_dir.join(format!("{name}_seg{ordinal}.wav"));
+    let ordinal = meeting.next_ordinal()?;
     let live_artifact_ordinal = ordinal;
     let initial_offset_ms = offset_ms;
     let checkpoint_uri = format!(".margins/{name}_seg{live_artifact_ordinal}.live-transcript.json");
@@ -249,7 +229,6 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
         None,
         initial_live_sink,
     )?;
-    meeting.open(ordinal)?;
     margins_cli::commands::sessions::write_current_session(
         &margins_cli::standalone_services(),
         &margins_dir,
@@ -268,10 +247,7 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
 
     let action = run_segment(
         &mut app,
-        &margins_dir,
-        &name,
         ordinal,
-        audio_path,
         live,
         live_artifact_ordinal,
         started_at,
@@ -294,10 +270,7 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
 #[cfg(feature = "audio-capture")]
 fn run_segment(
     app: &mut crate::app::App,
-    margins_dir: &Path,
-    session_name: &str,
     initial_ordinal: i64,
-    initial_audio_path: PathBuf,
     live: Option<LiveTranscriptWorker>,
     live_artifact_ordinal: i64,
     started_at: chrono::DateTime<Local>,
@@ -307,17 +280,19 @@ fn run_segment(
     meeting: &mut capture_local_runtime::LocalMeetingProducer,
 ) -> Result<PostCaptureAction> {
     let mut ordinal = initial_ordinal;
-    let mut audio_path = initial_audio_path;
     let mut selected_device: Option<crate::recorder::InputDevice> = None;
     let mut live_timeline_duration_ms: u64 = 0;
     let mut initial_recorder = Some(initial_recorder);
     let mut initial_stop = Some(initial_stop);
-
     // Memo durability must not depend on the optional transcription path.
     let mut tui_error: Option<anyhow::Error> = None;
 
     loop {
-        let segment_offset_ms = (Local::now() - started_at).num_milliseconds().max(0);
+        let segment_offset_ms = if initial_recorder.is_some() {
+            initial_offset_ms
+        } else {
+            (Local::now() - started_at).num_milliseconds().max(0)
+        };
         let stop = initial_stop
             .take()
             .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
@@ -333,6 +308,12 @@ fn run_segment(
                 live_sink,
             )?
         };
+        app.native_spool_overflow = recorder.bound_native_spool()?;
+        meeting.start_stream(
+            ordinal,
+            segment_offset_ms as u64,
+            recorder.native_spool_sources(),
+        )?;
 
         app.mic_level = recorder.mic_peak();
         app.spk_level = recorder.spk_peak();
@@ -345,7 +326,10 @@ fn run_segment(
         let tui_result = crate::tui::run_tui(app, stop.clone())
             .map_err(|error| anyhow::anyhow!(error.to_string()));
         stop.store(true, Ordering::SeqCst);
-        let duration = recorder.stop_and_write(&audio_path.to_string_lossy())?;
+        // Memo persistence never waits behind a runtime audio backlog.
+        let _ = app
+            .save()
+            .with_context(|| format!("could not save memo {}", &app.output_path));
 
         let reason = if matches!(&tui_result, Ok(crate::tui::TuiAction::Pause)) {
             margins_meeting_protocol::SegmentCloseReasonV1::Pause
@@ -356,11 +340,16 @@ fn run_segment(
         } else {
             margins_meeting_protocol::SegmentCloseReasonV1::Stop
         };
-        meeting.ingest_wav_and_close(ordinal, &audio_path, segment_offset_ms as u64, reason)?;
+        let mut runtime_duration_ms = 0;
+        let _duration = recorder.stop_and_flush(|| {
+            runtime_duration_ms =
+                meeting.flush_stream_and_close(ordinal, segment_offset_ms as u64, reason)?;
+            Ok(())
+        })?;
         live_timeline_duration_ms = live_timeline_duration_ms.max(
             (segment_offset_ms as u64)
                 .saturating_sub(initial_offset_ms as u64)
-                .saturating_add((duration * 1000.0).round().max(0.0) as u64),
+                .saturating_add(runtime_duration_ms),
         );
 
         match tui_result {
@@ -398,9 +387,7 @@ fn run_segment(
                     break;
                 }
                 app.set_capture_paused(false);
-                ordinal = margins_store::canonical::next_segment_index(margins_dir, session_name)?;
-                audio_path = margins_dir.join(format!("{session_name}_seg{ordinal}.wav"));
-                meeting.open(ordinal)?;
+                ordinal = meeting.next_ordinal()?;
             }
             Ok(crate::tui::TuiAction::Resume) => {
                 return Err(anyhow::anyhow!("resume requested while capture was active"));
@@ -415,29 +402,29 @@ fn run_segment(
                 let (device_name, device) = devices.swap_remove(index);
                 app.current_mic_name = device_name;
                 selected_device = Some(device);
-                ordinal = margins_store::canonical::next_segment_index(margins_dir, session_name)?;
-                audio_path = margins_dir.join(format!("{session_name}_seg{ordinal}.wav"));
-                meeting.open(ordinal)?;
+                ordinal = meeting.next_ordinal()?;
             }
         }
     }
 
-    meeting.finish((Local::now() - started_at).num_milliseconds().max(0) as u64)?;
+    // The paused editor can still receive edits after the active segment was
+    // saved. A repeated save with an unresolved conflict reuses its draft.
+    let memo_error = app
+        .save()
+        .with_context(|| format!("could not save memo {}", &app.output_path))
+        .err();
+    meeting.finish_with_reason(
+        (Local::now() - started_at).num_milliseconds().max(0) as u64,
+        if tui_error.is_some() {
+            margins_meeting_protocol::SessionFinalizeReasonV1::Error
+        } else {
+            margins_meeting_protocol::SessionFinalizeReasonV1::Completed
+        },
+    )?;
 
     // Signal terminal decoding before asking what to do next. The rolling
     // worker continues draining queued live audio while the user decides.
     let mut live_finalizer = live.map(|worker| worker.begin_finish(live_timeline_duration_ms));
-
-    // Save memo regardless of transcription result.
-    let memo_result = app
-        .save()
-        .with_context(|| format!("could not save memo {}", &app.output_path));
-    if let Err(error) = memo_result {
-        if let Some(finalizer) = live_finalizer.take() {
-            let _ = finalizer.complete();
-        }
-        return Err(error);
-    }
 
     let action_result = if tui_error.is_none() {
         choose_post_capture_action()
@@ -463,8 +450,11 @@ fn run_segment(
         Ok(())
     })();
 
-    if let Some(error) = tui_error {
-        return Err(error);
+    match (tui_error, memo_error) {
+        (Some(capture), Some(memo)) => return Err(anyhow::anyhow!("{capture}; {memo}")),
+        (Some(capture), None) => return Err(capture),
+        (None, Some(memo)) => return Err(memo),
+        (None, None) => {}
     }
     let action = action_result?;
     live_result?;

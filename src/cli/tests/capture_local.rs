@@ -157,36 +157,38 @@
         std::env::set_current_dir(old).unwrap();
         assert_eq!(code, 0);
         assert_eq!(spy.0.load(Ordering::SeqCst), 1);
+    }
 
-        #[test]
-        fn bare_margins_creates_without_a_current_session_and_resumes_when_present() {
-            let _guard = PROCESS_ENV_LOCK.lock().unwrap();
-            let _settings = ScopedTestSettings::new();
-            let temp = tempfile::tempdir().unwrap();
-            let old = std::env::current_dir().unwrap();
-            std::env::set_current_dir(temp.path()).unwrap();
+    #[test]
+    fn bare_margins_creates_without_a_current_session_and_resumes_when_present() {
+        let _guard = PROCESS_ENV_LOCK.lock().unwrap();
+        let _settings = ScopedTestSettings::new();
+        let temp = tempfile::tempdir().unwrap();
+        let vault = temp.path().join("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let old = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&vault).unwrap();
 
-            let without_current = SpyInteractive(AtomicUsize::new(0));
-            let first_code = main_entry_with(["margins"], &without_current);
+        let without_current = SpyInteractive(AtomicUsize::new(0));
+        let first_code = main_entry_with(["margins"], &without_current);
 
-            let margins_dir = temp.path().join(".margins");
-            std::fs::create_dir_all(&margins_dir).unwrap();
-            margins_store::canonical::create_session(
-                &margins_dir,
-                "current-session",
-                &chrono::Local::now(),
-                ".margins/current-session.md",
-            )
-            .unwrap();
-            std::fs::write(margins_dir.join("current"), "current-session\n").unwrap();
+        let margins_dir = vault.join(".margins");
+        std::fs::create_dir_all(&margins_dir).unwrap();
+        margins_store::canonical::create_session(
+            &margins_dir,
+            "current-session",
+            &chrono::Local::now(),
+            ".margins/current-session.md",
+        )
+        .unwrap();
+        std::fs::write(margins_dir.join("current"), "current-session\n").unwrap();
 
-            let with_current = SpyInteractive(AtomicUsize::new(0));
-            let second_code = main_entry_with(["margins"], &with_current);
-            std::env::set_current_dir(old).unwrap();
+        let with_current = SpyInteractive(AtomicUsize::new(0));
+        let second_code = main_entry_with(["margins"], &with_current);
+        std::env::set_current_dir(old).unwrap();
 
-            assert_eq!(first_code, 0);
-            assert_eq!(without_current.0.load(Ordering::SeqCst), 1);
-            assert_eq!(second_code, 0);
-            assert_eq!(with_current.0.load(Ordering::SeqCst), 10);
-        }
+        assert_eq!(first_code, 0);
+        assert_eq!(without_current.0.load(Ordering::SeqCst), 1);
+        assert_eq!(second_code, 0);
+        assert_eq!(with_current.0.load(Ordering::SeqCst), 10);
     }

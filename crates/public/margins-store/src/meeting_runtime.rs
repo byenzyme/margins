@@ -59,10 +59,187 @@ impl SqliteMeetingRuntimeStorage {
         &self.directory
     }
 
-    /// The native TUI may attach a pre-runtime, finalized session. This only
+    pub fn next_native_ordinal(&self, session_id: &str) -> Result<i64> {
+        let connection = self.connection()?;
+        let mut ordinal: i64 = connection
+            .query_row(
+                "SELECT COALESCE(MAX(ordinal) + 1, 0) FROM (SELECT segment_index AS ordinal FROM session_segments WHERE session_name = ?1 UNION ALL SELECT canonical_ordinal AS ordinal FROM meeting_segment_projection WHERE session_id = ?1)",
+                [session_id],
+                |row| row.get(0),
+            )
+            .map_err(anyhow::Error::from)?;
+        while self
+            .directory
+            .join(format!("{session_id}_seg{ordinal}.wav"))
+            .exists()
+        {
+            ordinal = ordinal
+                .checked_add(1)
+                .context("native segment ordinal overflow")?;
+        }
+        Ok(ordinal)
+    }
+
+    pub fn pending_native_segment(&self, session_id: &str) -> Result<Option<(i64, u64)>> {
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT segment_index, offset_ms FROM session_segments WHERE session_name = ?1 AND duration_secs IS NULL ORDER BY segment_index DESC LIMIT 1",
+                [session_id],
+                |row| Ok((row.get(0)?, row.get::<_, i64>(1)?.max(0) as u64)),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn native_chunk_boundaries(
+        &self,
+        session_id: &str,
+        ordinal: i64,
+    ) -> Result<[(u64, u64); 2]> {
+        let connection = self.connection()?;
+        let segment_id = format!("{session_id}-seg-{ordinal}");
+        let mut results = [(0u64, 0u64); 2];
+        for (index, lane) in ["mic", "system"].iter().enumerate() {
+            let mut query = connection.prepare(
+                "SELECT sequence, metadata_json FROM meeting_chunks WHERE session_id = ?1 AND segment_id = ?2 AND lane_id = ?3 ORDER BY sequence",
+            )?;
+            let mut rows = query.query(params![session_id, segment_id, lane])?;
+            while let Some(row) = rows.next()? {
+                let sequence: i64 = row.get(0)?;
+                if sequence != results[index].0 as i64 {
+                    anyhow::bail!("native runtime lane has a missing chunk");
+                }
+                let metadata: AudioChunkV1 = serde_json::from_str(&row.get::<_, String>(1)?)?;
+                results[index].0 += 1;
+                results[index].1 = results[index]
+                    .1
+                    .max(metadata.starts_at_ms.0 + metadata.duration_ms.0);
+            }
+        }
+        Ok(results)
+    }
+
+    /// Export a scriptable stereo WAV from the canonical runtime chunks.
+    /// Existing WAVs, including pre-runtime user recordings, are never changed.
+    pub fn export_native_wav(&self, session_id: &str, ordinal: i64) -> Result<PathBuf> {
+        if session_id.contains('/') || session_id.contains('\\') || ordinal < 0 {
+            anyhow::bail!("invalid native audio export identity");
+        }
+        let path = self
+            .directory
+            .join(format!("{session_id}_seg{ordinal}.wav"));
+        if path.is_file() {
+            return Ok(path);
+        }
+        let connection = self.connection()?;
+        let segment_id: String = connection.query_row(
+            "SELECT p.segment_id FROM meeting_segment_projection p JOIN session_segments s ON s.session_name = p.session_id AND s.segment_index = p.canonical_ordinal WHERE p.session_id = ?1 AND p.canonical_ordinal = ?2 AND s.duration_secs IS NOT NULL",
+            params![session_id, ordinal],
+            |row| row.get(0),
+        )?;
+        let lane_paths = |lane: &str| -> Result<Vec<PathBuf>> {
+            let mut query = connection.prepare(
+                "SELECT blob_path FROM meeting_chunks WHERE session_id = ?1 AND segment_id = ?2 AND lane_id = ?3 ORDER BY sequence",
+            )?;
+            let rows = query.query_map(params![session_id, segment_id, lane], |row| {
+                row.get::<_, String>(0)
+            })?;
+            rows.map(|row| Ok(self.blob_dir().join(row?))).collect()
+        };
+        let mut mic = PcmChunkSamples::new(lane_paths("mic")?);
+        let mut system = PcmChunkSamples::new(lane_paths("system")?);
+        let temporary = self.directory.join(format!(
+            ".{session_id}_seg{ordinal}.{}.{}.wav.tmp",
+            std::process::id(),
+            TEMPORARY_BLOB_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut writer = hound::WavWriter::create(
+            &temporary,
+            hound::WavSpec {
+                channels: 2,
+                sample_rate: 16_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )?;
+        loop {
+            let left = mic.next_sample()?;
+            let right = system.next_sample()?;
+            if left.is_none() && right.is_none() {
+                break;
+            }
+            writer.write_sample(left.unwrap_or(0))?;
+            writer.write_sample(right.unwrap_or(0))?;
+        }
+        writer.finalize()?;
+        File::open(&temporary)?.sync_all()?;
+        match std::fs::hard_link(&temporary, &path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        std::fs::remove_file(&temporary)?;
+        File::open(&self.directory)?.sync_all()?;
+        Ok(path)
+    }
+
+    /// Project an open native segment immediately so session readers can see
+    /// a recording before its first audio chunk has finalized.
+    pub fn open_native_segment(
+        &self,
+        session_id: &str,
+        ordinal: i64,
+        offset_ms: u64,
+    ) -> Result<()> {
+        if ordinal < 0 || session_id.contains('/') || session_id.contains('\\') {
+            anyhow::bail!("invalid native segment identity");
+        }
+        let segment_id = format!("{session_id}-seg-{ordinal}");
+        let uri = format!(".margins/{session_id}_seg{ordinal}.wav");
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO meeting_segment_projection (session_id, segment_id, canonical_ordinal) VALUES (?1, ?2, ?3) ON CONFLICT(session_id, segment_id) DO NOTHING",
+            params![session_id, segment_id, ordinal],
+        )?;
+        tx.execute(
+            "INSERT INTO session_segments (session_name, segment_index, wav_path, offset_ms, duration_secs, started_at) VALUES (?1, ?2, ?3, ?4, NULL, ?5) ON CONFLICT(session_name, segment_index) DO NOTHING",
+            params![session_id, ordinal, uri, offset_ms as i64, chrono::Utc::now().to_rfc3339()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn discard_empty_native_segment(&self, session_id: &str, ordinal: i64) -> Result<()> {
+        let segment_id = format!("{session_id}-seg-{ordinal}");
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let chunks: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM meeting_chunks WHERE session_id = ?1 AND segment_id = ?2",
+            params![session_id, segment_id],
+            |row| row.get(0),
+        )?;
+        if chunks != 0 {
+            anyhow::bail!("cannot discard a native segment with durable audio");
+        }
+        tx.execute(
+            "DELETE FROM session_segments WHERE session_name = ?1 AND segment_index = ?2 AND duration_secs IS NULL",
+            params![session_id, ordinal],
+        )?;
+        tx.execute(
+            "DELETE FROM meeting_segment_projection WHERE session_id = ?1 AND segment_id = ?2",
+            params![session_id, segment_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The native TUI may attach a pre-runtime session, including one that
+    /// crashed before its first finalized segment. This only
     /// authorizes one reservation against that existing canonical row; it does
     /// not rewrite earlier segments or backfill historical runtime events.
-    pub fn allow_finalized_legacy_adoption_once(&self) {
+    pub fn allow_legacy_adoption_once(&self) {
         self.adopt_legacy_once.store(true, Ordering::Release);
     }
 
@@ -387,6 +564,97 @@ impl SqliteMeetingRuntimeStorage {
         };
         let session_id = delta.session.session_id();
         let declared_lanes = &delta.session.create().lanes;
+        if delta
+            .session
+            .create()
+            .provenance
+            .hops
+            .iter()
+            .any(|hop| hop.producer == "margins-tui")
+        {
+            let ordinal: i64 = finalized
+                .segment_id
+                .as_ref()
+                .strip_prefix(&format!("{}-seg-", session_id.as_ref()))
+                .context("native runtime segment id does not match its session")?
+                .parse()
+                .context("native runtime segment id has no ordinal")?;
+            let connection = self.connection()?;
+            let mut lanes = Vec::new();
+            let mut first_start_ms: Option<u64> = None;
+            for boundary in &finalized.lane_boundaries {
+                if boundary.next_sequence == 0 {
+                    continue;
+                }
+                let format = declared_lanes
+                    .iter()
+                    .find(|lane| lane.lane_id == boundary.lane_id)
+                    .context("native finalized lane was not declared")?
+                    .format
+                    .clone();
+                if format.codec != AudioCodecV1::PcmS16Le
+                    || format.container != AudioContainerV1::Raw
+                    || format.sample_rate_hz != 16_000
+                    || format.channel_count != 1
+                {
+                    anyhow::bail!("native runtime lane is not 16 kHz mono PCM");
+                }
+                let mut query = connection.prepare(
+                    "SELECT sequence, metadata_json, blob_path FROM meeting_chunks WHERE session_id = ?1 AND segment_id = ?2 AND lane_id = ?3 ORDER BY sequence",
+                )?;
+                let mut rows = query.query(params![
+                    session_id.as_ref(),
+                    finalized.segment_id.as_ref(),
+                    boundary.lane_id.as_ref()
+                ])?;
+                let mut count = 0u64;
+                let mut bytes = 0u64;
+                while let Some(row) = rows.next()? {
+                    let sequence: i64 = row.get(0)?;
+                    if sequence != count as i64 {
+                        anyhow::bail!("native runtime lane has a missing chunk");
+                    }
+                    let metadata: AudioChunkV1 = serde_json::from_str(&row.get::<_, String>(1)?)?;
+                    let blob_path: String = row.get(2)?;
+                    let length = std::fs::metadata(self.blob_dir().join(blob_path))?.len();
+                    if length % 2 != 0 {
+                        anyhow::bail!("native runtime PCM chunk has a partial s16 sample");
+                    }
+                    bytes += length;
+                    first_start_ms = Some(first_start_ms.map_or(metadata.starts_at_ms.0, |old| {
+                        old.min(metadata.starts_at_ms.0)
+                    }));
+                    count += 1;
+                }
+                if count != boundary.next_sequence {
+                    anyhow::bail!("native runtime lane boundary exceeds durable chunks");
+                }
+                lanes.push((
+                    boundary.lane_id.clone(),
+                    format!(
+                        "meeting-runtime://{}/{}/{}",
+                        session_id.as_ref(),
+                        finalized.segment_id.as_ref(),
+                        boundary.lane_id.as_ref()
+                    ),
+                    bytes,
+                    bytes / 2,
+                    "runtime".to_owned(),
+                    format,
+                ));
+            }
+            if lanes.is_empty() {
+                return Ok(None);
+            }
+            let start = first_start_ms.unwrap_or(finalized.duration_ms.0);
+            return Ok(Some(FinalizedProjection {
+                segment_id: finalized.segment_id.as_ref().to_owned(),
+                offset_ms: start as i64,
+                duration_secs: finalized.duration_ms.0.saturating_sub(start) as f64 / 1000.0,
+                lanes,
+                native_wav_path: Some(format!(".margins/{}_seg{ordinal}.wav", session_id.as_ref())),
+            }));
+        }
         let artifacts = self.directory.join("artifacts").join(session_id.as_ref());
         std::fs::create_dir_all(&artifacts)?;
         let mut lanes = Vec::new();
@@ -471,6 +739,7 @@ impl SqliteMeetingRuntimeStorage {
                 .map(|start| finalized.duration_ms.0.saturating_sub(start) as f64 / 1000.0)
                 .unwrap_or(0.0),
             lanes,
+            native_wav_path: None,
         }))
     }
 }
@@ -480,6 +749,42 @@ struct FinalizedProjection {
     offset_ms: i64,
     duration_secs: f64,
     lanes: Vec<(LaneId, String, u64, u64, String, AudioFormatV1)>,
+    native_wav_path: Option<String>,
+}
+
+struct PcmChunkSamples {
+    paths: std::vec::IntoIter<PathBuf>,
+    bytes: Vec<u8>,
+    index: usize,
+}
+
+impl PcmChunkSamples {
+    fn new(paths: Vec<PathBuf>) -> Self {
+        Self {
+            paths: paths.into_iter(),
+            bytes: Vec::new(),
+            index: 0,
+        }
+    }
+
+    fn next_sample(&mut self) -> Result<Option<i16>> {
+        loop {
+            if self.index + 1 < self.bytes.len() {
+                let sample =
+                    i16::from_le_bytes([self.bytes[self.index], self.bytes[self.index + 1]]);
+                self.index += 2;
+                return Ok(Some(sample));
+            }
+            let Some(path) = self.paths.next() else {
+                return Ok(None);
+            };
+            self.bytes = std::fs::read(path)?;
+            if self.bytes.len() % 2 != 0 {
+                anyhow::bail!("native runtime PCM chunk has a partial s16 sample");
+            }
+            self.index = 0;
+        }
+    }
 }
 
 impl MeetingRuntimeStorage for SqliteMeetingRuntimeStorage {
@@ -610,12 +915,12 @@ impl MeetingRuntimeStorage for SqliteMeetingRuntimeStorage {
                     |row| row.get(0),
                 )
                 .optional()?;
-            let legacy_finalized: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM session_segments seg JOIN sessions s ON s.name = seg.session_name WHERE seg.session_name = ?1 AND seg.duration_secs IS NOT NULL AND s.lifecycle_state IN ('active', 'ended'))",
+            let legacy_session: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE name = ?1 AND lifecycle_state IN ('active', 'ended'))",
                 [session_id.as_ref()], |row| row.get(0),
             )?;
             let can_adopt = existing_create_key.is_none()
-                && legacy_finalized
+                && legacy_session
                 && self.adopt_legacy_once.swap(false, Ordering::AcqRel);
             if !can_adopt && existing_create_key.as_deref() != Some(create.idempotency_key.as_str())
             {
@@ -712,14 +1017,18 @@ impl MeetingRuntimeStorage for SqliteMeetingRuntimeStorage {
                 .lanes
                 .first()
                 .context("finalized segment has no lanes")?;
+            let canonical_audio_path = projection
+                .native_wav_path
+                .clone()
+                .unwrap_or_else(|| representative.1.clone());
             let started_at_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
             let started_at =
                 chrono::DateTime::<chrono::Utc>::from_timestamp_millis(started_at_ms as i64)
                     .context("segment timestamp is outside the supported range")?
                     .to_rfc3339();
             tx.execute(
-                "INSERT OR IGNORE INTO session_segments (session_name, segment_index, wav_path, offset_ms, duration_secs, started_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![session_id.as_ref(), ordinal, representative.1, offset_ms, projection.duration_secs, started_at],
+                "INSERT INTO session_segments (session_name, segment_index, wav_path, offset_ms, duration_secs, started_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(session_name, segment_index) DO UPDATE SET wav_path = excluded.wav_path, offset_ms = excluded.offset_ms, duration_secs = excluded.duration_secs",
+                params![session_id.as_ref(), ordinal, canonical_audio_path, offset_ms, projection.duration_secs, started_at],
             )?;
             let duration_ms = (projection.duration_secs * 1000.0).round().max(0.0) as u64;
             let lane = match representative.0.as_ref() {
@@ -757,6 +1066,9 @@ impl MeetingRuntimeStorage for SqliteMeetingRuntimeStorage {
                 params![session_id.as_ref(), ordinal, projection.segment_id, serde_json::to_string(&contract)?],
             )?;
             for (lane, path, _, _, artifact_suffix, _) in projection.lanes {
+                if projection.native_wav_path.is_some() {
+                    continue;
+                }
                 let kind = format!(
                     "audio_{}_{}",
                     safe_file_component(lane.as_ref()),
