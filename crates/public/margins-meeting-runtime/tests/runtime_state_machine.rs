@@ -730,3 +730,171 @@ fn finalize_rejects_close_ids_that_are_already_consumed_or_self_referential() {
         "invalid_transition"
     );
 }
+
+mod recorder_api {
+    use margins_meeting_protocol::*;
+    use margins_meeting_runtime::{InMemoryMeetingRuntimeStorage, MeetingRuntime};
+    use std::collections::BTreeMap;
+
+    const BASE: UnixMillis = UnixMillis(1_800_000_000_000);
+
+    #[test]
+    fn recorder_api_uses_v1_commands_across_pause_recovery_and_finish() {
+        let runtime = MeetingRuntime::new(InMemoryMeetingRuntimeStorage::new());
+        let recorder = runtime.recorder();
+        let session: SessionId = "recorder-api".into();
+        let created = recorder
+            .reserve(
+                &session,
+                "create".into(),
+                BASE,
+                CreateSessionV1 {
+                    idempotency_key: "recorder-api-key".into(),
+                    started_at_unix_ms: BASE,
+                    title: None,
+                    sources: vec![CaptureSourceV1 {
+                        source_id: "mic".into(),
+                        kind: CaptureSourceKindV1::Microphone,
+                        label: None,
+                        external_id: None,
+                    }],
+                    lanes: vec![CaptureLaneV1 {
+                        lane_id: "mic".into(),
+                        source_ids: vec!["mic".into()],
+                        label: None,
+                        format: AudioFormatV1 {
+                            codec: AudioCodecV1::PcmS16Le,
+                            container: AudioContainerV1::Raw,
+                            sample_rate_hz: 48_000,
+                            channel_count: 1,
+                        },
+                    }],
+                    provenance: CaptureProvenanceV1 {
+                        hops: vec![CaptureProvenanceHopV1 {
+                            producer: "native".into(),
+                            producer_version: None,
+                            mode: CaptureModeV1::Live,
+                            observed_at_unix_ms: BASE,
+                            attributes: BTreeMap::new(),
+                        }],
+                    },
+                },
+            )
+            .unwrap();
+        assert!(!created.idempotent_replay);
+        let first = recorder
+            .open_lane(&session, "first".into(), "mic".into())
+            .unwrap();
+        let chunk = recorder
+            .append_chunk(
+                &first,
+                "chunk-0".into(),
+                BASE,
+                0,
+                SessionMillis(0),
+                DurationMillis(100),
+                vec![0; 9_600],
+            )
+            .unwrap();
+        assert!(chunk
+            .messages
+            .iter()
+            .any(|message| matches!(message.body, ServerMessageBodyV1::AudioAcknowledged(_))));
+        let paused = recorder
+            .pause(
+                &session,
+                "pause".into(),
+                BASE,
+                CloseSegmentV1 {
+                    segment_id: "first".into(),
+                    ended_at_ms: SessionMillis(100),
+                    lane_boundaries: vec![LaneBoundaryV1 {
+                        lane_id: "mic".into(),
+                        next_sequence: 1,
+                    }],
+                    reason: SegmentCloseReasonV1::Stop,
+                },
+            )
+            .unwrap();
+        assert!(paused
+            .messages
+            .iter()
+            .any(|message| matches!(message.body, ServerMessageBodyV1::SegmentFinalized(_))));
+        assert!(recorder
+            .open_lane(&session, "first".into(), "mic".into())
+            .is_err());
+        let (state, replay) = recorder
+            .recover(&session, "recover".into(), BASE, None)
+            .unwrap();
+        assert!(!state.input_finalized());
+        assert!(replay
+            .messages
+            .iter()
+            .any(|message| matches!(message.body, ServerMessageBodyV1::ReplayCompleted(_))));
+        let second = recorder
+            .resume(&session, "second".into(), "mic".into())
+            .unwrap();
+        recorder
+            .append_chunk(
+                &second,
+                "chunk-1".into(),
+                BASE,
+                0,
+                SessionMillis(100),
+                DurationMillis(100),
+                vec![1; 9_600],
+            )
+            .unwrap();
+        recorder
+            .close_segment(
+                &session,
+                "stop".into(),
+                BASE,
+                CloseSegmentV1 {
+                    segment_id: "second".into(),
+                    ended_at_ms: SessionMillis(200),
+                    lane_boundaries: vec![LaneBoundaryV1 {
+                        lane_id: "mic".into(),
+                        next_sequence: 1,
+                    }],
+                    reason: SegmentCloseReasonV1::Stop,
+                },
+            )
+            .unwrap();
+        let final_command = FinalizeSessionV1 {
+            ended_at_ms: SessionMillis(200),
+            segment_closes: vec![
+                SegmentCloseReferenceV1 {
+                    segment_id: "first".into(),
+                    close_message_id: "pause".into(),
+                },
+                SegmentCloseReferenceV1 {
+                    segment_id: "second".into(),
+                    close_message_id: "stop".into(),
+                },
+            ],
+            reason: SessionFinalizeReasonV1::Completed,
+        };
+        assert!(recorder
+            .finish(&session, "finish".into(), BASE, final_command.clone())
+            .unwrap()
+            .messages
+            .iter()
+            .any(|message| matches!(message.body, ServerMessageBodyV1::SessionFinalized(_))));
+        assert!(
+            recorder
+                .finish(&session, "finish".into(), BASE, final_command)
+                .unwrap()
+                .idempotent_replay
+        );
+        assert_eq!(
+            runtime
+                .storage()
+                .snapshot(&session)
+                .unwrap()
+                .unwrap()
+                .audio_chunk_count(),
+            2
+        );
+    }
+}

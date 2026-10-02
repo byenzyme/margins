@@ -74,6 +74,78 @@ fn create(session: &str) -> ClientMessageV1 {
     )
 }
 
+#[test]
+fn workspace_memo_updates_and_replacements_report_stale_revision() {
+    let temp = tempfile::tempdir().unwrap();
+    let notes = temp.path().join("notes");
+    let captures = temp.path().join("captures");
+    std::fs::create_dir_all(&notes).unwrap();
+    let workspace =
+        ensure_service_workspace(&temp.path().join("state"), "team", None, &notes, &captures)
+            .unwrap();
+    let service = WorkspaceService::open("host", workspace).unwrap();
+    let alice = ServicePrincipal::full("alice", "team");
+    let bob = ServicePrincipal::full("bob", "team");
+    let session = SessionId("memo-cas".into());
+    service
+        .reserve_session(&alice, create(session.as_ref()))
+        .unwrap();
+    let observed = service.memo(&alice, &session).unwrap().revision;
+    let first = service
+        .update_memo(
+            &alice,
+            &session,
+            &WorkspaceMemoUpdateV1 {
+                request_id: "alice-edit".into(),
+                expected_revision: observed.clone(),
+                observed_at_ms: SessionMillis(1_234),
+                paused: false,
+                text: "Alice".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(first.lines[0].created_secs, 1.234);
+    let stale = service
+        .replace_memo(
+            &bob,
+            &session,
+            &WorkspaceMemoReplaceV1 {
+                request_id: "bob-stale".into(),
+                expected_revision: observed,
+                lines: vec![WorkspaceMemoLineV1 {
+                    text: "Bob".into(),
+                    created_secs: 2.0,
+                    edited_secs: None,
+                    draft_started_secs: None,
+                    audio_pending_at_mark: false,
+                    block_ordinal: None,
+                }],
+            },
+        )
+        .unwrap_err();
+    assert!(stale.is::<margins_store::MemoRevisionConflict>());
+    assert!(margins_workflows::workspace_service::is_memo_revision_conflict(&stale));
+    let replaced = service
+        .replace_memo(
+            &bob,
+            &session,
+            &WorkspaceMemoReplaceV1 {
+                request_id: "bob-fresh".into(),
+                expected_revision: first.revision,
+                lines: vec![WorkspaceMemoLineV1 {
+                    text: "Bob".into(),
+                    created_secs: 2.0,
+                    edited_secs: None,
+                    draft_started_secs: None,
+                    audio_pending_at_mark: false,
+                    block_ordinal: None,
+                }],
+            },
+        )
+        .unwrap();
+    assert_eq!(replaced.lines[0].text, "Bob");
+}
+
 fn chunk(session: &str, message: &str, lane: &str, sequence: u64) -> ClientMessageV1 {
     let sample = if lane == "mic" {
         0x1100_i16 + sequence as i16
@@ -492,6 +564,19 @@ fn composed_service_is_the_same_canonical_store_across_retry_and_restart() {
         margins_store::canonical::list_session_artifacts(&captures.join(".margins"), "capture-a")
             .unwrap();
     assert_eq!(artifacts.len(), 2);
+    let direct_pending = margins_workflows::transcript_view::load_transcript_view(
+        &captures,
+        &captures.join(".margins"),
+        "latest",
+    )
+    .unwrap();
+    assert_eq!(direct_pending.view, "pending");
+    assert!(!direct_pending.terminal);
+    let pending = restarted.transcript(&owner, "latest").unwrap();
+    assert_eq!(pending.session_id.as_ref(), "capture-a");
+    assert!(pending.body.contains("Transcript pending"));
+    assert_eq!(pending.view, "pending");
+    assert!(!pending.terminal);
     for (kind, expected) in [
         ("audio_mic_pcm", 0x1100_i16),
         ("audio_system_pcm", 0x2200_i16),
@@ -857,6 +942,18 @@ fn finalized_session_attach_is_generation_fenced_and_retry_safe() {
     service
         .execute_capture(&owner, &first.producer_token, finalize("capture-a"))
         .unwrap();
+    let margins_dir = captures.join(".margins");
+    let pending_path = margins_dir.join("capture-a_capture_context.md");
+    assert!(pending_path.is_file());
+    let connection = rusqlite::Connection::open(margins_dir.join("sessions.sqlite")).unwrap();
+    let lifecycle: String = connection
+        .query_row(
+            "SELECT lifecycle_state FROM sessions WHERE name = 'capture-a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(lifecycle, "ended");
 
     let request = WorkspaceAttachV1 {
         request_id: "8cc97936-9cb3-4d27-853f-9818cbe9ea72".into(),
@@ -867,6 +964,26 @@ fn finalized_session_attach_is_generation_fenced_and_retry_safe() {
     let second = service
         .attach_session(&owner, &SessionId("capture-a".into()), &request)
         .unwrap();
+    let lifecycle: String = connection
+        .query_row(
+            "SELECT lifecycle_state FROM sessions WHERE name = 'capture-a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let repository_lifecycle: String = connection
+        .query_row(
+            "SELECT lifecycle FROM session_repository_state WHERE session_name = 'capture-a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        (lifecycle.as_str(), repository_lifecycle.as_str()),
+        ("active", "active")
+    );
+    assert!(!pending_path.exists());
+    assert!(service.transcript(&owner, "latest").is_err());
     let replay = service
         .attach_session(&owner, &SessionId("capture-a".into()), &request)
         .unwrap();

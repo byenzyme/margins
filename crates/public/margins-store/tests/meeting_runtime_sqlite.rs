@@ -1,12 +1,189 @@
 use margins_meeting_protocol::*;
+use margins_meeting_runtime::test_support::{
+    assert_recorder_conformance, RecorderConformanceAdapter,
+};
 use margins_meeting_runtime::{MeetingRuntime, MeetingRuntimeStorage};
 use margins_store::SqliteMeetingRuntimeStorage;
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::BTreeMap,
+    path::PathBuf,
     sync::{Arc, Barrier},
     thread,
 };
+
+struct SqliteRecorderAdapter {
+    directory: PathBuf,
+    runtime: MeetingRuntime<SqliteMeetingRuntimeStorage>,
+    use_facade: bool,
+}
+
+impl RecorderConformanceAdapter for SqliteRecorderAdapter {
+    type Error = anyhow::Error;
+
+    fn send(
+        &mut self,
+        message: ClientMessageV1,
+    ) -> Result<margins_meeting_runtime::RuntimeResponseV1, Self::Error> {
+        if !self.use_facade {
+            return self
+                .runtime
+                .handle(message)
+                .map_err(|error| anyhow::anyhow!(error.to_string()));
+        }
+        let recorder = self.runtime.recorder();
+        let ClientMessageV1 {
+            session_id,
+            message_id,
+            sent_at_unix_ms,
+            body,
+            ..
+        } = message;
+        let result = match body {
+            ClientMessageBodyV1::CreateSession(create) => {
+                recorder.reserve(&session_id, message_id, sent_at_unix_ms, create)
+            }
+            ClientMessageBodyV1::AudioChunk(chunk) => {
+                let lane = recorder
+                    .open_lane(&session_id, chunk.segment_id, chunk.lane_id)
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                recorder.append_chunk(
+                    &lane,
+                    message_id,
+                    sent_at_unix_ms,
+                    chunk.sequence,
+                    chunk.starts_at_ms,
+                    chunk.duration_ms,
+                    chunk.payload,
+                )
+            }
+            ClientMessageBodyV1::CloseSegment(close)
+                if close.reason == SegmentCloseReasonV1::Pause =>
+            {
+                recorder.pause(&session_id, message_id, sent_at_unix_ms, close)
+            }
+            ClientMessageBodyV1::CloseSegment(close) => {
+                recorder.close_segment(&session_id, message_id, sent_at_unix_ms, close)
+            }
+            ClientMessageBodyV1::FinalizeSession(finalize) => {
+                recorder.finish(&session_id, message_id, sent_at_unix_ms, finalize)
+            }
+            ClientMessageBodyV1::BeginCaptureGeneration(begin) => {
+                recorder.start_generation(&session_id, message_id, sent_at_unix_ms, begin)
+            }
+            ClientMessageBodyV1::ResumeSession(resume) => {
+                return recorder
+                    .recover(
+                        &session_id,
+                        message_id,
+                        sent_at_unix_ms,
+                        resume.after_server_sequence,
+                    )
+                    .map(|(_, response)| response)
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+            }
+            _ => panic!("conformance suite sent an unsupported command"),
+        };
+        result.map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
+
+    fn restart(&mut self) {
+        self.runtime =
+            MeetingRuntime::new(SqliteMeetingRuntimeStorage::open(&self.directory).unwrap());
+    }
+}
+
+#[test]
+fn sqlite_recorder_conformance_projects_one_canonical_session_and_two_audio_artifacts() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut adapter = SqliteRecorderAdapter {
+        directory: temp.path().to_path_buf(),
+        runtime: MeetingRuntime::new(SqliteMeetingRuntimeStorage::open(temp.path()).unwrap()),
+        use_facade: false,
+    };
+    assert_recorder_conformance(&mut adapter, "conform");
+    adapter.use_facade = true;
+    assert_recorder_conformance(&mut adapter, "conform-facade");
+    let connection = rusqlite::Connection::open(adapter.runtime.storage().database_path()).unwrap();
+    let count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sessions WHERE name = 'conform'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let segment_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM session_segments WHERE session_name = 'conform'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let artifact_count: i64 = connection.query_row("SELECT COUNT(*) FROM session_artifacts WHERE session_name = 'conform' AND kind = 'audio_mic_pcm'", [], |row| row.get(0)).unwrap();
+    let lifecycle: String = connection
+        .query_row(
+            "SELECT lifecycle_state FROM sessions WHERE name = 'conform'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!((count, segment_count, artifact_count), (1, 2, 2));
+    assert_eq!(lifecycle, "active");
+    assert!(!temp.path().join("conform_capture_context.md").exists());
+}
+
+#[test]
+fn runtime_storage_rejects_new_session_ids_that_escape_artifact_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = MeetingRuntime::new(SqliteMeetingRuntimeStorage::open(temp.path()).unwrap());
+    assert!(runtime.handle(create("../escape")).is_err());
+    assert!(!temp
+        .path()
+        .parent()
+        .unwrap()
+        .join("escape_capture_context.md")
+        .exists());
+}
+
+#[test]
+fn pending_context_requires_finalized_audio_and_normal_finish() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = MeetingRuntime::new(SqliteMeetingRuntimeStorage::open(temp.path()).unwrap());
+    runtime.handle(create("empty")).unwrap();
+    runtime
+        .handle(message(
+            "empty",
+            "finish-empty",
+            ClientMessageBodyV1::FinalizeSession(FinalizeSessionV1 {
+                ended_at_ms: SessionMillis(0),
+                segment_closes: vec![],
+                reason: SessionFinalizeReasonV1::Completed,
+            }),
+        ))
+        .unwrap();
+    assert!(!temp.path().join("empty_capture_context.md").exists());
+
+    runtime.handle(create("cancelled")).unwrap();
+    runtime
+        .handle(chunk("cancelled", "chunk-0", 0, 9_600))
+        .unwrap();
+    runtime.handle(close("cancelled", 1)).unwrap();
+    runtime
+        .handle(message(
+            "cancelled",
+            "finish-cancelled",
+            ClientMessageBodyV1::FinalizeSession(FinalizeSessionV1 {
+                ended_at_ms: SessionMillis(20),
+                segment_closes: vec![SegmentCloseReferenceV1 {
+                    segment_id: "part".into(),
+                    close_message_id: "close".into(),
+                }],
+                reason: SessionFinalizeReasonV1::Cancelled,
+            }),
+        ))
+        .unwrap();
+    assert!(!temp.path().join("cancelled_capture_context.md").exists());
+}
 
 fn message(session: &str, id: impl Into<String>, body: ClientMessageBodyV1) -> ClientMessageV1 {
     ClientMessageV1 {
@@ -225,4 +402,192 @@ fn compact_session_state_does_not_accumulate_payloads_or_event_history() {
     assert!(!encoded
         .windows(128)
         .any(|window| window.iter().all(|byte| *byte == 0)));
+}
+
+mod memo_authority {
+    use margins_core::{MemoMoment, TimedMemoLine};
+    use margins_store::{
+        canonical, MemoRevisionConflict, MemoWrite, SqliteWorkspaceAuthorityStorage,
+    };
+    use std::sync::{Arc, Barrier};
+
+    fn store() -> (tempfile::TempDir, SqliteWorkspaceAuthorityStorage) {
+        let temp = tempfile::tempdir().unwrap();
+        canonical::create_session(temp.path(), "meeting", &chrono::Local::now(), "meeting.md")
+            .unwrap();
+        let storage = SqliteWorkspaceAuthorityStorage::open(temp.path()).unwrap();
+        (temp, storage)
+    }
+
+    #[test]
+    fn update_and_replace_require_the_observed_revision_and_preserve_observation_time() {
+        let (_temp, storage) = store();
+        let original = storage.memo("meeting").unwrap();
+        let update = storage
+            .write_memo(
+                "meeting",
+                "alice",
+                "update-1",
+                &original.revision,
+                MemoWrite::PlainText {
+                    observed_at_ms: 12_345,
+                    paused: false,
+                    text: "first",
+                },
+            )
+            .unwrap();
+        assert_eq!(update.lines[0].created_secs, 12.345);
+        let replay = storage
+            .write_memo(
+                "meeting",
+                "alice",
+                "update-1",
+                &original.revision,
+                MemoWrite::PlainText {
+                    observed_at_ms: 12_345,
+                    paused: false,
+                    text: "first",
+                },
+            )
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.revision, update.revision);
+
+        let stale = storage
+            .write_memo(
+                "meeting",
+                "bob",
+                "stale",
+                &original.revision,
+                MemoWrite::PlainText {
+                    observed_at_ms: 20_000,
+                    paused: false,
+                    text: "lost",
+                },
+            )
+            .unwrap_err();
+        let conflict = stale.downcast_ref::<MemoRevisionConflict>().unwrap();
+        assert_eq!(
+            (&conflict.expected, &conflict.current),
+            (&original.revision, &update.revision)
+        );
+
+        let lines = vec![TimedMemoLine::at(
+            "replacement",
+            MemoMoment::paused(25.0, 1),
+        )];
+        let replaced = storage
+            .write_memo(
+                "meeting",
+                "bob",
+                "replace-1",
+                &update.revision,
+                MemoWrite::ReplaceLines(&lines),
+            )
+            .unwrap();
+        assert_eq!(replaced.lines, lines);
+        assert_eq!(storage.memo("meeting").unwrap().revision, replaced.revision);
+        assert!(storage
+            .write_memo(
+                "meeting",
+                "alice",
+                "replace-stale",
+                &original.revision,
+                MemoWrite::ReplaceLines(&lines)
+            )
+            .unwrap_err()
+            .is::<MemoRevisionConflict>());
+    }
+
+    #[test]
+    fn concurrent_writers_have_one_winner_and_a_typed_conflict() {
+        let (_temp, storage) = store();
+        let observed = storage.memo("meeting").unwrap().revision;
+        let barrier = Arc::new(Barrier::new(3));
+        let handles: Vec<_> = (0..2)
+            .map(|index| {
+                let storage = storage.clone();
+                let observed = observed.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    storage.write_memo(
+                        "meeting",
+                        &format!("writer-{index}"),
+                        &format!("write-{index}"),
+                        &observed,
+                        MemoWrite::PlainText {
+                            observed_at_ms: 1000 + index,
+                            paused: false,
+                            text: if index == 0 { "zero" } else { "one" },
+                        },
+                    )
+                })
+            })
+            .collect();
+        barrier.wait();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|error| error.is::<MemoRevisionConflict>()))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn mirror_failure_after_commit_does_not_lose_write_and_can_be_repaired() {
+        let (temp, storage) = store();
+        let path = temp.path().join("meeting.md");
+        std::fs::create_dir(&path).unwrap();
+        let initial = storage.memo("meeting").unwrap();
+        let written = storage
+            .update_memo(
+                "meeting",
+                "alice",
+                "write",
+                &initial.revision,
+                4_321,
+                false,
+                "committed",
+            )
+            .unwrap();
+        assert!(written.mirror_stale);
+        assert_eq!(storage.memo("meeting").unwrap().revision, written.revision);
+        assert!(storage.memo("meeting").unwrap().mirror_stale);
+        assert!(path.is_dir());
+        std::fs::remove_dir(&path).unwrap();
+        storage.refresh_memo_mirror("meeting").unwrap();
+        assert!(!storage.memo("meeting").unwrap().mirror_stale);
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("committed"));
+
+        let lines = vec![TimedMemoLine::at("replacement", MemoMoment::recording(5.0))];
+        let replaced = storage
+            .replace_memo_lines("meeting", "bob", "replace", &written.revision, &lines)
+            .unwrap();
+        assert_eq!(storage.memo("meeting").unwrap().revision, replaced.revision);
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("replacement"));
+        std::fs::write(&path, "TUI wrote newer Markdown directly\n").unwrap();
+        let replay = storage
+            .replace_memo_lines("meeting", "bob", "replace", &written.revision, &lines)
+            .unwrap();
+        assert!(replay.replayed);
+        assert!(replay.mirror_stale);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "TUI wrote newer Markdown directly\n"
+        );
+    }
 }

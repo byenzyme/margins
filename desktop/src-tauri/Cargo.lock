@@ -5421,6 +5421,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "libsql-rusqlite",
+ "log",
  "margins-core",
  "margins-meeting-protocol",
  "margins-meeting-runtime",

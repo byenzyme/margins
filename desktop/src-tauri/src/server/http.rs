@@ -24,8 +24,9 @@ use margins_meeting_protocol::{
     AUDIO_CHUNK_BATCH_CONTENT_TYPE_V1,
 };
 use margins_workflows::workspace_service::{
-    ScopedCredentialStore, ServicePrincipal, WorkspaceService, OP_CAPTURE_WRITE, OP_MEMO_WRITE,
-    OP_SESSION_CREATE, OP_SESSION_READ, OP_SESSION_WRITE, OP_WORKSPACE_READ,
+    is_memo_revision_conflict, ScopedCredentialStore, ServicePrincipal, WorkspaceService,
+    OP_CAPTURE_WRITE, OP_MEMO_WRITE, OP_SESSION_CREATE, OP_SESSION_READ, OP_SESSION_WRITE,
+    OP_WORKSPACE_READ,
 };
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -328,7 +329,8 @@ fn workspace_error(
 
 fn service_error(error: anyhow::Error) -> Response {
     let message = error.to_string();
-    let (status, code) = if message.contains("revision conflict")
+    let (status, code) = if is_memo_revision_conflict(&error)
+        || message.contains("revision conflict")
         || message.contains("changed somewhere else")
         || message.contains("different content")
         || message.contains("already has")

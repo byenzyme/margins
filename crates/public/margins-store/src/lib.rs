@@ -18,7 +18,8 @@ mod meeting_runtime;
 mod sqlite;
 
 pub use authority::{
-    AuthorityMemoReceipt, ImportReceipt, SqliteWorkspaceAuthorityStorage,
+    AuthorityMemoReceipt, ImportReceipt, MemoRevisionConflict, MemoWrite,
+    SqliteWorkspaceAuthorityStorage,
 };
 pub use meeting_runtime::{MeetingRuntimeStorageStats, SqliteMeetingRuntimeStorage};
 pub use sqlite::SqliteSessionRepository;

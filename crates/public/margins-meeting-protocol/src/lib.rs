@@ -1603,6 +1603,13 @@ pub struct WorkspaceMemoV1 {
     pub session_id: SessionId,
     pub revision: String,
     pub lines: Vec<WorkspaceMemoLineV1>,
+    /// The SQLite write committed, but the Markdown projection needs repair.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mirror_stale: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

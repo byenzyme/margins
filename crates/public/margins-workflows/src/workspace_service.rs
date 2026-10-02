@@ -20,7 +20,7 @@ use margins_meeting_protocol::{
 };
 use margins_meeting_runtime::{MeetingRuntime, MeetingRuntimeStorage, RuntimeResponseV1};
 use margins_store::{
-    canonical, ImportReceipt, SqliteMeetingRuntimeStorage, SqliteSessionRepository,
+    canonical, ImportReceipt, MemoWrite, SqliteMeetingRuntimeStorage, SqliteSessionRepository,
     SqliteWorkspaceAuthorityStorage,
 };
 use rand::{distributions::Alphanumeric, Rng};
@@ -50,6 +50,11 @@ pub const OP_JOB_READ: &str = "job.read";
 pub const OP_IMPORT_WRITE: &str = "import.write";
 pub const OP_IMPORT_RECEIPT: &str = "import.receipt";
 pub const OP_RECALL_QUERY: &str = "recall.query";
+
+/// Preserve the typed storage conflict across the transport-neutral service.
+pub fn is_memo_revision_conflict(error: &anyhow::Error) -> bool {
+    error.is::<margins_store::MemoRevisionConflict>()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServicePrincipal {
@@ -1116,6 +1121,7 @@ impl WorkspaceService {
             session_id: session_id.clone(),
             revision: memo.revision,
             lines: memo.lines.into_iter().map(memo_line).collect(),
+            mirror_stale: memo.mirror_stale,
         })
     }
 
@@ -1127,19 +1133,22 @@ impl WorkspaceService {
     ) -> Result<WorkspaceMemoV1> {
         principal.require(self.workspace_id(), OP_MEMO_WRITE)?;
         ensure_session(&self.margins_dir, session_id.as_ref())?;
-        let memo = self.authority.update_memo(
+        let memo = self.authority.write_memo(
             session_id.as_ref(),
             &principal.id,
             &request.request_id,
             &request.expected_revision,
-            request.observed_at_ms.0,
-            request.paused,
-            &request.text,
+            MemoWrite::PlainText {
+                observed_at_ms: request.observed_at_ms.0,
+                paused: request.paused,
+                text: &request.text,
+            },
         )?;
         Ok(WorkspaceMemoV1 {
             session_id: session_id.clone(),
             revision: memo.revision,
             lines: memo.lines.into_iter().map(memo_line).collect(),
+            mirror_stale: memo.mirror_stale,
         })
     }
 
@@ -1157,17 +1166,18 @@ impl WorkspaceService {
             .cloned()
             .map(timed_memo_line)
             .collect::<Vec<_>>();
-        let memo = self.authority.replace_memo_lines(
+        let memo = self.authority.write_memo(
             session_id.as_ref(),
             &principal.id,
             &request.request_id,
             &request.expected_revision,
-            &lines,
+            MemoWrite::ReplaceLines(&lines),
         )?;
         Ok(WorkspaceMemoV1 {
             session_id: session_id.clone(),
             revision: memo.revision,
             lines: memo.lines.into_iter().map(memo_line).collect(),
+            mirror_stale: memo.mirror_stale,
         })
     }
 

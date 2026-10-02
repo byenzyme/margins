@@ -23,6 +23,7 @@ use std::sync::{
 use std::time::Duration;
 
 static TEMPORARY_BLOB_ID: AtomicU64 = AtomicU64::new(0);
+const PENDING_CAPTURE_CONTEXT: &str = "<!-- margins:transcript-pending-v1 -->\n# Capture saved\n\nTranscript pending. Audio is saved in this session's artifacts.\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MeetingRuntimeStorageStats {
@@ -465,6 +466,10 @@ impl MeetingRuntimeStorage for SqliteMeetingRuntimeStorage {
     }
 
     fn create_session(&self, delta: SessionDeltaV1) -> Result<StorageCommit> {
+        let name = delta.session.session_id().as_ref();
+        if name == "." || name == ".." || name.contains('/') || name.contains('\\') {
+            anyhow::bail!("session id cannot be used as a storage path component");
+        }
         let mut connection = self.connection()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let session_id = delta.session.session_id();
@@ -508,6 +513,14 @@ impl MeetingRuntimeStorage for SqliteMeetingRuntimeStorage {
 
     fn apply_delta(&self, delta: SessionDeltaV1) -> Result<StorageCommit> {
         let session_id = delta.session.session_id().clone();
+        let finalized = delta
+            .events
+            .iter()
+            .any(|event| matches!(event.body, ServerMessageBodyV1::SessionFinalized(_)));
+        let generation_started = delta
+            .events
+            .iter()
+            .any(|event| matches!(event.body, ServerMessageBodyV1::CaptureGenerationStarted(_)));
         let staged = delta
             .audio_chunk
             .as_ref()
@@ -635,9 +648,79 @@ impl MeetingRuntimeStorage for SqliteMeetingRuntimeStorage {
                 )?;
             }
         }
+        let finalized_audio: i64 = if finalized {
+            tx.query_row(
+                "SELECT COUNT(*) FROM session_segments WHERE session_name = ?1 AND duration_secs IS NOT NULL",
+                [session_id.as_ref()],
+                |row| row.get(0),
+            )?
+        } else {
+            0
+        };
+        if finalized && finalized_audio > 0 {
+            tx.execute("UPDATE sessions SET lifecycle_state = 'ended', lifecycle_updated_at = ?1 WHERE name = ?2 AND lifecycle_state = 'active'",
+                params![chrono::Utc::now().to_rfc3339(), session_id.as_ref()])?;
+        }
+        if generation_started {
+            tx.execute("UPDATE sessions SET lifecycle_state = 'active', lifecycle_updated_at = ?1 WHERE name = ?2 AND lifecycle_state = 'ended'",
+                params![chrono::Utc::now().to_rfc3339(), session_id.as_ref()])?;
+            tx.execute("UPDATE session_repository_state SET lifecycle = 'active' WHERE session_name = ?1 AND lifecycle = 'processing'",
+                [session_id.as_ref()])?;
+        }
         tx.commit()?;
+        let pending_path = self
+            .directory
+            .join(format!("{}_capture_context.md", session_id.as_ref()));
+        if generation_started && is_owned_pending_context(&pending_path) {
+            if let Err(error) = std::fs::remove_file(&pending_path) {
+                log::warn!(
+                    "could not remove pending capture context for {}: {error}",
+                    session_id.as_ref()
+                );
+            }
+        }
+        let normal_finish = matches!(
+            delta.session.finalized_reason(),
+            Some(
+                margins_meeting_protocol::SessionFinalizeReasonV1::Completed
+                    | margins_meeting_protocol::SessionFinalizeReasonV1::SourceEnded
+            )
+        );
+        let still_finalized = if finalized && finalized_audio > 0 && normal_finish {
+            match self.load_session(&session_id) {
+                Ok(Some(state)) => state.input_finalized(),
+                Ok(None) => false,
+                Err(error) => {
+                    log::warn!(
+                        "could not inspect finalized capture {} for pending context: {error}",
+                        session_id.as_ref()
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        if finalized
+            && finalized_audio > 0
+            && normal_finish
+            && still_finalized
+            && !pending_path.exists()
+        {
+            if let Err(error) = atomic_replace(&pending_path, PENDING_CAPTURE_CONTEXT.as_bytes()) {
+                log::warn!(
+                    "could not project pending capture context for {}: {error}",
+                    session_id.as_ref()
+                );
+            }
+        }
         Ok(StorageCommit::Committed)
     }
+}
+
+fn is_owned_pending_context(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .is_ok_and(|body| body.starts_with("<!-- margins:transcript-pending-v1 -->"))
 }
 
 fn core_audio_format(format: &AudioFormatV1) -> Result<AudioFormat> {
