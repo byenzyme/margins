@@ -314,6 +314,17 @@ fn headless_consent_instructions(url: &str) -> String {
 }
 
 fn open_browser(url: &str) -> Result<(), CliError> {
+    // Automation can inspect the consent URL without launching a browser or
+    // waiting for a callback. Both Google and Granola presenters use this path.
+    if std::env::var("MARGINS_CONNECT_NO_BROWSER").as_deref() == Ok("1") {
+        eprintln!(
+            "Browser launch suppressed by MARGINS_CONNECT_NO_BROWSER=1. Authorization URL: {url}"
+        );
+        return Err(CliError::new(
+            "browser_suppressed",
+            "Browser launch suppressed by MARGINS_CONNECT_NO_BROWSER=1.",
+        ));
+    }
     #[cfg(target_os = "macos")]
     let result = Command::new("open").arg(url).status();
     #[cfg(target_os = "linux")]
