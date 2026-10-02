@@ -17,13 +17,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build portable Margins CLI
-        run: cargo build --package margins-cli
+      - name: Build portable private Margins CLI
+        run: cargo build --package margins --bin margins-private --no-default-features --features recall
 
       - name: Exercise isolated native Google onboarding
         run: tests/test_e2e_fresh_onboarding.sh
         env:
-          MARGINS_E2E_BIN: ${{ github.workspace }}/target/debug/margins-public
+          MARGINS_E2E_BIN: ${{ github.workspace }}/target/debug/margins-private
 
       - name: Exercise setup E2E lane shell contracts
         run: tests/test_setup_e2e_lanes.sh

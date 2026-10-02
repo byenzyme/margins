@@ -276,7 +276,7 @@ PY
 assert_phase6_external_document_contract() {
   local ledger="$MARGINS_WORKSPACE_STATE/ledger.db"
   [ -f "$ledger" ] || die "ledger.db is required for Phase 6 external-document checks: $ledger"
-  python3 - "$ledger" "$MARGINS_WORKSPACE_STATE/config.toml" "$NOTES_HOME" <<'PY' || die "Phase 6 external-document contract failed"
+  python3 - "$ledger" "$MARGINS_WORKSPACE_STATE/config.toml" "$NOTES_HOME" "${MARGINS_E2E_GOOGLE_ONLY:-0}" <<'PY' || die "Phase 6 external-document contract failed"
 import sqlite3
 import sys
 import tomllib
@@ -285,12 +285,15 @@ from pathlib import Path
 ledger = sys.argv[1]
 config_path = sys.argv[2]
 notes_home = Path(sys.argv[3])
+google_only = sys.argv[4] == "1"
 db = sqlite3.connect(f"file:{ledger}?mode=ro", uri=True)
 tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')")}
 for table in ("external_document_evidence", "external_document_participants"):
     if table not in tables:
         raise SystemExit(f"missing authoritative table: {table}")
 for connector in ("google_meet", "granola"):
+    if google_only and connector == "granola":
+        continue
     document_count = db.execute(
         "SELECT COUNT(*) FROM external_document_evidence WHERE connector_id = ? AND tombstoned_at IS NULL",
         (connector,),
@@ -332,33 +335,31 @@ granola = next(
 )
 if meet is None or not meet.get("account"):
     raise SystemExit("google-meet binding must declare account identity")
-if granola is None or not granola.get("account"):
-    raise SystemExit("granola binding must declare account identity")
-if "path" in granola:
-    raise SystemExit("granola binding must not declare export path")
-if "projection" in granola:
-    raise SystemExit("granola binding must not declare retired projection settings")
-collection = granola.get("collection") or {}
-if collection.get("time_range") != "last_30_days":
-    raise SystemExit("granola binding must declare the bounded last_30_days collection")
-if collection.get("workspace_only") is not False:
-    raise SystemExit("granola binding must explicitly declare workspace_only=false")
+if not google_only:
+    if granola is None or not granola.get("account"):
+        raise SystemExit("granola binding must declare account identity")
+    if "path" in granola:
+        raise SystemExit("granola binding must not declare export path")
+    if "projection" in granola:
+        raise SystemExit("granola binding must not declare retired projection settings")
+    collection = granola.get("collection") or {}
+    if collection.get("time_range") != "last_30_days":
+        raise SystemExit("granola binding must declare the bounded last_30_days collection")
+    if collection.get("workspace_only") is not False:
+        raise SystemExit("granola binding must explicitly declare workspace_only=false")
 if list((notes_home / "meetings").glob("*.md")):
     raise SystemExit("Granola ledger evidence must not project notes into the home")
 if (notes_home / "people" / "Alice Client.md").exists():
     raise SystemExit("Granola must not auto-create native person stubs")
 if (notes_home / "organizations" / "Acme.md").exists():
     raise SystemExit("Granola must not auto-create native organization stubs")
-print(
-    "external_document_tables=2; meet_documents>0; granola_documents>0; "
-    "episodes_absent=1; recall_items_absent=1; account_bindings=2"
-)
+print(f"external_document_tables=2; meet_documents>0; episodes_absent=1; recall_items_absent=1; account_bindings={1 if google_only else 2}")
 PY
 }
 
 recall_composition_available() {
   run_margins capabilities | python3 -c \
-    'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("recall", {}).get("available") else 1)'
+    'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("recall", {}).get("indexing") else 1)'
 }
 
 record_observation() {
@@ -723,9 +724,11 @@ PY
           > "$MARGINS_E2E_ARTIFACTS/source-$source_name.txt"
       fi
     done
-    "$MARGINS_E2E_BIN" --workspace "$MARGINS_WORKSPACE" source add granola \
-      --name granola --account owner@example.com --time-range last_30_days \
-      > "$MARGINS_E2E_ARTIFACTS/source-granola.txt"
+    if [ "${MARGINS_E2E_GOOGLE_ONLY:-0}" != 1 ]; then
+      "$MARGINS_E2E_BIN" --workspace "$MARGINS_WORKSPACE" source add granola \
+        --name granola --account owner@example.com --time-range last_30_days \
+        > "$MARGINS_E2E_ARTIFACTS/source-granola.txt"
+    fi
   )
 
   printf 'Sandbox initialized: %s\n' "$sandbox"
@@ -856,6 +859,7 @@ if not any(row.get("account") == "owner@example.com" and row.get("connected") is
     raise SystemExit("owner@example.com is not connected")
 PY
 
+  if [ "${MARGINS_E2E_GOOGLE_ONLY:-0}" != 1 ]; then
   local granola_auth="$MARGINS_E2E_ARTIFACTS/phase2-granola-status.json"
   timed_run "phase2.granola-status" "$granola_auth" \
     "$MARGINS_E2E_BIN" connect status --service granola --json
@@ -885,6 +889,7 @@ if not required <= set(metadata.get("scopes") or []):
     raise SystemExit("durable Granola scope metadata is incomplete")
 print("granola_connected=1; storage_dirs=0700; metadata=0600; token_cache=0600; identity=verified; scopes=4")
 PY
+  fi
 
   run_workspace_plan_apply phase2
   local apply_replay="$MARGINS_E2E_ARTIFACTS/phase2-apply-replay.json"
@@ -945,6 +950,7 @@ PY
 )"
   record_observation "phase2: $reconcile_summary"
 
+  if [ "${MARGINS_E2E_GOOGLE_ONLY:-0}" != 1 ]; then
   local granola_live_status="$MARGINS_E2E_ARTIFACTS/phase2-granola-live-workspace-status.json"
   timed_run "phase2.granola-live-workspace-status" "$granola_live_status" \
     run_margins workspace status --json
@@ -984,6 +990,7 @@ PY
   timed_run "phase2.import-granola" "$import_granola" run_margins import granola \
     "$MARGINS_E2E_SANDBOX/granola-export.json" --account owner@example.com
   record_observation "phase2: supplemental Granola export import verified shared external-document materialization separately from live MCP parsing"
+  fi
   assert_calendar_materialization_contract
   assert_phase6_external_document_contract
   python3 - "$reconcile_path" <<'PY' || die "integrations reconcile failed"
@@ -1108,6 +1115,16 @@ contract_phase8() {
   local revision plan apply stale_err
   revision="$(read_workspace_revision "$status")"
   write_desired_fixture "$MARGINS_E2E_ARTIFACTS/contract-phase8-desired.toml"
+  # Use a new plan identity. Replaying phase2's already-applied no-op plan is
+  # valid even after another mutation and cannot test stale-plan rejection.
+  python3 - "$MARGINS_E2E_ARTIFACTS/contract-phase8-desired.toml" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text()
+assert "raw_cache_max_age_days" not in text
+path.write_text(text.replace("[retention]", "[retention]\nraw_cache_max_age_days = 45", 1))
+PY
   plan="$MARGINS_E2E_ARTIFACTS/contract-phase8-plan.json"
   timed_run "contract-phase8.workspace-plan" "$plan" \
     run_margins workspace plan --desired "$MARGINS_E2E_ARTIFACTS/contract-phase8-desired.toml" --json
@@ -1134,13 +1151,8 @@ from pathlib import Path
 import sys
 path = Path(sys.argv[1])
 text = path.read_text()
-if "raw_cache_max_age_days" not in text:
-    marker = "[retention]\n"
-    if marker in text:
-        text = text.replace(marker, marker + "raw_cache_max_age_days = 30\n", 1)
-    else:
-        text += "\n[retention]\nraw_cache_max_age_days = 30\n"
-    path.write_text(text)
+assert "raw_cache_max_age_days = 45" in text
+path.write_text(text.replace("raw_cache_max_age_days = 45", "raw_cache_max_age_days = 30", 1))
 PY
   local followup_plan="$MARGINS_E2E_ARTIFACTS/contract-phase8-followup-plan.json"
   timed_run "contract-phase8.workspace-plan-followup" "$followup_plan" \
@@ -1645,6 +1657,7 @@ if (home / "google" / "owner@example.com").exists():
 print("machine_forgotten=1; bindings_preserved=1; evidence_preserved=1; health=needs-auth")
 PY
   fi
+  if [ "${MARGINS_E2E_GOOGLE_ONLY:-0}" != 1 ]; then
   local granola_result="$MARGINS_E2E_ARTIFACTS/granola-machine-forget.json"
   local granola_status="$MARGINS_E2E_ARTIFACTS/granola-machine-status-after-forget.json"
   "$MARGINS_E2E_BIN" disconnect granola --account owner@example.com --json > "$granola_result"
@@ -1694,7 +1707,8 @@ if (home / "granola" / "owner@example.com").exists():
     raise SystemExit("machine Granola credential home survived disconnect")
 print("granola_forgotten=1; binding_preserved=1; external_evidence_preserved=1; health=needs-auth")
 PY
-  record_observation "lifecycle: Google and Granola machine forget preserved bindings/evidence and marked snapshots needs-auth"
+  fi
+  record_observation "lifecycle: machine forget preserved bindings/evidence and marked snapshots needs-auth"
   printf 'assert-machine-forget-preservation PASS\n'
 }
 
@@ -1858,9 +1872,10 @@ print(f"  phase2 counts: {reconcile_counts('phase2-reconcile.json')}, records={r
 verdict = (root / "isolation-verdict.txt").read_text().strip().upper() if (root / "isolation-verdict.txt").exists() else "NOT VERIFIED"
 print(f"  isolation: {verdict}")
 catalyst = workspace_status.get("catalyst", {})
-mode = catalyst.get("mode", "unknown")
-reason = catalyst.get("reason", "unknown")
-print(f"  catalyst mode: {mode} ({reason})")
+if catalyst:
+    print(f"  catalyst mode: {catalyst.get('mode', 'unknown')} ({catalyst.get('reason', 'unknown')})")
+else:
+    print(f"  local recall mode: {workspace_status['recall']['mode']}")
 provenance = json.loads((root / "artifacts" / "binary-provenance.json").read_text())
 build = provenance["build"]
 binary = provenance["binary"]
