@@ -33,10 +33,9 @@ the machine default; without either, the panel asks for a Workspace.
 - **Make connected note** starts a bb thread in the meeting's recorded project
   (or the project selected for older meetings without provenance) and opens it.
   The thread receives a pinned meeting reference with the current memo revision.
-- Newly started recordings are queued for one automatic note thread after the
-  session is finalized and its transcript is ready. The queue survives plugin
-  reloads and keeps separate meetings independent; older saved sessions are not
-  backfilled automatically.
+- **Make connected note** is the only way to start a note thread. If the
+  transcript is not final yet, the thread waits for it: the transcript tool
+  refuses missing or partial transcripts.
 - Bundled `watermark`, `workspace-setup`, and `connected-note` skills. BB agent
   tools read a pinned meeting's memo and transcript through its project host,
   then link an existing note in the Workspace Home Source.
