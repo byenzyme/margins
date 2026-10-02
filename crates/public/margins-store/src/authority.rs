@@ -199,10 +199,12 @@ impl SqliteWorkspaceAuthorityStorage {
         if owner != principal_id || hash != digest(producer_token.as_bytes()) {
             bail!("capture producer authorization failed");
         }
+        if state == "abandoned" {
+            bail!("browser capture owner lease expired");
+        }
         // A released producer may repeat its exact final command after losing
         // the response. The runtime receipt decides whether it is an
         // idempotent replay and rejects any new post-finalization mutation.
-        let _ = state;
         Ok(())
     }
 
@@ -412,6 +414,78 @@ impl SqliteWorkspaceAuthorityStorage {
             // released are successful; a stale generation must not release a
             // newer producer.
             self.authorize_producer(session_id, principal_id, producer_token)?;
+        }
+        Ok(())
+    }
+
+    /// Refresh the durable browser owner lease only for the active producer.
+    pub fn touch_producer(
+        &self,
+        session_id: &str,
+        principal_id: &str,
+        producer_token: &str,
+    ) -> Result<()> {
+        let connection = self.connection()?;
+        let changed = connection.execute(
+            "UPDATE workspace_session_producers SET updated_at_ms = ?1 WHERE session_id = ?2 AND principal_id = ?3 AND producer_token_hash = ?4 AND state = 'active'",
+            params![now_ms(), session_id, principal_id, digest(producer_token.as_bytes())],
+        )?;
+        if changed != 1 {
+            bail!("browser capture owner lease is no longer active");
+        }
+        Ok(())
+    }
+
+    /// Claim expired browser producers in the same durable authority row used
+    /// by capture authorization. A claimed row is retried after server restart
+    /// until incomplete finalization releases it.
+    pub fn claim_expired_browser_producers(
+        &self,
+        principal_id: &str,
+        cutoff_ms: i64,
+    ) -> Result<Vec<String>> {
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE workspace_session_producers SET state = 'abandoned' WHERE principal_id = ?1 AND state = 'active' AND updated_at_ms <= ?2 AND session_id LIKE 'browser-%'",
+            params![principal_id, cutoff_ms],
+        )?;
+        let sessions = {
+            let mut statement = tx.prepare(
+                "SELECT session_id FROM workspace_session_producers WHERE principal_id = ?1 AND state = 'abandoned' AND session_id LIKE 'browser-%' ORDER BY updated_at_ms ASC LIMIT 100",
+            )?;
+            let rows = statement
+                .query_map(params![principal_id], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            rows
+        };
+        tx.commit()?;
+        Ok(sessions)
+    }
+
+    pub fn require_abandoned_producer(&self, session_id: &str, principal_id: &str) -> Result<()> {
+        let connection = self.connection()?;
+        let state: Option<String> = connection
+            .query_row(
+                "SELECT state FROM workspace_session_producers WHERE session_id = ?1 AND principal_id = ?2",
+                params![session_id, principal_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if state.as_deref() != Some("abandoned") {
+            bail!("browser capture has no claimed expired owner lease");
+        }
+        Ok(())
+    }
+
+    pub fn release_abandoned_producer(&self, session_id: &str, principal_id: &str) -> Result<()> {
+        let connection = self.connection()?;
+        let changed = connection.execute(
+            "UPDATE workspace_session_producers SET state = 'released', updated_at_ms = ?1 WHERE session_id = ?2 AND principal_id = ?3 AND state = 'abandoned'",
+            params![now_ms(), session_id, principal_id],
+        )?;
+        if changed != 1 {
+            bail!("browser capture expired owner lease was not claimed");
         }
         Ok(())
     }

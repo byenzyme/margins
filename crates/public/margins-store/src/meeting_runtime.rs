@@ -900,6 +900,7 @@ impl SqliteMeetingRuntimeStorage {
             let (extension, artifact_suffix) = match (format.codec, format.container) {
                 (AudioCodecV1::PcmS16Le, AudioContainerV1::Raw) => ("pcm", "pcm"),
                 (AudioCodecV1::Opus, AudioContainerV1::PacketStream) => ("mopus", "opus"),
+                (AudioCodecV1::Opus, AudioContainerV1::Webm) => ("webm", "webm"),
                 _ => anyhow::bail!("finalized remote audio uses an unsupported durable format"),
             };
             let file_name = format!(
@@ -918,7 +919,7 @@ impl SqliteMeetingRuntimeStorage {
                         && chunk.lane_id == boundary.lane_id
                         && chunk.sequence == sequence
                 }) {
-                    delta.audio_chunk.as_ref().unwrap().clone()
+                    Some(delta.audio_chunk.as_ref().unwrap().clone())
                 } else {
                     self.load_audio_chunk(
                         session_id,
@@ -926,12 +927,22 @@ impl SqliteMeetingRuntimeStorage {
                         &boundary.lane_id,
                         sequence,
                     )?
-                    .with_context(|| {
-                        format!(
-                            "finalized lane {} is missing sequence {sequence}",
-                            boundary.lane_id.as_ref()
-                        )
-                    })?
+                };
+                let Some(chunk) = chunk else {
+                    // Incomplete finalization may explicitly declare a lost
+                    // sequence. The runtime has already accepted the gap;
+                    // ordinary missing storage is still a hard error.
+                    if delta.session.discontinuities().any(|gap| {
+                        gap.segment_id == finalized.segment_id
+                            && gap.lane_id == boundary.lane_id
+                            && gap.sequence_range.contains(sequence)
+                    }) {
+                        continue;
+                    }
+                    anyhow::bail!(
+                        "finalized lane {} is missing sequence {sequence}",
+                        boundary.lane_id.as_ref()
+                    );
                 };
                 first_start_ms = Some(
                     first_start_ms
@@ -941,6 +952,9 @@ impl SqliteMeetingRuntimeStorage {
                 byte_count = byte_count
                     .checked_add(chunk.payload.len() as u64)
                     .context("finalized lane byte count overflow")?;
+            }
+            if byte_count == 0 {
+                continue;
             }
             staged.as_file_mut().sync_all()?;
             let frame_count = match (format.codec, format.container) {
@@ -956,7 +970,7 @@ impl SqliteMeetingRuntimeStorage {
                 // MediaRecorder emits one WebM byte stream across its dataavailable
                 // blobs. Preserve those bytes in order; parsing and decoding belong
                 // to the media layer after the durable artifact is committed.
-                (AudioCodecV1::Opus, AudioContainerV1::Webm) => ("webm", "webm", 0),
+                (AudioCodecV1::Opus, AudioContainerV1::Webm) => 0,
                 _ => anyhow::bail!("finalized remote audio uses an unsupported durable format"),
             };
             install_staged_projection(staged, &path)?;
@@ -1252,6 +1266,9 @@ impl MeetingRuntimeStorage for SqliteMeetingRuntimeStorage {
                 )?;
                 next
             };
+            // Runtime chunk timestamps are session-relative. Summing prior
+            // segment durations erases real pause time and shifts later ASR
+            // words ahead of memo observations.
             let offset_ms = projection.offset_ms;
             let representative = projection
                 .lanes
@@ -1261,7 +1278,13 @@ impl MeetingRuntimeStorage for SqliteMeetingRuntimeStorage {
                 .native_wav_path
                 .clone()
                 .unwrap_or_else(|| representative.1.clone());
-            let started_at_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+            let started_at_ms = delta
+                .session
+                .create()
+                .started_at_unix_ms
+                .0
+                .checked_add(u64::try_from(offset_ms).context("negative segment start offset")?)
+                .context("segment wall-clock timestamp overflow")?;
             let started_at =
                 chrono::DateTime::<chrono::Utc>::from_timestamp_millis(started_at_ms as i64)
                     .context("segment timestamp is outside the supported range")?

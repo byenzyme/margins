@@ -1565,7 +1565,20 @@ pub struct WorkspaceSessionSummaryV1 {
     pub input_finalized: bool,
     pub capture_duration_ms: Option<DurationMillis>,
     pub capture_finalize_message_id: Option<MessageId>,
+    /// True when capture finalized with known loss or batch decoding skipped audio.
+    #[serde(default)]
+    pub capture_incomplete: bool,
+    #[serde(default)]
+    pub capture_gaps: Vec<WorkspaceCaptureGapV1>,
     pub processing_state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCaptureGapV1 {
+    pub segment_id: String,
+    pub start_sequence: u64,
+    pub end_exclusive: u64,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -17,7 +17,7 @@ const recordingStateSchema = z.enum([
   "needs_setup", "ready", "getting_ready", "recording", "paused",
   "recovering", "saving", "saved", "recording_elsewhere", "needs_attention", "unavailable",
 ]);
-const primaryActionSchema = z.enum(["start", "pause", "resume", "retry", "none"]);
+const primaryActionSchema = z.enum(["start", "pause", "resume", "retry", "finish_incomplete", "none"]);
 const projectTargetSchema = z.object({
   projectId: z.string().min(1), hostId: z.string().min(1), projectRoot: z.string().min(1),
   workspaceId: z.string().min(1).optional(),
@@ -26,10 +26,14 @@ const notepadSchema = z.object({ text: z.string(), revision: z.string().min(1) }
 const workspaceMeetingSchema = z.object({
   sessionId: z.string().min(1), title: z.string().nullable(),
   startedAt: z.string().min(1), inputFinalized: z.boolean(), notepad: notepadSchema,
+  captureIncomplete: z.boolean().default(false), captureGaps: z.array(z.object({
+    segmentId: z.string(), startSequence: z.number().int().nonnegative(),
+    endExclusive: z.number().int().nonnegative(), reason: z.string(),
+  }).strict()).default([]),
 }).strict();
 export const hostCaptureSnapshotSchema = z.object({
   recordingId: z.string().min(1), sessionId: z.string().min(1), status: z.enum(["recording", "paused", "saving"]),
-  notepad: notepadSchema,
+  notepad: notepadSchema, nextSequence: z.number().int().nonnegative(),
 }).strict();
 const hostErrorSchema = z.object({
   code: z.string().min(1), message: z.string().min(1), retryable: z.boolean(),
@@ -181,16 +185,21 @@ export const marginsHostContract = defineRpcContract({
     output: z.object({ status: z.number().int().min(100).max(599), bodyBase64: z.string().max(4_000_000) }).strict(),
   },
   startBrowserCapture: {
-    input: z.object({ target: projectTargetSchema, ownerId: z.string().min(1), name: z.string().min(1).max(160) }).strict(),
+    input: z.object({ target: projectTargetSchema, ownerId: z.string().min(1), name: z.string().min(1).max(160),
+      startedAtUnixMs: z.number().int().nonnegative().optional() }).strict(),
     output: hostResultSchema,
   },
   readCapture: { input: ownedCaptureInputSchema, output: hostResultSchema },
   heartbeat: { input: ownedCaptureInputSchema, output: hostResultSchema },
-  pause: { input: ownedCaptureInputSchema.extend({ expectedNextSequence: z.number().int().nonnegative() }).strict(), output: hostResultSchema },
-  resume: { input: ownedCaptureInputSchema, output: hostResultSchema },
-  stop: { input: ownedCaptureInputSchema.extend({ expectedNextSequence: z.number().int().nonnegative() }).strict(), output: hostResultSchema },
+  pause: { input: ownedCaptureInputSchema.extend({ expectedNextSequence: z.number().int().nonnegative(),
+    segmentEndedUnixMs: z.number().int().nonnegative().optional(), recoveredAfterReload: z.boolean().optional() }).strict(), output: hostResultSchema },
+  resume: { input: ownedCaptureInputSchema.extend({ segmentStartedUnixMs: z.number().int().nonnegative().optional() }).strict(), output: hostResultSchema },
+  stop: { input: ownedCaptureInputSchema.extend({ expectedNextSequence: z.number().int().nonnegative(),
+    segmentEndedUnixMs: z.number().int().nonnegative().optional() }).strict(), output: hostResultSchema },
+  finishIncomplete: { input: ownedCaptureInputSchema.extend({ expectedNextSequence: z.number().int().nonnegative() }).strict(), output: hostResultSchema },
   uploadChunk: {
-    input: ownedCaptureInputSchema.extend({ sequence: z.number().int().nonnegative(), bytesBase64: z.string() }).strict(),
+    input: ownedCaptureInputSchema.extend({ sequence: z.number().int().nonnegative(), bytesBase64: z.string(),
+      capturedStartUnixMs: z.number().int().nonnegative(), capturedEndUnixMs: z.number().int().nonnegative() }).strict(),
     output: z.object({ ok: z.boolean(), error: hostErrorSchema.optional() }).strict(),
   },
   connectedNoteContext: {
@@ -223,6 +232,7 @@ const panelStateSchema = z.object({
   canStop: z.boolean(), canEditNotepad: z.boolean(), ownsRecording: z.boolean(),
   recordingId: z.string().nullable(), sessionId: z.string().nullable(), notepad: notepadSchema.nullable(),
   lastSessionId: z.string().nullable(),
+  nextSequence: z.number().int().nonnegative().optional(),
   error: hostErrorSchema.nullable(),
 }).strict();
 
@@ -260,7 +270,8 @@ export const marginsRpcContract = defineRpcContract({
   },
   beginProjectCapture: {
     input: z.object({ projectId: z.string().min(1), client: clientCapabilitiesSchema,
-      ownerId: z.string().min(1), title: z.string().trim().max(160).optional() }).strict(),
+      ownerId: z.string().min(1), title: z.string().trim().max(160).optional(),
+      startedAtUnixMs: z.number().int().nonnegative().optional() }).strict(),
     output: panelStateSchema,
   },
   listWorkspaceMeetings: {
@@ -325,9 +336,13 @@ export const marginsRpcContract = defineRpcContract({
     ]),
   },
   heartbeat: { input: captureClientInputSchema, output: panelStateSchema },
-  pause: { input: captureClientInputSchema.extend({ expectedNextSequence: z.number().int().nonnegative() }).strict(), output: panelStateSchema },
-  resume: { input: captureClientInputSchema, output: panelStateSchema },
-  stop: { input: captureClientInputSchema.extend({ expectedNextSequence: z.number().int().nonnegative() }).strict(), output: panelStateSchema },
+  readCapture: { input: captureClientInputSchema, output: panelStateSchema },
+  pause: { input: captureClientInputSchema.extend({ expectedNextSequence: z.number().int().nonnegative(),
+    segmentEndedUnixMs: z.number().int().nonnegative().optional(), recoveredAfterReload: z.boolean().optional() }).strict(), output: panelStateSchema },
+  resume: { input: captureClientInputSchema.extend({ segmentStartedUnixMs: z.number().int().nonnegative().optional() }).strict(), output: panelStateSchema },
+  stop: { input: captureClientInputSchema.extend({ expectedNextSequence: z.number().int().nonnegative(),
+    segmentEndedUnixMs: z.number().int().nonnegative().optional() }).strict(), output: panelStateSchema },
+  finishIncomplete: { input: captureClientInputSchema.extend({ expectedNextSequence: z.number().int().nonnegative() }).strict(), output: panelStateSchema },
   connectedNoteContext: {
     input: z.object({ threadId: z.string().min(1).optional(), projectId: z.string().min(1).optional(), sessionId: z.string().min(1) }).strict(),
     output: connectedNoteResultSchema,

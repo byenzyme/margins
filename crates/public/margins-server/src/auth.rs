@@ -179,47 +179,6 @@ pub fn is_valid_token(token: &str) -> bool {
     token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-// ---------------------------------------------------------------------------
-// Axum extractor / layer helper
-// ---------------------------------------------------------------------------
-
-use axum::{
-    extract::{Request, State},
-    http::{HeaderMap, StatusCode},
-    middleware::Next,
-    response::{IntoResponse, Response},
-};
-
-#[derive(Clone)]
-pub struct AuthToken(pub String);
-
-/// Axum middleware: require `Authorization: Bearer <token>` for any request.
-/// Paths outside /api/* and /ws/* are handled by separate routers that do NOT
-/// apply this middleware.
-pub async fn require_bearer(
-    State(AuthToken(expected)): State<AuthToken>,
-    headers: HeaderMap,
-    request: Request,
-    next: Next,
-) -> Response {
-    if let Some(auth) = headers.get("Authorization") {
-        if let Ok(val) = auth.to_str() {
-            if val == format!("Bearer {}", expected) {
-                return next.run(request).await;
-            }
-        }
-    }
-    (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
-}
-
-/// Check a `?token=` query parameter — used by the WebSocket upgrade path.
-pub fn check_query_token(query: Option<&str>, expected: &str) -> bool {
-    query
-        .unwrap_or("")
-        .split('&')
-        .any(|kv| kv == format!("token={}", expected))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

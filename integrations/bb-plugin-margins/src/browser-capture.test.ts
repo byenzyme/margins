@@ -421,6 +421,109 @@ describe("browser capture ownership", () => {
     expect(sessionStorage.getItem("margins.bb.capture.v1")).toBeNull();
   });
 
+  it("rotates the server segment and resumes at its durable cursor after a lost ACK and reload", async () => {
+    sessionStorage.setItem("margins.bb.capture.v1", JSON.stringify({ sessionId: "rec-1",
+      startedAtMs: 1_000, nextSequence: 0, expectedNextSequence: 1, paused: false }));
+    const order: string[] = [];
+    const stream = { getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream;
+    const recorder = { ondataavailable: null, onstop: null, start: vi.fn(), stop: vi.fn(),
+      pause: vi.fn(), resume: vi.fn() } as unknown as MediaRecorder;
+    const fetchMock = vi.fn(async (_url: string, options: RequestInit) => {
+      const chunk = JSON.parse(String(options.body)) as { sequence: number; capturedStartUnixMs: number; capturedEndUnixMs: number };
+      order.push(`upload-${chunk.sequence}`);
+      expect(chunk.capturedEndUnixMs).toBeGreaterThanOrEqual(chunk.capturedStartUnixMs);
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const rpc: BrowserCaptureDependencies["rpc"] = async (_plugin, method, input) => {
+      order.push(method);
+      if (method === "readCapture") return state({ nextSequence: 1 }) as never;
+      if (method === "pause") {
+        expect(input).toMatchObject({ expectedNextSequence: 1, segmentEndedUnixMs: expect.any(Number), recoveredAfterReload: true });
+        return state({ state: "paused", nextSequence: 1 }) as never;
+      }
+      if (method === "resume") {
+        expect(input).toMatchObject({ segmentStartedUnixMs: expect.any(Number) });
+        return state({ nextSequence: 1 }) as never;
+      }
+      return state({ nextSequence: 1 }) as never;
+    };
+    const owner = new BrowserCaptureOwner({ rpc, acquireMicrophone: async () => stream,
+      createRecorder: () => recorder,
+      supportsMime: () => false, heartbeatMs: 100_000, disconnectGraceMs: 100_000 });
+    owner.install({ pluginId: "margins" } as never);
+    await vi.waitFor(() => expect(owner.active).toBe(true));
+    expect(order.slice(0, 3)).toEqual(["readCapture", "pause", "resume"]);
+    expect(recorder.start).toHaveBeenCalledOnce();
+    recorder.ondataavailable?.({ data: new Blob(["fresh-webm"]) } as BlobEvent);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    expect(order).toContain("upload-1");
+    expect(JSON.parse(sessionStorage.getItem("margins.bb.capture.v1")!)).toMatchObject({
+      nextSequence: 2, expectedNextSequence: 2,
+    });
+  });
+
+  it("offers incomplete finish instead of reusing a missing Blob's sequence after reload", async () => {
+    sessionStorage.setItem("margins.bb.capture.v1", JSON.stringify({ sessionId: "rec-1",
+      startedAtMs: 1_000, nextSequence: 0, expectedNextSequence: 1, paused: false }));
+    const acquireMicrophone = vi.fn();
+    const calls: string[] = [];
+    const rpc: BrowserCaptureDependencies["rpc"] = async (_plugin, method, input) => {
+      calls.push(method);
+      if (method === "readCapture") return state({ nextSequence: 0 }) as never;
+      if (method === "finishIncomplete") {
+        expect(input).toMatchObject({ expectedNextSequence: 1 });
+        return state({ state: "saved", error: null, recordingId: null, ownsRecording: false }) as never;
+      }
+      return state({}) as never;
+    };
+    const owner = new BrowserCaptureOwner({ rpc, acquireMicrophone,
+      createRecorder: () => { throw new Error("recorder must not restart"); },
+      supportsMime: () => false, heartbeatMs: 100_000, disconnectGraceMs: 100_000 });
+    owner.install({ pluginId: "margins" } as never);
+    await vi.waitFor(() => expect(owner.canFinishIncomplete).toBe(true));
+    expect(owner.panel()).toMatchObject({ state: "needs_attention",
+      primaryAction: "finish_incomplete", primaryLabel: "Finish with what was saved" });
+    expect(acquireMicrophone).not.toHaveBeenCalled();
+    expect(calls).toEqual(["readCapture"]);
+    await expect(owner.finishIncomplete()).resolves.toMatchObject({ state: "saved", error: null });
+    expect(calls).toEqual(["readCapture", "finishIncomplete"]);
+    expect(sessionStorage.getItem("margins.bb.capture.v1")).toBeNull();
+  });
+
+  it("reconciles a pending Stop after the server lease already saved the session", async () => {
+    const rpc: BrowserCaptureDependencies["rpc"] = async (_plugin, method) => {
+      if (method === "beginProjectCapture") return state({}) as never;
+      if (method === "stop") return state({ state: "needs_attention",
+        error: { code: "session_not_owned", message: "The capture owner was released", retryable: false } }) as never;
+      if (method === "getProjectPanelState") return state({ state: "saved", recordingId: null,
+        ownsRecording: false, lastSessionId: "rec-1" }) as never;
+      return state({}) as never;
+    };
+    const { owner } = controllerFixture(rpc, function () { this.onstop?.(new Event("stop")); });
+    await owner.startFromProject("proj-1");
+    await expect(owner.stop()).resolves.toMatchObject({ state: "saved", lastSessionId: "rec-1" });
+    expect(sessionStorage.getItem("margins.bb.capture.v1")).toBeNull();
+  });
+
+  it("reconciles incomplete Finish after the server lease finalized first", async () => {
+    const rpc: BrowserCaptureDependencies["rpc"] = async (_plugin, method) => {
+      if (method === "beginProjectCapture") return state({}) as never;
+      if (method === "stop") return state({ state: "needs_attention",
+        error: { code: "browser_audio_empty", message: "Recording has no durable audio chunk", retryable: true } }) as never;
+      if (method === "finishIncomplete") return state({ state: "needs_attention",
+        error: { code: "session_not_owned", message: "The capture owner was released", retryable: false } }) as never;
+      if (method === "getProjectPanelState") return state({ state: "saved", recordingId: null,
+        ownsRecording: false, lastSessionId: "rec-1" }) as never;
+      return state({}) as never;
+    };
+    const { owner } = controllerFixture(rpc, function () { this.onstop?.(new Event("stop")); });
+    await owner.startFromProject("proj-1");
+    await expect(owner.stop()).resolves.toMatchObject({ state: "needs_attention", primaryAction: "finish_incomplete" });
+    await expect(owner.finishIncomplete()).resolves.toMatchObject({ state: "saved", lastSessionId: "rec-1" });
+    expect(sessionStorage.getItem("margins.bb.capture.v1")).toBeNull();
+  });
+
   it("does not report saved or discard recovery identity after a failed final upload", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: false, error: "disk full" }), {
       status: 502,

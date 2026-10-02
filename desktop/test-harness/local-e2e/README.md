@@ -1,5 +1,11 @@
 # Margins local e2e harness (headless Linux VPS)
 
+**Parked desktop harness.** `run.sh` still builds the retired
+`desktop/src-tauri` server, and `distill-fixture.mjs` calls the retired
+`/api/invoke` routes. Neither script tests the shipped standalone
+`margins-server`; use `integrations/bb-plugin-margins/test-harness/no-llm.mjs`
+for the current BB plugin and server E2E lane.
+
 Drive the **real** Margins app on a headless Linux box — real Rust backend, real
 on-disk workspace, real distillation — with no macOS and no native Tauri GUI.
 

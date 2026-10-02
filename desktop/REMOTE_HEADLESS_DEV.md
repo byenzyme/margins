@@ -1,5 +1,9 @@
 # Remote / headless desktop development
 
+**Parked desktop workflow.** This document describes the former Tauri hosted-web
+server and `/api/invoke` frontend. The shipped BB plugin and standalone server
+use `integrations/bb-plugin-margins/test-harness/no-llm.mjs` for headless E2E.
+
 **Source of truth for running and driving Margins on a non-macOS / headless
 remote (VPS).** The native Tauri app can't run here (no macOS WebView; Tauri
 won't compile on Linux without GTK/WebKit), so we run the **`margins-server`**

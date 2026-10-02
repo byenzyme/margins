@@ -11,7 +11,7 @@ use margins_workflows::{
     alignment::{interleave_timeline, parse_timed_memo_lines, TimelineEvent},
     remote_workspace::{remote_opus_packet_stream_for_asr, remote_pcm_s16le_for_asr},
     transcript_view::transcript_artifact_path,
-    workspace_service::{ServicePrincipal, WorkspaceService},
+    workspace_service::{LegacyBrowserAudioFormat, ServicePrincipal, WorkspaceService},
 };
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -378,10 +378,6 @@ fn transcribe_remote_session(
     session_id: &SessionId,
     backend: &dyn AsrBackend,
 ) -> Result<String> {
-    let record = service
-        .repository_record(principal, session_id)?
-        .context("finalized session has no canonical repository record")?;
-    let artifacts = service.artifacts(principal, session_id.as_ref())?;
     let mut entries = Vec::new();
     let mut decoded_audio = false;
     let mut channel_labels = BTreeMap::from([
@@ -389,70 +385,34 @@ fn transcribe_remote_session(
         (1, "them (system)".to_string()),
     ]);
     let mut other_channels = HashMap::<String, u32>::new();
-    for artifact in artifacts {
-        let Some(kind) = artifact.kind.strip_prefix("audio_") else {
-            continue;
-        };
-        let (lane_id, codec, container) = if let Some(lane) = kind.strip_suffix("_pcm") {
-            (lane, AudioCodecV1::PcmS16Le, AudioContainerV1::Raw)
-        } else if let Some(lane) = kind.strip_suffix("_opus") {
-            (lane, AudioCodecV1::Opus, AudioContainerV1::PacketStream)
-        } else if let Some(lane) = kind.strip_suffix("_webm") {
-            (lane, AudioCodecV1::Opus, AudioContainerV1::Webm)
-        } else {
-            continue;
-        };
-        let format = service.capture_lane_format(session_id, lane_id)?;
-        if format.codec != codec || format.container != container || format.channel_count != 1 {
-            bail!("remote ASR artifact kind conflicts with declared lane format");
+    if let Some(source) = service.legacy_browser_audio_source(principal, session_id)? {
+        if source.format == LegacyBrowserAudioFormat::Webm {
+            // The old browser recorder had no durable sequence watermark. A
+            // retained upload may be the only surviving prefix after a crash.
+            service.record_processing_gap(
+                session_id,
+                "legacy-browser",
+                0,
+                0,
+                "legacy_unverified_upload",
+            )?;
         }
-        let segment = record
-            .segments
-            .iter()
-            .find(|segment| segment.ordinal == artifact.ordinal.max(0) as u64)
-            .context("audio artifact has no matching segment timeline")?;
-        let bytes = service.artifact_content(principal, artifact.artifact_id.as_ref())?;
-        let mono_16k = match (codec, container) {
-            (AudioCodecV1::PcmS16Le, AudioContainerV1::Raw) => {
-                remote_pcm_s16le_for_asr(&bytes, format.sample_rate_hz)?
-            }
-            (AudioCodecV1::Opus, AudioContainerV1::PacketStream)
-                if format.sample_rate_hz == 16_000 =>
-            {
-                remote_opus_packet_stream_for_asr(&bytes)?
-            }
-            (AudioCodecV1::Opus, AudioContainerV1::Webm) if format.sample_rate_hz == 48_000 => {
+        let mono_16k = match source.format {
+            LegacyBrowserAudioFormat::Webm => {
+                let bytes = std::fs::read(&source.path)?;
                 crate::webm::decode_webm_opus_to_mono_16k(&bytes).map_err(anyhow::Error::msg)?
             }
-            _ => bail!("remote ASR lane uses an unsupported durable audio format"),
+            LegacyBrowserAudioFormat::Wav => margins_media::audio::mono_16k_from_wav(&source.path)?,
         };
-        if mono_16k.is_empty() {
-            continue;
-        }
+        anyhow::ensure!(
+            !mono_16k.is_empty(),
+            "legacy browser audio has no decodable samples"
+        );
         decoded_audio = true;
-        let channel = match lane_id {
-            "mic" => 0,
-            "system" => 1,
-            _ => match other_channels.get(lane_id) {
-                Some(channel) => *channel,
-                None => {
-                    let channel = 2 + other_channels.len() as u32;
-                    other_channels.insert(lane_id.to_string(), channel);
-                    channel
-                }
-            },
-        };
-        channel_labels
-            .entry(channel)
-            .or_insert_with(|| match lane_id {
-                "mic" => "you (mic)".into(),
-                "system" => "them (system)".into(),
-                _ => lane_id.to_string(),
-            });
         let result = backend.transcribe(AsrRequest {
             samples: mono_16k,
             sample_rate_hz: 16_000,
-            session_offset_ms: segment.start_offset_ms,
+            session_offset_ms: source.offset_ms,
             language: None,
         })?;
         entries.extend(
@@ -461,15 +421,119 @@ fn transcribe_remote_session(
                 .into_iter()
                 .filter(|word| !word.text.trim().is_empty())
                 .map(|word| TranscriptWordEntry {
-                    channel,
+                    channel: 0,
                     start_ms: word.start_ms,
                     end_ms: word.end_ms,
                     text: word.text,
                 }),
         );
+    } else {
+        let record = service
+            .repository_record(principal, session_id)?
+            .context("finalized session has no canonical repository record")?;
+        let artifacts = service.artifacts(principal, session_id.as_ref())?;
+        for artifact in artifacts {
+            let Some(kind) = artifact.kind.strip_prefix("audio_") else {
+                continue;
+            };
+            let (lane_id, codec, container) = if let Some(lane) = kind.strip_suffix("_pcm") {
+                (lane, AudioCodecV1::PcmS16Le, AudioContainerV1::Raw)
+            } else if let Some(lane) = kind.strip_suffix("_opus") {
+                (lane, AudioCodecV1::Opus, AudioContainerV1::PacketStream)
+            } else if let Some(lane) = kind.strip_suffix("_webm") {
+                (lane, AudioCodecV1::Opus, AudioContainerV1::Webm)
+            } else {
+                continue;
+            };
+            let format = service.capture_lane_format(session_id, lane_id)?;
+            if format.codec != codec || format.container != container || format.channel_count != 1 {
+                bail!("remote ASR artifact kind conflicts with declared lane format");
+            }
+            let segment = record
+                .segments
+                .iter()
+                .find(|segment| segment.ordinal == artifact.ordinal.max(0) as u64)
+                .context("audio artifact has no matching segment timeline")?;
+            let bytes = service.artifact_content(principal, artifact.artifact_id.as_ref())?;
+            let mono_16k = match (codec, container) {
+                (AudioCodecV1::PcmS16Le, AudioContainerV1::Raw) => {
+                    remote_pcm_s16le_for_asr(&bytes, format.sample_rate_hz)?
+                }
+                (AudioCodecV1::Opus, AudioContainerV1::PacketStream)
+                    if format.sample_rate_hz == 16_000 =>
+                {
+                    remote_opus_packet_stream_for_asr(&bytes)?
+                }
+                (AudioCodecV1::Opus, AudioContainerV1::Webm) if format.sample_rate_hz == 48_000 => {
+                    match crate::webm::decode_webm_opus_to_mono_16k(&bytes) {
+                        Ok(samples) if !samples.is_empty() => samples,
+                        Ok(_) | Err(_) => {
+                            let end_exclusive = service
+                                .capture_segment_sequence_boundary(
+                                    session_id,
+                                    segment.id.as_ref(),
+                                    lane_id,
+                                )?
+                                .unwrap_or(0);
+                            service.record_processing_gap(
+                                session_id,
+                                segment.id.as_ref(),
+                                0,
+                                end_exclusive,
+                                "undecodable_webm",
+                            )?;
+                            continue;
+                        }
+                    }
+                }
+                _ => bail!("remote ASR lane uses an unsupported durable audio format"),
+            };
+            if mono_16k.is_empty() {
+                continue;
+            }
+            decoded_audio = true;
+            let channel = match lane_id {
+                "mic" => 0,
+                "system" => 1,
+                _ => match other_channels.get(lane_id) {
+                    Some(channel) => *channel,
+                    None => {
+                        let channel = 2 + other_channels.len() as u32;
+                        other_channels.insert(lane_id.to_string(), channel);
+                        channel
+                    }
+                },
+            };
+            channel_labels
+                .entry(channel)
+                .or_insert_with(|| match lane_id {
+                    "mic" => "you (mic)".into(),
+                    "system" => "them (system)".into(),
+                    _ => lane_id.to_string(),
+                });
+            let result = backend.transcribe(AsrRequest {
+                samples: mono_16k,
+                sample_rate_hz: 16_000,
+                session_offset_ms: segment.start_offset_ms,
+                language: None,
+            })?;
+            entries.extend(
+                result
+                    .words
+                    .into_iter()
+                    .filter(|word| !word.text.trim().is_empty())
+                    .map(|word| TranscriptWordEntry {
+                        channel,
+                        start_ms: word.start_ms,
+                        end_ms: word.end_ms,
+                        text: word.text,
+                    }),
+            );
+        }
     }
+    let summary = service.session(principal, session_id)?;
     anyhow::ensure!(
-        decoded_audio,
+        decoded_audio || summary.capture_incomplete,
         "finalized session has no decodable audio artifacts"
     );
     entries.sort_by_key(|entry| (entry.start_ms, entry.channel));
@@ -487,8 +551,32 @@ fn transcribe_remote_session(
         .collect::<Vec<_>>()
         .join("\n");
     let timeline = render_remote_timeline(&entries, &channel_labels, &memo_text);
+    let incomplete_notice = if summary.capture_incomplete {
+        let details = summary
+            .capture_gaps
+            .iter()
+            .map(|gap| {
+                if gap.start_sequence < gap.end_exclusive {
+                    format!(
+                        "{} chunks {}..{} ({})",
+                        gap.segment_id, gap.start_sequence, gap.end_exclusive, gap.reason
+                    )
+                } else {
+                    format!("{} ({})", gap.segment_id, gap.reason)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        if details.is_empty() {
+            "**Incomplete recording:** Some audio was not saved. Transcript covers the audio that survived.\n\n".to_string()
+        } else {
+            format!("**Incomplete recording:** Some audio was not saved or could not be decoded ({details}). Transcript covers the audio that survived.\n\n")
+        }
+    } else {
+        String::new()
+    };
     let content = format!(
-        "# Transcript\n\nSession: `{}`\nSource: Margins remote offline speech transcript and memo context.\nTranscript source: `offline`\n\n## Timeline\n\n{}\n",
+        "# Transcript\n\n{incomplete_notice}Session: `{}`\nSource: Margins remote offline speech transcript and memo context.\nTranscript source: `offline`\n\n## Timeline\n\n{}\n",
         session_id.as_ref(),
         if timeline.is_empty() { "_No timestamped transcript or memo entries were available._" } else { &timeline },
     );

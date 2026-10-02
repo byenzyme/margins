@@ -18,7 +18,12 @@ use margins_workflows::{
     workspace,
     workspace_service::{ScopedCredentialStore, ServicePrincipal, WorkspaceService},
 };
-use std::{io::Write as _, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{
+    io::Write as _,
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+    sync::Arc,
+};
 
 fn selected_workspace(
     margins_home: &std::path::Path,
@@ -68,10 +73,7 @@ async fn run_async() -> anyhow::Result<()> {
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(8787);
     let host = std::env::var("MARGINS_HOST").unwrap_or_else(|_| "127.0.0.1".into());
-    anyhow::ensure!(
-        matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1"),
-        "margins-server only binds loopback"
-    );
+    let listen_addr = loopback_socket_addr(&host, port)?;
     let data_dir = std::env::var("MARGINS_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
@@ -134,8 +136,7 @@ async fn run_async() -> anyhow::Result<()> {
         asr_setup,
         remote_asr_jobs,
     };
-    let listener =
-        tokio::net::TcpListener::bind(format!("{host}:{port}").parse::<SocketAddr>()?).await?;
+    let listener = tokio::net::TcpListener::bind(listen_addr).await?;
     let service_state = ServiceStateV1 {
         schema: "margins.service-state.v1".into(),
         protocol_version: 1,
@@ -154,6 +155,29 @@ async fn run_async() -> anyhow::Result<()> {
     drop(file);
     std::fs::rename(&temporary_path, &state_path)?;
     std::fs::File::open(&data_dir)?.sync_all()?;
+    let sweeper_state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            let state = sweeper_state.clone();
+            match tokio::task::spawn_blocking(move || {
+                let observed = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                browser::sweep_expired_browser_captures(&state, observed)
+            })
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => eprintln!("[margins-server] browser lease sweep: {error:#}"),
+                Err(error) => eprintln!("[margins-server] browser lease worker: {error}"),
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(
+                browser::BROWSER_OWNER_SWEEP_INTERVAL_SECS,
+            ))
+            .await;
+        }
+    });
     let app = http::build_router(state);
     eprintln!(
         "[margins-server] listening on http://{}",
@@ -163,9 +187,36 @@ async fn run_async() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn loopback_socket_addr(host: &str, port: u16) -> anyhow::Result<SocketAddr> {
+    let ip = match host {
+        "127.0.0.1" | "localhost" => IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        "::1" => IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+        _ => anyhow::bail!("margins-server only binds loopback"),
+    };
+    Ok(SocketAddr::new(ip, port))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loopback_host_spellings_resolve_to_socket_addresses() {
+        assert_eq!(
+            loopback_socket_addr("127.0.0.1", 8787).unwrap().to_string(),
+            "127.0.0.1:8787"
+        );
+        assert_eq!(
+            loopback_socket_addr("localhost", 8787).unwrap().to_string(),
+            "127.0.0.1:8787"
+        );
+        assert_eq!(
+            loopback_socket_addr("::1", 8787).unwrap().to_string(),
+            "[::1]:8787"
+        );
+        assert!(loopback_socket_addr("0.0.0.0", 8787).is_err());
+        assert!(loopback_socket_addr("localhost.example", 8787).is_err());
+    }
 
     #[test]
     fn bb_launch_uses_existing_workspace_bindings_instead_of_launcher_directory() {
@@ -180,6 +231,9 @@ mod tests {
         workspace::ensure_service_workspace(&home, "practice", None, &notes, &captures).unwrap();
         let selected = selected_workspace(&home, "practice", &launcher, true).unwrap();
         assert_eq!(selected.home_dir, notes.canonicalize().unwrap());
-        assert_eq!(selected.capture_store_dir().unwrap(), captures.canonicalize().unwrap());
+        assert_eq!(
+            selected.capture_store_dir().unwrap(),
+            captures.canonicalize().unwrap()
+        );
     }
 }

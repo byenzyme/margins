@@ -26,6 +26,10 @@ export const workspaceSessionSummarySchema = z.strictObject({
   capture_lanes: z.array(captureLaneSchema), segment_count: z.number().int().nonnegative(),
   input_finalized: z.boolean(), capture_duration_ms: z.number().int().nonnegative().nullable(),
   capture_finalize_message_id: z.string().nullable(), processing_state: z.string(),
+  capture_incomplete: z.boolean().default(false), capture_gaps: z.array(z.strictObject({
+    segment_id: z.string(), start_sequence: z.number().int().nonnegative(),
+    end_exclusive: z.number().int().nonnegative(), reason: z.string(),
+  })).default([]),
 });
 export const workspaceSessionPageSchema = z.strictObject({
   sessions: z.array(workspaceSessionSummarySchema), next_cursor: z.string().nullable(),
@@ -113,13 +117,16 @@ async function verifyServerCompatibility(baseUrl: string, token: string, workspa
   const response = await fetch(`${baseUrl}/v1/capabilities`, {
     signal, headers: { authorization: `Bearer ${token}` },
   });
-  const envelope = await response.json() as {
+  const envelope = await response.json().catch(() => null) as {
     ok?: boolean;
     result?: { workspace_id?: string; instance_id?: string; protocol_version?: number; capture_protocol_version?: number };
     error?: { message?: string };
-  };
-  if (!response.ok || !envelope.ok) {
-    throw new Error(envelope.error?.message || `Margins capability check failed (${response.status})`);
+  } | null;
+  if (response.status === 404 || (response.ok && !envelope?.ok)) {
+    throw new Error("Margins server version doesn't match this plugin; upgrade both");
+  }
+  if (!response.ok || !envelope?.ok) {
+    throw new Error(envelope?.error?.message || `Margins capability check failed (${response.status})`);
   }
   if (envelope.result?.protocol_version !== 1 || envelope.result.capture_protocol_version !== CAPTURE_PROTOCOL_VERSION) {
     throw new Error("Margins server version doesn't match this plugin; upgrade both");
@@ -361,12 +368,10 @@ export class ProjectServerManager {
       child.kill("SIGTERM");
       throw error;
     });
-    if (asrRuntime) {
-      await verifyServerCompatibility(baseUrl, token, workspaceId, signal).catch((error) => {
-        child.kill("SIGTERM");
-        throw error;
-      });
-    }
+    await verifyServerCompatibility(baseUrl, token, workspaceId, signal).catch((error) => {
+      child.kill("SIGTERM");
+      throw error;
+    });
     child.once("exit", () => this.handles.delete(key));
     return { baseUrl, token, workspaceId, instanceId: `bb-host-${target.hostId}`, child };
   }
@@ -411,6 +416,10 @@ export class ProjectMarginsTransport {
           ? "Microphone + computer audio" : summary.segment_count === 0 ? null : "Microphone";
         return { sessionId: summary.session_id, title: summary.title, startedAt: summary.started_at,
           inputFinalized: summary.input_finalized, durationMs: summary.capture_duration_ms ?? null, audioSource,
+          captureIncomplete: summary.capture_incomplete ?? false, captureGaps: (summary.capture_gaps ?? []).map((gap) => ({
+            segmentId: gap.segment_id, startSequence: gap.start_sequence,
+            endExclusive: gap.end_exclusive, reason: gap.reason,
+          })),
           notePath: note?.relative_path || null,
           noteFile: noteFilePath ? { hostId: target.hostId, path: noteFilePath } : null,
           threadIds: note?.bb_thread_ids || [], distilledMemoRevision: note?.distilled_memo_revision || null };
@@ -444,7 +453,9 @@ export class ProjectMarginsTransport {
       ]);
       return { ok: true as const, candidates, meeting: {
         sessionId: summary.session_id, title: summary.title, startedAt: summary.started_at,
-        inputFinalized: summary.input_finalized,
+        inputFinalized: summary.input_finalized, captureIncomplete: summary.capture_incomplete ?? false,
+        captureGaps: (summary.capture_gaps ?? []).map((gap) => ({ segmentId: gap.segment_id,
+          startSequence: gap.start_sequence, endExclusive: gap.end_exclusive, reason: gap.reason })),
         notepad: { revision: memo.revision, text: memo.lines.map((line) => line.text).join("\n") },
       } };
     } catch (cause) {
@@ -664,9 +675,10 @@ export class ProjectMarginsTransport {
     }
   }
 
-  start(target: ProjectTarget, dataDir: string, ownerId: string, name: string) {
+  start(target: ProjectTarget, dataDir: string, ownerId: string, name: string, startedAtUnixMs?: number) {
     return this.withHandle(target, dataDir, async (handle) => {
-      const snapshot = await this.request<HostCaptureSnapshot>(handle, "browser/sessions", "POST", { name, ownerId });
+      const snapshot = await this.request<HostCaptureSnapshot>(handle, "browser/sessions", "POST", { name, ownerId,
+        ...(startedAtUnixMs !== undefined ? { startedAtUnixMs } : {}) });
       return snapshot;
     });
   }
@@ -675,22 +687,35 @@ export class ProjectMarginsTransport {
     return this.withHandle(target, dataDir, (handle) => this.snapshot(handle, recordingId, ownerId));
   }
 
-  mutate(target: ProjectTarget, dataDir: string, recordingId: string, ownerId: string, command: "heartbeat_web_recording" | "pause_recording" | "resume_recording", expectedNextSequence?: number) {
+  mutate(target: ProjectTarget, dataDir: string, recordingId: string, ownerId: string, command: "heartbeat_web_recording" | "pause_recording" | "resume_recording", expectedNextSequence?: number, segmentTimeUnixMs?: number, recoveredAfterReload?: boolean) {
     return this.withHandle(target, dataDir, async (handle) => {
       const action = command === "heartbeat_web_recording" ? "heartbeat" : command === "pause_recording" ? "pause" : "resume";
       return this.request<HostCaptureSnapshot>(handle, `browser/sessions/${recordingId}/${action}`, "POST",
-        command === "pause_recording" ? { ownerId, expectedNextSequence } : { ownerId });
+        command === "pause_recording" ? { ownerId, expectedNextSequence,
+          ...(segmentTimeUnixMs !== undefined ? { segmentEndedUnixMs: segmentTimeUnixMs } : {}),
+          ...(recoveredAfterReload ? { recoveredAfterReload: true } : {}) }
+          : command === "resume_recording" && segmentTimeUnixMs !== undefined
+            ? { ownerId, segmentStartedUnixMs: segmentTimeUnixMs } : { ownerId });
     });
   }
 
-  stop(target: ProjectTarget, dataDir: string, recordingId: string, ownerId: string, expectedNextSequence: number) {
+  stop(target: ProjectTarget, dataDir: string, recordingId: string, ownerId: string, expectedNextSequence: number, segmentEndedUnixMs?: number) {
     return this.withHandle(target, dataDir, async (handle) => {
-      await this.request(handle, `browser/sessions/${recordingId}/stop`, "POST", { ownerId, expectedNextSequence });
+      await this.request(handle, `browser/sessions/${recordingId}/stop`, "POST", { ownerId, expectedNextSequence,
+        ...(segmentEndedUnixMs !== undefined ? { segmentEndedUnixMs } : {}) });
       return null;
     });
   }
 
-  async upload(target: ProjectTarget, dataDir: string, recordingId: string, ownerId: string, sequence: number, bytesBase64: string) {
+  finishIncomplete(target: ProjectTarget, dataDir: string, recordingId: string, ownerId: string, expectedNextSequence: number) {
+    return this.withHandle(target, dataDir, async (handle) => {
+      await this.request(handle, `browser/sessions/${recordingId}/finish-incomplete`, "POST", { ownerId, expectedNextSequence });
+      return null;
+    });
+  }
+
+  async upload(target: ProjectTarget, dataDir: string, recordingId: string, ownerId: string, sequence: number, bytesBase64: string,
+    capturedStartUnixMs: number, capturedEndUnixMs: number) {
     try {
       const handle = await this.manager.ensure(target, dataDir);
       const response = await fetch(`${handle.baseUrl}/v1/workspaces/${handle.workspaceId}/browser/sessions/${recordingId}/chunks/${sequence}`, {
@@ -700,6 +725,8 @@ export class ProjectMarginsTransport {
           "content-type": "application/octet-stream",
           "x-margins-capture-owner": ownerId,
           "X-Margins-Instance-Id": handle.instanceId,
+          "X-Margins-Captured-Start-Unix-Ms": String(capturedStartUnixMs),
+          "X-Margins-Captured-End-Unix-Ms": String(capturedEndUnixMs),
         },
         body: Buffer.from(bytesBase64, "base64"),
       });

@@ -138,6 +138,10 @@ pub fn build_router(state: ServerState) -> Router {
             post(crate::browser::stop),
         )
         .route(
+            "/v1/workspaces/:workspace/browser/sessions/:recording/finish-incomplete",
+            post(crate::browser::finish_incomplete),
+        )
+        .route(
             "/v1/workspaces/:workspace/browser/sessions/:recording/chunks/:sequence",
             put(crate::browser::chunk).layer(DefaultBodyLimit::max(
                 margins_workflows::workspace_service::DEFAULT_MAX_CHUNK_BYTES as usize,

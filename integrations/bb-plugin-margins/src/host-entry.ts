@@ -98,7 +98,8 @@ export function createMarginsHostEntry(transport: Transport) {
       },
       async startBrowserCapture(input, context) {
         retain(context);
-        const result = await transport.start(input.target, context.experimental_paths.dataDir, input.ownerId, input.name);
+        const result = await transport.start(input.target, context.experimental_paths.dataDir, input.ownerId,
+          input.name, input.startedAtUnixMs);
         await changed(context, input.target.projectId, "start", result);
         return result;
       },
@@ -112,25 +113,36 @@ export function createMarginsHostEntry(transport: Transport) {
       },
       async pause(input, context) {
         retain(context);
-        const result = await transport.mutate(input.target, context.experimental_paths.dataDir, input.recordingId, input.ownerId, "pause_recording", input.expectedNextSequence);
+        const result = await transport.mutate(input.target, context.experimental_paths.dataDir, input.recordingId,
+          input.ownerId, "pause_recording", input.expectedNextSequence, input.segmentEndedUnixMs, input.recoveredAfterReload);
         await changed(context, input.target.projectId, "pause", result);
         return result;
       },
       async resume(input, context) {
         retain(context);
-        const result = await transport.mutate(input.target, context.experimental_paths.dataDir, input.recordingId, input.ownerId, "resume_recording");
+        const result = await transport.mutate(input.target, context.experimental_paths.dataDir, input.recordingId,
+          input.ownerId, "resume_recording", undefined, input.segmentStartedUnixMs);
         await changed(context, input.target.projectId, "resume", result);
         return result;
       },
       async stop(input, context) {
         retain(context);
-        const result = await transport.stop(input.target, context.experimental_paths.dataDir, input.recordingId, input.ownerId, input.expectedNextSequence);
+        const result = await transport.stop(input.target, context.experimental_paths.dataDir, input.recordingId,
+          input.ownerId, input.expectedNextSequence, input.segmentEndedUnixMs);
+        await changed(context, input.target.projectId, "stop", result);
+        return result;
+      },
+      async finishIncomplete(input, context) {
+        retain(context);
+        const result = await transport.finishIncomplete(input.target, context.experimental_paths.dataDir,
+          input.recordingId, input.ownerId, input.expectedNextSequence);
         await changed(context, input.target.projectId, "stop", result);
         return result;
       },
       uploadChunk(input, context) {
         retain(context);
-        return transport.upload(input.target, context.experimental_paths.dataDir, input.recordingId, input.ownerId, input.sequence, input.bytesBase64);
+        return transport.upload(input.target, context.experimental_paths.dataDir, input.recordingId, input.ownerId,
+          input.sequence, input.bytesBase64, input.capturedStartUnixMs, input.capturedEndUnixMs);
       },
       connectedNoteContext(input, context) {
         retain(context);

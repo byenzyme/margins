@@ -10,6 +10,7 @@ use margins_server::{
     http::build_router,
     ServerState,
 };
+use margins_store::canonical;
 use margins_workflows::{
     workspace::ensure_service_workspace,
     workspace_service::{ScopedCredentialStore, ServicePrincipal, WorkspaceService},
@@ -243,4 +244,400 @@ async fn typed_transcribe_route_runs_durable_job_against_runtime_audio() {
         .as_str()
         .unwrap()
         .contains("[00:01] you (mic): spoken evidence"));
+}
+
+#[tokio::test]
+async fn legacy_browser_webm_upload_transcribes_without_runtime_capture_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let (app, service, principal) = fixture(temp.path());
+    let margins_dir = service.margins_dir();
+    canonical::create_session(
+        margins_dir,
+        SESSION,
+        &chrono::Local::now(),
+        ".margins/asr-http.md",
+    )
+    .unwrap();
+    canonical::add_segment(
+        margins_dir,
+        SESSION,
+        0,
+        ".margins/recordings/asr-http_seg0.wav",
+        0,
+        None,
+    )
+    .unwrap();
+    let recordings = margins_dir.join("recordings");
+    std::fs::create_dir_all(&recordings).unwrap();
+    std::fs::write(
+        recordings.join("asr-http_upload.webm"),
+        include_bytes!("fixtures/legacy-browser.webm"),
+    )
+    .unwrap();
+    std::fs::write(
+        recordings.join("old-recording.recovery.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "version": 2,
+            "recording_id": "old-recording",
+            "session_name": SESSION,
+            "webm_chunk_count": 1
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let (status, receipt) = call(
+        &app,
+        Method::POST,
+        &format!("/v1/workspaces/practice/sessions/{SESSION}/jobs/transcribe"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    for _ in 0..100 {
+        let job = service
+            .latest_job(&principal, &SessionId(SESSION.into()))
+            .unwrap()
+            .unwrap();
+        match job.status.as_str() {
+            "complete" => break,
+            "failed" => panic!("legacy ASR job failed: {:?}", job.failure),
+            _ => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    }
+    let (status, transcript) = call(
+        &app,
+        Method::GET,
+        &format!("/v1/workspaces/practice/sessions/{SESSION}/transcript"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{transcript}");
+    let body = transcript["result"]["body"].as_str().unwrap();
+    assert!(body.contains("spoken evidence"), "{body}");
+    assert!(body.contains("Incomplete recording"), "{body}");
+    let summary = service
+        .session(&principal, &SessionId(SESSION.into()))
+        .unwrap();
+    assert!(summary.capture_incomplete);
+    assert_eq!(summary.capture_gaps[0].reason, "legacy_unverified_upload");
+}
+
+#[tokio::test]
+async fn undecodable_webm_segment_is_recorded_as_gap_while_later_audio_transcribes() {
+    let temp = tempfile::tempdir().unwrap();
+    let (app, service, principal) = fixture(temp.path());
+    let reservation = service
+        .reserve_session(
+            &principal,
+            command(
+                "webm-create",
+                ClientMessageBodyV1::CreateSession(CreateSessionV1 {
+                    idempotency_key: "webm-gap-create".into(),
+                    started_at_unix_ms: UnixMillis(BASE),
+                    title: Some("WebM gap fixture".into()),
+                    sources: vec![CaptureSourceV1 {
+                        source_id: "microphone".into(),
+                        kind: CaptureSourceKindV1::Microphone,
+                        label: None,
+                        external_id: None,
+                    }],
+                    lanes: vec![CaptureLaneV1 {
+                        lane_id: "browser-audio".into(),
+                        source_ids: vec!["microphone".into()],
+                        label: None,
+                        format: AudioFormatV1 {
+                            codec: AudioCodecV1::Opus,
+                            container: AudioContainerV1::Webm,
+                            sample_rate_hz: 48_000,
+                            channel_count: 1,
+                        },
+                    }],
+                    provenance: CaptureProvenanceV1 {
+                        hops: vec![CaptureProvenanceHopV1 {
+                            producer: "asr-http-test".into(),
+                            producer_version: Some("1".into()),
+                            mode: CaptureModeV1::Live,
+                            observed_at_unix_ms: UnixMillis(BASE),
+                            attributes: BTreeMap::new(),
+                        }],
+                    },
+                }),
+            ),
+        )
+        .unwrap();
+    for (segment, message, start, audio) in [
+        ("bad", "bad-chunk", 0, b"invalid WebM".as_slice()),
+        (
+            "good",
+            "good-chunk",
+            1_000,
+            include_bytes!("fixtures/legacy-browser.webm").as_slice(),
+        ),
+    ] {
+        service
+            .execute_capture(
+                &principal,
+                &reservation.producer_token,
+                command(
+                    message,
+                    ClientMessageBodyV1::AudioChunk(AudioChunkV1 {
+                        segment_id: segment.into(),
+                        lane_id: "browser-audio".into(),
+                        sequence: 0,
+                        starts_at_ms: SessionMillis(start),
+                        duration_ms: DurationMillis(300),
+                        payload_digest: ContentDigestV1 {
+                            algorithm: DigestAlgorithmV1::Sha256,
+                            hex: format!("{:x}", Sha256::digest(audio)),
+                        },
+                        payload: audio.to_vec(),
+                    }),
+                ),
+            )
+            .unwrap();
+        service
+            .execute_capture(
+                &principal,
+                &reservation.producer_token,
+                command(
+                    &format!("close-{segment}"),
+                    ClientMessageBodyV1::CloseSegment(CloseSegmentV1 {
+                        segment_id: segment.into(),
+                        ended_at_ms: SessionMillis(start + 300),
+                        lane_boundaries: vec![LaneBoundaryV1 {
+                            lane_id: "browser-audio".into(),
+                            next_sequence: 1,
+                        }],
+                        reason: if segment == "bad" {
+                            SegmentCloseReasonV1::Pause
+                        } else {
+                            SegmentCloseReasonV1::Stop
+                        },
+                    }),
+                ),
+            )
+            .unwrap();
+    }
+    service
+        .execute_capture(
+            &principal,
+            &reservation.producer_token,
+            command(
+                "webm-finalize",
+                ClientMessageBodyV1::FinalizeSession(FinalizeSessionV1 {
+                    ended_at_ms: SessionMillis(1_300),
+                    segment_closes: vec![
+                        SegmentCloseReferenceV1 {
+                            segment_id: "bad".into(),
+                            close_message_id: "close-bad".into(),
+                        },
+                        SegmentCloseReferenceV1 {
+                            segment_id: "good".into(),
+                            close_message_id: "close-good".into(),
+                        },
+                    ],
+                    reason: SessionFinalizeReasonV1::Completed,
+                }),
+            ),
+        )
+        .unwrap();
+    let (status, receipt) = call(
+        &app,
+        Method::POST,
+        &format!("/v1/workspaces/practice/sessions/{SESSION}/jobs/transcribe"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    for _ in 0..100 {
+        let job = service
+            .latest_job(&principal, &SessionId(SESSION.into()))
+            .unwrap()
+            .unwrap();
+        match job.status.as_str() {
+            "complete" => break,
+            "failed" => panic!("WebM ASR job failed: {:?}", job.failure),
+            _ => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    }
+    let summary = service
+        .session(&principal, &SessionId(SESSION.into()))
+        .unwrap();
+    assert!(summary.capture_incomplete);
+    assert!(summary.capture_gaps.iter().any(|gap| {
+        gap.segment_id == "bad"
+            && gap.start_sequence == 0
+            && gap.end_exclusive == 1
+            && gap.reason == "undecodable_webm"
+    }));
+    let (status, transcript) = call(
+        &app,
+        Method::GET,
+        &format!("/v1/workspaces/practice/sessions/{SESSION}/transcript"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{transcript}");
+    let body = transcript["result"]["body"].as_str().unwrap();
+    assert!(body.contains("spoken evidence"), "{body}");
+    assert!(body.contains("Incomplete recording"), "{body}");
+    let (_, restarted, restarted_principal) = fixture(temp.path());
+    assert!(
+        restarted
+            .session(&restarted_principal, &SessionId(SESSION.into()))
+            .unwrap()
+            .capture_incomplete
+    );
+}
+
+#[tokio::test]
+async fn zero_audio_incomplete_session_gets_terminal_explanatory_transcript() {
+    let temp = tempfile::tempdir().unwrap();
+    let (app, service, principal) = fixture(temp.path());
+    let reservation = service
+        .reserve_session(
+            &principal,
+            command(
+                "empty-create",
+                ClientMessageBodyV1::CreateSession(CreateSessionV1 {
+                    idempotency_key: "empty-create".into(),
+                    started_at_unix_ms: UnixMillis(BASE),
+                    title: Some("Interrupted before audio".into()),
+                    sources: vec![CaptureSourceV1 {
+                        source_id: "mic".into(),
+                        kind: CaptureSourceKindV1::Microphone,
+                        label: None,
+                        external_id: None,
+                    }],
+                    lanes: vec![CaptureLaneV1 {
+                        lane_id: "mic".into(),
+                        source_ids: vec!["mic".into()],
+                        label: None,
+                        format: AudioFormatV1 {
+                            codec: AudioCodecV1::PcmS16Le,
+                            container: AudioContainerV1::Raw,
+                            sample_rate_hz: 16_000,
+                            channel_count: 1,
+                        },
+                    }],
+                    provenance: CaptureProvenanceV1 {
+                        hops: vec![CaptureProvenanceHopV1 {
+                            producer: "asr-http-test".into(),
+                            producer_version: Some("1".into()),
+                            mode: CaptureModeV1::Live,
+                            observed_at_unix_ms: UnixMillis(BASE),
+                            attributes: BTreeMap::new(),
+                        }],
+                    },
+                }),
+            ),
+        )
+        .unwrap();
+    service
+        .execute_capture(
+            &principal,
+            &reservation.producer_token,
+            command(
+                "empty-finalize",
+                ClientMessageBodyV1::FinalizeSession(FinalizeSessionV1 {
+                    ended_at_ms: SessionMillis(0),
+                    segment_closes: vec![],
+                    reason: SessionFinalizeReasonV1::Error,
+                }),
+            ),
+        )
+        .unwrap();
+    let (status, receipt) = call(
+        &app,
+        Method::POST,
+        &format!("/v1/workspaces/practice/sessions/{SESSION}/jobs/transcribe"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    for _ in 0..100 {
+        let job = service
+            .latest_job(&principal, &SessionId(SESSION.into()))
+            .unwrap()
+            .unwrap();
+        match job.status.as_str() {
+            "complete" => break,
+            "failed" => panic!("zero-audio ASR job failed: {:?}", job.failure),
+            _ => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    }
+    let (status, transcript) = call(
+        &app,
+        Method::GET,
+        &format!("/v1/workspaces/practice/sessions/{SESSION}/transcript"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{transcript}");
+    let body = transcript["result"]["body"].as_str().unwrap();
+    assert!(body.contains("Incomplete recording"), "{body}");
+    assert!(body.contains("_No timestamped transcript"), "{body}");
+}
+
+#[tokio::test]
+async fn finalized_legacy_browser_wav_transcribes_after_webm_cleanup() {
+    let temp = tempfile::tempdir().unwrap();
+    let (app, service, principal) = fixture(temp.path());
+    let margins_dir = service.margins_dir();
+    canonical::create_session(
+        margins_dir,
+        SESSION,
+        &chrono::Local::now(),
+        ".margins/asr-http.md",
+    )
+    .unwrap();
+    canonical::add_segment(
+        margins_dir,
+        SESSION,
+        0,
+        ".margins/recordings/asr-http_seg0.wav",
+        0,
+        Some(0.1),
+    )
+    .unwrap();
+    let recordings = margins_dir.join("recordings");
+    std::fs::create_dir_all(&recordings).unwrap();
+    let mut writer = hound::WavWriter::create(
+        recordings.join("asr-http_seg0.wav"),
+        hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        },
+    )
+    .unwrap();
+    for _ in 0..1_600 {
+        writer.write_sample(0.0_f32).unwrap();
+    }
+    writer.finalize().unwrap();
+    // A crash during old cleanup could retain an upload after the WAV was
+    // finalized. The canonical WAV remains the safer source.
+    std::fs::write(recordings.join("asr-http_upload.webm"), b"stale upload").unwrap();
+    let (status, receipt) = call(
+        &app,
+        Method::POST,
+        &format!("/v1/workspaces/practice/sessions/{SESSION}/jobs/transcribe"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    for _ in 0..100 {
+        let job = service
+            .latest_job(&principal, &SessionId(SESSION.into()))
+            .unwrap()
+            .unwrap();
+        match job.status.as_str() {
+            "complete" => break,
+            "failed" => panic!("legacy WAV ASR job failed: {:?}", job.failure),
+            _ => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    }
+    let transcript = std::fs::read_to_string(
+        margins_dir
+            .join("artifacts")
+            .join(SESSION)
+            .join("transcript.md"),
+    )
+    .unwrap();
+    assert!(transcript.contains("spoken evidence"), "{transcript}");
+    assert!(!transcript.contains("Incomplete recording"), "{transcript}");
 }

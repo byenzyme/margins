@@ -1,6 +1,7 @@
 {
   "recordingId": "browser-contract-session",
   "sessionId": "browser-contract-session",
+  "nextSequence": 3,
   "status": "paused",
   "notepad": {
     "text": "Review launch plan",
