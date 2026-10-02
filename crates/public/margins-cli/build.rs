@@ -1,4 +1,5 @@
 use chrono::{SecondsFormat, Utc};
+use std::collections::BTreeSet;
 use std::env;
 use std::path::Path;
 use std::process::Command;
@@ -16,11 +17,40 @@ fn git(repo: &Path, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+fn git_path(repo: &Path, path: &str) -> Option<String> {
+    git(
+        repo,
+        &["rev-parse", "--path-format=absolute", "--git-path", path],
+    )
+    .filter(|value| !value.is_empty())
+}
+
+fn emit_git_rerun_paths(repo: &Path) {
+    // Cargo may reuse this build-script output across linked-worktree checkouts.
+    // Track both the per-worktree pointers and the common ref storage so the
+    // embedded identity follows detach/checkout, branch advances, and staging.
+    let mut paths = BTreeSet::new();
+    for path in ["HEAD", "index", "packed-refs"] {
+        if let Some(path) = git_path(repo, path) {
+            paths.insert(path);
+        }
+    }
+    if let Some(reference) = git(repo, &["symbolic-ref", "-q", "HEAD"]) {
+        if let Some(path) = git_path(repo, &reference) {
+            paths.insert(path);
+        }
+    }
+    for path in paths {
+        println!("cargo:rerun-if-changed={path}");
+    }
+}
+
 fn main() {
     println!("cargo:rerun-if-env-changed=MARGINS_BUILD_COMMIT");
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     let repo = Path::new(&manifest_dir);
+    emit_git_rerun_paths(repo);
     let git_commit = git(repo, &["rev-parse", "HEAD"]).filter(|value| !value.is_empty());
     let override_commit = env::var("MARGINS_BUILD_COMMIT")
         .ok()

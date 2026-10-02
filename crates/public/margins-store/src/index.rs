@@ -1,6 +1,6 @@
 //! Storage-only session index queries suitable for a standalone CLI.
 
-use crate::legacy;
+use crate::canonical;
 use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -40,11 +40,11 @@ pub fn list_session_index(
     margins_dir: &Path,
     query: SessionIndexQuery,
 ) -> anyhow::Result<Vec<SessionIndexEntry>> {
-    if !legacy::database_path(margins_dir).exists() {
+    if !canonical::database_path(margins_dir).exists() {
         return Ok(Vec::new());
     }
 
-    let tombstoned = legacy::list_session_tombstone_names(margins_dir)?
+    let tombstoned = canonical::list_session_tombstone_names(margins_dir)?
         .into_iter()
         .collect::<HashSet<_>>();
     let after = parse_bound(query.started_after.as_deref(), "started_after")?;
@@ -54,7 +54,7 @@ pub fn list_session_index(
     }
     let mut entries = Vec::new();
 
-    for session in legacy::list_sessions(margins_dir)? {
+    for session in canonical::list_sessions(margins_dir)? {
         if tombstoned.contains(&session.name) {
             continue;
         }
@@ -66,7 +66,7 @@ pub fn list_session_index(
         {
             continue;
         }
-        let meta = legacy::get_session_meta(margins_dir, &session.name)?;
+        let meta = canonical::get_session_meta(margins_dir, &session.name)?;
         entries.push((
             started,
             SessionIndexEntry {

@@ -7,7 +7,7 @@
 
 use crate::workspace::{ResolvedWorkspace, WorkspaceBinding};
 use anyhow::{bail, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -15,22 +15,48 @@ use walkdir::{DirEntry, WalkDir};
 
 const MAX_DOCUMENT_BYTES: u64 = 2 * 1024 * 1024;
 const DEFAULT_RESULT_LIMIT: usize = 12;
+// Keep this portable baseline aligned with the official engine's built-in
+// discovery exclusions. The richer engine can index non-Markdown Sources too,
+// so an official runtime must still report its persisted index count directly.
+const DEFAULT_EXCLUDED_NAMES: &[&str] = &[
+    ".agents",
+    ".claude",
+    ".codex",
+    ".codex-work",
+    ".conversations",
+    ".enzyme",
+    ".enzyme-embeddings",
+    ".git",
+    ".hermes",
+    ".local",
+    ".margins",
+    ".obsidian",
+    ".pi",
+    ".trash",
+    "__pycache__",
+    "build",
+    "dist",
+    "enzyme-config.yaml",
+    "enzyme_guide.md",
+    "node_modules",
+    "target",
+];
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalRecallStatus {
-    pub schema_version: &'static str,
+    pub schema_version: String,
     pub available: bool,
-    pub mode: &'static str,
+    pub mode: String,
     pub documents: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalRecallEvidence {
-    pub kind: &'static str,
+    pub kind: String,
     pub path: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalRecallResult {
     pub document_ref: String,
     pub source: String,
@@ -39,13 +65,13 @@ pub struct LocalRecallResult {
     pub evidence: LocalRecallEvidence,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalRecallOutput {
-    pub schema_version: &'static str,
-    pub status: &'static str,
-    pub reason: &'static str,
+    pub schema_version: String,
+    pub status: String,
+    pub reason: String,
     pub query: String,
-    pub search_strategy: &'static str,
+    pub search_strategy: String,
     pub results: Vec<LocalRecallResult>,
     pub total_results: usize,
 }
@@ -53,7 +79,6 @@ pub struct LocalRecallOutput {
 #[derive(Debug, Clone)]
 struct LocalDocument {
     source: String,
-    root: PathBuf,
     path: PathBuf,
     relative: PathBuf,
     body: String,
@@ -61,9 +86,9 @@ struct LocalDocument {
 
 pub fn status(workspace: &ResolvedWorkspace) -> Result<LocalRecallStatus> {
     Ok(LocalRecallStatus {
-        schema_version: "margins.local-recall.v1",
+        schema_version: "margins.local-recall.v1".to_string(),
         available: true,
-        mode: "live_lexical",
+        mode: "live_lexical".to_string(),
         documents: discover_documents(workspace, None)?.len(),
     })
 }
@@ -104,8 +129,8 @@ pub fn search(
                 score,
                 content: matching_excerpt(&document.body, &query_lower, &tokens),
                 evidence: LocalRecallEvidence {
-                    kind: "native_markdown",
-                    path: document.path,
+                    kind: "native_markdown".to_string(),
+                    path: document.relative,
                 },
             })
         })
@@ -120,11 +145,11 @@ pub fn search(
     results.truncate(DEFAULT_RESULT_LIMIT);
     let total_results = results.len();
     Ok(LocalRecallOutput {
-        schema_version: "margins.recall.v1",
-        status: "ok",
-        reason: "local_lexical",
+        schema_version: "margins.recall.v1".to_string(),
+        status: "ok".to_string(),
+        reason: "local_lexical".to_string(),
         query: query.to_string(),
-        search_strategy: "live_local_markdown",
+        search_strategy: "live_local_markdown".to_string(),
         results,
         total_results,
     })
@@ -160,9 +185,9 @@ fn discover_documents(
             .map(|folder| folder.trim().to_lowercase())
             .filter(|folder| !folder.is_empty())
             .chain(
-                [".git", ".margins", ".enzyme", "node_modules"]
-                    .into_iter()
-                    .map(str::to_string),
+                DEFAULT_EXCLUDED_NAMES
+                    .iter()
+                    .map(|name| (*name).to_string()),
             )
             .collect::<BTreeSet<_>>();
         for entry in WalkDir::new(root)
@@ -189,7 +214,6 @@ fn discover_documents(
             }
             documents.push(LocalDocument {
                 source: source.clone(),
-                root: root.clone(),
                 path: entry.path().to_path_buf(),
                 relative: entry
                     .path()
@@ -201,11 +225,7 @@ fn discover_documents(
         }
     }
     documents.sort_by(|left, right| {
-        (&left.source, &left.root, &left.relative).cmp(&(
-            &right.source,
-            &right.root,
-            &right.relative,
-        ))
+        (&left.source, &left.relative).cmp(&(&right.source, &right.relative))
     });
     Ok(documents)
 }
@@ -282,6 +302,8 @@ mod tests {
         let notes = temp.path().join("notes");
         std::fs::create_dir_all(notes.join("projects")).unwrap();
         std::fs::create_dir_all(notes.join("templates")).unwrap();
+        std::fs::create_dir_all(notes.join(".agents/runs")).unwrap();
+        std::fs::create_dir_all(notes.join(".trash")).unwrap();
         std::fs::write(
             notes.join("projects/atlas.md"),
             "# Atlas\nThe phosphorescent handoff preserves the decision boundary.\n",
@@ -290,6 +312,21 @@ mod tests {
         std::fs::write(
             notes.join("templates/meeting.md"),
             "phosphorescent handoff should stay excluded",
+        )
+        .unwrap();
+        std::fs::write(
+            notes.join(".agents/runs/transcript.md"),
+            "phosphorescent handoff should stay structurally excluded",
+        )
+        .unwrap();
+        std::fs::write(
+            notes.join(".trash/deleted.md"),
+            "phosphorescent handoff should stay structurally excluded",
+        )
+        .unwrap();
+        std::fs::write(
+            notes.join("ENZYME_GUIDE.md"),
+            "phosphorescent handoff should stay structurally excluded",
         )
         .unwrap();
         let mut workspace = create_workspace(&margins_home, "practice", None, &notes).unwrap();
@@ -306,6 +343,7 @@ mod tests {
             .document_ref
             .ends_with("projects/atlas.md"));
         assert_eq!(output.results[0].evidence.kind, "native_markdown");
+        assert_eq!(status(&workspace).unwrap().documents, 1);
     }
 
     #[test]
@@ -325,6 +363,7 @@ mod tests {
             WorkspaceBinding::NativeMarkdown {
                 path: reference,
                 role: SourceRole::Reference,
+                note_folder: None,
             },
         )
         .unwrap();

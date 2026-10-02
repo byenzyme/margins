@@ -53,10 +53,10 @@ pub fn process_session(
     // Failures are non-fatal: do not block or fail the process command.
     let expires_at =
         (services.clock.now() + Duration::days(AUDIO_REPROCESS_WINDOW_DAYS)).to_rfc3339();
-    if let Ok(artifacts) = margins_store::legacy::list_session_artifacts(&margins_dir, &name) {
+    if let Ok(artifacts) = margins_store::canonical::list_session_artifacts(&margins_dir, &name) {
         for artifact in artifacts {
             if artifact.kind == "audio" && artifact.retention_class == "durable" {
-                let _ = margins_store::legacy::upsert_session_artifact(
+                let _ = margins_store::canonical::upsert_session_artifact(
                     &margins_dir,
                     &artifact.session_name,
                     "audio",

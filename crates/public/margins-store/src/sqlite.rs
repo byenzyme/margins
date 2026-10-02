@@ -1,4 +1,4 @@
-use crate::legacy;
+use crate::canonical;
 use chrono::{DateTime, SecondsFormat, Utc};
 use margins_core::{
     ArtifactId, NewSegment, NewSession, SegmentRecord, SessionArtifact, SessionError,
@@ -19,7 +19,7 @@ impl SqliteSessionRepository {
     /// backwards-compatible metadata tables and triggers.
     pub fn open(directory: impl AsRef<Path>) -> Result<Self, SessionError> {
         let directory = directory.as_ref().to_path_buf();
-        let connection = legacy::open_db(&directory).map_err(internal)?;
+        let connection = canonical::open_db(&directory).map_err(internal)?;
         init_repository_schema(&connection).map_err(internal)?;
         Ok(Self { directory })
     }
@@ -29,7 +29,7 @@ impl SqliteSessionRepository {
     }
 
     fn connection(&self) -> Result<Connection, SessionError> {
-        let connection = legacy::open_db(&self.directory).map_err(internal)?;
+        let connection = canonical::open_db(&self.directory).map_err(internal)?;
         init_repository_schema(&connection).map_err(internal)?;
         Ok(connection)
     }
@@ -440,7 +440,7 @@ fn mark_tombstoned(tx: &Transaction<'_>, id: &SessionId) -> Result<(), SessionEr
     Ok(())
 }
 
-fn init_repository_schema(connection: &Connection) -> rusqlite::Result<()> {
+pub(crate) fn init_repository_schema(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(
         r#"
         BEGIN IMMEDIATE;
@@ -478,7 +478,11 @@ fn init_repository_schema(connection: &Connection) -> rusqlite::Result<()> {
         INSERT OR IGNORE INTO session_repository_state
             (session_name, revision, lifecycle, updated_at_ms)
         SELECT s.name, 0,
-               CASE WHEN t.name IS NULL THEN 'active' ELSE 'tombstoned' END,
+               CASE
+                   WHEN t.name IS NOT NULL THEN 'tombstoned'
+                   WHEN s.lifecycle_state = 'ended' THEN 'processing'
+                   ELSE 'active'
+               END,
                MAX(0, CAST(strftime('%s', COALESCE(s.lifecycle_updated_at, s.created_at)) AS INTEGER) * 1000)
         FROM sessions s
         LEFT JOIN session_tombstones t ON t.name = s.name;
@@ -501,6 +505,7 @@ fn init_repository_schema(connection: &Connection) -> rusqlite::Result<()> {
             SET revision = revision + 1,
                 lifecycle = CASE
                     WHEN NEW.lifecycle_state = 'deleting' THEN 'tombstoned'
+                    WHEN NEW.lifecycle_state = 'ended' THEN 'processing'
                     WHEN OLD.lifecycle_state = 'deleting' AND NEW.lifecycle_state = 'active' THEN 'active'
                     ELSE lifecycle
                 END,

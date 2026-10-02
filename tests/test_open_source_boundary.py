@@ -258,6 +258,10 @@ class RepositoryPolicyTests(unittest.TestCase):
             REPO_ROOT
             / "crates/public/margins-workflows/resources/skills/margins-workspace-setup/SKILL.md"
         ).read_text(encoding="utf-8")
+        setup += "\n\n" + (
+            REPO_ROOT
+            / "crates/public/margins-workflows/resources/guidance/knowledge-practice-review.md"
+        ).read_text(encoding="utf-8")
         onboarding = (
             REPO_ROOT
             / "crates/public/margins-workflows/resources/skills/margins-guided-onboarding/SKILL.md"
@@ -287,9 +291,9 @@ class RepositoryPolicyTests(unittest.TestCase):
             "Never open, cat, print, or summarize credential bundles",
             "Use only redacted Margins product status",
             "Do not run recall before `margins init`",
-            "ask for explicit consent",
+            "Do not ask for a second “apply this plan” confirmation",
             "apply the saved plan unchanged",
-            "Only make settings the user consented to",
+            "universal pause.",
             "Never declare setup complete while",
             "Do not begin connected-note",
         ):
@@ -297,8 +301,19 @@ class RepositoryPolicyTests(unittest.TestCase):
         normalized_setup = " ".join(setup.split())
         self.assertIn("Do not run unsupported discovery commands", normalized_setup)
         self.assertIn(
-            "Any fallback policy change requires a fresh desired config", normalized_setup
+            "A fallback policy change after failure is not part", normalized_setup
         )
+        for required in (
+            "# Knowledge Practice Review Contract",
+            "at most two future capture habits",
+            "name the question that habit would make answerable",
+            "Do not prescribe a generic folder taxonomy",
+            "Lead the final handoff with what the proof revealed",
+            "Do not mistake a successful command",
+            "operational receipt",
+            "revision hashes, similarity scores",
+        ):
+            self.assertIn(required, normalized_setup)
         for profile in (
             "relational",
             "operational",
@@ -328,11 +343,30 @@ class RepositoryPolicyTests(unittest.TestCase):
         self.assertLess(plan, apply)
         self.assertLess(apply, initialize)
 
-        self.assertIn("Connected-note distillation is a separate workflow", onboarding)
-        self.assertIn("from that folder", onboarding)
-        self.assertIn("complete `scan.v2` result", onboarding)
         normalized_onboarding = " ".join(onboarding.split())
-        self.assertIn("coverage entities, curation candidates", normalized_onboarding)
+        self.assertIn("`margins guide workspace-setup`", onboarding)
+        self.assertIn("sole source of truth for setup", normalized_onboarding)
+        self.assertIn("Setup and distillation are separate", onboarding)
+        self.assertIn(
+            "Speak about their notes, work, and questions in ordinary language",
+            normalized_onboarding,
+        )
+        self.assertIn(
+            "End with the useful thing Margins surfaced", normalized_onboarding
+        )
+        self.assertIn("setup result brief and secondary", normalized_onboarding)
+        self.assertLess(len(onboarding.split()), 300)
+        for duplicated_detail in (
+            "scan.v2",
+            "workspace plan",
+            "workspace apply",
+            "current_config",
+            "catalyst",
+            "profile =",
+            "margins init",
+            "margins sync",
+        ):
+            self.assertNotIn(duplicated_detail, onboarding)
         for required in (
             "The job is complete when the user approves",
             "Start with the latest Margins session",

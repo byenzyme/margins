@@ -52,7 +52,16 @@ pub fn words_to_transcript_entries(
             channel,
             start_ms: word.start_ms + offset_ms,
             end_ms: word.end_ms + offset_ms,
-            text: format!(" {}", word.text.trim()),
+            text: if word
+                .text
+                .trim()
+                .chars()
+                .all(|ch| matches!(ch, '.' | ',' | '!' | '?' | ':' | ';' | ')' | ']'))
+            {
+                word.text.trim().to_string()
+            } else {
+                format!(" {}", word.text.trim())
+            },
         })
         .collect()
 }

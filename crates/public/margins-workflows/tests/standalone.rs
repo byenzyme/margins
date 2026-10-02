@@ -20,6 +20,8 @@ fn crate_builds_from_an_isolated_public_tree() {
     let temp = tempfile::tempdir().unwrap();
     for name in [
         "margins-core",
+        "margins-meeting-protocol",
+        "margins-meeting-runtime",
         "margins-media",
         "margins-store",
         "margins-workflows",

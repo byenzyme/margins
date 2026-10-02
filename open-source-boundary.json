@@ -131,6 +131,7 @@
         "crates/public/margins-workflows/LICENSE",
         "crates/public/margins-workflows/README.md",
         "crates/public/margins-workflows/resources/agents/margins.md",
+        "crates/public/margins-workflows/resources/guidance/knowledge-practice-review.md",
         "crates/public/margins-workflows/resources/skills/margins-guided-onboarding/SKILL.md",
         "crates/public/margins-workflows/resources/skills/margins-workspace-setup/SKILL.md",
         "crates/public/margins-workflows/src/agents.rs",
@@ -189,6 +190,7 @@
         "crates/public/margins-workflows/LICENSE",
         "crates/public/margins-workflows/README.md",
         "crates/public/margins-workflows/resources/agents/margins.md",
+        "crates/public/margins-workflows/resources/guidance/knowledge-practice-review.md",
         "crates/public/margins-workflows/resources/skills/margins-guided-onboarding/SKILL.md",
         "crates/public/margins-workflows/resources/skills/margins-workspace-setup/SKILL.md",
         "crates/public/margins-workflows/src/agents.rs",
@@ -242,7 +244,7 @@
         "crates/public/margins-workflows/tests/public_graph.rs",
         "crates/public/margins-workflows/tests/standalone.rs"
       ],
-      "minimum_files": 56
+      "minimum_files": 57
     },
     {
       "name": "margins-core-crate",

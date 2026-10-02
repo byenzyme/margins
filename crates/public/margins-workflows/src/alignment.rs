@@ -1,23 +1,59 @@
 use chrono::{DateTime, Local};
-use margins_media::transcript::TranscriptWordEntry;
+use margins_media::transcript::{merge_word_entries_to_phrases, TranscriptWordEntry};
 
 #[derive(Debug, Clone, PartialEq)]
-enum TimelineEvent {
+pub enum TimelineEvent {
     Transcript(TranscriptWordEntry),
-    Memo {
-        at_ms: u64,
-        edited_at_ms: Option<u64>,
-        text: String,
-    },
+    Memo(TimedMemo),
 }
 
-impl TimelineEvent {
-    fn at_ms(&self) -> u64 {
-        match self {
-            Self::Transcript(entry) => entry.start_ms,
-            Self::Memo { at_ms, .. } => *at_ms,
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimedMemo {
+    pub at_ms: u64,
+    pub edited_at_ms: Option<u64>,
+    pub text: String,
+}
+
+/// Group words into phrases within memo-bounded windows, then place each memo
+/// after the speech it bookmarked. Equal timestamps belong before the memo.
+pub fn interleave_timeline(
+    words: &[TranscriptWordEntry],
+    memos: &[TimedMemo],
+    max_gap_ms: u64,
+) -> Vec<TimelineEvent> {
+    let mut words = words.to_vec();
+    for word in &mut words {
+        let Some(first) = word.text.chars().next() else {
+            continue;
+        };
+        if !first.is_whitespace() && !matches!(first, '.' | ',' | '!' | '?' | ':' | ';' | ')' | ']')
+        {
+            word.text.insert(0, ' ');
         }
     }
+    words.sort_by_key(|word| (word.start_ms, word.channel));
+    let mut words = words.into_iter().peekable();
+    let mut memos = memos.to_vec();
+    memos.sort_by_key(|memo| memo.at_ms);
+    let mut events = Vec::new();
+    for memo in memos {
+        let mut window = Vec::new();
+        while words.peek().is_some_and(|word| word.start_ms <= memo.at_ms) {
+            window.push(words.next().expect("peeked transcript word"));
+        }
+        events.extend(
+            merge_word_entries_to_phrases(window, max_gap_ms)
+                .into_iter()
+                .map(TimelineEvent::Transcript),
+        );
+        events.push(TimelineEvent::Memo(memo));
+    }
+    events.extend(
+        merge_word_entries_to_phrases(words.collect(), max_gap_ms)
+            .into_iter()
+            .map(TimelineEvent::Transcript),
+    );
+    events
 }
 
 /// Render a memo and complete transcript on one session-relative timeline.
@@ -29,31 +65,27 @@ pub fn render_aligned_markdown(
     memo: &str,
     entries: &[TranscriptWordEntry],
 ) -> String {
-    let mut events = entries
-        .iter()
-        .cloned()
-        .map(TimelineEvent::Transcript)
-        .collect::<Vec<_>>();
-    events.extend(parse_markdown(memo, session_start).into_iter().map(|line| {
-        TimelineEvent::Memo {
+    let memos = parse_markdown(memo, session_start)
+        .into_iter()
+        .map(|line| TimedMemo {
             at_ms: (line.created_at - *session_start).num_milliseconds().max(0) as u64,
             edited_at_ms: line
                 .edited_at
                 .map(|edited| (edited - *session_start).num_milliseconds().max(0) as u64),
             text: line.text,
-        }
-    }));
-    events.sort_by_key(|event| event.at_ms());
+        })
+        .collect::<Vec<_>>();
+    let events = interleave_timeline(entries, &memos, 2_000);
 
     let memo_count = events
         .iter()
-        .filter(|event| matches!(event, TimelineEvent::Memo { .. }))
+        .filter(|event| matches!(event, TimelineEvent::Memo(_)))
         .count();
     let transcript_count = events.len().saturating_sub(memo_count);
     let mut windows = Vec::<Vec<TimelineEvent>>::new();
     let mut current = Vec::new();
     for event in events {
-        let closes_window = matches!(event, TimelineEvent::Memo { .. });
+        let closes_window = matches!(event, TimelineEvent::Memo(_));
         current.push(event);
         if closes_window {
             windows.push(std::mem::take(&mut current));
@@ -72,20 +104,16 @@ pub fn render_aligned_markdown(
                     entry.channel,
                     entry.text.trim()
                 )),
-                TimelineEvent::Memo {
-                    at_ms,
-                    edited_at_ms,
-                    text,
-                } => {
-                    let stamp = match edited_at_ms {
+                TimelineEvent::Memo(memo) => {
+                    let stamp = match memo.edited_at_ms {
                         Some(edited) => format!(
                             "{} ~{}",
-                            format_timestamp(*at_ms),
-                            format_timestamp(*edited)
+                            format_timestamp(memo.at_ms),
+                            format_timestamp(edited)
                         ),
-                        None => format_timestamp(*at_ms),
+                        None => format_timestamp(memo.at_ms),
                     };
-                    out.push_str(&format!("**[{stamp} memo]** {}\n\n", text.trim()));
+                    out.push_str(&format!("**[{stamp} memo]** {}\n\n", memo.text.trim()));
                 }
             }
         }
@@ -130,6 +158,43 @@ fn parse_time_str(value: &str) -> Option<i64> {
         ),
         _ => None,
     }
+}
+
+/// Read the timestamped memo rows used by remote capture. Untimed lines stay
+/// separate because they are reflections rather than points on the timeline.
+pub fn parse_timed_memo_lines(memo: &str) -> (Vec<TimedMemo>, Vec<String>) {
+    let mut timed = Vec::new();
+    let mut untimed = Vec::new();
+    for line in memo.lines().map(str::trim) {
+        if line.is_empty() || line == "---" || line.starts_with('#') {
+            continue;
+        }
+        let parsed = line
+            .strip_prefix('[')
+            .and_then(|tail| tail.split_once(']'))
+            .and_then(|(stamp, text)| {
+                let (created, edited) = match stamp.split_once('~') {
+                    Some((created, edited)) => (created.trim(), Some(edited.trim())),
+                    None => (stamp.trim(), None),
+                };
+                Some(TimedMemo {
+                    at_ms: u64::try_from(parse_time_str(created)?)
+                        .ok()?
+                        .checked_mul(1_000)?,
+                    edited_at_ms: edited
+                        .and_then(parse_time_str)
+                        .and_then(|seconds| u64::try_from(seconds).ok())
+                        .and_then(|seconds| seconds.checked_mul(1_000)),
+                    text: text.trim().to_string(),
+                })
+            });
+        if let Some(row) = parsed {
+            timed.push(row);
+        } else {
+            untimed.push(line.to_string());
+        }
+    }
+    (timed, untimed)
 }
 
 /// Parse persisted memo markdown without depending on the root capture crate.
@@ -218,5 +283,70 @@ mod tests {
         assert_eq!((lines[1].created_at - start).num_seconds(), 90);
         assert_eq!((lines[2].created_at - start).num_seconds(), 3_600);
         assert_eq!((lines[2].edited_at.unwrap() - start).num_seconds(), 3_723);
+    }
+
+    #[test]
+    fn shared_timeline_groups_words_without_crossing_memo_or_channel() {
+        let words = vec![
+            TranscriptWordEntry {
+                channel: 0,
+                start_ms: 1_000,
+                end_ms: 1_100,
+                text: " Nice".into(),
+            },
+            TranscriptWordEntry {
+                channel: 0,
+                start_ms: 2_000,
+                end_ms: 2_000,
+                text: ".".into(),
+            },
+            TranscriptWordEntry {
+                channel: 1,
+                start_ms: 2_000,
+                end_ms: 2_200,
+                text: " Yes".into(),
+            },
+            TranscriptWordEntry {
+                channel: 0,
+                start_ms: 3_000,
+                end_ms: 3_100,
+                text: " Next".into(),
+            },
+        ];
+        let (memos, untimed) = parse_timed_memo_lines("# Memo\n[00:02] decision\nLater reflection");
+        assert_eq!(untimed, ["Later reflection"]);
+        let rows = interleave_timeline(&words, &memos, 2_000);
+        assert!(matches!(&rows[0], TimelineEvent::Transcript(word) if word.text == " Nice."));
+        assert!(matches!(&rows[1], TimelineEvent::Transcript(word) if word.channel == 1));
+        assert!(matches!(&rows[2], TimelineEvent::Memo(memo) if memo.text == "decision"));
+        assert!(matches!(&rows[3], TimelineEvent::Transcript(word) if word.text == " Next"));
+    }
+
+    #[test]
+    fn shared_timeline_spaces_bare_cli_words_but_attaches_punctuation() {
+        let words = vec![
+            TranscriptWordEntry {
+                channel: 0,
+                start_ms: 0,
+                end_ms: 100,
+                text: "Nice".into(),
+            },
+            TranscriptWordEntry {
+                channel: 0,
+                start_ms: 110,
+                end_ms: 120,
+                text: ".".into(),
+            },
+            TranscriptWordEntry {
+                channel: 0,
+                start_ms: 130,
+                end_ms: 200,
+                text: "recording".into(),
+            },
+        ];
+        let rows = interleave_timeline(&words, &[], 2_000);
+        assert!(
+            matches!(&rows[0], TimelineEvent::Transcript(word) if word.text.trim() == "Nice. recording")
+        );
     }
 }
