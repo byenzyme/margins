@@ -9,7 +9,7 @@ fn as_json<T: serde::Serialize>(value: &T) -> Value {
 #[test]
 fn desktop_live_golden_fixture_is_emitted_by_the_rust_contract() {
     let fixture: Value =
-        serde_json::from_str(include_str!("fixtures/desktop-live-v1.json")).unwrap();
+        serde_json::from_str(include_str!("fixtures/meeting-live-v1.json")).unwrap();
 
     let discovery = LiveDiscoveryV1 {
         protocol_version: ProtocolVersionV1,
