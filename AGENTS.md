@@ -462,6 +462,13 @@ backticks inside a double-quoted shell string.
 and does not fix it. The coordinator routes it to the owning worker (or a new
 one) with the worker's diagnosis attached.
 
+**One repo (2026-10-02).** This repository becomes the public repository, with
+fresh history at cutover; there is no separate public export. Only the Enzyme
+recall engine stays closed, consumed as a private git dependency behind the
+`recall` / `recall-local-model` features. Workers must keep every crate building
+and testing with `recall` off, keep credentials out of source, and stop editing
+the export allowlist; the cutover retires that machinery.
+
 **Cleanup.** Delete dead code and generated build output only. Never delete
 documentation (specs, reports, READMEs) or benchmark/evaluation evidence. A doc
 that has become wrong is corrected with a minimal edit, not removed.
@@ -469,9 +476,8 @@ that has become wrong is corrected with a minimal edit, not removed.
 **Gating tiers.** Review is the per-PR gate; heavy builds are batched.
 - Every PR: the coordinator reviews the diff. The worker runs only the
   affected crates/packages' tests plus compile checks of the shipped binaries it
-  touches. If it adds, removes or moves public files, it also runs
-  `python3 scripts/open_source_boundary.py --check` and the boundary Python
-  tests. It pastes what it ran into the PR.
+  touches, and the no-`recall` (public) build when it touches shared crates.
+  It pastes what it ran into the PR.
 - Risky PRs (runtime/session/memo authority, ASR/models, server or plugin
   protocol, data or schema, release configuration) also get an independent
   Opus 5.5 review before merge. The same reviewer re-checks the fixes, and the
