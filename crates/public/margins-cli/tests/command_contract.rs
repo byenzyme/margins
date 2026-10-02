@@ -3,12 +3,7 @@ use clap::Parser;
 use margins_cli::args::Args;
 use margins_cli::run;
 use margins_cli::services::{CliServices, Clock, ProjectService};
-use margins_core::{
-    AsrBackend, AsrRequest, AsrResult, AudioLane, CaptureCapabilities, CaptureCommand,
-    CaptureCommandResult, CaptureCommandStatus, CaptureDevice, CaptureError, CaptureHandle,
-    CaptureLaneSnapshot, CaptureLaneState, CaptureObserver, CaptureProvider, CaptureRequest,
-    CaptureSnapshot, CaptureState, PermissionState, TranscriptError,
-};
+use margins_core::{AsrBackend, AsrRequest, AsrResult, TranscriptError};
 use margins_meeting_protocol::{SessionId, SessionMillis, WorkspaceMemoUpdateV1};
 use margins_store::canonical;
 use margins_workflows::project::{ProjectSource, ResolvedProject};
@@ -3326,7 +3321,7 @@ fn unavailable_capture_is_stable_and_precedes_all_mutation() {
 }
 
 #[test]
-fn explicit_workspace_new_uses_declared_capture_store_from_unrelated_cwd() {
+fn explicit_workspace_new_is_unavailable_without_side_effects() {
     let _guard = ENV_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let margins_home = temp.path().join("state");
@@ -3339,8 +3334,7 @@ fn explicit_workspace_new_uses_declared_capture_store_from_unrelated_cwd() {
     let old_margins_home = std::env::var_os("MARGINS_HOME");
     std::env::set_var("MARGINS_HOME", &margins_home);
     workspace::create_workspace(&margins_home, "practice", None, &notes).unwrap();
-    let mut services = services(&legacy_project);
-    services.capture = Arc::new(FakeCapture);
+    let services = services(&legacy_project);
 
     let (result, _stdout, stderr) = invoke(
         &services,
@@ -3356,10 +3350,13 @@ fn explicit_workspace_new_uses_declared_capture_store_from_unrelated_cwd() {
     );
     restore_env("MARGINS_HOME", old_margins_home.as_ref());
 
-    assert!(result.is_ok(), "{stderr}");
+    assert_eq!(
+        result.unwrap_err().code(),
+        "capture_unavailable",
+        "{stderr}"
+    );
     let canonical = margins_home.join("workspaces/practice/captures/.margins");
-    assert!(canonical.join("2026-08-10-12-00-00.md").is_file());
-    assert!(canonical.join("sessions.sqlite").is_file());
+    assert!(!canonical.exists());
     assert!(!unrelated.join(".margins").exists());
     assert!(!legacy_project.join(".margins").exists());
     assert!(!notes.join(".margins").exists());
@@ -3375,8 +3372,7 @@ fn explicit_workspace_rejects_project_before_capture_side_effects() {
     let old_margins_home = std::env::var_os("MARGINS_HOME");
     std::env::set_var("MARGINS_HOME", &margins_home);
     workspace::create_workspace(&margins_home, "practice", None, &notes).unwrap();
-    let mut services = services(temp.path());
-    services.capture = Arc::new(FakeCapture);
+    let services = services(temp.path());
 
     let (result, _stdout, stderr) = invoke(
         &services,
@@ -3397,239 +3393,6 @@ fn explicit_workspace_rejects_project_before_capture_side_effects() {
     assert!(!margins_home
         .join("workspaces/practice/captures/.margins")
         .exists());
-}
-
-#[derive(Default)]
-struct FakeCapture;
-
-impl CaptureProvider for FakeCapture {
-    fn capabilities(&self) -> CaptureCapabilities {
-        CaptureCapabilities {
-            available: true,
-            supported_lanes: vec![AudioLane::Microphone],
-            supports_device_selection: false,
-            supports_live_pcm: false,
-            unavailable_reason: None,
-        }
-    }
-    fn devices(&self) -> Result<Vec<CaptureDevice>, CaptureError> {
-        Ok(Vec::new())
-    }
-    fn permission(&self, _lane: AudioLane) -> Result<PermissionState, CaptureError> {
-        Ok(PermissionState::Granted)
-    }
-    fn request_permission(&self, _lane: AudioLane) -> Result<PermissionState, CaptureError> {
-        Ok(PermissionState::Granted)
-    }
-    fn start(
-        &self,
-        request: CaptureRequest,
-        _observer: Arc<dyn CaptureObserver>,
-    ) -> Result<Box<dyn CaptureHandle>, CaptureError> {
-        Ok(Box::new(FakeHandle {
-            snapshot: CaptureSnapshot {
-                session_id: request.session_id,
-                segment_id: request.segment_id,
-                state: CaptureState::Capturing,
-                lanes: vec![CaptureLaneSnapshot {
-                    lane: AudioLane::Microphone,
-                    state: CaptureLaneState::Active,
-                    generation: 0,
-                    delivered_frames: 0,
-                    durable_frames: 0,
-                    observed_signal: false,
-                    dropped_live_frames: 0,
-                    dropped_durable_frames: 0,
-                    last_error_code: None,
-                }],
-                timeline_reusable: true,
-            },
-        }))
-    }
-}
-
-struct FailingStartCapture;
-
-impl CaptureProvider for FailingStartCapture {
-    fn capabilities(&self) -> CaptureCapabilities {
-        FakeCapture.capabilities()
-    }
-    fn devices(&self) -> Result<Vec<CaptureDevice>, CaptureError> {
-        Ok(Vec::new())
-    }
-    fn permission(&self, _lane: AudioLane) -> Result<PermissionState, CaptureError> {
-        Ok(PermissionState::Granted)
-    }
-    fn request_permission(&self, _lane: AudioLane) -> Result<PermissionState, CaptureError> {
-        Ok(PermissionState::Granted)
-    }
-    fn start(
-        &self,
-        _request: CaptureRequest,
-        _observer: Arc<dyn CaptureObserver>,
-    ) -> Result<Box<dyn CaptureHandle>, CaptureError> {
-        Err(CaptureError::unavailable("provider disappeared"))
-    }
-}
-
-struct DeniedCapture;
-
-impl CaptureProvider for DeniedCapture {
-    fn capabilities(&self) -> CaptureCapabilities {
-        FakeCapture.capabilities()
-    }
-    fn devices(&self) -> Result<Vec<CaptureDevice>, CaptureError> {
-        Ok(Vec::new())
-    }
-    fn permission(&self, _lane: AudioLane) -> Result<PermissionState, CaptureError> {
-        Ok(PermissionState::Denied)
-    }
-    fn request_permission(&self, _lane: AudioLane) -> Result<PermissionState, CaptureError> {
-        Ok(PermissionState::Denied)
-    }
-    fn start(
-        &self,
-        _request: CaptureRequest,
-        _observer: Arc<dyn CaptureObserver>,
-    ) -> Result<Box<dyn CaptureHandle>, CaptureError> {
-        unreachable!("permission denial must preflight before start")
-    }
-}
-
-struct UnknownSystemCapture;
-
-impl CaptureProvider for UnknownSystemCapture {
-    fn capabilities(&self) -> CaptureCapabilities {
-        CaptureCapabilities {
-            available: true,
-            supported_lanes: vec![AudioLane::System],
-            supports_device_selection: false,
-            supports_live_pcm: false,
-            unavailable_reason: None,
-        }
-    }
-
-    fn devices(&self) -> Result<Vec<CaptureDevice>, CaptureError> {
-        Ok(Vec::new())
-    }
-
-    fn permission(&self, _lane: AudioLane) -> Result<PermissionState, CaptureError> {
-        Ok(PermissionState::Unknown)
-    }
-
-    fn request_permission(&self, _lane: AudioLane) -> Result<PermissionState, CaptureError> {
-        panic!("unknown system permission must be proven by capture health, not requested")
-    }
-
-    fn start(
-        &self,
-        request: CaptureRequest,
-        _observer: Arc<dyn CaptureObserver>,
-    ) -> Result<Box<dyn CaptureHandle>, CaptureError> {
-        Ok(Box::new(FakeHandle {
-            snapshot: CaptureSnapshot {
-                session_id: request.session_id,
-                segment_id: request.segment_id,
-                state: CaptureState::Capturing,
-                lanes: vec![CaptureLaneSnapshot {
-                    lane: AudioLane::System,
-                    state: CaptureLaneState::Active,
-                    generation: 0,
-                    delivered_frames: 0,
-                    durable_frames: 0,
-                    observed_signal: false,
-                    dropped_live_frames: 0,
-                    dropped_durable_frames: 0,
-                    last_error_code: None,
-                }],
-                timeline_reusable: true,
-            },
-        }))
-    }
-}
-
-struct FakeHandle {
-    snapshot: CaptureSnapshot,
-}
-
-impl CaptureHandle for FakeHandle {
-    fn snapshot(&self) -> Result<CaptureSnapshot, CaptureError> {
-        Ok(self.snapshot.clone())
-    }
-    fn command(&self, command: CaptureCommand) -> Result<CaptureCommandResult, CaptureError> {
-        let mut snapshot = self.snapshot.clone();
-        snapshot.state = CaptureState::Finished;
-        Ok(CaptureCommandResult {
-            operation_id: command.operation_id,
-            status: CaptureCommandStatus::Applied,
-            snapshot,
-            completed_artifacts: Vec::new(),
-        })
-    }
-}
-
-#[test]
-fn injected_capture_keeps_one_stable_id_across_attaches() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut services = services(temp.path());
-    services.capture = Arc::new(FakeCapture);
-    for args in [
-        vec!["margins", "new", "--title", "Stable"],
-        vec!["margins", "attach"],
-        vec!["margins", "attach"],
-    ] {
-        let (result, _, stderr) = invoke(&services, temp.path(), &args);
-        assert!(result.is_ok(), "{stderr}");
-    }
-    let margins_dir = temp.path().join(".margins");
-    let current = std::fs::read_to_string(margins_dir.join("current")).unwrap();
-    let id = current.trim();
-    assert_eq!(id, "2026-08-10-12-00-00");
-    let meta = canonical::get_session_meta(&margins_dir, id).unwrap();
-    assert_eq!(meta.title.as_deref(), Some("Stable"));
-    assert_eq!(
-        meta.segments
-            .iter()
-            .map(|segment| segment.segment_index)
-            .collect::<Vec<_>>(),
-        vec![0, 1, 2]
-    );
-    assert_eq!(canonical::list_sessions(&margins_dir).unwrap().len(), 1);
-}
-
-#[test]
-fn permission_and_failed_start_leave_no_capture_mutation() {
-    for (provider, expected) in [
-        (
-            Arc::new(DeniedCapture) as Arc<dyn CaptureProvider>,
-            "capture_permission_denied",
-        ),
-        (
-            Arc::new(FailingStartCapture) as Arc<dyn CaptureProvider>,
-            "capture_unavailable",
-        ),
-    ] {
-        let temp = tempfile::tempdir().unwrap();
-        let mut services = services(temp.path());
-        services.capture = provider;
-        let (result, stdout, _) = invoke(&services, temp.path(), &["margins", "new"]);
-        assert_eq!(result.unwrap_err().code(), expected);
-        assert!(stdout.is_empty());
-        assert!(!temp.path().join(".margins").exists());
-    }
-}
-
-#[test]
-fn unknown_system_permission_is_deferred_to_delivery_health() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut services = services(temp.path());
-    services.capture = Arc::new(UnknownSystemCapture);
-
-    let (result, stdout, stderr) = invoke(&services, temp.path(), &["margins", "new"]);
-
-    assert!(result.is_ok(), "{stderr}");
-    assert!(stdout.is_empty());
-    assert!(temp.path().join(".margins/current").is_file());
 }
 
 #[test]
@@ -3931,35 +3694,14 @@ fn public_note_handoff_defaults_to_latest_session_in_selected_workspace() {
 }
 
 #[test]
-fn bare_margins_creates_without_a_current_session_then_resumes_it() {
+fn bare_public_cli_is_unavailable_without_side_effects() {
     let temp = tempfile::tempdir().unwrap();
-    let mut services = services(temp.path());
-    services.capture = Arc::new(FakeCapture);
-
-    let (first, _, first_stderr) = invoke(&services, temp.path(), &["margins"]);
-    assert!(first.is_ok(), "{first_stderr}");
-
-    let margins_dir = temp.path().join(".margins");
-    let current = std::fs::read_to_string(margins_dir.join("current")).unwrap();
-    let id = current.trim();
-    let first_meta = canonical::get_session_meta(&margins_dir, id).unwrap();
-    assert_eq!(first_meta.segments.len(), 1);
-
-    let (second, _, second_stderr) = invoke(&services, temp.path(), &["margins"]);
-    assert!(second.is_ok(), "{second_stderr}");
-
-    let second_current = std::fs::read_to_string(margins_dir.join("current")).unwrap();
-    assert_eq!(second_current.trim(), id);
-    let resumed_meta = canonical::get_session_meta(&margins_dir, id).unwrap();
-    assert_eq!(
-        resumed_meta
-            .segments
-            .iter()
-            .map(|segment| segment.segment_index)
-            .collect::<Vec<_>>(),
-        vec![0, 1]
-    );
-    assert_eq!(canonical::list_sessions(&margins_dir).unwrap().len(), 1);
+    let services = services(temp.path());
+    for _ in 0..2 {
+        let (result, _, _) = invoke(&services, temp.path(), &["margins"]);
+        assert_eq!(result.unwrap_err().code(), "capture_unavailable");
+    }
+    assert!(!temp.path().join(".margins").exists());
 }
 
 #[test]

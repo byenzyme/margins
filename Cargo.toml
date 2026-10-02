@@ -70,6 +70,7 @@ margins-cli = { path = "crates/public/margins-cli" }
 margins-store = { path = "crates/public/margins-store" }
 margins-workflows = { path = "crates/public/margins-workflows" }
 margins-meeting-protocol = { path = "crates/public/margins-meeting-protocol" }
+margins-meeting-runtime = { path = "crates/public/margins-meeting-runtime" }
 rusqlite.workspace = true
 recall-engine = { path = "crates/private/recall-engine", package = "enzyme-core", features = ["embedder-compat"], optional = true }
 tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
@@ -95,6 +96,7 @@ uuid = { version = "1", features = ["v4"] }
 [dev-dependencies]
 ctor = "0.2.9"
 margins-workflows = { path = "crates/public/margins-workflows", features = ["test-support"] }
+margins-meeting-runtime = { path = "crates/public/margins-meeting-runtime", features = ["test-support"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cidre = { version = "0.14", features = ["av"], optional = true }

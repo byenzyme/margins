@@ -143,7 +143,10 @@ pub fn list(
     }
     line(
         stderr,
-        format_args!("{:<20} {:<24} {:<8} {}", "NAME", "STARTED", "SEGS", "NOTES"),
+        format_args!(
+            "{:<20} {:<24} {:<8} {:<7} {}",
+            "NAME", "STARTED", "SEGS", "STATE", "NOTES"
+        ),
     )
     .map_err(CliError::from_anyhow)?;
     line(stderr, format_args!("{}", "-".repeat(72))).map_err(CliError::from_anyhow)?;
@@ -151,8 +154,12 @@ pub fn list(
         line(
             stderr,
             format_args!(
-                "{:<20} {:<24} {:<8} {}",
-                session.name, session.start_time, session.segment_count, session.notes_path
+                "{:<20} {:<24} {:<8} {:<7} {}",
+                session.name,
+                session.start_time,
+                session.segment_count,
+                session.lifecycle_state,
+                session.notes_path
             ),
         )
         .map_err(CliError::from_anyhow)?;

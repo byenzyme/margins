@@ -22,6 +22,7 @@ pub struct TranscriptView {
     pub updated_at_unix_ms: u64,
     pub live: bool,
     pub terminal: bool,
+    pub capture_state: String,
     pub speaker_alias: Option<String>,
     pub started_at: String,
     pub created_at: String,
@@ -98,6 +99,11 @@ pub fn load_transcript_view(
     requested: &str,
 ) -> Result<TranscriptView> {
     let name = resolve_session_name(margins_dir, requested)?;
+    let capture_state = canonical::list_sessions(margins_dir)?
+        .into_iter()
+        .find(|session| session.name == name)
+        .map(|session| session.lifecycle_state)
+        .unwrap_or_else(|| "ended".to_string());
     let meta = canonical::get_session_meta(margins_dir, &name).ok();
     let final_path = transcript_artifact_path(margins_dir, &name);
     let final_source = if meta
@@ -149,8 +155,10 @@ pub fn load_transcript_view(
     };
     // The public store has no process-level capture status. A current session
     // with a non-terminal live source is the strongest honest available signal.
-    let live =
-        source.live_checkpoint && !source.terminal && current_session_matches(margins_dir, &name);
+    let live = source.live_checkpoint
+        && !source.terminal
+        && capture_state == "active"
+        && current_session_matches(margins_dir, &name);
     let speaker_alias = speaker_alias_from_meta(meta.as_ref());
     let body = if source.source_path == final_path {
         meta.as_ref()
@@ -177,6 +185,7 @@ pub fn load_transcript_view(
         updated_at_unix_ms,
         live,
         terminal: source.terminal,
+        capture_state,
         speaker_alias,
         started_at: meta
             .as_ref()

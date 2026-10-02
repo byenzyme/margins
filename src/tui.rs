@@ -252,7 +252,11 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Option<TuiAction> {
 
         // Save
         KeyCode::Char('s') if ctrl => {
-            let _ = app.save();
+            if let Err(error) = app.save() {
+                if app.message.is_none() {
+                    app.message = Some(format!("Memo save failed: {error}"));
+                }
+            }
         }
 
         // Device select

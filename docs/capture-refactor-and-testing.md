@@ -55,6 +55,7 @@ Relevant implementation sites:
 | Input received and durably finalized | Session persistence | Processing queued or failed; explicit audio gaps |
 | Local unacknowledged input | Delivery adapter | Producer stopped |
 | Memo document and revision | Shared timed-memo model and authority | Client draft based on an older revision |
+
 | Transcription health and progress | ASR worker/job | Healthy durable capture |
 | Note association | Application metadata | Missing synced file; failed later job |
 | Job outcome | Named processing job | Earlier note remains available |
@@ -65,6 +66,32 @@ Use existing durable receipts and job records for facts that must survive restar
 The UI projects these facts into a concise display; its labels are not a second
 authoritative lifecycle. Remove `Processing`/`Ready` and note errors from the
 authoritative capture lifecycle when their consumers move to explicit job facts.
+
+### Native TUI authority (2026-10-02)
+
+`margins new` and local attach reserve or recover an in-process meeting runtime
+session. After the native recorder seals each stereo WAV, the TUI sends its two
+16 kHz PCM lanes through the runtime Recorder facade, closes the segment, and
+finalizes the session. The store projects runtime segment metadata and links the
+same native WAV for the existing audio processing path. The public CLI's
+unavailable capture command no longer writes a second set of session rows.
+Attach replays an interrupted runtime ingest of a sealed WAV and repairs a
+missing WAV link after segment finalization. Native samples still held by the
+recorder before WAV seal are outside this recovery path.
+
+The TUI remembers the memo revision and lines it actually read. On save, it
+compares and replaces against that revision. Independent line edits are merged
+and retried; conflicting edits to one line leave the remote version intact and
+write the local draft to a `*.memo-conflict-*.md` file for review. The memo's
+SQLite record is authoritative. `mirror_stale` now means its repairable Markdown
+projection differs from that record or could not be refreshed; it no longer
+needs to account for TUI writes made directly to Markdown. A stale projection
+can be refreshed with `SqliteWorkspaceAuthorityStorage::refresh_memo_mirror`.
+
+Older sessions can retain `lifecycle_state = active` in SQLite despite finalized
+audio. Readers report them as ended when they have a finalized segment and no
+meeting-runtime row. This is a read-time interpretation and leaves historical
+rows unchanged.
 
 ## 4. Control, data, and processing boundaries
 

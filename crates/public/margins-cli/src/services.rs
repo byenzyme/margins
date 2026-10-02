@@ -1,5 +1,5 @@
 use chrono::{DateTime, Local};
-use margins_core::{AsrBackend, CaptureProvider, DiarizationBackend, EventSink};
+use margins_core::{AsrBackend, DiarizationBackend, EventSink};
 use margins_workflows::project::ResolvedProject;
 use std::ffi::OsStr;
 use std::path::Path;
@@ -263,7 +263,6 @@ impl ProjectService for SystemProjectService {
 }
 
 pub struct CliServices {
-    pub capture: Arc<dyn CaptureProvider>,
     pub sessions: Arc<dyn SessionStore>,
     pub asr: Arc<dyn AsrBackend>,
     pub diarization: Arc<dyn DiarizationBackend>,
@@ -276,7 +275,6 @@ pub struct CliServices {
 impl Default for CliServices {
     fn default() -> Self {
         Self {
-            capture: Arc::new(margins_core::UnavailableCaptureProvider::default()),
             sessions: Arc::new(LocalSessionStore),
             asr: Arc::new(margins_media::providers::UnavailableAsr),
             diarization: Arc::new(margins_media::providers::UnavailableDiarization),

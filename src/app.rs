@@ -1,5 +1,5 @@
 use chrono::{DateTime, Local};
-use margins_core::{MemoMoment, TimedMemoDocument};
+use margins_core::{MemoMoment, TimedMemoDocument, TimedMemoLine};
 use ratatui::layout::Rect;
 use std::io;
 use std::path::PathBuf;
@@ -50,6 +50,7 @@ pub struct App {
     pub remote_pending_bytes: Arc<AtomicU64>,
     pause_block_ordinal: u32,
     workspace_authority: Option<(PathBuf, String)>,
+    observed_memo: Option<(String, Vec<TimedMemoLine>)>,
 }
 
 impl App {
@@ -81,6 +82,7 @@ impl App {
             remote_pending_bytes: Arc::new(AtomicU64::new(0)),
             pause_block_ordinal: 0,
             workspace_authority: None,
+            observed_memo: None,
         }
     }
 
@@ -124,11 +126,16 @@ impl App {
             remote_pending_bytes: Arc::new(AtomicU64::new(0)),
             pause_block_ordinal: 0,
             workspace_authority: None,
+            observed_memo: None,
         }
     }
 
     pub fn bind_workspace_authority(&mut self, margins_dir: PathBuf, session_id: String) {
         self.workspace_authority = Some((margins_dir, session_id));
+    }
+
+    pub fn observe_memo(&mut self, revision: String, lines: Vec<TimedMemoLine>) {
+        self.observed_memo = Some((revision, lines));
     }
 
     pub fn mark_edited(&mut self, line: usize) {
@@ -456,36 +463,119 @@ impl App {
     }
 
     pub fn save(&mut self) -> io::Result<()> {
+        self.message = None;
         self.commit_uncommitted_at(Local::now());
         let content = self.export();
         if let Some((margins_dir, session_id)) = &self.workspace_authority {
             let authority = margins_store::SqliteWorkspaceAuthorityStorage::open(margins_dir)
                 .map_err(io::Error::other)?;
-            let current = authority.memo(session_id).map_err(io::Error::other)?;
-            if current.lines != self.memo.lines() {
-                let desired = self.memo.revision();
-                let request_id = format!(
-                    "native-memo-{}-{}",
-                    current.revision.chars().take(32).collect::<String>(),
-                    desired.chars().take(32).collect::<String>()
-                );
-                authority
-                    .replace_memo_lines(
-                        session_id,
-                        "native-cli",
-                        &request_id,
-                        &current.revision,
-                        self.memo.lines(),
-                    )
-                    .map_err(io::Error::other)?;
+            let (mut revision, mut base) = match &self.observed_memo {
+                Some(observed) => observed.clone(),
+                None => {
+                    let receipt = authority.memo(session_id).map_err(io::Error::other)?;
+                    (receipt.revision, receipt.lines)
+                }
+            };
+            let mut desired = self.memo.lines().to_vec();
+            let mut saved = false;
+            for _ in 0..3 {
+                let request_id = format!("native-memo-{}", uuid::Uuid::new_v4());
+                match authority.replace_memo_lines(
+                    session_id,
+                    "native-cli",
+                    &request_id,
+                    &revision,
+                    &desired,
+                ) {
+                    Ok(receipt) => {
+                        self.observed_memo = Some((receipt.revision, receipt.lines.clone()));
+                        if receipt.lines != self.memo.lines() {
+                            self.memo = TimedMemoDocument::resume(
+                                receipt.lines,
+                                MemoMoment::recording(elapsed_between(
+                                    self.start_time,
+                                    Local::now(),
+                                )),
+                            );
+                            self.cursor_line = self.memo.len().saturating_sub(1);
+                            self.cursor_col = 0;
+                        }
+                        if receipt.mirror_stale {
+                            self.message =
+                                Some("Memo saved in SQLite; Markdown mirror needs repair".into());
+                        }
+                        saved = true;
+                        break;
+                    }
+                    Err(error)
+                        if error
+                            .downcast_ref::<margins_store::MemoRevisionConflict>()
+                            .is_some() =>
+                    {
+                        let current = authority.memo(session_id).map_err(io::Error::other)?;
+                        if let Some(merged) = merge_memo_lines(&base, &desired, &current.lines) {
+                            desired = merged;
+                            revision = current.revision;
+                            base = current.lines;
+                        } else {
+                            let draft = margins_dir.join(format!(
+                                "{session_id}.memo-conflict-{}.md",
+                                uuid::Uuid::new_v4()
+                            ));
+                            std::fs::write(&draft, &content)?;
+                            self.message = Some(format!(
+                                "Memo changed elsewhere. Your draft is at {}. Review it and retry.",
+                                draft.display()
+                            ));
+                            return Err(io::Error::other(format!(
+                                "memo conflict; local draft saved to {}",
+                                draft.display()
+                            )));
+                        }
+                    }
+                    Err(error) => return Err(io::Error::other(error)),
+                }
+            }
+            if !saved {
+                return Err(io::Error::other("memo changed repeatedly; retry save"));
             }
         } else {
             std::fs::write(&self.output_path, &content)?;
         }
         let count = content.lines().count();
-        self.message = Some(format!("Saved {} lines to {}", count, self.output_path));
+        if self.message.is_none() {
+            self.message = Some(format!("Saved {} lines to {}", count, self.output_path));
+        }
         Ok(())
     }
+}
+
+/// Three-way merge of line edits. A line changed differently in both copies
+/// needs a human decision; independent edits and appended lines are safe.
+fn merge_memo_lines(
+    base: &[TimedMemoLine],
+    local: &[TimedMemoLine],
+    remote: &[TimedMemoLine],
+) -> Option<Vec<TimedMemoLine>> {
+    if local.len() < base.len() || remote.len() < base.len() {
+        return None;
+    }
+    let mut merged = Vec::with_capacity(local.len() + remote.len());
+    for index in 0..base.len() {
+        let local_changed = local[index] != base[index];
+        let remote_changed = remote[index] != base[index];
+        if local_changed && remote_changed && local[index] != remote[index] {
+            return None;
+        }
+        merged.push(if local_changed {
+            local[index].clone()
+        } else {
+            remote[index].clone()
+        });
+    }
+    merged.extend_from_slice(&remote[base.len()..]);
+    merged.extend_from_slice(&local[base.len()..]);
+    Some(merged)
 }
 
 fn elapsed_between(start: DateTime<Local>, time: DateTime<Local>) -> f64 {
@@ -594,5 +684,104 @@ mod tests {
             std::fs::read_to_string(output).unwrap(),
             app.memo.export_markdown()
         );
+    }
+
+    #[test]
+    fn remote_and_local_appends_merge_against_observed_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join(".margins");
+        margins_store::canonical::create_session(
+            &dir,
+            "meeting",
+            &Local::now(),
+            ".margins/meeting.md",
+        )
+        .unwrap();
+        let authority = margins_store::SqliteWorkspaceAuthorityStorage::open(&dir).unwrap();
+        let base = authority.memo("meeting").unwrap();
+        let mut app = App::from_memo(
+            TimedMemoDocument::from_committed(base.lines.clone()),
+            dir.join("meeting.md").to_string_lossy().into_owned(),
+            make_start(),
+            "mic".into(),
+        );
+        app.bind_workspace_authority(dir.clone(), "meeting".into());
+        app.observe_memo(base.revision.clone(), base.lines);
+        type_text(&mut app, "local line");
+        authority
+            .update_memo(
+                "meeting",
+                "bb",
+                "remote-1",
+                &base.revision,
+                1000,
+                false,
+                "remote line",
+            )
+            .unwrap();
+        app.save().unwrap();
+        let saved = authority.memo("meeting").unwrap();
+        assert!(saved.lines.iter().any(|line| line.text == "remote line"));
+        assert!(saved.lines.iter().any(|line| line.text == "local line"));
+        assert!(!saved.mirror_stale);
+    }
+
+    #[test]
+    fn divergent_line_keeps_remote_and_preserves_local_draft() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join(".margins");
+        margins_store::canonical::create_session(
+            &dir,
+            "meeting",
+            &Local::now(),
+            ".margins/meeting.md",
+        )
+        .unwrap();
+        let authority = margins_store::SqliteWorkspaceAuthorityStorage::open(&dir).unwrap();
+        let initial = authority.memo("meeting").unwrap();
+        let base = authority
+            .update_memo(
+                "meeting",
+                "bb",
+                "seed",
+                &initial.revision,
+                1000,
+                false,
+                "base",
+            )
+            .unwrap();
+        let mut app = App::from_memo(
+            TimedMemoDocument::from_committed(base.lines.clone()),
+            dir.join("meeting.md").to_string_lossy().into_owned(),
+            make_start(),
+            "mic".into(),
+        );
+        app.bind_workspace_authority(dir.clone(), "meeting".into());
+        app.observe_memo(base.revision.clone(), base.lines);
+        app.memo = TimedMemoDocument::from_committed(vec![TimedMemoLine::at(
+            "local",
+            MemoMoment::recording(2.0),
+        )]);
+        authority
+            .update_memo(
+                "meeting",
+                "bb",
+                "remote-2",
+                &base.revision,
+                2000,
+                false,
+                "remote",
+            )
+            .unwrap();
+        let error = app.save().unwrap_err();
+        assert!(error.to_string().contains("memo conflict"));
+        assert_eq!(authority.memo("meeting").unwrap().lines[0].text, "remote");
+        let draft = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.to_string_lossy().contains("memo-conflict"))
+            .unwrap();
+        assert!(std::fs::read_to_string(draft).unwrap().contains("local"));
     }
 }

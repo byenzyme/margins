@@ -143,6 +143,14 @@ fn render_vault_meetings(
         .map_err(CliError::from_anyhow)?;
         line(
             stdout,
+            format_args!(
+                "    <capture_state>{}</capture_state>",
+                xml_escape_text(&meeting.capture_state)
+            ),
+        )
+        .map_err(CliError::from_anyhow)?;
+        line(
+            stdout,
             format_args!("    <source>{}</source>", xml_escape_text(&meeting.source)),
         )
         .map_err(CliError::from_anyhow)?;
@@ -187,6 +195,7 @@ pub fn transcript(
             updated_at_unix_ms: transcript.updated_at_unix_ms,
             live: transcript.live,
             terminal: transcript.terminal,
+            capture_state: &transcript.capture_state,
             title: &transcript.title,
             started_at: &transcript.started_at,
             created_at: &transcript.created_at,
@@ -211,6 +220,14 @@ pub fn transcript(
     )
     .map_err(CliError::from_anyhow)?;
     line(stdout, format_args!("  <metadata>")).map_err(CliError::from_anyhow)?;
+    line(
+        stdout,
+        format_args!(
+            "    <capture_state>{}</capture_state>",
+            xml_escape_text(&transcript.capture_state)
+        ),
+    )
+    .map_err(CliError::from_anyhow)?;
     line(
         stdout,
         format_args!(
@@ -303,6 +320,7 @@ struct TranscriptJson<'a> {
     updated_at_unix_ms: u64,
     live: bool,
     terminal: bool,
+    capture_state: &'a str,
     title: &'a str,
     started_at: &'a str,
     created_at: &'a str,
