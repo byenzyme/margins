@@ -1,12 +1,90 @@
 use margins_meeting_protocol::*;
+use margins_meeting_runtime::test_support::{
+    assert_recorder_conformance, RecorderConformanceAdapter,
+};
 use margins_meeting_runtime::{MeetingRuntime, MeetingRuntimeStorage};
 use margins_store::SqliteMeetingRuntimeStorage;
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::BTreeMap,
+    path::PathBuf,
     sync::{Arc, Barrier},
     thread,
 };
+
+struct SqliteRecorderAdapter {
+    directory: PathBuf,
+    runtime: MeetingRuntime<SqliteMeetingRuntimeStorage>,
+}
+
+impl RecorderConformanceAdapter for SqliteRecorderAdapter {
+    type Error = margins_meeting_runtime::RuntimeError<anyhow::Error>;
+
+    fn send(
+        &mut self,
+        message: ClientMessageV1,
+    ) -> Result<margins_meeting_runtime::RuntimeResponseV1, Self::Error> {
+        self.runtime.handle(message)
+    }
+
+    fn restart(&mut self) {
+        self.runtime =
+            MeetingRuntime::new(SqliteMeetingRuntimeStorage::open(&self.directory).unwrap());
+    }
+}
+
+#[test]
+fn sqlite_recorder_conformance_projects_one_canonical_session_and_two_audio_artifacts() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut adapter = SqliteRecorderAdapter {
+        directory: temp.path().to_path_buf(),
+        runtime: MeetingRuntime::new(SqliteMeetingRuntimeStorage::open(temp.path()).unwrap()),
+    };
+    assert_recorder_conformance(&mut adapter, "conform");
+    let connection = rusqlite::Connection::open(adapter.runtime.storage().database_path()).unwrap();
+    let count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sessions WHERE name = 'conform'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let segment_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM session_segments WHERE session_name = 'conform'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let artifact_count: i64 = connection.query_row("SELECT COUNT(*) FROM session_artifacts WHERE session_name = 'conform' AND kind = 'audio_mic_pcm'", [], |row| row.get(0)).unwrap();
+    let lifecycle: String = connection
+        .query_row(
+            "SELECT lifecycle_state FROM sessions WHERE name = 'conform'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!((count, segment_count, artifact_count), (1, 2, 2));
+    assert_eq!(lifecycle, "ended");
+    assert!(
+        std::fs::read_to_string(temp.path().join("conform_capture_context.md"))
+            .unwrap()
+            .contains("Transcript pending")
+    );
+}
+
+#[test]
+fn runtime_storage_rejects_new_session_ids_that_escape_artifact_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = MeetingRuntime::new(SqliteMeetingRuntimeStorage::open(temp.path()).unwrap());
+    assert!(runtime.handle(create("../escape")).is_err());
+    assert!(!temp
+        .path()
+        .parent()
+        .unwrap()
+        .join("escape_capture_context.md")
+        .exists());
+}
 
 fn message(session: &str, id: impl Into<String>, body: ClientMessageBodyV1) -> ClientMessageV1 {
     ClientMessageV1 {
@@ -225,4 +303,179 @@ fn compact_session_state_does_not_accumulate_payloads_or_event_history() {
     assert!(!encoded
         .windows(128)
         .any(|window| window.iter().all(|byte| *byte == 0)));
+}
+
+mod memo_authority {
+    use margins_core::{MemoMoment, TimedMemoLine};
+    use margins_store::{
+        canonical, MemoRevisionConflict, MemoWrite, SqliteWorkspaceAuthorityStorage,
+    };
+    use std::sync::{Arc, Barrier};
+
+    fn store() -> (tempfile::TempDir, SqliteWorkspaceAuthorityStorage) {
+        let temp = tempfile::tempdir().unwrap();
+        canonical::create_session(temp.path(), "meeting", &chrono::Local::now(), "meeting.md")
+            .unwrap();
+        let storage = SqliteWorkspaceAuthorityStorage::open(temp.path()).unwrap();
+        (temp, storage)
+    }
+
+    #[test]
+    fn update_and_replace_require_the_observed_revision_and_preserve_observation_time() {
+        let (_temp, storage) = store();
+        let original = storage.memo("meeting").unwrap();
+        let update = storage
+            .write_memo(
+                "meeting",
+                "alice",
+                "update-1",
+                &original.revision,
+                MemoWrite::PlainText {
+                    observed_at_ms: 12_345,
+                    paused: false,
+                    text: "first",
+                },
+            )
+            .unwrap();
+        assert_eq!(update.lines[0].created_secs, 12.345);
+        let replay = storage
+            .write_memo(
+                "meeting",
+                "alice",
+                "update-1",
+                &original.revision,
+                MemoWrite::PlainText {
+                    observed_at_ms: 12_345,
+                    paused: false,
+                    text: "first",
+                },
+            )
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.revision, update.revision);
+
+        let stale = storage
+            .write_memo(
+                "meeting",
+                "bob",
+                "stale",
+                &original.revision,
+                MemoWrite::PlainText {
+                    observed_at_ms: 20_000,
+                    paused: false,
+                    text: "lost",
+                },
+            )
+            .unwrap_err();
+        let conflict = stale.downcast_ref::<MemoRevisionConflict>().unwrap();
+        assert_eq!(
+            (&conflict.expected, &conflict.current),
+            (&original.revision, &update.revision)
+        );
+
+        let lines = vec![TimedMemoLine::at(
+            "replacement",
+            MemoMoment::paused(25.0, 1),
+        )];
+        let replaced = storage
+            .write_memo(
+                "meeting",
+                "bob",
+                "replace-1",
+                &update.revision,
+                MemoWrite::ReplaceLines(&lines),
+            )
+            .unwrap();
+        assert_eq!(replaced.lines, lines);
+        assert_eq!(storage.memo("meeting").unwrap().revision, replaced.revision);
+        assert!(storage
+            .write_memo(
+                "meeting",
+                "alice",
+                "replace-stale",
+                &original.revision,
+                MemoWrite::ReplaceLines(&lines)
+            )
+            .unwrap_err()
+            .is::<MemoRevisionConflict>());
+    }
+
+    #[test]
+    fn concurrent_writers_have_one_winner_and_a_typed_conflict() {
+        let (_temp, storage) = store();
+        let observed = storage.memo("meeting").unwrap().revision;
+        let barrier = Arc::new(Barrier::new(3));
+        let handles: Vec<_> = (0..2)
+            .map(|index| {
+                let storage = storage.clone();
+                let observed = observed.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    storage.write_memo(
+                        "meeting",
+                        &format!("writer-{index}"),
+                        &format!("write-{index}"),
+                        &observed,
+                        MemoWrite::PlainText {
+                            observed_at_ms: 1000 + index,
+                            paused: false,
+                            text: if index == 0 { "zero" } else { "one" },
+                        },
+                    )
+                })
+            })
+            .collect();
+        barrier.wait();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|error| error.is::<MemoRevisionConflict>()))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn mirror_failure_after_commit_does_not_lose_write_and_can_be_repaired() {
+        let (temp, storage) = store();
+        let path = temp.path().join("meeting.md");
+        std::fs::create_dir(&path).unwrap();
+        let initial = storage.memo("meeting").unwrap();
+        let written = storage
+            .update_memo(
+                "meeting",
+                "alice",
+                "write",
+                &initial.revision,
+                4_321,
+                false,
+                "committed",
+            )
+            .unwrap();
+        assert_eq!(storage.memo("meeting").unwrap().revision, written.revision);
+        assert!(path.is_dir());
+        std::fs::remove_dir(&path).unwrap();
+        storage.refresh_memo_mirror("meeting").unwrap();
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("committed"));
+
+        let lines = vec![TimedMemoLine::at("replacement", MemoMoment::recording(5.0))];
+        let replaced = storage
+            .replace_memo_lines("meeting", "bob", "replace", &written.revision, &lines)
+            .unwrap();
+        assert_eq!(storage.memo("meeting").unwrap().revision, replaced.revision);
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("replacement"));
+    }
 }

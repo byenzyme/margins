@@ -74,6 +74,77 @@ fn create(session: &str) -> ClientMessageV1 {
     )
 }
 
+#[test]
+fn workspace_memo_updates_and_replacements_report_stale_revision() {
+    let temp = tempfile::tempdir().unwrap();
+    let notes = temp.path().join("notes");
+    let captures = temp.path().join("captures");
+    std::fs::create_dir_all(&notes).unwrap();
+    let workspace =
+        ensure_service_workspace(&temp.path().join("state"), "team", None, &notes, &captures)
+            .unwrap();
+    let service = WorkspaceService::open("host", workspace).unwrap();
+    let alice = ServicePrincipal::full("alice", "team");
+    let bob = ServicePrincipal::full("bob", "team");
+    let session = SessionId("memo-cas".into());
+    service
+        .reserve_session(&alice, create(session.as_ref()))
+        .unwrap();
+    let observed = service.memo(&alice, &session).unwrap().revision;
+    let first = service
+        .update_memo(
+            &alice,
+            &session,
+            &WorkspaceMemoUpdateV1 {
+                request_id: "alice-edit".into(),
+                expected_revision: observed.clone(),
+                observed_at_ms: SessionMillis(1_234),
+                paused: false,
+                text: "Alice".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(first.lines[0].created_secs, 1.234);
+    let stale = service
+        .replace_memo(
+            &bob,
+            &session,
+            &WorkspaceMemoReplaceV1 {
+                request_id: "bob-stale".into(),
+                expected_revision: observed,
+                lines: vec![WorkspaceMemoLineV1 {
+                    text: "Bob".into(),
+                    created_secs: 2.0,
+                    edited_secs: None,
+                    draft_started_secs: None,
+                    audio_pending_at_mark: false,
+                    block_ordinal: None,
+                }],
+            },
+        )
+        .unwrap_err();
+    assert!(stale.is::<margins_store::MemoRevisionConflict>());
+    let replaced = service
+        .replace_memo(
+            &bob,
+            &session,
+            &WorkspaceMemoReplaceV1 {
+                request_id: "bob-fresh".into(),
+                expected_revision: first.revision,
+                lines: vec![WorkspaceMemoLineV1 {
+                    text: "Bob".into(),
+                    created_secs: 2.0,
+                    edited_secs: None,
+                    draft_started_secs: None,
+                    audio_pending_at_mark: false,
+                    block_ordinal: None,
+                }],
+            },
+        )
+        .unwrap();
+    assert_eq!(replaced.lines[0].text, "Bob");
+}
+
 fn chunk(session: &str, message: &str, lane: &str, sequence: u64) -> ClientMessageV1 {
     let sample = if lane == "mic" {
         0x1100_i16 + sequence as i16
@@ -491,7 +562,10 @@ fn composed_service_is_the_same_canonical_store_across_retry_and_restart() {
     let artifacts =
         margins_store::canonical::list_session_artifacts(&captures.join(".margins"), "capture-a")
             .unwrap();
-    assert_eq!(artifacts.len(), 2);
+    assert_eq!(artifacts.len(), 3);
+    let pending = restarted.transcript(&owner, "latest").unwrap();
+    assert_eq!(pending.session_id.as_ref(), "capture-a");
+    assert!(pending.body.contains("Transcript pending"));
     for (kind, expected) in [
         ("audio_mic_pcm", 0x1100_i16),
         ("audio_system_pcm", 0x2200_i16),
@@ -630,7 +704,7 @@ fn composed_service_validates_and_finalizes_native_opus_without_relabeling() {
         .unwrap();
 
     let artifacts = service.artifacts(&owner, "opus-a").unwrap();
-    assert_eq!(artifacts.len(), 2);
+    assert_eq!(artifacts.len(), 3);
     let stored =
         margins_store::canonical::list_session_artifacts(&captures.join(".margins"), "opus-a")
             .unwrap();

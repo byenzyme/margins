@@ -5,12 +5,44 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{error::Error, fmt};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AuthorityMemoReceipt {
     pub revision: String,
     pub lines: Vec<TimedMemoLine>,
     pub replayed: bool,
+}
+
+/// The caller edited an older memo snapshot. Read `memo` again before retrying.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoRevisionConflict {
+    pub expected: String,
+    pub current: String,
+}
+
+impl fmt::Display for MemoRevisionConflict {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "memo revision conflict: current revision is {}",
+            self.current
+        )
+    }
+}
+
+impl Error for MemoRevisionConflict {}
+
+/// One revision-fenced memo mutation. A producer must retain the revision it
+/// actually observed, including across retries and reconnects.
+#[derive(Debug, Clone)]
+pub enum MemoWrite<'a> {
+    PlainText {
+        observed_at_ms: u64,
+        paused: bool,
+        text: &'a str,
+    },
+    ReplaceLines(&'a [TimedMemoLine]),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -457,9 +489,63 @@ impl SqliteWorkspaceAuthorityStorage {
         paused: bool,
         text: &str,
     ) -> Result<AuthorityMemoReceipt> {
+        self.write_memo(
+            session_id,
+            principal_id,
+            request_id,
+            expected_revision,
+            MemoWrite::PlainText {
+                observed_at_ms,
+                paused,
+                text,
+            },
+        )
+    }
+
+    /// Replace an already-timestamped memo through the same revisioned
+    /// authority used by plain-text remote edits. Desktop capture owns the
+    /// timestamps it supplies; SQLite owns CAS, retry receipts, and the
+    /// Markdown projection.
+    pub fn replace_memo_lines(
+        &self,
+        session_id: &str,
+        principal_id: &str,
+        request_id: &str,
+        expected_revision: &str,
+        lines: &[TimedMemoLine],
+    ) -> Result<AuthorityMemoReceipt> {
+        self.write_memo(
+            session_id,
+            principal_id,
+            request_id,
+            expected_revision,
+            MemoWrite::ReplaceLines(lines),
+        )
+    }
+
+    /// SQLite is the memo authority. The Markdown file is a repairable,
+    /// post-commit projection; a failed mirror refresh never reverses a commit.
+    pub fn write_memo(
+        &self,
+        session_id: &str,
+        principal_id: &str,
+        request_id: &str,
+        expected_revision: &str,
+        write: MemoWrite<'_>,
+    ) -> Result<AuthorityMemoReceipt> {
         validate_request_id(request_id)?;
-        let fingerprint =
-            digest(format!("{expected_revision}\0{observed_at_ms}\0{paused}\0{text}").as_bytes());
+        let fingerprint = match &write {
+            MemoWrite::PlainText {
+                observed_at_ms,
+                paused,
+                text,
+            } => digest(
+                format!("{expected_revision}\0{observed_at_ms}\0{paused}\0{text}").as_bytes(),
+            ),
+            MemoWrite::ReplaceLines(lines) => {
+                digest(format!("{expected_revision}\0{}", serde_json::to_string(lines)?).as_bytes())
+            }
+        };
         let mut connection = self.connection()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let prior: Option<(String, String)> = tx
@@ -475,45 +561,34 @@ impl SqliteWorkspaceAuthorityStorage {
             }
             let mut receipt: AuthorityMemoReceiptWire = serde_json::from_str(&response)?;
             receipt.replayed = true;
+            drop(tx);
+            let _ = self.refresh_memo_mirror(session_id);
             return Ok(receipt.into());
         }
-        let stored: Option<(String, String)> = tx
-            .query_row(
-                "SELECT revision, document_json FROM workspace_memos WHERE session_id = ?1",
-                params![session_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        let current = if let Some((revision, json)) = stored {
-            AuthorityMemoReceipt {
-                revision,
-                lines: serde_json::from_str(&json)?,
-                replayed: false,
-            }
-        } else {
-            let markdown = std::fs::read_to_string(self.directory.join(format!("{session_id}.md")))
-                .unwrap_or_default();
-            let document = TimedMemoDocument::parse_markdown(&markdown);
-            AuthorityMemoReceipt {
-                revision: document.revision(),
-                lines: document.into_lines(),
-                replayed: false,
-            }
-        };
+        let current = self.memo_in_transaction(&tx, session_id)?;
         if current.revision != expected_revision {
-            bail!(
-                "memo revision conflict: current revision is {}",
-                current.revision
-            );
+            return Err(MemoRevisionConflict {
+                expected: expected_revision.to_string(),
+                current: current.revision,
+            }
+            .into());
         }
-        let elapsed = observed_at_ms as f64 / 1000.0;
-        let moment = if paused {
-            MemoMoment::paused(elapsed, 1)
-        } else {
-            MemoMoment::recording(elapsed)
+        let document = match write {
+            MemoWrite::PlainText {
+                observed_at_ms,
+                paused,
+                text,
+            } => {
+                let elapsed = observed_at_ms as f64 / 1000.0;
+                let moment = if paused {
+                    MemoMoment::paused(elapsed, 1)
+                } else {
+                    MemoMoment::recording(elapsed)
+                };
+                TimedMemoDocument::from_committed(current.lines).reconcile_plain_text(text, moment)
+            }
+            MemoWrite::ReplaceLines(lines) => TimedMemoDocument::from_committed(lines.to_vec()),
         };
-        let document =
-            TimedMemoDocument::from_committed(current.lines).reconcile_plain_text(text, moment);
         let receipt = AuthorityMemoReceipt {
             revision: document.revision(),
             lines: document.clone().into_lines(),
@@ -529,73 +604,23 @@ impl SqliteWorkspaceAuthorityStorage {
             params![session_id, principal_id, request_id, fingerprint, response],
         )?;
         tx.commit()?;
-        atomic_write(
-            &self.directory.join(format!("{session_id}.md")),
-            document.export_markdown().as_bytes(),
-        )?;
+        let _ = self.refresh_memo_mirror(session_id);
         Ok(receipt)
     }
 
-    /// Replace an already-timestamped memo through the same revisioned
-    /// authority used by plain-text remote edits. Desktop capture owns the
-    /// timestamps it supplies; SQLite owns CAS, retry receipts, and the
-    /// Markdown projection.
-    pub fn replace_memo_lines(
-        &self,
-        session_id: &str,
-        principal_id: &str,
-        request_id: &str,
-        expected_revision: &str,
-        lines: &[TimedMemoLine],
-    ) -> Result<AuthorityMemoReceipt> {
-        validate_request_id(request_id)?;
-        let document = TimedMemoDocument::from_committed(lines.to_vec());
-        let fingerprint =
-            digest(format!("{expected_revision}\0{}", serde_json::to_string(lines)?).as_bytes());
+    /// Rebuild the optional Markdown export from committed SQLite state.
+    pub fn refresh_memo_mirror(&self, session_id: &str) -> Result<()> {
+        // Serialize projections with memo writes, including other processes.
         let mut connection = self.connection()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let prior: Option<(String, String)> = tx
-            .query_row(
-                "SELECT fingerprint, response_json FROM workspace_memo_receipts WHERE session_id = ?1 AND principal_id = ?2 AND request_id = ?3",
-                params![session_id, principal_id, request_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if let Some((prior_fingerprint, response)) = prior {
-            if prior_fingerprint != fingerprint {
-                bail!("memo request id was reused with different content");
-            }
-            let mut receipt: AuthorityMemoReceiptWire = serde_json::from_str(&response)?;
-            receipt.replayed = true;
-            return Ok(receipt.into());
-        }
-        let current = self.memo_in_transaction(&tx, session_id)?;
-        if current.revision != expected_revision {
-            bail!(
-                "memo revision conflict: current revision is {}",
-                current.revision
-            );
-        }
-        let receipt = AuthorityMemoReceipt {
-            revision: document.revision(),
-            lines: lines.to_vec(),
-            replayed: false,
-        };
-        let response = serde_json::to_string(&AuthorityMemoReceiptWire::from(&receipt))?;
-        tx.execute(
-            "INSERT INTO workspace_memos (session_id, revision, document_json, updated_at_ms) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(session_id) DO UPDATE SET revision = excluded.revision, document_json = excluded.document_json, updated_at_ms = excluded.updated_at_ms",
-            params![session_id, receipt.revision, serde_json::to_string(lines)?, now_ms()],
-        )?;
-        tx.execute(
-            "INSERT INTO workspace_memo_receipts (session_id, principal_id, request_id, fingerprint, response_json) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![session_id, principal_id, request_id, fingerprint, response],
-        )?;
-        tx.commit()?;
+        let receipt = self.memo_in_transaction(&tx, session_id)?;
+        let document = TimedMemoDocument::from_committed(receipt.lines);
         atomic_write(
             &self.directory.join(format!("{session_id}.md")),
             document.export_markdown().as_bytes(),
         )?;
-        Ok(receipt)
+        tx.commit()?;
+        Ok(())
     }
 
     fn memo_in_transaction(

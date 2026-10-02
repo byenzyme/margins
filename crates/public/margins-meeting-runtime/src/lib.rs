@@ -5,16 +5,248 @@
 
 #![forbid(unsafe_code)]
 
+/// Reusable producer-adapter contract. Kept public so external HTTP and native
+/// adapters can run the same lifecycle suite against their own transport.
+pub mod test_support {
+    //! Recorder conformance shared by in-process and transport adapters.
+    //! The adapter owns its temporary store and must reopen it in `restart`.
+
+    use crate::RuntimeResponseV1;
+    use margins_meeting_protocol::{
+        AudioChunkV1, AudioCodecV1, AudioContainerV1, AudioFormatV1, CaptureLaneV1, CaptureModeV1,
+        CaptureProvenanceHopV1, CaptureProvenanceV1, CaptureSourceKindV1, CaptureSourceV1,
+        ClientMessageBodyV1, ClientMessageV1, CloseSegmentV1, ContentDigestV1, CreateSessionV1,
+        DigestAlgorithmV1, DurationMillis, FinalizeSessionV1, LaneBoundaryV1, ProtocolVersionV1,
+        ResumeSessionV1, SegmentCloseReasonV1, SegmentCloseReferenceV1, ServerMessageBodyV1,
+        SessionFinalizeReasonV1, SessionMillis, UnixMillis,
+    };
+    use sha2::{Digest as _, Sha256};
+    use std::{collections::BTreeMap, fmt::Debug};
+
+    pub trait RecorderConformanceAdapter {
+        type Error: Debug;
+        fn send(&mut self, message: ClientMessageV1) -> Result<RuntimeResponseV1, Self::Error>;
+        fn restart(&mut self);
+    }
+
+    const START: u64 = 1_800_000_000_000;
+
+    fn command(session: &str, id: &str, body: ClientMessageBodyV1) -> ClientMessageV1 {
+        ClientMessageV1 {
+            protocol_version: ProtocolVersionV1,
+            message_id: id.into(),
+            session_id: session.into(),
+            sent_at_unix_ms: UnixMillis(START),
+            body,
+        }
+    }
+
+    fn pcm(session: &str, segment: &str, sequence: u64, start: u64) -> ClientMessageV1 {
+        let payload = vec![sequence as u8; 9_600];
+        command(
+            session,
+            &format!("{segment}-chunk-{sequence}"),
+            ClientMessageBodyV1::AudioChunk(AudioChunkV1 {
+                segment_id: segment.into(),
+                lane_id: "mic".into(),
+                sequence,
+                starts_at_ms: SessionMillis(start),
+                duration_ms: DurationMillis(100),
+                payload_digest: ContentDigestV1 {
+                    algorithm: DigestAlgorithmV1::Sha256,
+                    hex: format!("{:x}", Sha256::digest(&payload)),
+                },
+                payload,
+            }),
+        )
+    }
+
+    fn close(
+        session: &str,
+        segment: &str,
+        id: &str,
+        boundary: u64,
+        ended_at: u64,
+        reason: SegmentCloseReasonV1,
+    ) -> ClientMessageV1 {
+        command(
+            session,
+            id,
+            ClientMessageBodyV1::CloseSegment(CloseSegmentV1 {
+                segment_id: segment.into(),
+                ended_at_ms: SessionMillis(ended_at),
+                lane_boundaries: vec![LaneBoundaryV1 {
+                    lane_id: "mic".into(),
+                    next_sequence: boundary,
+                }],
+                reason,
+            }),
+        )
+    }
+
+    fn has_ack(response: &RuntimeResponseV1) -> bool {
+        response
+            .messages
+            .iter()
+            .any(|event| matches!(event.body, ServerMessageBodyV1::AudioAcknowledged(_)))
+    }
+
+    fn has_finalized(response: &RuntimeResponseV1) -> bool {
+        response
+            .messages
+            .iter()
+            .any(|event| matches!(event.body, ServerMessageBodyV1::SessionFinalized(_)))
+    }
+
+    /// Run the V1 recorder lifecycle against any adapter. An assertion failure
+    /// identifies a transport/storage divergence from the durable runtime.
+    pub fn assert_recorder_conformance<A: RecorderConformanceAdapter>(
+        adapter: &mut A,
+        session: &str,
+    ) {
+        let create = command(
+            session,
+            "create",
+            ClientMessageBodyV1::CreateSession(CreateSessionV1 {
+                idempotency_key: format!("conformance-{session}"),
+                started_at_unix_ms: UnixMillis(START),
+                title: None,
+                sources: vec![CaptureSourceV1 {
+                    source_id: "mic".into(),
+                    kind: CaptureSourceKindV1::Microphone,
+                    label: None,
+                    external_id: None,
+                }],
+                lanes: vec![CaptureLaneV1 {
+                    lane_id: "mic".into(),
+                    source_ids: vec!["mic".into()],
+                    label: None,
+                    format: AudioFormatV1 {
+                        codec: AudioCodecV1::PcmS16Le,
+                        container: AudioContainerV1::Raw,
+                        sample_rate_hz: 48_000,
+                        channel_count: 1,
+                    },
+                }],
+                provenance: CaptureProvenanceV1 {
+                    hops: vec![CaptureProvenanceHopV1 {
+                        producer: "conformance".into(),
+                        producer_version: None,
+                        mode: CaptureModeV1::Live,
+                        observed_at_unix_ms: UnixMillis(START),
+                        attributes: BTreeMap::new(),
+                    }],
+                },
+            }),
+        );
+        let first = adapter.send(create.clone()).unwrap();
+        assert!(!first.idempotent_replay);
+        assert!(adapter.send(create).unwrap().idempotent_replay);
+
+        let zero = pcm(session, "first", 0, 0);
+        assert!(has_ack(&adapter.send(zero.clone()).unwrap()));
+        assert!(adapter.send(zero).unwrap().idempotent_replay);
+        assert!(has_ack(
+            &adapter.send(pcm(session, "first", 1, 100)).unwrap()
+        ));
+        let third = adapter.send(pcm(session, "first", 3, 300)).unwrap();
+        let ack = third
+            .messages
+            .iter()
+            .find_map(|event| match &event.body {
+                ServerMessageBodyV1::AudioAcknowledged(value) => Some(value),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(ack.durable_through_sequence, 2);
+        assert_eq!(ack.durable_out_of_order.len(), 1);
+
+        // Restart with a gap still present, then replay and fill it.
+        adapter.restart();
+        let replay = adapter
+            .send(command(
+                session,
+                "recover",
+                ClientMessageBodyV1::ResumeSession(ResumeSessionV1 {
+                    after_server_sequence: None,
+                }),
+            ))
+            .unwrap();
+        assert!(replay
+            .messages
+            .iter()
+            .any(|event| matches!(event.body, ServerMessageBodyV1::ReplayCompleted(_))));
+        assert!(has_ack(
+            &adapter.send(pcm(session, "first", 2, 200)).unwrap()
+        ));
+        let pause = close(
+            session,
+            "first",
+            "pause",
+            4,
+            400,
+            SegmentCloseReasonV1::Pause,
+        );
+        let paused = adapter.send(pause.clone()).unwrap();
+        assert!(paused
+            .messages
+            .iter()
+            .any(|event| matches!(event.body, ServerMessageBodyV1::SegmentFinalized(_))));
+        assert!(adapter.send(pause).unwrap().idempotent_replay);
+
+        // Resume capture in a new segment, then finish the complete session.
+        assert!(has_ack(
+            &adapter.send(pcm(session, "second", 0, 400)).unwrap()
+        ));
+        let stop = close(
+            session,
+            "second",
+            "stop",
+            1,
+            500,
+            SegmentCloseReasonV1::Stop,
+        );
+        assert!(adapter
+            .send(stop.clone())
+            .unwrap()
+            .messages
+            .iter()
+            .any(|event| matches!(event.body, ServerMessageBodyV1::SegmentFinalized(_))));
+        assert!(adapter.send(stop).unwrap().idempotent_replay);
+        let finish = command(
+            session,
+            "finish",
+            ClientMessageBodyV1::FinalizeSession(FinalizeSessionV1 {
+                ended_at_ms: SessionMillis(500),
+                segment_closes: vec![
+                    SegmentCloseReferenceV1 {
+                        segment_id: "first".into(),
+                        close_message_id: "pause".into(),
+                    },
+                    SegmentCloseReferenceV1 {
+                        segment_id: "second".into(),
+                        close_message_id: "stop".into(),
+                    },
+                ],
+                reason: SessionFinalizeReasonV1::Completed,
+            }),
+        );
+        assert!(has_finalized(&adapter.send(finish.clone()).unwrap()));
+        let repeated = adapter.send(finish).unwrap();
+        assert!(repeated.idempotent_replay && has_finalized(&repeated));
+    }
+}
+
 use margins_meeting_protocol::{
-    AppendProvenanceHopV1, AudioAcknowledgementV1, AudioChunkV1, BeginCaptureGenerationV1,
-    CaptureDiscontinuityV1, CaptureGenerationStartedV1, CaptureHealthV1, CaptureProvenanceHopV1,
-    ClientMessageBodyV1, ClientMessageV1, CloseSegmentV1, CommandRejectedV1, CreateSessionV1,
-    DigestAlgorithmV1, DurationMillis, FinalizeSessionV1, LaneId, LiveErrorV1,
-    LiveMutationResponseV1, LiveOperationId, LiveSessionRequestV1, LiveSnapshotV1,
-    LiveStartRequestV1, LiveUpdateNotepadRequestV1, MessageId, ProtocolVersionV1,
-    ProvenanceHopRecordedV1, ReplayCompletedV1, SegmentFinalizedV1, SequenceRangeV1,
-    ServerMessageBodyV1, ServerMessageV1, SessionCreatedV1, SessionFinalizedV1, SessionId,
-    SessionMillis, UnixMillis, ValidationErrorV1, MAX_SAFE_JSON_INTEGER,
+    AppendProvenanceHopV1, AudioAcknowledgementV1, AudioChunkV1, AudioFormatV1,
+    BeginCaptureGenerationV1, CaptureDiscontinuityV1, CaptureGenerationStartedV1, CaptureHealthV1,
+    CaptureProvenanceHopV1, ClientMessageBodyV1, ClientMessageV1, CloseSegmentV1,
+    CommandRejectedV1, CreateSessionV1, DigestAlgorithmV1, DurationMillis, FinalizeSessionV1,
+    LaneId, LiveErrorV1, LiveMutationResponseV1, LiveOperationId, LiveSessionRequestV1,
+    LiveSnapshotV1, LiveStartRequestV1, LiveUpdateNotepadRequestV1, MessageId, ProtocolVersionV1,
+    ProvenanceHopRecordedV1, ReplayCompletedV1, ResumeSessionV1, SegmentFinalizedV1, SegmentId,
+    SequenceRangeV1, ServerMessageBodyV1, ServerMessageV1, SessionCreatedV1, SessionFinalizedV1,
+    SessionId, SessionMillis, UnixMillis, ValidationErrorV1, MAX_SAFE_JSON_INTEGER,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -571,6 +803,12 @@ where
 
     pub fn into_storage(self) -> S {
         self.storage
+    }
+
+    /// Producer-facing capture API. HTTP adapters can send the exact V1
+    /// envelopes emitted by these methods to `handle` without translation.
+    pub fn recorder(&self) -> Recorder<'_, S> {
+        Recorder { runtime: self }
     }
 
     pub fn handle(
@@ -1747,6 +1985,276 @@ fn reject(
             details: BTreeMap::new(),
         }),
     )]
+}
+
+/// A declared lane within a segment. Opening is intentionally local: V1
+/// declares lanes at reservation and the first durable chunk opens a segment.
+/// Retaining this value across restarts is optional; `open_lane` validates it
+/// again against the persisted session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecorderLaneV1 {
+    pub session_id: SessionId,
+    pub segment_id: SegmentId,
+    pub lane_id: LaneId,
+    pub format: AudioFormatV1,
+}
+
+#[derive(Debug)]
+pub enum RecorderError<E> {
+    Runtime(RuntimeError<E>),
+    Rejected {
+        code: String,
+        message: Option<String>,
+    },
+    InvalidTransition(&'static str),
+}
+
+impl<E: fmt::Display> fmt::Display for RecorderError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Runtime(error) => write!(formatter, "{error}"),
+            Self::Rejected { code, message } => write!(
+                formatter,
+                "capture rejected ({code}): {}",
+                message.as_deref().unwrap_or("no detail")
+            ),
+            Self::InvalidTransition(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl<E: Error + 'static> Error for RecorderError<E> {}
+
+/// Thin producer adapter over the durable V1 command log. Operation IDs and
+/// chunk sequences are supplied by the recorder and must survive retries.
+pub struct Recorder<'a, S: MeetingRuntimeStorage> {
+    runtime: &'a MeetingRuntime<S>,
+}
+
+impl<S: MeetingRuntimeStorage> Recorder<'_, S> {
+    fn submit(
+        &self,
+        session_id: &SessionId,
+        message_id: MessageId,
+        sent_at: UnixMillis,
+        body: ClientMessageBodyV1,
+    ) -> Result<RuntimeResponseV1, RecorderError<S::Error>> {
+        let response = self
+            .runtime
+            .handle(ClientMessageV1 {
+                protocol_version: ProtocolVersionV1,
+                message_id,
+                session_id: session_id.clone(),
+                sent_at_unix_ms: sent_at,
+                body,
+            })
+            .map_err(RecorderError::Runtime)?;
+        if let Some(rejection) = response
+            .messages
+            .iter()
+            .find_map(|message| match &message.body {
+                ServerMessageBodyV1::CommandRejected(value) => Some(value),
+                _ => None,
+            })
+        {
+            return Err(RecorderError::Rejected {
+                code: rejection.code.clone(),
+                message: rejection.message.clone(),
+            });
+        }
+        Ok(response)
+    }
+
+    pub fn reserve(
+        &self,
+        session_id: &SessionId,
+        message_id: MessageId,
+        sent_at: UnixMillis,
+        create: CreateSessionV1,
+    ) -> Result<RuntimeResponseV1, RecorderError<S::Error>> {
+        self.submit(
+            session_id,
+            message_id,
+            sent_at,
+            ClientMessageBodyV1::CreateSession(create),
+        )
+    }
+
+    /// Validate a lane handle before the first chunk, or after a pause. A
+    /// resumed capture uses a fresh segment ID; no extra protocol command is
+    /// needed because the next audio chunk opens it durably.
+    pub fn open_lane(
+        &self,
+        session_id: &SessionId,
+        segment_id: SegmentId,
+        lane_id: LaneId,
+    ) -> Result<RecorderLaneV1, RecorderError<S::Error>> {
+        let session = self
+            .runtime
+            .storage
+            .load_session(session_id)
+            .map_err(|error| RecorderError::Runtime(RuntimeError::Storage(error)))?
+            .ok_or_else(|| {
+                RecorderError::Runtime(RuntimeError::UnknownSession(session_id.clone()))
+            })?;
+        if session.input_finalized()
+            || session
+                .segments
+                .get(segment_id.as_ref())
+                .is_some_and(|segment| segment.close.is_some())
+        {
+            return Err(RecorderError::InvalidTransition(
+                "segment is closed or session is finalized",
+            ));
+        }
+        let lane = session
+            .create
+            .lanes
+            .iter()
+            .find(|lane| lane.lane_id == lane_id)
+            .ok_or(RecorderError::InvalidTransition(
+                "lane is not declared by the session",
+            ))?;
+        Ok(RecorderLaneV1 {
+            session_id: session_id.clone(),
+            segment_id,
+            lane_id,
+            format: lane.format.clone(),
+        })
+    }
+
+    pub fn append_chunk(
+        &self,
+        lane: &RecorderLaneV1,
+        message_id: MessageId,
+        sent_at: UnixMillis,
+        sequence: u64,
+        starts_at_ms: SessionMillis,
+        duration_ms: DurationMillis,
+        payload: Vec<u8>,
+    ) -> Result<RuntimeResponseV1, RecorderError<S::Error>> {
+        let digest = format!("{:x}", Sha256::digest(&payload));
+        self.submit(
+            &lane.session_id,
+            message_id,
+            sent_at,
+            ClientMessageBodyV1::AudioChunk(AudioChunkV1 {
+                segment_id: lane.segment_id.clone(),
+                lane_id: lane.lane_id.clone(),
+                sequence,
+                starts_at_ms,
+                duration_ms,
+                payload_digest: margins_meeting_protocol::ContentDigestV1 {
+                    algorithm: DigestAlgorithmV1::Sha256,
+                    hex: digest,
+                },
+                payload,
+            }),
+        )
+    }
+
+    /// Close the current segment for a pause. The caller supplies a boundary
+    /// for every declared lane, including lanes with zero chunks.
+    pub fn pause(
+        &self,
+        session_id: &SessionId,
+        message_id: MessageId,
+        sent_at: UnixMillis,
+        mut close: CloseSegmentV1,
+    ) -> Result<RuntimeResponseV1, RecorderError<S::Error>> {
+        close.reason = margins_meeting_protocol::SegmentCloseReasonV1::Pause;
+        self.submit(
+            session_id,
+            message_id,
+            sent_at,
+            ClientMessageBodyV1::CloseSegment(close),
+        )
+    }
+
+    /// Close the last segment before `finish`. This may be retried exactly.
+    pub fn close_segment(
+        &self,
+        session_id: &SessionId,
+        message_id: MessageId,
+        sent_at: UnixMillis,
+        close: CloseSegmentV1,
+    ) -> Result<RuntimeResponseV1, RecorderError<S::Error>> {
+        self.submit(
+            session_id,
+            message_id,
+            sent_at,
+            ClientMessageBodyV1::CloseSegment(close),
+        )
+    }
+
+    /// Continue after a pause with a new segment. No durable mutation occurs
+    /// until its first chunk; `recover` supplies the durable replay watermark.
+    pub fn resume(
+        &self,
+        session_id: &SessionId,
+        new_segment_id: SegmentId,
+        lane_id: LaneId,
+    ) -> Result<RecorderLaneV1, RecorderError<S::Error>> {
+        self.open_lane(session_id, new_segment_id, lane_id)
+    }
+
+    pub fn finish(
+        &self,
+        session_id: &SessionId,
+        message_id: MessageId,
+        sent_at: UnixMillis,
+        finalize: FinalizeSessionV1,
+    ) -> Result<RuntimeResponseV1, RecorderError<S::Error>> {
+        self.submit(
+            session_id,
+            message_id,
+            sent_at,
+            ClientMessageBodyV1::FinalizeSession(finalize),
+        )
+    }
+
+    /// Reopen after process or transport loss. Returns the persisted state and
+    /// bounded event replay using the existing `ResumeSessionV1` command.
+    pub fn recover(
+        &self,
+        session_id: &SessionId,
+        message_id: MessageId,
+        sent_at: UnixMillis,
+        after_server_sequence: Option<u64>,
+    ) -> Result<(StoredSessionV1, RuntimeResponseV1), RecorderError<S::Error>> {
+        let state = self
+            .runtime
+            .storage
+            .load_session(session_id)
+            .map_err(|error| RecorderError::Runtime(RuntimeError::Storage(error)))?
+            .ok_or_else(|| {
+                RecorderError::Runtime(RuntimeError::UnknownSession(session_id.clone()))
+            })?;
+        let replay = self.submit(
+            session_id,
+            message_id,
+            sent_at,
+            ClientMessageBodyV1::ResumeSession(ResumeSessionV1 {
+                after_server_sequence,
+            }),
+        )?;
+        Ok((state, replay))
+    }
+
+    pub fn start_generation(
+        &self,
+        session_id: &SessionId,
+        message_id: MessageId,
+        sent_at: UnixMillis,
+        begin: BeginCaptureGenerationV1,
+    ) -> Result<RuntimeResponseV1, RecorderError<S::Error>> {
+        self.submit(
+            session_id,
+            message_id,
+            sent_at,
+            ClientMessageBodyV1::BeginCaptureGeneration(begin),
+        )
+    }
 }
 
 fn append_event(

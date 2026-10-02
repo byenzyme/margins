@@ -465,6 +465,10 @@ impl MeetingRuntimeStorage for SqliteMeetingRuntimeStorage {
     }
 
     fn create_session(&self, delta: SessionDeltaV1) -> Result<StorageCommit> {
+        let name = delta.session.session_id().as_ref();
+        if name == "." || name == ".." || name.contains('/') || name.contains('\\') {
+            anyhow::bail!("session id cannot be used as a storage path component");
+        }
         let mut connection = self.connection()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let session_id = delta.session.session_id();
@@ -634,6 +638,28 @@ impl MeetingRuntimeStorage for SqliteMeetingRuntimeStorage {
                     params![session_id.as_ref(), kind, ordinal, path, chrono::Utc::now().to_rfc3339()],
                 )?;
             }
+        }
+        if delta
+            .events
+            .iter()
+            .any(|event| matches!(event.body, ServerMessageBodyV1::SessionFinalized(_)))
+        {
+            tx.execute(
+                "UPDATE sessions SET lifecycle_state = 'ended', lifecycle_updated_at = ?1 WHERE name = ?2 AND lifecycle_state = 'active'",
+                params![chrono::Utc::now().to_rfc3339(), session_id.as_ref()],
+            )?;
+            // Existing transcript readers use this fallback until processing
+            // publishes a real transcript. It explicitly reports pending ASR.
+            let path = self
+                .directory
+                .join(format!("{}_capture_context.md", session_id.as_ref()));
+            if !path.exists() {
+                atomic_replace(&path, b"# Capture saved\n\nTranscript pending. Audio is saved in this session's artifacts.\n")?;
+            }
+            tx.execute(
+                "INSERT OR IGNORE INTO session_artifacts (session_name, kind, ordinal, path, retention_class, created_at, expires_at) VALUES (?1, 'capture_context', 0, ?2, 'durable', ?3, NULL)",
+                params![session_id.as_ref(), format!(".margins/{}_capture_context.md", session_id.as_ref()), chrono::Utc::now().to_rfc3339()],
+            )?;
         }
         tx.commit()?;
         Ok(StorageCommit::Committed)

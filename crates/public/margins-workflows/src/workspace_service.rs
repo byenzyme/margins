@@ -20,7 +20,7 @@ use margins_meeting_protocol::{
 };
 use margins_meeting_runtime::{MeetingRuntime, MeetingRuntimeStorage, RuntimeResponseV1};
 use margins_store::{
-    canonical, ImportReceipt, SqliteMeetingRuntimeStorage, SqliteSessionRepository,
+    canonical, ImportReceipt, MemoWrite, SqliteMeetingRuntimeStorage, SqliteSessionRepository,
     SqliteWorkspaceAuthorityStorage,
 };
 use rand::{distributions::Alphanumeric, Rng};
@@ -1127,14 +1127,16 @@ impl WorkspaceService {
     ) -> Result<WorkspaceMemoV1> {
         principal.require(self.workspace_id(), OP_MEMO_WRITE)?;
         ensure_session(&self.margins_dir, session_id.as_ref())?;
-        let memo = self.authority.update_memo(
+        let memo = self.authority.write_memo(
             session_id.as_ref(),
             &principal.id,
             &request.request_id,
             &request.expected_revision,
-            request.observed_at_ms.0,
-            request.paused,
-            &request.text,
+            MemoWrite::PlainText {
+                observed_at_ms: request.observed_at_ms.0,
+                paused: request.paused,
+                text: &request.text,
+            },
         )?;
         Ok(WorkspaceMemoV1 {
             session_id: session_id.clone(),
@@ -1157,12 +1159,12 @@ impl WorkspaceService {
             .cloned()
             .map(timed_memo_line)
             .collect::<Vec<_>>();
-        let memo = self.authority.replace_memo_lines(
+        let memo = self.authority.write_memo(
             session_id.as_ref(),
             &principal.id,
             &request.request_id,
             &request.expected_revision,
-            &lines,
+            MemoWrite::ReplaceLines(&lines),
         )?;
         Ok(WorkspaceMemoV1 {
             session_id: session_id.clone(),
