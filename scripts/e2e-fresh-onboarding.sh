@@ -336,25 +336,15 @@ if granola is None or not granola.get("account"):
     raise SystemExit("granola binding must declare account identity")
 if "path" in granola:
     raise SystemExit("granola binding must not declare export path")
-if "projection" not in granola:
-    raise SystemExit("granola binding must declare typed projection settings")
+if "projection" in granola:
+    raise SystemExit("granola binding must not declare retired projection settings")
 collection = granola.get("collection") or {}
 if collection.get("time_range") != "last_30_days":
     raise SystemExit("granola binding must declare the bounded last_30_days collection")
 if collection.get("workspace_only") is not False:
     raise SystemExit("granola binding must explicitly declare workspace_only=false")
-if granola["projection"].get("enabled") is not True:
-    raise SystemExit("Granola managed projection should be enabled by default")
-projection_notes = list((notes_home / "meetings").glob("*.md"))
-if not projection_notes:
-    raise SystemExit("Granola managed projection note is missing")
-granola_projections = [
-    path for path in projection_notes if "margins-managed-projection" in path.read_text()
-]
-if not granola_projections:
-    raise SystemExit("Granola projection is not tagged for native-ingestion exclusion")
-if any("margins_session:" in path.read_text() for path in granola_projections):
-    raise SystemExit("Granola projection must not create a Margins capture/session identity")
+if list((notes_home / "meetings").glob("*.md")):
+    raise SystemExit("Granola ledger evidence must not project notes into the home")
 if (notes_home / "people" / "Alice Client.md").exists():
     raise SystemExit("Granola must not auto-create native person stubs")
 if (notes_home / "organizations" / "Acme.md").exists():

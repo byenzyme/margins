@@ -338,11 +338,11 @@ assert set(calendar) <= allowed_calendar_keys, calendar
 granola = next(source for source in sources if source["name"] == "granola")
 assert granola["kind"] == "granola"
 assert granola["account"] == "owner@example.com"
-assert granola["projection"]["enabled"] is True
-assert granola["projection"]["notes_folder"] == "meetings"
+assert granola["collection"] == {"time_range": "last_30_days", "workspace_only": False}
+assert "projection" not in granola
 assert "path" not in granola
 assert "role" not in granola
-assert granola["project_to_home"] is True
+assert granola["project_to_home"] is False
 assert granola["indexed_how"] == "ledger"
 PY
 "$MARGINS_E2E_BIN" --workspace "$MARGINS_WORKSPACE" workspace status --json \

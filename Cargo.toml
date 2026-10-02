@@ -93,6 +93,7 @@ tempfile = "3"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+ctor = "0.2.9"
 margins-workflows = { path = "crates/public/margins-workflows", features = ["test-support"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
