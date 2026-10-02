@@ -7,11 +7,6 @@ on:
         description: "Version to release, for example 0.2.0"
         required: true
         type: string
-      desktop:
-        description: "Also build and publish the macOS desktop app"
-        required: false
-        default: false
-        type: boolean
 
 jobs:
   bump:
@@ -21,12 +16,6 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: desktop/package-lock.json
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -42,7 +31,7 @@ jobs:
           export VERSION="${{ inputs.version }}"
           perl -0pi -e 's/^(name = "margins"\nversion = ")[^"]+/${1}'"$VERSION"'/m' Cargo.toml
           perl -0pi -e 's/^(name = "margins-cli"\nversion = ")[^"]+/${1}'"$VERSION"'/m' crates/public/margins-cli/Cargo.toml
-          cargo update -p margins -p margins-cli
+          scripts/cargo-lane shared -- cargo update -p margins -p margins-cli
           python3 - <<'PY'
           import os
           from pathlib import Path
@@ -61,21 +50,11 @@ jobs:
           path.write_text(updated)
           PY
 
-      - name: Bump desktop versions
-        run: |
-          export VERSION="${{ inputs.version }}"
-          cd desktop
-          npm version "$VERSION" --no-git-tag-version
-          node -e '
-            const fs = require("fs");
-            const path = "src-tauri/tauri.conf.json";
-            const config = JSON.parse(fs.readFileSync(path, "utf8"));
-            config.version = process.env.VERSION;
-            fs.writeFileSync(path, JSON.stringify(config, null, 2) + "\n");
-          '
-          perl -0pi -e 's/^version = ".*"/version = "'$VERSION'"/m' src-tauri/Cargo.toml
-          cd src-tauri
-          cargo update -p margins-desktop
+      - name: Refresh project server lockfile
+        run: >-
+          scripts/cargo-lane shared -- cargo update
+          --manifest-path desktop/src-tauri/Cargo.toml
+          -p margins -p margins-cli
 
       - name: Commit and tag
         run: |
@@ -83,10 +62,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Cargo.toml Cargo.lock crates/public/margins-cli/Cargo.toml \
-            public-repository/Cargo.lock \
-            desktop/package.json desktop/package-lock.json \
-            desktop/src-tauri/Cargo.toml desktop/src-tauri/Cargo.lock \
-            desktop/src-tauri/tauri.conf.json
+            public-repository/Cargo.lock desktop/src-tauri/Cargo.lock
           git commit -m "Release v${VERSION}"
           git tag "v${VERSION}"
           git push origin main --tags
@@ -97,11 +73,3 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           gh workflow run cli-release.yml --ref main -f tag="v${VERSION}"
-
-      - name: Dispatch desktop release
-        if: ${{ inputs.desktop }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
-        run: |
-          gh workflow run release.yml --ref main -f tag="v${VERSION}"

@@ -5,8 +5,6 @@ browser can supply microphone audio, or Margins Menu on a Mac can record both
 microphone and computer audio. Meetings are saved in the selected Margins
 Workspace's capture store. A project's Workspace override takes precedence over
 the machine default; without either, the panel asks for a Workspace.
-Meetings saved **On this Mac** use a separate local store and do not appear in
-this bb project automatically.
 
 ## What works in this version
 
@@ -111,7 +109,7 @@ Start. The menu lists the Mac's available inputs and a System default choice;
 the chosen input stays selected for future meetings on that Mac. bb shows the
 selected microphone beside its connection status. If a pinned microphone is
 unplugged, choose another input in the menu before recording. This choice does
-not change the Mac's system default or the separate **On this Mac** recorder.
+not change the Mac's system default.
 
 For a manual or older recorder, expand **Connect a Mac recorder manually** and run
 an audio-capture-enabled Margins build **on the Mac running the browser**:
