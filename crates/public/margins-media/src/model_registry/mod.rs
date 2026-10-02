@@ -5,11 +5,13 @@
 //! overrides untouched.
 
 pub mod coreml;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "model-download"))]
 #[allow(unsafe_code)]
 pub mod parakeet;
 
-use anyhow::{Context, Result};
+#[cfg(feature = "model-download")]
+use anyhow::Context;
+use anyhow::Result;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,15 +29,35 @@ pub fn resolve_model(kind: ModelKind) -> Result<Option<PathBuf>> {
 }
 
 pub fn resolve_coreml_dir() -> Option<PathBuf> {
-    coreml::find_installed_model()
+    resolve_coreml_dir_with_fallback(None)
+}
+
+/// A profile setting may select installed assets only when no explicit env
+/// override is present. It never changes the managed download destination.
+pub fn resolve_coreml_dir_with_fallback(fallback: Option<&str>) -> Option<PathBuf> {
+    if let Some(explicit) = env_path("MARGINS_FLUID_COREML_MODEL_DIR") {
+        return coreml::valid_model(&explicit).then_some(explicit);
+    }
+    fallback
+        .and_then(expand_configured_path)
+        .filter(|path| coreml::valid_model(path))
+        .or_else(coreml::find_installed_model)
 }
 
 /// Resolve an explicitly configured Parakeet directory and its decoder kind.
 /// Missing configuration is distinct from an incomplete configured directory.
 pub fn resolve_parakeet_model(
 ) -> Result<Option<(PathBuf, crate::providers::parakeet::AsrModelKind)>> {
+    resolve_parakeet_model_with_fallback(None)
+}
+
+pub fn resolve_parakeet_model_with_fallback(
+    fallback: Option<&str>,
+) -> Result<Option<(PathBuf, crate::providers::parakeet::AsrModelKind)>> {
     use crate::providers::parakeet::missing_model_files;
-    let Some(path) = env_path("MARGINS_PARAKEET_MODEL_DIR") else {
+    let Some(path) = env_path("MARGINS_PARAKEET_MODEL_DIR")
+        .or_else(|| fallback.and_then(expand_configured_path))
+    else {
         return Ok(None);
     };
     let kind = parakeet_kind_from_env()?;
@@ -69,7 +91,18 @@ pub fn parse_parakeet_kind(
 pub fn env_path(name: &str) -> Option<PathBuf> {
     let value =
         std::env::var_os(name).filter(|value| !value.to_string_lossy().trim().is_empty())?;
-    let path = PathBuf::from(value);
+    expand_path(PathBuf::from(value))
+}
+
+fn expand_configured_path(value: &str) -> Option<PathBuf> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    expand_path(PathBuf::from(value))
+}
+
+fn expand_path(path: PathBuf) -> Option<PathBuf> {
     if path == std::path::Path::new("~") {
         return dirs::home_dir();
     }
@@ -85,16 +118,35 @@ pub fn prepare_model(
     kind: ModelKind,
     progress: &(dyn Fn(String, Option<f32>) + Send + Sync),
 ) -> Result<PathBuf> {
+    prepare_model_with_cancel(kind, progress, &|| false)
+}
+
+/// Like `prepare_model`, but stops in-flight CoreML transfers when requested.
+pub fn prepare_model_with_cancel(
+    kind: ModelKind,
+    progress: &(dyn Fn(String, Option<f32>) + Send + Sync),
+    is_cancelled: &(dyn Fn() -> bool + Send + Sync),
+) -> Result<PathBuf> {
+    #[cfg(not(feature = "model-download"))]
+    {
+        let _ = (kind, progress, is_cancelled);
+        anyhow::bail!("model download support is not enabled")
+    }
+    #[cfg(feature = "model-download")]
     match kind {
-        ModelKind::CoreMl => coreml::download_model(|done, total| {
-            progress(
-                "Downloading transcription model".into(),
-                (total > 0).then_some(done as f32 / total as f32),
-            );
-        }),
+        ModelKind::CoreMl => coreml::download_model_with_cancel(
+            |done, total| {
+                progress(
+                    "Downloading transcription model".into(),
+                    (total > 0).then_some(done as f32 / total as f32),
+                );
+            },
+            is_cancelled,
+        ),
         ModelKind::ParakeetOnnx => {
             #[cfg(target_os = "linux")]
             {
+                anyhow::ensure!(!is_cancelled(), "model preparation canceled");
                 parakeet::configure_env()?;
                 parakeet::prepare(progress)?;
                 return env_path("MARGINS_PARAKEET_MODEL_DIR")

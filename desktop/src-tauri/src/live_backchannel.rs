@@ -946,8 +946,10 @@ fn prewarm_live_models_with_reason(settings: Settings, reason: &'static str) {
 }
 
 #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
-pub(crate) fn resolved_live_model_dir(_settings: &Settings) -> Option<PathBuf> {
-    margins_media::model_registry::resolve_coreml_dir()
+pub(crate) fn resolved_live_model_dir(settings: &Settings) -> Option<PathBuf> {
+    margins_media::model_registry::resolve_coreml_dir_with_fallback(
+        settings.parakeet_model_dir.as_deref(),
+    )
 }
 
 #[cfg(not(all(feature = "coreml-asr", target_os = "macos")))]

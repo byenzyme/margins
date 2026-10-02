@@ -1,11 +1,20 @@
+#[cfg(feature = "model-download")]
 use anyhow::{bail, Context, Result};
+#[cfg(feature = "model-download")]
+use fs4::fs_std::FileExt;
+#[cfg(feature = "model-download")]
 use serde::Deserialize;
+#[cfg(any(feature = "model-download", test))]
 use std::fs;
+#[cfg(feature = "model-download")]
 use std::io::Read;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "model-download")]
 use std::process::{Command, Stdio};
 
+#[cfg(feature = "model-download")]
 const TREE_URL: &str = "https://huggingface.co/api/models/FluidInference/parakeet-tdt-0.6b-v2-coreml/tree/main?recursive=true";
+#[cfg(feature = "model-download")]
 const FILE_URL: &str =
     "https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v2-coreml/resolve/main";
 const REQUIRED_DIRS: &[&str] = &[
@@ -16,8 +25,10 @@ const REQUIRED_DIRS: &[&str] = &[
 ];
 // Leave bandwidth and one execution lane available for the Polyvoice speaker
 // models, which `margins setup` provisions concurrently.
+#[cfg(feature = "model-download")]
 const MAX_DOWNLOAD_WORKERS: usize = 6;
 
+#[cfg(feature = "model-download")]
 #[derive(Deserialize)]
 struct TreeEntry {
     path: String,
@@ -27,11 +38,13 @@ struct TreeEntry {
     lfs: Option<LfsEntry>,
 }
 
+#[cfg(feature = "model-download")]
 #[derive(Deserialize)]
 struct LfsEntry {
     size: u64,
 }
 
+#[cfg(feature = "model-download")]
 impl TreeEntry {
     fn size(&self) -> u64 {
         self.lfs
@@ -74,20 +87,64 @@ fn resolve_installed_model_from(
     .find(|path| valid_model(path))
 }
 
+#[cfg(feature = "model-download")]
 pub fn download_model(mut progress: impl FnMut(u64, u64)) -> Result<PathBuf> {
-    download_model_from(TREE_URL, FILE_URL, download_target()?, &mut progress)
+    download_model_with_cancel(&mut progress, &|| false)
 }
 
+#[cfg(feature = "model-download")]
+pub fn download_model_with_cancel(
+    mut progress: impl FnMut(u64, u64),
+    is_cancelled: &(dyn Fn() -> bool + Send + Sync),
+) -> Result<PathBuf> {
+    if matches!(
+        std::env::var("MARGINS_FLUID_COREML_VERSION")
+            .ok()
+            .map(|version| version.to_ascii_lowercase())
+            .as_deref(),
+        Some("v3" | "3")
+    ) {
+        eprintln!("warning: MARGINS_FLUID_COREML_VERSION=v3 requested; setup downloads the pinned v2 CoreML model");
+    }
+    download_model_from(
+        TREE_URL,
+        FILE_URL,
+        download_target()?,
+        &mut progress,
+        is_cancelled,
+    )
+}
+
+#[cfg(feature = "model-download")]
 fn download_model_from(
     tree_url: &str,
     file_url: &str,
     final_dir: PathBuf,
     progress: &mut impl FnMut(u64, u64),
+    is_cancelled: &(dyn Fn() -> bool + Send + Sync),
 ) -> Result<PathBuf> {
     let parent = final_dir
         .parent()
         .context("model directory has no parent")?;
     fs::create_dir_all(parent)?;
+    let lock_path = parent.join(format!(
+        ".{}.download.lock",
+        final_dir
+            .file_name()
+            .context("model directory has no final component")?
+            .to_string_lossy()
+    ));
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    while !lock.try_lock_exclusive()? {
+        anyhow::ensure!(!is_cancelled(), "model preparation canceled");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let _lock = ModelInstallLock(lock);
+    anyhow::ensure!(!is_cancelled(), "model preparation canceled");
     let tree = Command::new("/usr/bin/curl")
         .args([
             "--fail",
@@ -154,6 +211,10 @@ fn download_model_from(
         let mut active = Vec::new();
         let mut next = 0;
         loop {
+            if is_cancelled() {
+                stop_downloads(&mut active);
+                bail!("model preparation canceled");
+            }
             while active.len() < MAX_DOWNLOAD_WORKERS && next < pending.len() {
                 let index = pending[next];
                 next += 1;
@@ -197,6 +258,10 @@ fn download_model_from(
                 })
                 .sum();
             progress(downloaded, total);
+            if is_cancelled() {
+                stop_downloads(&mut active);
+                bail!("model preparation canceled");
+            }
 
             let mut index = active.len();
             while index > 0 {
@@ -265,6 +330,17 @@ fn download_model_from(
     Ok(final_dir)
 }
 
+#[cfg(feature = "model-download")]
+struct ModelInstallLock(fs::File);
+
+#[cfg(feature = "model-download")]
+impl Drop for ModelInstallLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
+#[cfg(feature = "model-download")]
 fn stop_downloads(active: &mut Vec<(usize, std::process::Child)>) {
     for (_, child) in active.iter_mut() {
         let _ = child.kill();
@@ -273,6 +349,7 @@ fn stop_downloads(active: &mut Vec<(usize, std::process::Child)>) {
     active.clear();
 }
 
+#[cfg(feature = "model-download")]
 fn download_target() -> Result<PathBuf> {
     if let Some(path) = super::env_path("MARGINS_FLUID_COREML_MODEL_DIR") {
         return Ok(path);
@@ -282,6 +359,7 @@ fn download_target() -> Result<PathBuf> {
         .join("Library/Application Support/FluidAudio/Models/parakeet-tdt-0.6b-v2"))
 }
 
+#[cfg(any(feature = "model-download", test))]
 fn required_path(path: &str) -> bool {
     path == "parakeet_vocab.json"
         || REQUIRED_DIRS.contains(&path.split('/').next().unwrap_or_default())
@@ -295,9 +373,13 @@ pub fn valid_model(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "model-download")]
     use std::io::Write as _;
+    #[cfg(feature = "model-download")]
     use std::net::TcpListener;
+    #[cfg(feature = "model-download")]
     use std::sync::atomic::{AtomicBool, Ordering};
+    #[cfg(feature = "model-download")]
     use std::sync::Arc;
 
     #[test]
@@ -348,6 +430,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "model-download")]
     #[test]
     fn downloads_required_assets_from_fake_model_host() {
         let temp = tempfile::tempdir().unwrap();
@@ -398,10 +481,47 @@ mod tests {
             &format!("http://{address}/files"),
             target.clone(),
             &mut |_, _| {},
+            &|| false,
         );
+        let cancelled = AtomicBool::new(false);
+        let canceled_target = temp.path().join("canceled-model");
+        let canceled_result = download_model_from(
+            &format!("http://{address}/tree"),
+            &format!("http://{address}/files"),
+            canceled_target.clone(),
+            &mut |_, _| cancelled.store(true, Ordering::Relaxed),
+            &|| cancelled.load(Ordering::Relaxed),
+        );
+        let locked_target = temp.path().join("locked-model");
+        let lock_file = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(temp.path().join(".locked-model.download.lock"))
+            .unwrap();
+        lock_file.lock_exclusive().unwrap();
+        let lock_cancelled = Arc::new(AtomicBool::new(false));
+        let cancel_after_wait = lock_cancelled.clone();
+        let cancel_thread = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            cancel_after_wait.store(true, Ordering::Relaxed);
+        });
+        let locked_result = download_model_from(
+            &format!("http://{address}/tree"),
+            &format!("http://{address}/files"),
+            locked_target.clone(),
+            &mut |_, _| {},
+            &|| lock_cancelled.load(Ordering::Relaxed),
+        );
+        cancel_thread.join().unwrap();
+        FileExt::unlock(&lock_file).unwrap();
         stop.store(true, Ordering::Relaxed);
         server.join().unwrap();
         assert_eq!(result.unwrap(), target);
+        assert!(format!("{:#}", canceled_result.unwrap_err()).contains("canceled"));
+        assert!(!canceled_target.exists());
+        assert!(format!("{:#}", locked_result.unwrap_err()).contains("canceled"));
+        assert!(!locked_target.exists());
         assert!(valid_model(&target));
         assert_eq!(
             fs::read(target.join("Preprocessor.mlmodelc/coremldata.bin")).unwrap(),

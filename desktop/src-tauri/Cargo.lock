@@ -5382,6 +5382,7 @@ dependencies = [
  "anyhow",
  "block2",
  "dirs",
+ "fs4",
  "hound",
  "libc",
  "libloading 0.9.0",

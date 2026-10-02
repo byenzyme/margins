@@ -53,9 +53,9 @@ recall = ["dep:recall-engine", "dep:reqwest", "dep:tokio"]
 # In-process llama.cpp generation for offline thematic bridges. Kept separate
 # so recall policy and lookup tests need no native C/C++ inference toolchain.
 recall-local-model = ["recall", "recall-engine/local-llm"]
-parakeet-asr = ["margins-cli/parakeet-onnx", "margins-media/parakeet-onnx"]
+parakeet-asr = ["margins-cli/parakeet-onnx", "margins-media/parakeet-onnx", "margins-media/model-download"]
 parakeet-asr-dynamic = ["parakeet-asr", "margins-media/parakeet-onnx-dynamic"]
-coreml-asr = ["margins-cli/coreml-asr", "margins-media/coreml-asr"]
+coreml-asr = ["margins-cli/coreml-asr", "margins-media/coreml-asr", "margins-media/model-download"]
 polyvoice-diarization = [
     "margins-cli/polyvoice-diarization",
     "margins-media/polyvoice-diarization",

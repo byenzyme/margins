@@ -414,13 +414,14 @@ pub(crate) fn download_fluid_coreml_model(
     cancel: &Arc<AtomicBool>,
 ) -> Result<std::path::PathBuf, String> {
     check_speech_model_cancelled(cancel)?;
-    margins_media::model_registry::prepare_model(
+    margins_media::model_registry::prepare_model_with_cancel(
         margins_media::model_registry::ModelKind::CoreMl,
         &|message, progress| {
             emit_speech_model_progress(sink, "transcription", &message, progress);
         },
+        &|| cancel.load(Ordering::SeqCst),
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| format!("{error:#}"))
 }
 
 /// Check whether `dir` contains all required CoreML assets.
@@ -503,8 +504,10 @@ fn check_fluid_coreml_model() -> (bool, String, Option<String>) {
     not(all(feature = "coreml-asr", target_os = "macos")),
     feature = "parakeet-asr"
 ))]
-fn check_parakeet_onnx_model(_settings: &Settings) -> (bool, String, Option<String>) {
-    match margins_media::model_registry::resolve_parakeet_model() {
+fn check_parakeet_onnx_model(settings: &Settings) -> (bool, String, Option<String>) {
+    match margins_media::model_registry::resolve_parakeet_model_with_fallback(
+        settings.parakeet_model_dir.as_deref(),
+    ) {
         Ok(Some((dir, _))) => {
             let path = dir.to_string_lossy().to_string();
             (
@@ -547,8 +550,10 @@ pub(crate) fn emit_speech_model_progress(
     );
 }
 
-fn resolved_fluid_coreml_model_dir(_settings: &Settings) -> Option<std::path::PathBuf> {
-    margins_media::model_registry::resolve_coreml_dir()
+fn resolved_fluid_coreml_model_dir(settings: &Settings) -> Option<std::path::PathBuf> {
+    margins_media::model_registry::resolve_coreml_dir_with_fallback(
+        settings.parakeet_model_dir.as_deref(),
+    )
 }
 
 #[cfg(test)]
@@ -604,14 +609,14 @@ fn prepare_transcription_model_now(
     feature = "parakeet-asr"
 ))]
 fn prepare_transcription_model_now(
-    _settings: &Settings,
+    settings: &Settings,
     cancel: &AtomicBool,
 ) -> Result<String, String> {
-    let (dir, kind) = margins_media::model_registry::resolve_parakeet_model()
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| {
-            "Set MARGINS_PARAKEET_MODEL_DIR to a Parakeet ONNX model folder.".to_string()
-        })?;
+    let (dir, kind) = margins_media::model_registry::resolve_parakeet_model_with_fallback(
+        settings.parakeet_model_dir.as_deref(),
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "Set MARGINS_PARAKEET_MODEL_DIR to a Parakeet ONNX model folder.".to_string())?;
     check_speech_model_cancelled(cancel)?;
     let _asr = margins_media::providers::parakeet::ParakeetOnnxBackend::from_dir(&dir, kind)
         .map_err(|error| format!("Could not load Parakeet ONNX transcription model: {error}"))?;
