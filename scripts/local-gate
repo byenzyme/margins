@@ -12,6 +12,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 LANE = ROOT / "scripts" / "cargo-lane"
+BB_PLUGIN = ROOT / "integrations/bb-plugin-margins"
+BB_PLUGIN_DIST = "integrations/bb-plugin-margins/dist"
 ROOT_PACKAGES = {
     "margins",
     "margins-cli",
@@ -80,9 +82,10 @@ def normalize_input(raw: str) -> str:
     return path.as_posix().removeprefix("./").rstrip("/")
 
 
-def quick_selection(inputs: list[str]) -> tuple[list[str], bool]:
+def quick_selection(inputs: list[str]) -> tuple[list[str], bool, bool]:
     packages: set[str] = set()
     parked_desktop = False
+    bb_plugin = False
     global_rust = False
     for raw in inputs:
         item = normalize_input(raw)
@@ -104,9 +107,23 @@ def quick_selection(inputs: list[str]) -> tuple[list[str], bool]:
             packages.add("enzyme-core")
         elif item == "desktop" or item.startswith("desktop/"):
             parked_desktop = True
+        elif item == "integrations/bb-plugin-margins" or item.startswith("integrations/bb-plugin-margins/"):
+            bb_plugin = True
     if global_rust:
         packages = ROOT_PACKAGES.copy()
-    return sorted(packages), parked_desktop
+    return sorted(packages), parked_desktop, bb_plugin
+
+
+def check_bb_plugin(gate: Gate) -> None:
+    if not (BB_PLUGIN / "node_modules").is_dir():
+        gate.run("install BB plugin dependencies", ["npm", "ci"], cwd=BB_PLUGIN)
+    gate.run("typecheck BB plugin", ["npm", "run", "typecheck"], cwd=BB_PLUGIN)
+    gate.run("test BB plugin", ["npm", "test"], cwd=BB_PLUGIN)
+    gate.run("build BB plugin", ["npm", "run", "build"], cwd=BB_PLUGIN)
+    gate.run(
+        "verify committed BB plugin dist",
+        ["git", "diff", "--exit-code", "HEAD", "--", BB_PLUGIN_DIST],
+    )
 
 
 def check_shipped_linux(gate: Gate, *, cli_already_built: bool = False) -> None:
@@ -125,7 +142,7 @@ def check_shipped_linux(gate: Gate, *, cli_already_built: bool = False) -> None:
 
 
 def quick(gate: Gate, inputs: list[str]) -> None:
-    packages, parked_desktop = quick_selection(inputs)
+    packages, parked_desktop, bb_plugin = quick_selection(inputs)
     if packages:
         args = ["test", "--locked", "--no-default-features"]
         for package in packages:
@@ -135,10 +152,13 @@ def quick(gate: Gate, inputs: list[str]) -> None:
         gate.cargo("affected root workspace tests", *args)
     if parked_desktop:
         gate.skipped.append("parked desktop path")
+    if bb_plugin:
+        check_bb_plugin(gate)
     check_shipped_linux(gate)
 
 
 def linux(gate: Gate) -> None:
+    check_bb_plugin(gate)
     gate.cargo(
         "portable workspace and private composition tests",
         "test", "--workspace", "--no-default-features", "--features", "recall", "--locked",
