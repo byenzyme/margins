@@ -186,6 +186,103 @@ impl SqliteMeetingRuntimeStorage {
         Ok(path)
     }
 
+    /// Size of the WAV that can be derived from a finalized native segment,
+    /// without writing the derived file merely to list its audio artifacts.
+    pub fn native_wav_export_size(&self, session_id: &str, ordinal: i64) -> Result<Option<u64>> {
+        if session_id.is_empty()
+            || session_id == "."
+            || session_id == ".."
+            || session_id.contains('/')
+            || session_id.contains('\\')
+            || ordinal < 0
+        {
+            anyhow::bail!("invalid native audio export identity");
+        }
+        let connection = self.connection()?;
+        let segment_id: Option<String> = connection
+            .query_row(
+                "SELECT p.segment_id FROM meeting_segment_projection p JOIN session_segments s ON s.session_name = p.session_id AND s.segment_index = p.canonical_ordinal WHERE p.session_id = ?1 AND p.canonical_ordinal = ?2 AND s.duration_secs IS NOT NULL",
+                params![session_id, ordinal],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(segment_id) = segment_id else {
+            return Ok(None);
+        };
+        let mut statement = connection.prepare(
+            "SELECT lane_id, blob_path FROM meeting_chunks WHERE session_id = ?1 AND segment_id = ?2 ORDER BY lane_id, sequence",
+        )?;
+        let mut rows = statement.query(params![session_id, segment_id])?;
+        let mut mic_bytes = 0u64;
+        let mut system_bytes = 0u64;
+        while let Some(row) = rows.next()? {
+            let lane: String = row.get(0)?;
+            let blob: String = row.get(1)?;
+            let size = std::fs::metadata(self.blob_dir().join(blob))?.len();
+            let total = match lane.as_str() {
+                "mic" => &mut mic_bytes,
+                "system" => &mut system_bytes,
+                _ => continue,
+            };
+            *total = total
+                .checked_add(size)
+                .context("native audio size overflow")?;
+        }
+        if mic_bytes == 0 && system_bytes == 0 {
+            return Ok(None);
+        }
+        if mic_bytes % 2 != 0 || system_bytes % 2 != 0 {
+            anyhow::bail!("native runtime PCM has a partial s16 sample");
+        }
+        let frames = mic_bytes.max(system_bytes) / 2;
+        let data_bytes = frames.checked_mul(4).context("native WAV size overflow")?;
+        if data_bytes > u32::MAX as u64 {
+            return Ok(None);
+        }
+        Ok(Some(
+            data_bytes
+                .checked_add(44)
+                .context("native WAV size overflow")?,
+        ))
+    }
+
+    /// Read-time inventory for TUI sessions finalized before audio artifact
+    /// registry rows were added. It does not export or duplicate any audio.
+    pub fn native_runtime_artifact_lanes(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<(i64, String, String)>> {
+        if session_id.is_empty()
+            || session_id == "."
+            || session_id == ".."
+            || session_id.contains('/')
+            || session_id.contains('\\')
+        {
+            anyhow::bail!("invalid native session id");
+        }
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT DISTINCT p.canonical_ordinal, p.segment_id, s.wav_path, s.started_at, c.lane_id FROM meeting_segment_projection p JOIN session_segments s ON s.session_name = p.session_id AND s.segment_index = p.canonical_ordinal JOIN meeting_chunks c ON c.session_id = p.session_id AND c.segment_id = p.segment_id WHERE p.session_id = ?1 AND s.duration_secs IS NOT NULL ORDER BY p.canonical_ordinal, c.lane_id",
+        )?;
+        let mut rows = statement.query([session_id])?;
+        let mut lanes = Vec::new();
+        while let Some(row) = rows.next()? {
+            let ordinal: i64 = row.get(0)?;
+            let segment: String = row.get(1)?;
+            let wav_path: String = row.get(2)?;
+            let started_at: String = row.get(3)?;
+            let lane: String = row.get(4)?;
+            if ordinal >= 0
+                && segment == format!("{session_id}-seg-{ordinal}")
+                && wav_path == format!(".margins/{session_id}_seg{ordinal}.wav")
+                && matches!(lane.as_str(), "mic" | "system")
+            {
+                lanes.push((ordinal, lane, started_at));
+            }
+        }
+        Ok(lanes)
+    }
+
     /// Project an open native segment immediately so session readers can see
     /// a recording before its first audio chunk has finalized.
     pub fn open_native_segment(
@@ -1076,9 +1173,6 @@ impl MeetingRuntimeStorage for SqliteMeetingRuntimeStorage {
                 params![session_id.as_ref(), ordinal, projection.segment_id, serde_json::to_string(&contract)?],
             )?;
             for (lane, path, _, _, artifact_suffix, _) in projection.lanes {
-                if projection.native_wav_path.is_some() {
-                    continue;
-                }
                 let kind = format!(
                     "audio_{}_{}",
                     safe_file_component(lane.as_ref()),

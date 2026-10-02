@@ -497,7 +497,7 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
     };
     let status_text = if app.viewing_conflict_draft() {
         format!(
-            " {} | LOCAL DRAFT read only | ^G return to remote memo | ^C stop",
+            " {} | CONFLICTING LOCAL LINES read only | ^G return to merged memo | ^C stop",
             time
         )
     } else if app.native_store_retrying.load(Ordering::Acquire) {
@@ -505,14 +505,14 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
             " {} | Audio storage busy, retrying; capture is buffered locally",
             time
         )
-    } else if let Some(ref msg) = app.message {
-        format!(" {} | {}", time, msg)
     } else if let Some(path) = app.conflict_draft_path() {
         format!(
-            " {} | CONFLICT: remote memo shown | ^G view local draft ({})",
+            " {} | CONFLICT: merged memo shown | ^G view conflicting local lines ({})",
             time,
             path.display()
         )
+    } else if let Some(ref msg) = app.message {
+        format!(" {} | {}", time, msg)
     } else if app.capture_paused {
         format!(
             " {} | PAUSED{} | {} lines |  ^P resume  ^S save  ^C stop",
