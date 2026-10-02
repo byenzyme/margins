@@ -315,6 +315,97 @@ fn native_open_segment_is_visible_to_workspace_reader_before_audio_arrives() {
 }
 
 #[test]
+fn native_runtime_audio_is_listed_as_exportable_and_downloads_as_wav() {
+    let temp = tempfile::tempdir().unwrap();
+    let notes = temp.path().join("notes");
+    let captures = temp.path().join("captures");
+    std::fs::create_dir_all(&notes).unwrap();
+    let workspace =
+        ensure_service_workspace(&temp.path().join("state"), "team", None, &notes, &captures)
+            .unwrap();
+    let service = WorkspaceService::open("host", workspace).unwrap();
+    let producer = ServicePrincipal::full("native-producer", "team");
+    let reader = ServicePrincipal::scoped(
+        "bb-reader",
+        ["team".to_string()],
+        [OP_SESSION_READ.to_string()],
+    );
+    let mut create = create("tui-a");
+    let ClientMessageBodyV1::CreateSession(ref mut session) = create.body else {
+        unreachable!()
+    };
+    session.provenance.hops[0].producer = "margins-tui".into();
+    for lane in &mut session.lanes {
+        lane.format.sample_rate_hz = 16_000;
+    }
+    let reservation = service.reserve_session(&producer, create).unwrap();
+    for lane in ["mic", "system"] {
+        for sequence in 0..2 {
+            let mut message = chunk("tui-a", &format!("{lane}-{sequence}"), lane, sequence);
+            let ClientMessageBodyV1::AudioChunk(ref mut audio) = message.body else {
+                unreachable!()
+            };
+            audio.segment_id = "tui-a-seg-0".into();
+            audio.payload.truncate(1_600 * 2);
+            audio.payload_digest.hex = format!("{:x}", Sha256::digest(&audio.payload));
+            service
+                .execute_capture(&producer, &reservation.producer_token, message)
+                .unwrap();
+        }
+    }
+    let mut close = close("tui-a");
+    let ClientMessageBodyV1::CloseSegment(ref mut segment) = close.body else {
+        unreachable!()
+    };
+    segment.segment_id = "tui-a-seg-0".into();
+    service
+        .execute_capture(&producer, &reservation.producer_token, close)
+        .unwrap();
+    let mut finish = finalize("tui-a");
+    let ClientMessageBodyV1::FinalizeSession(ref mut session) = finish.body else {
+        unreachable!()
+    };
+    session.segment_closes[0].segment_id = "tui-a-seg-0".into();
+    service
+        .execute_capture(&producer, &reservation.producer_token, finish)
+        .unwrap();
+
+    let margins = captures.join(".margins");
+    let wav = margins.join("tui-a_seg0.wav");
+    assert!(!wav.exists());
+    let registered = margins_store::canonical::list_session_artifacts(&margins, "tui-a").unwrap();
+    assert_eq!(registered.len(), 2);
+    // Simulate a TUI capture finalized before artifact rows were registered.
+    for artifact in registered {
+        margins_store::canonical::delete_session_artifact_registry_row(
+            &margins,
+            "tui-a",
+            &artifact.kind,
+            artifact.ordinal,
+        )
+        .unwrap();
+    }
+    let views = margins_workflows::artifacts::list_artifacts(&captures, &margins, "tui-a").unwrap();
+    assert_eq!(views.len(), 2);
+    assert!(views
+        .iter()
+        .all(|view| view.available && !view.exists && view.disk_path == wav));
+    let artifacts = service.artifacts(&reader, "tui-a").unwrap();
+    assert_eq!(artifacts.len(), 2);
+    assert!(artifacts
+        .iter()
+        .all(|artifact| artifact.size_bytes == Some(12_844)));
+    assert!(!wav.exists(), "listing must not double stored audio");
+    let bytes = service
+        .artifact_content(&reader, artifacts[0].artifact_id.as_ref())
+        .unwrap();
+    assert_eq!(&bytes[..4], b"RIFF");
+    assert_eq!(&bytes[8..12], b"WAVE");
+    assert_eq!(bytes.len(), 12_844);
+    assert_eq!(std::fs::read(wav).unwrap(), bytes);
+}
+
+#[test]
 fn workspace_reader_can_follow_an_unclosed_capture_without_producer_access() {
     let temp = tempfile::tempdir().unwrap();
     let notes = temp.path().join("notes");

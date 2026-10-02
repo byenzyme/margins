@@ -86,6 +86,9 @@ error reason, and tells the user to run `margins attach` to continue. The spools
 are transient and removed after sealing. A full-length WAV is no
 longer rendered at stop. `margins audio-export [meeting_id]` makes a scriptable
 stereo WAV on demand; `margins process` derives one temporarily when needed.
+Artifact listing marks runtime audio as exportable and gives the WAV path and
+`margins audio-export` command without creating that large derived file. The
+Workspace artifact-content route creates the WAV only when bytes are requested.
 Existing WAVs are preserved. The public CLI's unavailable capture command no
 longer writes a second set of session rows. An open segment gets a canonical
 row immediately, so session readers can see the meeting during its first
@@ -105,10 +108,11 @@ the full recording is never concatenated in process memory.
 
 The TUI remembers the memo revision and lines it actually read. On save, it
 compares and replaces against that revision. Independent line edits are merged
-and retried; conflicting edits to one line leave the remote version intact and
-write the local draft to a `*.memo-conflict-*.md` file for review. The remote
-version becomes the working document, and the TUI keeps a persistent
-conflict status. Ctrl+G toggles a read-only view of the local draft; subsequent
+and retried; if one line conflicts, independent local edits are still saved
+alongside remote edits. Only the overlapping local lines go to a
+`*.memo-conflict-*.md` file for review. The merged version becomes the working
+document, and the TUI keeps a persistent conflict status. Ctrl+G toggles a
+read-only view of those local lines; subsequent
 edits start from the remote version, so a later save cannot automatically
 replace its conflicting or remote-only lines. Large memos use a patience diff
 instead of a fixed-size LCS cutoff. The memo's SQLite record is authoritative.

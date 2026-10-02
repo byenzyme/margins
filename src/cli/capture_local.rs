@@ -304,147 +304,200 @@ fn run_segment(
     let mut tui_error: Option<anyhow::Error> = None;
     let mut flush_failed = false;
 
-    loop {
-        let segment_offset_ms = if initial_recorder.is_some() {
-            initial_offset_ms
-        } else {
-            (Local::now() - started_at).num_milliseconds().max(0)
-        };
-        let stop = initial_stop
-            .take()
-            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
-        let recorder = if let Some(recorder) = initial_recorder.take() {
-            recorder
-        } else {
-            let live_sink = live
-                .as_ref()
-                .map(|worker| worker.sink_for_offset(segment_offset_ms as u64));
-            crate::recorder::RecorderHandle::start_with_live_audio(
-                stop.clone(),
-                selected_device.as_ref(),
-                live_sink,
-            )?
-        };
-        app.native_spool_overflow = recorder.bound_native_spool()?;
-        app.native_store_retrying = meeting.start_stream(
-            ordinal,
-            segment_offset_ms as u64,
-            recorder.native_spool_sources(),
-        )?;
+    // Keep capture and resume exits inside this closure so the common memo
+    // save and runtime finalization below always run.
+    let capture_result = (|| -> Result<()> {
+        loop {
+            let segment_offset_ms = if initial_recorder.is_some() {
+                initial_offset_ms
+            } else {
+                (Local::now() - started_at).num_milliseconds().max(0)
+            };
+            let stop = initial_stop
+                .take()
+                .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+            let recorder = if let Some(recorder) = initial_recorder.take() {
+                recorder
+            } else {
+                let live_sink = live
+                    .as_ref()
+                    .map(|worker| worker.sink_for_offset(segment_offset_ms as u64));
+                crate::recorder::RecorderHandle::start_with_live_audio(
+                    stop.clone(),
+                    selected_device.as_ref(),
+                    live_sink,
+                )?
+            };
+            app.native_spool_overflow = match recorder.bound_native_spool() {
+                Ok(overflow) => overflow,
+                Err(error) => {
+                    stop.store(true, Ordering::SeqCst);
+                    let _ = recorder.stop_and_flush(|| Ok(()));
+                    return Err(error.context("could not bound the native audio spool"));
+                }
+            };
+            app.native_store_retrying = match meeting.start_stream(
+                ordinal,
+                segment_offset_ms as u64,
+                recorder.native_spool_sources(),
+            ) {
+                Ok(retrying) => retrying,
+                Err(error) => {
+                    stop.store(true, Ordering::SeqCst);
+                    let _ = recorder.stop_and_flush(|| Ok(()));
+                    let recovery =
+                        meeting.recover_failed_stream_and_close(ordinal, segment_offset_ms as u64);
+                    return Err(match recovery {
+                    Ok(()) => error.context("could not start runtime audio storage"),
+                    Err(recovery_error) => anyhow::anyhow!(
+                        "could not start runtime audio storage: {error:#}; recovery failed: {recovery_error:#}"
+                    ),
+                });
+                }
+            };
 
-        app.mic_level = recorder.mic_peak();
-        app.spk_level = recorder.spk_peak();
-        app.mic_drops = recorder.mic_drops();
-        app.spk_drops = recorder.spk_drops();
-        app.spk_silence = recorder.spk_silence();
-        app.spk_frames = recorder.spk_frames();
-        app.spk_rate = recorder.spk_rate();
+            app.mic_level = recorder.mic_peak();
+            app.spk_level = recorder.spk_peak();
+            app.mic_drops = recorder.mic_drops();
+            app.spk_drops = recorder.spk_drops();
+            app.spk_silence = recorder.spk_silence();
+            app.spk_frames = recorder.spk_frames();
+            app.spk_rate = recorder.spk_rate();
 
-        let tui_result = crate::tui::run_tui(app, stop.clone())
-            .map_err(|error| anyhow::anyhow!(error.to_string()));
-        stop.store(true, Ordering::SeqCst);
-        // Memo persistence never waits behind a runtime audio backlog.
-        let _ = app
-            .save()
-            .with_context(|| format!("could not save memo {}", &app.output_path));
+            let tui_result = crate::tui::run_tui(app, stop.clone())
+                .map_err(|error| anyhow::anyhow!(error.to_string()));
+            stop.store(true, Ordering::SeqCst);
+            // Memo persistence never waits behind a runtime audio backlog.
+            let _ = app
+                .save()
+                .with_context(|| format!("could not save memo {}", &app.output_path));
 
-        let reason = if matches!(&tui_result, Ok(crate::tui::TuiAction::Pause)) {
-            margins_meeting_protocol::SegmentCloseReasonV1::Pause
-        } else if matches!(&tui_result, Ok(crate::tui::TuiAction::SwitchDevice(_))) {
-            margins_meeting_protocol::SegmentCloseReasonV1::Rollover
-        } else if tui_result.is_err() {
-            margins_meeting_protocol::SegmentCloseReasonV1::Error
-        } else {
-            margins_meeting_protocol::SegmentCloseReasonV1::Stop
-        };
-        let mut runtime_duration_ms = 0;
-        let flush_result = recorder.stop_and_flush(|| {
-            runtime_duration_ms =
-                meeting.flush_stream_and_close(ordinal, segment_offset_ms as u64, reason)?;
-            Ok(())
-        });
-        if let Err(error) = flush_result {
-            let recovery =
-                meeting.recover_failed_stream_and_close(ordinal, segment_offset_ms as u64);
-            runtime_duration_ms = meeting
-                .last_end_ms()
-                .saturating_sub(segment_offset_ms as u64);
-            let recovery_note = recovery
-                .err()
-                .map(|error| format!("; recovery of committed audio also failed: {error:#}"))
-                .unwrap_or_default();
-            tui_error = Some(anyhow::anyhow!(
+            let reason = if matches!(&tui_result, Ok(crate::tui::TuiAction::Pause)) {
+                margins_meeting_protocol::SegmentCloseReasonV1::Pause
+            } else if matches!(&tui_result, Ok(crate::tui::TuiAction::SwitchDevice(_))) {
+                margins_meeting_protocol::SegmentCloseReasonV1::Rollover
+            } else if tui_result.is_err() {
+                margins_meeting_protocol::SegmentCloseReasonV1::Error
+            } else {
+                margins_meeting_protocol::SegmentCloseReasonV1::Stop
+            };
+            let mut runtime_duration_ms = 0;
+            let flush_result = recorder.stop_and_flush(|| {
+                runtime_duration_ms =
+                    meeting.flush_stream_and_close(ordinal, segment_offset_ms as u64, reason)?;
+                Ok(())
+            });
+            if let Err(error) = flush_result {
+                let recovery =
+                    meeting.recover_failed_stream_and_close(ordinal, segment_offset_ms as u64);
+                runtime_duration_ms = meeting
+                    .last_end_ms()
+                    .saturating_sub(segment_offset_ms as u64);
+                let recovery_note = recovery
+                    .err()
+                    .map(|error| format!("; recovery of committed audio also failed: {error:#}"))
+                    .unwrap_or_default();
+                tui_error = Some(anyhow::anyhow!(
                 "audio writer failed: {error:#}{recovery_note}. Run margins attach to continue this session"
             ));
-            flush_failed = true;
+                flush_failed = true;
+                live_timeline_duration_ms = live_timeline_duration_ms.max(
+                    (segment_offset_ms as u64)
+                        .saturating_sub(initial_offset_ms as u64)
+                        .saturating_add(runtime_duration_ms),
+                );
+                break;
+            }
             live_timeline_duration_ms = live_timeline_duration_ms.max(
                 (segment_offset_ms as u64)
                     .saturating_sub(initial_offset_ms as u64)
                     .saturating_add(runtime_duration_ms),
             );
-            break;
-        }
-        live_timeline_duration_ms = live_timeline_duration_ms.max(
-            (segment_offset_ms as u64)
-                .saturating_sub(initial_offset_ms as u64)
-                .saturating_add(runtime_duration_ms),
-        );
 
-        match tui_result {
-            Err(error) => {
-                tui_error = Some(error);
-                break;
-            }
-            Ok(crate::tui::TuiAction::Quit) => break,
-            Ok(crate::tui::TuiAction::Pause) => {
-                app.set_capture_paused(true);
-                app.mic_level = Arc::new(AtomicU32::new(0));
-                app.spk_level = Arc::new(AtomicU32::new(0));
-                let resume = loop {
-                    let paused_stop = Arc::new(AtomicBool::new(false));
-                    match crate::tui::run_tui(app, paused_stop)
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?
-                    {
-                        crate::tui::TuiAction::Resume => break true,
-                        crate::tui::TuiAction::Quit => break false,
-                        crate::tui::TuiAction::SwitchDevice(index) => {
-                            let mut devices = crate::recorder::list_input_devices();
-                            if index >= devices.len() {
-                                return Err(anyhow::anyhow!(
-                                    "selected audio input is no longer available"
-                                ));
-                            }
-                            let (device_name, device) = devices.swap_remove(index);
-                            app.current_mic_name = device_name;
-                            selected_device = Some(device);
-                        }
-                        crate::tui::TuiAction::Pause => {}
-                    }
-                };
-                if !resume {
+            match tui_result {
+                Err(error) => {
+                    tui_error = Some(error);
                     break;
                 }
-                app.set_capture_paused(false);
-                ordinal = meeting.next_ordinal()?;
-            }
-            Ok(crate::tui::TuiAction::Resume) => {
-                return Err(anyhow::anyhow!("resume requested while capture was active"));
-            }
-            Ok(crate::tui::TuiAction::SwitchDevice(index)) => {
-                let mut devices = crate::recorder::list_input_devices();
-                if index >= devices.len() {
-                    return Err(anyhow::anyhow!(
-                        "selected audio input is no longer available"
-                    ));
+                Ok(crate::tui::TuiAction::Quit) => break,
+                Ok(crate::tui::TuiAction::Pause) => {
+                    app.set_capture_paused(true);
+                    app.mic_level = Arc::new(AtomicU32::new(0));
+                    app.spk_level = Arc::new(AtomicU32::new(0));
+                    let resume = loop {
+                        let paused_stop = Arc::new(AtomicBool::new(false));
+                        match crate::tui::run_tui(app, paused_stop)
+                            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+                        {
+                            crate::tui::TuiAction::Resume => break true,
+                            crate::tui::TuiAction::Quit => break false,
+                            crate::tui::TuiAction::SwitchDevice(index) => {
+                                let mut devices = crate::recorder::list_input_devices();
+                                if index >= devices.len() {
+                                    return Err(anyhow::anyhow!(
+                                        "selected audio input is no longer available"
+                                    ));
+                                }
+                                let (device_name, device) = devices.swap_remove(index);
+                                app.current_mic_name = device_name;
+                                selected_device = Some(device);
+                            }
+                            crate::tui::TuiAction::Pause => {}
+                        }
+                    };
+                    if !resume {
+                        break;
+                    }
+                    app.set_capture_paused(false);
+                    ordinal = meeting.next_ordinal()?;
                 }
-                let (device_name, device) = devices.swap_remove(index);
-                app.current_mic_name = device_name;
-                selected_device = Some(device);
-                ordinal = meeting.next_ordinal()?;
+                Ok(crate::tui::TuiAction::Resume) => {
+                    return Err(anyhow::anyhow!("resume requested while capture was active"));
+                }
+                Ok(crate::tui::TuiAction::SwitchDevice(index)) => {
+                    let mut devices = crate::recorder::list_input_devices();
+                    if index >= devices.len() {
+                        return Err(anyhow::anyhow!(
+                            "selected audio input is no longer available"
+                        ));
+                    }
+                    let (device_name, device) = devices.swap_remove(index);
+                    app.current_mic_name = device_name;
+                    selected_device = Some(device);
+                    ordinal = meeting.next_ordinal()?;
+                }
             }
         }
+        Ok(())
+    })();
+    if let Err(error) = capture_result {
+        tui_error = Some(error.context("capture or resume failed; run margins attach to continue"));
     }
 
+    finish_segment_after_capture(
+        app,
+        live,
+        live_artifact_ordinal,
+        started_at,
+        live_timeline_duration_ms,
+        meeting,
+        tui_error,
+        flush_failed,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(feature = "audio-capture")]
+fn finish_segment_after_capture(
+    app: &mut crate::app::App,
+    live: Option<LiveTranscriptWorker>,
+    live_artifact_ordinal: i64,
+    started_at: chrono::DateTime<Local>,
+    live_timeline_duration_ms: u64,
+    meeting: &mut capture_local_runtime::LocalMeetingProducer,
+    tui_error: Option<anyhow::Error>,
+    flush_failed: bool,
+) -> Result<SegmentOutcome> {
     // The paused editor can still receive edits after the active segment was
     // saved. A repeated save with an unresolved conflict reuses its draft.
     let memo_error = app
@@ -515,5 +568,102 @@ fn resolve_artifact(work_dir: &Path, value: &str) -> PathBuf {
         path.to_path_buf()
     } else {
         work_dir.join(path)
+    }
+}
+
+#[cfg(all(test, feature = "audio-capture"))]
+mod resume_failure_tests {
+    use super::*;
+    use margins_meeting_protocol::SegmentCloseReasonV1;
+
+    #[test]
+    fn resume_device_failure_saves_paused_edits_and_error_finalizes() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(".margins");
+        let started_at = Local::now();
+        let mut meeting = capture_local_runtime::LocalMeetingProducer::reserve(
+            &dir,
+            "resume-failure",
+            None,
+            started_at,
+        )
+        .unwrap();
+        let wav = dir.join("resume-failure_seg0.wav");
+        let mut writer = hound::WavWriter::create(
+            &wav,
+            hound::WavSpec {
+                channels: 2,
+                sample_rate: 16_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        for _ in 0..1_600 {
+            writer.write_sample(100_i16).unwrap();
+            writer.write_sample(200_i16).unwrap();
+        }
+        writer.finalize().unwrap();
+        meeting.open(0, 0).unwrap();
+        meeting
+            .ingest_wav_and_close(0, &wav, 0, SegmentCloseReasonV1::Pause)
+            .unwrap();
+        let authority = margins_store::SqliteWorkspaceAuthorityStorage::open(&dir).unwrap();
+        let observed = authority.memo("resume-failure").unwrap();
+        let mut app = crate::app::App::new(
+            dir.join("resume-failure.md").to_string_lossy().into_owned(),
+            started_at,
+            "fake mic".into(),
+        );
+        app.bind_workspace_authority(dir.clone(), "resume-failure".into());
+        app.observe_memo(observed.revision, observed.lines);
+        app.set_capture_paused(true);
+        for letter in "typed while paused".chars() {
+            app.insert_char(letter);
+        }
+        let outcome = finish_segment_after_capture(
+            &mut app,
+            None,
+            0,
+            started_at,
+            100,
+            &mut meeting,
+            Some(anyhow::anyhow!(
+                "selected audio input is no longer available"
+            )),
+            false,
+        )
+        .unwrap();
+        assert_eq!(outcome.action, PostCaptureAction::NotOffered);
+        assert!(complete_post_capture(outcome, None)
+            .unwrap_err()
+            .to_string()
+            .contains("selected audio input"));
+        assert_eq!(
+            authority.memo("resume-failure").unwrap().lines[0].text,
+            "typed while paused"
+        );
+        assert_eq!(
+            margins_store::canonical::list_sessions(&dir)
+                .unwrap()
+                .into_iter()
+                .find(|session| session.name == "resume-failure")
+                .unwrap()
+                .lifecycle_state,
+            "ended"
+        );
+        let owner =
+            capture_local_runtime::SessionOwnerLock::acquire(&dir, "resume-failure").unwrap();
+        let resumed = capture_local_runtime::LocalMeetingProducer::recover(
+            &dir,
+            "resume-failure",
+            200,
+            None,
+            started_at,
+            &owner,
+        )
+        .unwrap();
+        assert_eq!(resumed.next_ordinal().unwrap(), 1);
+        resumed.open(1, 200).unwrap();
     }
 }

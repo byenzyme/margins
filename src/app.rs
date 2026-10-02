@@ -533,6 +533,7 @@ impl App {
             };
             let mut desired = self.memo.lines().to_vec();
             let mut saved = false;
+            let mut pending_draft: Option<(PathBuf, Vec<TimedMemoLine>)> = None;
             for _ in 0..3 {
                 let request_id = format!("native-memo-{}", uuid::Uuid::new_v4());
                 match authority.replace_memo_lines(
@@ -559,6 +560,22 @@ impl App {
                             self.message =
                                 Some("Memo saved in SQLite; Markdown mirror needs repair".into());
                         }
+                        if let Some((path, lines)) = pending_draft {
+                            self.pending_conflict = Some(PendingMemoConflict {
+                                path: path.clone(),
+                                lines,
+                                viewing_draft: false,
+                                draft_scroll: 0,
+                            });
+                            self.message = Some(format!(
+                                "Memo changed elsewhere. Non-conflicting edits were saved; press Ctrl+G to view conflicting local lines at {}.",
+                                path.display()
+                            ));
+                            return Err(io::Error::other(format!(
+                                "memo conflict; conflicting local lines saved to {}",
+                                path.display()
+                            )));
+                        }
                         saved = true;
                         break;
                     }
@@ -568,42 +585,27 @@ impl App {
                             .is_some() =>
                     {
                         let current = authority.memo(session_id).map_err(io::Error::other)?;
-                        if let Some(merged) = merge_memo_lines(&base, &desired, &current.lines) {
-                            desired = merged;
-                            revision = current.revision;
-                            base = current.lines;
-                        } else {
-                            let draft = margins_dir.join(format!(
-                                "{session_id}.memo-conflict-{}.md",
-                                uuid::Uuid::new_v4()
-                            ));
-                            std::fs::write(&draft, &content)?;
-                            self.observed_memo = Some((current.revision, current.lines.clone()));
-                            self.memo = TimedMemoDocument::resume(
-                                current.lines,
-                                MemoMoment::recording(elapsed_between(
-                                    self.start_time,
-                                    Local::now(),
-                                )),
-                            );
-                            self.cursor_line = self.memo.len().saturating_sub(1);
-                            self.cursor_col = 0;
-                            self.scroll = self.cursor_line.saturating_sub(10);
-                            self.pending_conflict = Some(PendingMemoConflict {
-                                path: draft.clone(),
-                                lines: desired,
-                                viewing_draft: false,
-                                draft_scroll: 0,
+                        let merged = merge_memo_lines_partial(&base, &desired, &current.lines)
+                            .ok_or_else(|| io::Error::other("could not compare memo lines"))?;
+                        if !merged.conflicts.is_empty() {
+                            let (path, lines) = pending_draft.get_or_insert_with(|| {
+                                (
+                                    margins_dir.join(format!(
+                                        "{session_id}.memo-conflict-{}.md",
+                                        uuid::Uuid::new_v4()
+                                    )),
+                                    Vec::new(),
+                                )
                             });
-                            self.message = Some(format!(
-                                "Memo changed elsewhere. Remote text is shown; press Ctrl+G to view your local draft at {}.",
-                                draft.display()
-                            ));
-                            return Err(io::Error::other(format!(
-                                "memo conflict; local draft saved to {}",
-                                draft.display()
-                            )));
+                            lines.extend(merged.conflicts);
+                            std::fs::write(
+                                path,
+                                TimedMemoDocument::from_committed(lines.clone()).export_markdown(),
+                            )?;
                         }
+                        desired = merged.merged;
+                        revision = current.revision;
+                        base = current.lines;
                     }
                     Err(error) => return Err(io::Error::other(error)),
                 }
@@ -736,9 +738,70 @@ fn memo_hunks(base: &[TimedMemoLine], changed: &[TimedMemoLine]) -> Option<Vec<M
     Some(hunks)
 }
 
+struct PartialMemoMerge {
+    merged: Vec<TimedMemoLine>,
+    conflicts: Vec<TimedMemoLine>,
+}
+
+/// Apply independent local hunks while leaving overlapping remote edits in
+/// the working memo. Only the local hunks requiring a decision go to the draft.
+fn merge_memo_lines_partial(
+    base: &[TimedMemoLine],
+    local: &[TimedMemoLine],
+    remote: &[TimedMemoLine],
+) -> Option<PartialMemoMerge> {
+    let local_hunks = memo_hunks(base, local)?;
+    let remote_hunks = memo_hunks(base, remote)?;
+    let mut accepted = Vec::new();
+    let mut conflicts = Vec::new();
+    for local_hunk in local_hunks {
+        let conflicts_with_remote = remote_hunks.iter().any(|remote_hunk| {
+            if local_hunk.start == remote_hunk.start
+                && local_hunk.end == remote_hunk.end
+                && same_memo_text(&local_hunk.replacement, &remote_hunk.replacement)
+            {
+                return false;
+            }
+            match (
+                local_hunk.start == local_hunk.end,
+                remote_hunk.start == remote_hunk.end,
+            ) {
+                (true, true) => false,
+                (true, false) => {
+                    remote_hunk.start < local_hunk.start && local_hunk.start < remote_hunk.end
+                }
+                (false, true) => {
+                    local_hunk.start < remote_hunk.start && remote_hunk.start < local_hunk.end
+                }
+                (false, false) => {
+                    local_hunk.start < remote_hunk.end && remote_hunk.start < local_hunk.end
+                }
+            }
+        });
+        if conflicts_with_remote {
+            if local_hunk.replacement.is_empty() {
+                conflicts.extend(base[local_hunk.start..local_hunk.end].iter().map(|line| {
+                    let mut line = line.clone();
+                    line.text = format!("[local deletion] {}", line.text);
+                    line
+                }));
+            } else {
+                conflicts.extend(local_hunk.replacement);
+            }
+        } else {
+            accepted.push(local_hunk);
+        }
+    }
+    Some(PartialMemoMerge {
+        merged: merge_memo_hunks(base, &accepted, &remote_hunks)?,
+        conflicts,
+    })
+}
+
 /// Merge edits against the lines both clients observed. Different insertions
 /// at one boundary are retained in remote-then-local order; identical ones
 /// appear once. Overlapping replacements need a human decision.
+#[cfg(test)]
 fn merge_memo_lines(
     base: &[TimedMemoLine],
     local: &[TimedMemoLine],
@@ -746,7 +809,15 @@ fn merge_memo_lines(
 ) -> Option<Vec<TimedMemoLine>> {
     let local_hunks = memo_hunks(base, local)?;
     let remote_hunks = memo_hunks(base, remote)?;
-    let mut merged = Vec::with_capacity(local.len() + remote.len());
+    merge_memo_hunks(base, &local_hunks, &remote_hunks)
+}
+
+fn merge_memo_hunks(
+    base: &[TimedMemoLine],
+    local_hunks: &[MemoHunk],
+    remote_hunks: &[MemoHunk],
+) -> Option<Vec<TimedMemoLine>> {
+    let mut merged = Vec::with_capacity(base.len() + local_hunks.len() + remote_hunks.len());
     let (mut position, mut li, mut ri) = (0usize, 0usize, 0usize);
     loop {
         let local_insert = local_hunks
@@ -1051,7 +1122,7 @@ mod tests {
         assert!(first_message
             .as_deref()
             .unwrap()
-            .contains("Remote text is shown"));
+            .contains("Non-conflicting edits were saved"));
         assert_eq!(
             std::fs::read_dir(&dir)
                 .unwrap()
@@ -1060,6 +1131,76 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn conflict_saves_independent_local_edits_and_drafts_only_the_overlap() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join(".margins");
+        margins_store::canonical::create_session(
+            &dir,
+            "meeting",
+            &Local::now(),
+            ".margins/meeting.md",
+        )
+        .unwrap();
+        let authority = margins_store::SqliteWorkspaceAuthorityStorage::open(&dir).unwrap();
+        let initial = authority.memo("meeting").unwrap();
+        let lines = |values: &[&str]| {
+            values
+                .iter()
+                .enumerate()
+                .map(|(index, text)| TimedMemoLine::at(*text, MemoMoment::recording(index as f64)))
+                .collect::<Vec<_>>()
+        };
+        let base = authority
+            .replace_memo_lines(
+                "meeting",
+                "bb",
+                "base",
+                &initial.revision,
+                &lines(&["A", "B", "C", "D"]),
+            )
+            .unwrap();
+        let mut app = App::from_memo(
+            TimedMemoDocument::from_committed(base.lines.clone()),
+            dir.join("meeting.md").to_string_lossy().into_owned(),
+            make_start(),
+            "mic".into(),
+        );
+        app.bind_workspace_authority(dir.clone(), "meeting".into());
+        app.observe_memo(base.revision.clone(), base.lines);
+        app.memo = TimedMemoDocument::from_committed(lines(&["A", "local B", "C", "local D"]));
+        authority
+            .replace_memo_lines(
+                "meeting",
+                "bb",
+                "remote",
+                &base.revision,
+                &lines(&["A", "remote B", "C", "D", "remote E"]),
+            )
+            .unwrap();
+        assert!(app
+            .save()
+            .unwrap_err()
+            .to_string()
+            .contains("memo conflict"));
+        let saved = authority.memo("meeting").unwrap();
+        assert_eq!(
+            saved
+                .lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "remote B", "C", "local D", "remote E"]
+        );
+        app.toggle_conflict_draft();
+        let draft = app.conflict_draft_lines().unwrap();
+        assert_eq!(draft.len(), 1);
+        assert_eq!(draft[0].text, "local B");
+        let contents = std::fs::read_to_string(app.conflict_draft_path().unwrap()).unwrap();
+        assert!(contents.contains("local B"));
+        assert!(!contents.contains("local D"));
     }
 
     #[test]
@@ -1114,5 +1255,14 @@ mod tests {
         assert_eq!(merged[1_000].text, "local insert");
         assert_eq!(merged.last().unwrap().text, "remote append");
         assert_eq!(merged.len(), 2_502);
+    }
+
+    #[test]
+    fn conflicting_local_deletion_is_visible_in_the_draft() {
+        let base = vec![TimedMemoLine::at("remove me", MemoMoment::recording(1.0))];
+        let remote = vec![TimedMemoLine::at("remote edit", MemoMoment::recording(2.0))];
+        let merged = merge_memo_lines_partial(&base, &[], &remote).unwrap();
+        assert_eq!(merged.merged[0].text, "remote edit");
+        assert_eq!(merged.conflicts[0].text, "[local deletion] remove me");
     }
 }

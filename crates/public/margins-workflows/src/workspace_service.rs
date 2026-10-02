@@ -1062,7 +1062,7 @@ impl WorkspaceService {
     ) -> Result<Vec<WorkspaceArtifactV1>> {
         principal.require(self.workspace_id(), OP_SESSION_READ)?;
         let session_id = resolve_session_id(&self.margins_dir, session_id)?;
-        canonical::list_session_artifacts(&self.margins_dir, &session_id)?
+        crate::artifacts::session_artifact_rows(&self.margins_dir, &session_id)?
             .into_iter()
             .map(|artifact| {
                 let path = crate::artifacts::confined_session_artifact_access_disk_path(
@@ -1070,6 +1070,20 @@ impl WorkspaceService {
                     &session_id,
                     &artifact.path,
                 );
+                let size_bytes = if let Some(path) = path {
+                    path.metadata().ok().map(|value| value.len())
+                } else if crate::artifacts::native_runtime_audio_export_path(
+                    &self.margins_dir,
+                    &artifact,
+                )
+                .is_some()
+                {
+                    self.runtime
+                        .storage()
+                        .native_wav_export_size(&session_id, artifact.ordinal)?
+                } else {
+                    None
+                };
                 Ok(WorkspaceArtifactV1 {
                     artifact_id: ArtifactId(format!(
                         "{}:{}:{}",
@@ -1078,7 +1092,7 @@ impl WorkspaceService {
                     session_id: SessionId(session_id.clone()),
                     kind: artifact.kind,
                     ordinal: artifact.ordinal,
-                    size_bytes: path.and_then(|path| path.metadata().ok().map(|value| value.len())),
+                    size_bytes,
                     retention_class: artifact.retention_class,
                     created_at: artifact.created_at,
                 })
@@ -1096,10 +1110,17 @@ impl WorkspaceService {
         let ordinal: i64 = parts.next().context("invalid artifact id")?.parse()?;
         let kind = parts.next().context("invalid artifact id")?;
         let session = parts.next().context("invalid artifact id")?;
-        let artifact = canonical::list_session_artifacts(&self.margins_dir, session)?
+        let artifact = crate::artifacts::session_artifact_rows(&self.margins_dir, session)?
             .into_iter()
             .find(|value| value.kind == kind && value.ordinal == ordinal)
             .context("artifact not found")?;
+        if let Some(expected_path) =
+            crate::artifacts::native_runtime_audio_export_path(&self.margins_dir, &artifact)
+        {
+            let path = self.runtime.storage().export_native_wav(session, ordinal)?;
+            anyhow::ensure!(path == expected_path, "native audio export path changed");
+            return Ok(std::fs::read(path)?);
+        }
         let path = crate::artifacts::confined_session_artifact_access_disk_path(
             &self.margins_dir,
             session,
