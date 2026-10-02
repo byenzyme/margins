@@ -710,6 +710,13 @@ fn connection_commands_do_not_implicitly_create_a_workspace() {
         .env_clear()
         .env("HOME", &machine_home)
         .env("MARGINS_HOME", &margins_home)
+        .env(
+            "MARGINS_GOOGLE_OAUTH_CLIENT_FILE",
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/crates/public/margins-cli/tests/fixtures/google-oauth-client.json"
+            ),
+        )
         .env("MARGINS_CONNECT_NO_BROWSER", "1")
         // A failed suppression guard must still be unable to find open/xdg-open.
         .env("PATH", temp.path())

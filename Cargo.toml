@@ -92,5 +92,6 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 ctor = "0.2.9"
+hound = "3.5"
 margins-workflows = { path = "crates/public/margins-workflows", features = ["test-support"] }
 margins-meeting-runtime = { path = "crates/public/margins-meeting-runtime", features = ["test-support"] }

@@ -2617,6 +2617,7 @@ dependencies = [
  "ctor",
  "dirs",
  "enzyme-core",
+ "hound",
  "include_dir",
  "libsql-rusqlite",
  "margins-capture",
