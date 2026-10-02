@@ -1,16 +1,16 @@
 # Official CLI release pipeline
 
-The official `margins` executable is built only from the private
-`byenzyme/margins-desktop` source-of-truth. The public `byenzyme/margins`
-repository is an audited open-core export and validates its source graph, but
-has no release-writing workflow. Never add a tag-triggered binary publisher or
-a cross-repository write token to the public export.
+The official `margins` executable is built from a tag in the public
+`byenzyme/margins` source tree. The private `byenzyme/margins-desktop` repository
+remains an archive after cutover. Only the Enzyme recall engine is fetched from
+a private repository, at the exact revision in
+`scripts/private_recall_dependency.toml` and `Cargo.private-recall.lock`.
 
 ## Release topology
 
-`.github/workflows/cli-release.yml` checks out an existing private tag and
-builds the root `margins` package's internal `margins-private` target with an
-explicit, fail-closed private composition, then stages it in each archive as
+`.github/workflows/cli-release.yml` checks out an existing public source tag
+and builds the root `margins` package's internal `margins-private` target with
+`scripts/with-private-recall`, then stages it in each archive as
 the user-facing `margins` executable alongside `margins-server`, for:
 
 - `aarch64-apple-darwin` on the `macos-15` Apple Silicon runner with
@@ -29,9 +29,9 @@ no publishing credential. The publish job is protected by the
 `official-cli-release` GitHub Environment so reviewers can inspect all artifacts
 before secrets become available.
 
-The publish job exports and verifies the public source tree, then commits and
-tags that tree before uploading the matching binary archives. Tags and releases
-are not created by setup or validation work.
+The publish job uploads archives to the release for that same public source
+tag. It does not transform, rsync, commit, or tag a second source tree. Tags
+and releases are not created by setup or validation work.
 
 ## Release order and BB plugin runtime pairing
 
@@ -43,7 +43,7 @@ fails with an explicit "upgrade both" error.
 
 Release in this order:
 
-1. The full local Linux gate passes on `main` (`scripts/local-gate linux`).
+1. The full local Linux gate passes on `main` (`scripts/with-private-recall scripts/local-gate linux`).
 2. The macOS gate and the Mac smoke checklist pass on the attached Mac bb host.
 3. Merge the PR that bumps `RUNTIME_RELEASE_VERSION` and its rebuilt `dist/`
    **immediately** before tagging. Between that merge and the published release,
@@ -55,24 +55,31 @@ Release in this order:
 
 ## Required secrets and permissions
 
-Configure these as secrets on the protected `official-cli-release` Environment
-in `byenzyme/margins-desktop`:
+Configure these repository secrets in `byenzyme/margins` for the build jobs:
 
-- `MARGINS_RELEASE_TOKEN`: a fine-grained PAT (or equivalent installation
-  token) limited to `byenzyme/margins`, with repository **Contents: read and
-  write**. It needs no access to the private source repository or Homebrew tap.
+- `ENZYME_RUST_READ_TOKEN`: a fine-grained PAT or GitHub App token with
+  **Contents: read** for private `byenzyme/enzyme-rust`. The build sets
+  `CARGO_NET_GIT_FETCH_WITH_CLI=true` and configures `gh` as Git's credential
+  helper before Cargo resolves the pinned dependency.
+- `MARGINS_GOOGLE_OAUTH_CLIENT_JSON`: the downloaded Desktop OAuth client JSON.
+  The CLI build embeds it through `option_env!`; source and lockfiles contain
+  no client credential. A public source build may instead set a runtime file or
+  JSON environment variable.
+
+Configure this secret on the protected `official-cli-release` Environment:
+
 - `HOMEBREW_TAP_TOKEN`: a separate fine-grained PAT limited to
   `byenzyme/homebrew-margins`, with repository **Contents: read and write**. It
   needs no access to releases or private source.
 
 Protect the Environment with required reviewers and restrict it to `v*` tags.
-Protect matching tags in both source and public repositories. If organization
-policy permits GitHub Apps, two single-repository installations with short-lived
-tokens are preferable to user PATs; keep the same split authority.
+Protect release tags in the public repository. Prefer short-lived GitHub App
+tokens where available.
 
-The workflow's built-in `GITHUB_TOKEN` has only `contents: read`. Checkout does
-not persist credentials. No token is available until the publish job, and each
-cross-repository operation receives only its own token.
+The workflow's built-in `GITHUB_TOKEN` has `contents: read` except for the
+publish job, where it receives `contents: write` to publish on the current
+repository. Checkout does not persist credentials. The Enzyme token is scoped
+to build jobs, and the Homebrew token is scoped to its publish step.
 
 ## Packaged-binary smoke contract
 

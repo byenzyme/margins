@@ -1,9 +1,9 @@
 # Margins Google OAuth resource
 
-The official private composition embeds `resources/google-oauth-client.json` at
-compile time. The owner replaces the documented placeholder before producing an
-official build. It must be a Google OAuth **Desktop app** client in Google's
-downloaded JSON shape:
+Official builds inject `MARGINS_GOOGLE_OAUTH_CLIENT_JSON` from a CI secret at
+compile time. Source builds can set that variable at runtime or provide a file
+with `MARGINS_GOOGLE_OAUTH_CLIENT_FILE`. The value must be a Google OAuth
+**Desktop app** client in Google's downloaded JSON shape:
 
 ```json
 {
@@ -19,5 +19,6 @@ downloaded JSON shape:
 }
 ```
 
-This directory is private-composition-only and must never be added to
-`open-source-boundary.json`.
+No client JSON is tracked in this repository. Official CI provides the JSON
+only to the CLI build step; the runtime file option keeps local credentials out
+of source.

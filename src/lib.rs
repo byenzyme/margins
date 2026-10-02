@@ -10,6 +10,7 @@ mod cli_log;
 pub mod coreml_asr;
 pub mod diarization;
 pub mod granola_import;
+pub mod google_oauth_client;
 pub mod hosted_credentials;
 pub mod included_lease;
 mod note;

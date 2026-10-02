@@ -226,13 +226,10 @@ where
     }) = &parsed.command
     {
         let mut stdout = std::io::stdout().lock();
-        let credential = Some(
-            include_bytes!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/crates/private/margins-google/resources/google-oauth-client.json"
-            ))
-            .as_slice(),
-        );
+        let credential = match crate::google_oauth_client::load() {
+            Ok(credential) => credential,
+            Err(error) => return report_error(&error.to_string()),
+        };
         let home = match margins_workflows::workspace::margins_home() {
             Ok(home) => home,
             Err(error) => return report_error(&error.to_string()),
@@ -242,7 +239,7 @@ where
             account.as_deref(),
             *headless,
             *json,
-            credential,
+            credential.as_deref(),
             &mut stdout,
             &mut std::io::stderr().lock(),
         );
@@ -325,18 +322,24 @@ where
                 &mut stdout,
             )
         } else {
-            let credential = include_bytes!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/crates/private/margins-google/resources/google-oauth-client.json"
-            ))
-            .as_slice();
+            let credential = match crate::google_oauth_client::load() {
+                Ok(Some(credential)) => credential,
+                Ok(None) => return report_json_cli_error(margins_cli::CliError::new(
+                    "google_credential_unavailable",
+                    "Supply MARGINS_GOOGLE_OAUTH_CLIENT_FILE or MARGINS_GOOGLE_OAUTH_CLIENT_JSON to use Google integration in a source build.",
+                )),
+                Err(error) => return report_json_cli_error(margins_cli::CliError::new(
+                    "google_credential_unavailable",
+                    error.to_string(),
+                )),
+            };
             margins_cli::commands::integrations::reconcile_with_google_credential(
                 &workspace.state_dir,
                 connector.as_deref(),
                 account.as_deref(),
                 if_revision,
                 request_id,
-                credential,
+                &credential,
                 &mut stdout,
             )
         };

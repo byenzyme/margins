@@ -6,12 +6,12 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing private source tag to release (vMAJOR.MINOR.PATCH)"
+        description: "Existing source tag to release (vMAJOR.MINOR.PATCH)"
         required: true
         type: string
 
-# The default token may only read the private source repository. Publishing to
-# the two public repositories uses separate, repository-scoped credentials.
+# The public repository's token publishes its own release. A separate token
+# updates the Homebrew tap; official builds use a read-only Enzyme token.
 permissions:
   contents: read
 
@@ -39,6 +39,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "byenzyme/margins"
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]] || {
             echo "::error::Release tag must be a complete vMAJOR.MINOR.PATCH tag"
             exit 1
@@ -55,6 +56,9 @@ jobs:
 
   build:
     needs: validate
+    env:
+      GH_TOKEN: ${{ secrets.ENZYME_RUST_READ_TOKEN }}
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     strategy:
       fail-fast: false
       matrix:
@@ -91,11 +95,19 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
 
+      - name: Authenticate private recall source
+        run: |
+          test -n "$GH_TOKEN"
+          gh auth setup-git
+
       - name: Build the private root distributable
-        run: >-
-          cargo build --release --locked --package margins --bin margins-private
-          --no-default-features --features "${{ matrix.features }}"
-          --target "${{ matrix.target }}"
+        env:
+          MARGINS_GOOGLE_OAUTH_CLIENT_JSON: ${{ secrets.MARGINS_GOOGLE_OAUTH_CLIENT_JSON }}
+        run: |
+          test -n "$MARGINS_GOOGLE_OAUTH_CLIENT_JSON"
+          scripts/with-private-recall cargo build --release --locked --package margins --bin margins-private \
+            --no-default-features --features "${{ matrix.features }}" \
+            --target "${{ matrix.target }}"
 
       - name: Compile the project recording service
         run: >-
@@ -278,6 +290,8 @@ jobs:
     needs: [validate, build]
     runs-on: ubuntu-24.04
     environment: official-cli-release
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -295,55 +309,13 @@ jobs:
           VERSION: ${{ needs.validate.outputs.version }}
         run: scripts/verify-release-artifacts.sh dist "$VERSION"
 
-      - name: Materialize and verify public source tree
-        run: |
-          set -euo pipefail
-          export_path="$RUNNER_TEMP/margins-public-export"
-          python3 scripts/open_source_boundary.py --output "$export_path" --execute
-          python3 scripts/open_source_boundary.py --verify-tree "$export_path"
-
-      - name: Publish source tree and tag to the public repository
+      - name: Publish release from this tagged public source
         env:
-          GH_TOKEN: ${{ secrets.MARGINS_RELEASE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.validate.outputs.tag }}
         run: |
           set -euo pipefail
-          test -n "$GH_TOKEN"
-          gh auth setup-git
-          public_repo="$RUNNER_TEMP/margins-public-repository"
-          export_path="$RUNNER_TEMP/margins-public-export"
-          gh repo clone byenzyme/margins "$public_repo"
-          rsync -a --delete --exclude '.git/' "$export_path/" "$public_repo/"
-          cd "$public_repo"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add --all
-          if ! git diff --cached --quiet; then
-            git commit -m "release: sync public source for $TAG"
-            git push origin HEAD:main
-          fi
-          public_commit=$(git rev-parse HEAD)
-          if git ls-remote --exit-code origin "refs/tags/$TAG" >/dev/null 2>&1; then
-            remote_tag=$(git ls-remote origin "refs/tags/$TAG^{}" | cut -f1)
-            if [ -z "$remote_tag" ]; then
-              remote_tag=$(git ls-remote origin "refs/tags/$TAG" | cut -f1)
-            fi
-            test "$remote_tag" = "$public_commit" || {
-              echo "::error::$TAG already points to a different public source commit"
-              exit 1
-            }
-          else
-            git tag -a "$TAG" -m "Margins $TAG"
-            git push origin "$TAG"
-          fi
-
-      - name: Publish release to the public open-core repository
-        env:
-          GH_TOKEN: ${{ secrets.MARGINS_RELEASE_TOKEN }}
-          TAG: ${{ needs.validate.outputs.tag }}
-        run: |
-          set -euo pipefail
-          test -n "$GH_TOKEN"
+          test "$GITHUB_REPOSITORY" = "byenzyme/margins"
           gh release create "$TAG" dist/* \
             --repo byenzyme/margins \
             --title "Margins $TAG" \
