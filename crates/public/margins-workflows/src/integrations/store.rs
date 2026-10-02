@@ -3192,13 +3192,17 @@ mod tests {
                 .update_health(ctx, HealthStatus::Fresh, Some("fixture refresh"))
                 .unwrap();
         }
-        let last_successful = store.health_report(&email).unwrap().last_successful_sync;
+        let last_successful = [&email, &calendar, &meet, &granola]
+            .map(|ctx| store.health_report(ctx).unwrap().last_successful_sync);
 
         assert_eq!(store.mark_google_connection_needs_auth(account).unwrap(), 3);
-        for ctx in [&email, &calendar, &meet] {
+        for (ctx, previous_sync) in [&email, &calendar, &meet]
+            .into_iter()
+            .zip(last_successful.iter())
+        {
             let report = store.health_report(ctx).unwrap();
             assert_eq!(report.status, HealthStatus::NeedsAuth);
-            assert_eq!(report.last_successful_sync, last_successful);
+            assert_eq!(&report.last_successful_sync, previous_sync);
             assert_eq!(
                 report.detail.as_deref(),
                 Some("machine Google connection was forgotten")
@@ -3219,7 +3223,7 @@ mod tests {
         );
         let report = store.health_report(&granola).unwrap();
         assert_eq!(report.status, HealthStatus::NeedsAuth);
-        assert_eq!(report.last_successful_sync, last_successful);
+        assert_eq!(report.last_successful_sync, last_successful[3]);
         assert_eq!(
             report.detail.as_deref(),
             Some("machine Granola connection was forgotten")
