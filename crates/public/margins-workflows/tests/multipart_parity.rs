@@ -41,32 +41,34 @@ fn invalid_speaker_configuration_fails_before_provider_or_filesystem_writes() {
             work_dir: work,
             margins_dir: &dir,
             session_name: "meet",
-            speakers: 2,
+            speakers: 0,
             align_only: false,
         },
         &asr,
         None,
     )
     .unwrap_err();
-    assert!(process_error.to_string().contains("diarization backend"));
+    assert!(process_error.to_string().contains("at least 1"));
     assert_eq!(asr.0.load(Ordering::SeqCst), 0);
     assert!(!dir.exists());
 
+    let mono_path = work.join("mono.wav");
+    write_interleaved_wav(&mono_path, &[0.0; 16_000], 16_000, 1).unwrap();
     let transcribe_error = transcribe_audio(
         TranscribeRequest {
             work_dir: work,
             margins_dir: &dir,
-            audio_path: &work.join("missing.wav"),
+            audio_path: &mono_path,
             requested_name: None,
             memo_path: None,
-            speakers: 0,
+            speakers: 2,
             started_at: Local::now(),
         },
         &asr,
         None,
     )
     .unwrap_err();
-    assert!(transcribe_error.to_string().contains("at least 1"));
+    assert!(transcribe_error.to_string().contains("diarization backend"));
     assert_eq!(asr.0.load(Ordering::SeqCst), 0);
     assert!(!dir.exists());
 }
@@ -153,5 +155,8 @@ fn multipart_offsets_apply_once_and_align_only_makes_no_asr_calls() {
     assert!(aligned.find("boundary memo").unwrap() < aligned.find("part-1").unwrap());
     let artifacts = canonical::list_session_artifacts(&dir, "meet").unwrap();
     assert_eq!(artifacts.len(), 1);
-    assert_eq!(artifacts[0].kind, canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT);
+    assert_eq!(
+        artifacts[0].kind,
+        canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT
+    );
 }

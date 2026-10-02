@@ -62,12 +62,37 @@ pub struct TranscribeResult {
     pub transcript_entries: usize,
 }
 
+/// Shared routing for channel-aware ASR. Two recorded lanes already identify
+/// mic and system; speaker diarization applies only to a mixed mono lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioProcessingPolicy {
+    SplitChannels,
+    Mono,
+    DiarizeMono,
+}
+
+pub fn processing_policy(channels: u16, speakers: usize) -> Result<AudioProcessingPolicy> {
+    if channels == 0 {
+        bail!("audio must have at least one channel");
+    }
+    if speakers == 0 {
+        bail!("speaker count must be at least 1");
+    }
+    Ok(if channels >= 2 {
+        AudioProcessingPolicy::SplitChannels
+    } else if speakers > 1 {
+        AudioProcessingPolicy::DiarizeMono
+    } else {
+        AudioProcessingPolicy::Mono
+    })
+}
+
 pub fn process_session(
     request: ProcessRequest<'_>,
     asr: &dyn AsrBackend,
     diarization: Option<&dyn DiarizationBackend>,
 ) -> Result<ProcessResult> {
-    validate_speaker_request(request.speakers, diarization)?;
+    validate_speaker_request(request.speakers)?;
     validate_session_name(request.session_name)?;
     let meta = canonical::get_session_meta(request.margins_dir, request.session_name)?;
     if meta.segments.is_empty() {
@@ -164,7 +189,7 @@ pub fn transcribe_audio(
     asr: &dyn AsrBackend,
     diarization: Option<&dyn DiarizationBackend>,
 ) -> Result<TranscribeResult> {
-    validate_speaker_request(request.speakers, diarization)?;
+    validate_speaker_request(request.speakers)?;
     let source = load_audio_any(request.audio_path)
         .with_context(|| format!("failed to decode {}", request.audio_path.display()))?;
     let mut speaker_channels = HashMap::new();
@@ -200,9 +225,8 @@ pub fn transcribe_audio(
     let aligned_path =
         crate::archive::aligned_output_path(request.work_dir, &name, &local_aligned_path);
 
-    let mono = downmix_to_mono(&source)?;
-    let mono = resample_mono_linear(&mono, source.sample_rate, 16_000);
-    let duration = write_interleaved_wav(&audio_dest, &mono, 16_000, 1)?;
+    let (stored_samples, stored_channels) = prepare_import_audio(&source, request.speakers)?;
+    let duration = write_interleaved_wav(&audio_dest, &stored_samples, 16_000, stored_channels)?;
     canonical::create_session(request.margins_dir, &name, &request.started_at, &memo_rel)?;
     canonical::add_segment(request.margins_dir, &name, 0, &audio_rel, 0, Some(duration))?;
     if let Some(path) = request.memo_path {
@@ -261,6 +285,26 @@ pub fn transcribe_audio(
     })
 }
 
+fn prepare_import_audio(audio: &AudioBuffer, speakers: usize) -> Result<(Vec<f32>, u16)> {
+    match processing_policy(audio.channels, speakers)? {
+        AudioProcessingPolicy::SplitChannels => {
+            let left = resample_mono_linear(&extract_channel(audio, 0)?, audio.sample_rate, 16_000);
+            let right =
+                resample_mono_linear(&extract_channel(audio, 1)?, audio.sample_rate, 16_000);
+            let interleaved = left
+                .into_iter()
+                .zip(right)
+                .flat_map(|(left, right)| [left, right])
+                .collect();
+            Ok((interleaved, 2))
+        }
+        AudioProcessingPolicy::Mono | AudioProcessingPolicy::DiarizeMono => {
+            let mono = resample_mono_linear(&downmix_to_mono(audio)?, audio.sample_rate, 16_000);
+            Ok((mono, 1))
+        }
+    }
+}
+
 fn transcribe_audio_buffer(
     audio: &AudioBuffer,
     speakers: usize,
@@ -270,7 +314,11 @@ fn transcribe_audio_buffer(
     session_offset_ms: u64,
 ) -> Result<(Vec<TranscriptWordEntry>, &'static str, BTreeSet<String>)> {
     let mut backends = BTreeSet::new();
-    if audio.channels >= 2 && speakers <= 1 {
+    let policy = processing_policy(audio.channels, speakers)?;
+    if policy == AudioProcessingPolicy::DiarizeMono && diarization.is_none() {
+        bail!("multi-speaker processing requires a diarization backend");
+    }
+    if policy == AudioProcessingPolicy::SplitChannels {
         let mut entries = Vec::new();
         for channel in 0..audio.channels.min(2) as usize {
             let mono =
@@ -300,7 +348,7 @@ fn transcribe_audio_buffer(
         language: None,
     })?;
     backends.insert(asr.backend_name().to_string());
-    if speakers <= 1 {
+    if policy == AudioProcessingPolicy::Mono {
         return Ok((
             result
                 .words
@@ -345,17 +393,162 @@ fn transcribe_audio_buffer(
     Ok((entries, "diarized_mono", backends))
 }
 
-fn validate_speaker_request(
-    speakers: usize,
-    diarization: Option<&dyn DiarizationBackend>,
-) -> Result<()> {
+fn validate_speaker_request(speakers: usize) -> Result<()> {
     if speakers == 0 {
         bail!("speaker count must be at least 1");
     }
-    if speakers > 1 && diarization.is_none() {
-        bail!("multi-speaker processing requires a diarization backend");
-    }
     Ok(())
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    use margins_core::{
+        AsrResult, DiarizationResult, SpeakerSegment, TranscriptError, TranscriptWord,
+    };
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct FakeAsr {
+        requests: Mutex<Vec<AsrRequest>>,
+    }
+
+    impl AsrBackend for FakeAsr {
+        fn transcribe(
+            &self,
+            request: AsrRequest,
+        ) -> std::result::Result<AsrResult, TranscriptError> {
+            let text = if request.samples[0] < 0.0 {
+                "system"
+            } else {
+                "mic"
+            };
+            self.requests.lock().unwrap().push(request.clone());
+            Ok(AsrResult {
+                words: [0, 100]
+                    .into_iter()
+                    .map(|start_ms| TranscriptWord {
+                        start_ms: request.session_offset_ms + start_ms,
+                        end_ms: request.session_offset_ms + start_ms + 100,
+                        text: text.into(),
+                        speaker: None,
+                        confidence_per_mille: None,
+                    })
+                    .collect(),
+                detected_language: None,
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeDiarizer(Mutex<Vec<DiarizationRequest>>);
+
+    impl DiarizationBackend for FakeDiarizer {
+        fn diarize(
+            &self,
+            request: DiarizationRequest,
+        ) -> std::result::Result<DiarizationResult, margins_core::DiarizationError> {
+            self.0.lock().unwrap().push(request.clone());
+            Ok(DiarizationResult {
+                segments: [
+                    SpeakerSegment {
+                        start_ms: request.session_offset_ms,
+                        end_ms: request.session_offset_ms + 100,
+                        speaker: SpeakerId::new("alice"),
+                    },
+                    SpeakerSegment {
+                        start_ms: request.session_offset_ms + 100,
+                        end_ms: request.session_offset_ms + 200,
+                        speaker: SpeakerId::new("bob"),
+                    },
+                ]
+                .into(),
+            })
+        }
+    }
+
+    #[test]
+    fn stereo_mic_system_stays_split_even_with_multiple_speakers() {
+        let asr = FakeAsr::default();
+        let diarizer = FakeDiarizer::default();
+        let audio = AudioBuffer {
+            samples: vec![0.5, -0.5, 0.5, -0.5],
+            sample_rate: 16_000,
+            channels: 2,
+        };
+        let (entries, mode, _) =
+            transcribe_audio_buffer(&audio, 2, &asr, Some(&diarizer), &mut HashMap::new(), 500)
+                .unwrap();
+        assert_eq!(mode, "stereo_channels");
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.channel)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 0, 1]
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["mic", "system", "mic", "system"]
+        );
+        assert_eq!(asr.requests.lock().unwrap().len(), 2);
+        assert!(diarizer.0.lock().unwrap().is_empty());
+        let (stored, channels) = prepare_import_audio(&audio, 2).unwrap();
+        assert_eq!(channels, 2);
+        assert_eq!(stored, audio.samples);
+    }
+
+    #[test]
+    fn mono_single_speaker_downmixes_without_diarization() {
+        let asr = FakeAsr::default();
+        let diarizer = FakeDiarizer::default();
+        let audio = AudioBuffer {
+            samples: vec![0.5, 0.5],
+            sample_rate: 16_000,
+            channels: 1,
+        };
+        let (entries, mode, _) =
+            transcribe_audio_buffer(&audio, 1, &asr, Some(&diarizer), &mut HashMap::new(), 500)
+                .unwrap();
+        assert_eq!(mode, "mono");
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.channel)
+                .collect::<Vec<_>>(),
+            vec![0, 0]
+        );
+        assert_eq!(entries[0].start_ms, 500);
+        assert!(diarizer.0.lock().unwrap().is_empty());
+        assert_eq!(prepare_import_audio(&audio, 1).unwrap().1, 1);
+    }
+
+    #[test]
+    fn mono_multiple_speakers_uses_diarization_turns() {
+        let asr = FakeAsr::default();
+        let diarizer = FakeDiarizer::default();
+        let audio = AudioBuffer {
+            samples: vec![0.5, 0.5],
+            sample_rate: 16_000,
+            channels: 1,
+        };
+        let (entries, mode, _) =
+            transcribe_audio_buffer(&audio, 2, &asr, Some(&diarizer), &mut HashMap::new(), 500)
+                .unwrap();
+        assert_eq!(mode, "diarized_mono");
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.channel)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(diarizer.0.lock().unwrap().len(), 1);
+        assert_eq!(prepare_import_audio(&audio, 2).unwrap().1, 1);
+    }
 }
 
 fn validate_session_name(name: &str) -> Result<()> {
