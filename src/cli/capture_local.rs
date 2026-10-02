@@ -652,5 +652,18 @@ mod resume_failure_tests {
                 .lifecycle_state,
             "ended"
         );
+        let owner =
+            capture_local_runtime::SessionOwnerLock::acquire(&dir, "resume-failure").unwrap();
+        let resumed = capture_local_runtime::LocalMeetingProducer::recover(
+            &dir,
+            "resume-failure",
+            200,
+            None,
+            started_at,
+            &owner,
+        )
+        .unwrap();
+        assert_eq!(resumed.next_ordinal().unwrap(), 1);
+        resumed.open(1, 200).unwrap();
     }
 }
