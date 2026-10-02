@@ -80,6 +80,8 @@ cpal = { version = "0.15", optional = true }
 crossterm = "0.28"
 dasp = "0.11"
 hound = "3.5"
+similar = "2.7"
+fs4 = { version = "0.13", features = ["sync"] }
 dirs = "6"
 include_dir = "0.7"
 rtrb = "0.3"

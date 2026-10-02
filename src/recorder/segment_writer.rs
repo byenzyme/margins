@@ -337,6 +337,7 @@ struct LaneActorHandle {
     join: Option<JoinHandle<()>>,
     rate: Arc<AtomicU32>,
     spool_path: PathBuf,
+    sealed: Arc<AtomicBool>,
 }
 
 /// Readable native lane spool with an acknowledgement channel. The runtime
@@ -345,6 +346,7 @@ pub struct NativeSpoolSource {
     pub path: PathBuf,
     pub rate: u32,
     compact: Option<SyncSender<LaneMsg>>,
+    sealed: Arc<AtomicBool>,
 }
 
 impl NativeSpoolSource {
@@ -352,6 +354,9 @@ impl NativeSpoolSource {
         let Some(sender) = &self.compact else {
             return Ok(false);
         };
+        if self.sealed.load(Ordering::Acquire) {
+            return Ok(false);
+        }
         let (ack, response) = mpsc::channel();
         if sender
             .send(LaneMsg::CompactSpool {
@@ -360,13 +365,19 @@ impl NativeSpoolSource {
             })
             .is_err()
         {
-            // The actor has sealed. The remaining spool is removed on drop.
-            return Ok(false);
+            if self.sealed.load(Ordering::Acquire) {
+                return Ok(false);
+            }
+            bail!("native spool actor stopped before compaction");
         }
-        response
-            .recv()
-            .context("lane actor dropped spool compaction ACK")??;
-        Ok(true)
+        match response.recv() {
+            Ok(result) => {
+                result?;
+                Ok(true)
+            }
+            Err(_) if self.sealed.load(Ordering::Acquire) => Ok(false),
+            Err(_) => bail!("lane actor dropped spool compaction ACK before sealing"),
+        }
     }
 
     #[cfg(test)]
@@ -375,6 +386,7 @@ impl NativeSpoolSource {
             path,
             rate,
             compact: None,
+            sealed: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -498,6 +510,7 @@ impl SegmentWriter {
             path: lane.spool_path.clone(),
             rate: lane.rate.load(Ordering::Acquire),
             compact: Some(lane.sender.clone()),
+            sealed: lane.sealed.clone(),
         })
     }
 
@@ -694,6 +707,8 @@ fn spawn_lane(
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     let rate_atomic = Arc::new(AtomicU32::new(rate));
     let thread_rate = rate_atomic.clone();
+    let sealed = Arc::new(AtomicBool::new(false));
+    let thread_sealed = sealed.clone();
     let join = std::thread::Builder::new()
         .name(format!("margins-{lane:?}-lane"))
         .spawn(move || {
@@ -710,6 +725,7 @@ fn spawn_lane(
                 lane_telemetry,
                 thread_rate,
                 ever_attached,
+                thread_sealed,
             ) {
                 Ok(actor) => {
                     let _ = ready_tx.send(Ok(actor.spool_path.clone()));
@@ -737,6 +753,7 @@ fn spawn_lane(
         join: Some(join),
         rate: rate_atomic,
         spool_path,
+        sealed,
     })
 }
 
@@ -770,6 +787,7 @@ struct LaneActor {
     last_packet_end_nanos: Option<u64>,
     pending_overlap_trim: u64,
     sealed: bool,
+    sealed_ack: Arc<AtomicBool>,
 }
 
 impl LaneActor {
@@ -786,6 +804,7 @@ impl LaneActor {
         telemetry: Arc<LaneTelemetry>,
         rate_atomic: Arc<AtomicU32>,
         ever_attached: Arc<AtomicBool>,
+        sealed_ack: Arc<AtomicBool>,
     ) -> Result<Self> {
         let (spool_path, writer) = new_spool(lane)?;
         Ok(Self {
@@ -818,6 +837,7 @@ impl LaneActor {
             last_packet_end_nanos: None,
             pending_overlap_trim: 0,
             sealed: false,
+            sealed_ack,
         })
     }
 
@@ -917,6 +937,7 @@ impl LaneActor {
             } => {
                 let result = self.seal(segment_id, lane, token, target_frame);
                 self.sealed = result.is_ok();
+                self.sealed_ack.store(true, Ordering::Release);
                 let _ = ack.send(result);
                 return true;
             }
@@ -1768,6 +1789,36 @@ mod tests {
         assert!(overflow.load(Ordering::Acquire));
         assert!(std::fs::metadata(mic_path).unwrap().len() <= 60 * 100 * 4);
         writer.seal_at(0).unwrap();
+    }
+
+    #[test]
+    fn compaction_queued_after_seal_is_a_successful_no_op() {
+        let (sender, receiver) = mpsc::sync_channel(2);
+        let sealed = Arc::new(AtomicBool::new(false));
+        let source = NativeSpoolSource {
+            path: PathBuf::new(),
+            rate: 100,
+            compact: Some(sender.clone()),
+            sealed: sealed.clone(),
+        };
+        let (seal_ack, _seal_response) = mpsc::channel();
+        sender
+            .send(LaneMsg::Seal {
+                segment_id: 1,
+                lane: CaptureLane::Mic,
+                token: 0,
+                target_frame: 0,
+                ack: seal_ack,
+            })
+            .unwrap();
+        let compact = std::thread::spawn(move || source.compact_through(4));
+        assert!(matches!(receiver.recv().unwrap(), LaneMsg::Seal { .. }));
+        let LaneMsg::CompactSpool { ack, .. } = receiver.recv().unwrap() else {
+            panic!("compaction was not queued after seal");
+        };
+        sealed.store(true, Ordering::Release);
+        drop(ack);
+        assert!(!compact.join().unwrap().unwrap());
     }
 
     #[test]

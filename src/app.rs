@@ -44,6 +44,7 @@ pub struct App {
     pub spk_frames: Arc<AtomicU64>,
     pub spk_rate: u32,
     pub native_spool_overflow: Arc<AtomicBool>,
+    pub native_store_retrying: Arc<AtomicBool>,
     pub live_transcription_status: Arc<AtomicU8>,
     pub capture_paused: bool,
     pub remote_delivery_state: Arc<AtomicU8>,
@@ -52,7 +53,14 @@ pub struct App {
     pause_block_ordinal: u32,
     workspace_authority: Option<(PathBuf, String)>,
     observed_memo: Option<(String, Vec<TimedMemoLine>)>,
-    pending_conflict: Option<(String, PathBuf)>,
+    pending_conflict: Option<PendingMemoConflict>,
+}
+
+struct PendingMemoConflict {
+    path: PathBuf,
+    lines: Vec<TimedMemoLine>,
+    viewing_draft: bool,
+    draft_scroll: usize,
 }
 
 impl App {
@@ -78,6 +86,7 @@ impl App {
             spk_frames: Arc::new(AtomicU64::new(0)),
             spk_rate: 0,
             native_spool_overflow: Arc::new(AtomicBool::new(false)),
+            native_store_retrying: Arc::new(AtomicBool::new(false)),
             live_transcription_status: Arc::new(AtomicU8::new(LIVE_TRANSCRIPTION_OFF)),
             capture_paused: false,
             remote_delivery_state: Arc::new(AtomicU8::new(REMOTE_DELIVERY_LOCAL)),
@@ -124,6 +133,7 @@ impl App {
             spk_frames: Arc::new(AtomicU64::new(0)),
             spk_rate: 0,
             native_spool_overflow: Arc::new(AtomicBool::new(false)),
+            native_store_retrying: Arc::new(AtomicBool::new(false)),
             live_transcription_status: Arc::new(AtomicU8::new(LIVE_TRANSCRIPTION_OFF)),
             capture_paused: false,
             remote_delivery_state: Arc::new(AtomicU8::new(REMOTE_DELIVERY_LOCAL)),
@@ -143,6 +153,44 @@ impl App {
     pub fn observe_memo(&mut self, revision: String, lines: Vec<TimedMemoLine>) {
         self.observed_memo = Some((revision, lines));
         self.pending_conflict = None;
+    }
+
+    pub fn conflict_draft_path(&self) -> Option<&std::path::Path> {
+        self.pending_conflict
+            .as_ref()
+            .map(|draft| draft.path.as_path())
+    }
+
+    pub fn viewing_conflict_draft(&self) -> bool {
+        self.pending_conflict
+            .as_ref()
+            .is_some_and(|draft| draft.viewing_draft)
+    }
+
+    pub fn conflict_draft_lines(&self) -> Option<&[TimedMemoLine]> {
+        self.pending_conflict
+            .as_ref()
+            .filter(|draft| draft.viewing_draft)
+            .map(|draft| draft.lines.as_slice())
+    }
+
+    pub fn conflict_draft_scroll(&self) -> usize {
+        self.pending_conflict
+            .as_ref()
+            .map_or(0, |draft| draft.draft_scroll)
+    }
+
+    pub fn scroll_conflict_draft(&mut self, delta: isize, visible_lines: usize) {
+        if let Some(draft) = &mut self.pending_conflict {
+            let last = draft.lines.len().saturating_sub(visible_lines.max(1));
+            draft.draft_scroll = draft.draft_scroll.saturating_add_signed(delta).min(last);
+        }
+    }
+
+    pub fn toggle_conflict_draft(&mut self) {
+        if let Some(draft) = &mut self.pending_conflict {
+            draft.viewing_draft = !draft.viewing_draft;
+        }
     }
 
     pub fn mark_edited(&mut self, line: usize) {
@@ -473,17 +521,6 @@ impl App {
         self.message = None;
         self.commit_uncommitted_at(Local::now());
         let content = self.export();
-        if let Some((draft_revision, draft_path)) = &self.pending_conflict {
-            if *draft_revision == self.memo.revision() {
-                let message = format!(
-                    "Memo conflict is still pending. Review your draft at {} and edit to resolve it.",
-                    draft_path.display()
-                );
-                self.message = Some(message.clone());
-                return Err(io::Error::other(message));
-            }
-            self.pending_conflict = None;
-        }
         if let Some((margins_dir, session_id)) = &self.workspace_authority {
             let authority = margins_store::SqliteWorkspaceAuthorityStorage::open(margins_dir)
                 .map_err(io::Error::other)?;
@@ -506,7 +543,6 @@ impl App {
                     &desired,
                 ) {
                     Ok(receipt) => {
-                        self.pending_conflict = None;
                         self.observed_memo = Some((receipt.revision, receipt.lines.clone()));
                         if receipt.lines != self.memo.lines() {
                             self.memo = TimedMemoDocument::resume(
@@ -542,10 +578,25 @@ impl App {
                                 uuid::Uuid::new_v4()
                             ));
                             std::fs::write(&draft, &content)?;
-                            self.observed_memo = Some((current.revision, current.lines));
-                            self.pending_conflict = Some((self.memo.revision(), draft.clone()));
+                            self.observed_memo = Some((current.revision, current.lines.clone()));
+                            self.memo = TimedMemoDocument::resume(
+                                current.lines,
+                                MemoMoment::recording(elapsed_between(
+                                    self.start_time,
+                                    Local::now(),
+                                )),
+                            );
+                            self.cursor_line = self.memo.len().saturating_sub(1);
+                            self.cursor_col = 0;
+                            self.scroll = self.cursor_line.saturating_sub(10);
+                            self.pending_conflict = Some(PendingMemoConflict {
+                                path: draft.clone(),
+                                lines: desired,
+                                viewing_draft: false,
+                                draft_scroll: 0,
+                            });
                             self.message = Some(format!(
-                                "Memo changed elsewhere. Your draft is at {}. Review it and retry.",
+                                "Memo changed elsewhere. Remote text is shown; press Ctrl+G to view your local draft at {}.",
                                 draft.display()
                             ));
                             return Err(io::Error::other(format!(
@@ -585,7 +636,63 @@ fn memo_hunks(base: &[TimedMemoLine], changed: &[TimedMemoLine]) -> Option<Vec<M
     let rows = base.len().checked_add(1)?;
     let cols = changed.len().checked_add(1)?;
     if rows.checked_mul(cols)? > 4_000_000 {
-        return None;
+        let old = base
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        let new = changed
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        let mut hunks = Vec::new();
+        let mut pending: Option<(usize, usize, usize, usize)> = None;
+        for op in similar::capture_diff_slices(similar::Algorithm::Patience, &old, &new) {
+            if op.tag() == similar::DiffTag::Equal {
+                if let Some((start, end, new_start, new_end)) = pending.take() {
+                    hunks.push(MemoHunk {
+                        start,
+                        end,
+                        replacement: changed[new_start..new_end].to_vec(),
+                    });
+                }
+                continue;
+            }
+            let old_range = op.old_range();
+            let new_range = op.new_range();
+            match &mut pending {
+                Some((_, end, _, new_end))
+                    if *end == old_range.start && *new_end == new_range.start =>
+                {
+                    *end = old_range.end;
+                    *new_end = new_range.end;
+                }
+                _ => {
+                    if let Some((start, end, new_start, new_end)) = pending.take() {
+                        hunks.push(MemoHunk {
+                            start,
+                            end,
+                            replacement: changed[new_start..new_end].to_vec(),
+                        });
+                    }
+                    pending = Some((
+                        old_range.start,
+                        old_range.end,
+                        new_range.start,
+                        new_range.end,
+                    ));
+                }
+            }
+        }
+        if let Some((start, end, new_start, new_end)) = pending {
+            hunks.push(MemoHunk {
+                start,
+                end,
+                replacement: changed[new_start..new_end].to_vec(),
+            });
+        }
+        return Some(hunks);
     }
     let mut lcs = vec![vec![0usize; cols]; rows];
     for i in (0..base.len()).rev() {
@@ -905,19 +1012,26 @@ mod tests {
             MemoMoment::recording(2.0),
         )]);
         authority
-            .update_memo(
+            .replace_memo_lines(
                 "meeting",
                 "bb",
                 "remote-2",
                 &base.revision,
-                2000,
-                false,
-                "remote",
+                &[
+                    TimedMemoLine::at("remote", MemoMoment::recording(2.0)),
+                    TimedMemoLine::at("remote-only", MemoMoment::recording(2.1)),
+                ],
             )
             .unwrap();
         let error = app.save().unwrap_err();
         assert!(error.to_string().contains("memo conflict"));
         assert_eq!(authority.memo("meeting").unwrap().lines[0].text, "remote");
+        assert_eq!(app.memo.line(0).unwrap().text, "remote");
+        assert_eq!(app.memo.line(1).unwrap().text, "remote-only");
+        assert!(app.conflict_draft_path().is_some());
+        app.toggle_conflict_draft();
+        assert_eq!(app.conflict_draft_lines().unwrap()[0].text, "local");
+        app.toggle_conflict_draft();
         let draft = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(Result::ok)
@@ -926,12 +1040,18 @@ mod tests {
             .unwrap();
         assert!(std::fs::read_to_string(draft).unwrap().contains("local"));
         let first_message = app.message.clone();
-        assert!(app.save().is_err());
-        assert!(app.message.as_deref().unwrap().contains("still pending"));
+        app.enter();
+        type_text(&mut app, "new local note");
+        app.save().unwrap();
+        let saved = authority.memo("meeting").unwrap();
+        assert!(saved.lines.iter().any(|line| line.text == "remote"));
+        assert!(saved.lines.iter().any(|line| line.text == "remote-only"));
+        assert!(saved.lines.iter().any(|line| line.text == "new local note"));
+        assert!(app.conflict_draft_path().is_some());
         assert!(first_message
             .as_deref()
             .unwrap()
-            .contains("Memo changed elsewhere"));
+            .contains("Remote text is shown"));
         assert_eq!(
             std::fs::read_dir(&dir)
                 .unwrap()
@@ -973,5 +1093,26 @@ mod tests {
         let mut right = base.clone();
         right.push(TimedMemoLine::at("same", MemoMoment::recording(6.0)));
         assert_eq!(merge_memo_lines(&base, &left, &right).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn large_memo_uses_patience_diff_instead_of_conflicting_by_size() {
+        let base = (0..2_500)
+            .map(|index| TimedMemoLine::at(format!("line {index}"), MemoMoment::recording(1.0)))
+            .collect::<Vec<_>>();
+        let mut local = base.clone();
+        local.insert(
+            1_000,
+            TimedMemoLine::at("local insert", MemoMoment::recording(2.0)),
+        );
+        let mut remote = base.clone();
+        remote.push(TimedMemoLine::at(
+            "remote append",
+            MemoMoment::recording(3.0),
+        ));
+        let merged = merge_memo_lines(&base, &local, &remote).unwrap();
+        assert_eq!(merged[1_000].text, "local insert");
+        assert_eq!(merged.last().unwrap().text, "remote append");
+        assert_eq!(merged.len(), 2_502);
     }
 }

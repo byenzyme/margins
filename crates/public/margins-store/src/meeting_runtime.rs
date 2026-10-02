@@ -5,8 +5,10 @@ use margins_core::{
     NewSegment, SampleFormat, SegmentId as CoreSegmentId, UnixMillis as CoreUnixMillis,
 };
 use margins_meeting_protocol::{
-    validate_opus_packet_stream_v1, AudioChunkV1, AudioCodecV1, AudioContainerV1, AudioFormatV1,
+    decode_opus_packet_blocks_v1, AudioChunkV1, AudioCodecV1, AudioContainerV1, AudioFormatV1,
     LaneId, MessageId, SequenceRangeV1, ServerMessageBodyV1, ServerMessageV1, SessionId,
+    MAX_SAFE_JSON_INTEGER, OPUS_PACKET_FRAME_SAMPLES_V1, OPUS_PACKET_STREAM_HEADER_BYTES_V1,
+    OPUS_PACKET_STREAM_MAX_BLOCK_BYTES_V1,
 };
 use margins_meeting_runtime::{
     MeetingRuntimeStorage, SessionDeltaV1, StorageCommit, StoredCommandReceiptV1, StoredSessionV1,
@@ -14,7 +16,7 @@ use margins_meeting_runtime::{
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -663,7 +665,27 @@ impl SqliteMeetingRuntimeStorage {
             if boundary.next_sequence == 0 {
                 continue;
             }
-            let mut bytes = Vec::new();
+            let format = declared_lanes
+                .iter()
+                .find(|lane| lane.lane_id == boundary.lane_id)
+                .context("finalized lane was not declared by the session")?
+                .format
+                .clone();
+            let (extension, artifact_suffix) = match (format.codec, format.container) {
+                (AudioCodecV1::PcmS16Le, AudioContainerV1::Raw) => ("pcm", "pcm"),
+                (AudioCodecV1::Opus, AudioContainerV1::PacketStream) => ("mopus", "opus"),
+                _ => anyhow::bail!("finalized remote audio uses an unsupported durable format"),
+            };
+            let file_name = format!(
+                "{}_{}_{}.{}",
+                safe_file_component(session_id.as_ref()),
+                safe_file_component(finalized.segment_id.as_ref()),
+                safe_file_component(boundary.lane_id.as_ref()),
+                extension,
+            );
+            let path = artifacts.join(&file_name);
+            let mut staged = tempfile::NamedTempFile::new_in(&artifacts)?;
+            let mut byte_count = 0u64;
             for sequence in 0..boundary.next_sequence {
                 let chunk = if delta.audio_chunk.as_ref().is_some_and(|chunk| {
                     chunk.segment_id == finalized.segment_id
@@ -689,41 +711,29 @@ impl SqliteMeetingRuntimeStorage {
                     first_start_ms
                         .map_or(chunk.starts_at_ms.0, |old| old.min(chunk.starts_at_ms.0)),
                 );
-                bytes.extend_from_slice(&chunk.payload);
+                staged.write_all(&chunk.payload)?;
+                byte_count = byte_count
+                    .checked_add(chunk.payload.len() as u64)
+                    .context("finalized lane byte count overflow")?;
             }
-            let format = declared_lanes
-                .iter()
-                .find(|lane| lane.lane_id == boundary.lane_id)
-                .context("finalized lane was not declared by the session")?
-                .format
-                .clone();
-            let (extension, artifact_suffix, frame_count) = match (format.codec, format.container) {
+            staged.as_file_mut().sync_all()?;
+            let frame_count = match (format.codec, format.container) {
                 (AudioCodecV1::PcmS16Le, AudioContainerV1::Raw) => {
-                    if bytes.len() % 2 != 0 {
+                    if byte_count % 2 != 0 {
                         anyhow::bail!("finalized PCM lane has a partial s16 sample");
                     }
-                    ("pcm", "pcm", bytes.len() as u64 / 2)
+                    byte_count / 2
                 }
                 (AudioCodecV1::Opus, AudioContainerV1::PacketStream) => {
-                    let summary =
-                        validate_opus_packet_stream_v1(&bytes).map_err(anyhow::Error::msg)?;
-                    ("mopus", "opus", summary.source_frame_count)
+                    validate_opus_packet_file(staged.path())?
                 }
                 _ => anyhow::bail!("finalized remote audio uses an unsupported durable format"),
             };
-            let file_name = format!(
-                "{}_{}_{}.{}",
-                safe_file_component(session_id.as_ref()),
-                safe_file_component(finalized.segment_id.as_ref()),
-                safe_file_component(boundary.lane_id.as_ref()),
-                extension,
-            );
-            let path = artifacts.join(&file_name);
-            atomic_replace(&path, &bytes)?;
+            install_staged_projection(staged, &path)?;
             lanes.push((
                 boundary.lane_id.clone(),
                 format!(".margins/artifacts/{}/{file_name}", session_id.as_ref()),
-                bytes.len() as u64,
+                byte_count,
                 frame_count,
                 artifact_suffix.to_string(),
                 format,
@@ -1186,6 +1196,107 @@ fn safe_file_component(value: &str) -> String {
         })
         .take(100)
         .collect()
+}
+
+/// Validate the packet-block stream with at most one bounded block in memory.
+fn validate_opus_packet_file(path: &Path) -> Result<u64> {
+    let mut file = File::open(path)?;
+    let mut expected_source_start = 0u64;
+    let mut packet_count = 0u64;
+    let mut pre_skip_48k = 0u16;
+    let mut block_count = 0u64;
+    let mut saw_end = false;
+    loop {
+        let mut header = [0u8; OPUS_PACKET_STREAM_HEADER_BYTES_V1];
+        if file.read(&mut header[..1])? == 0 {
+            break;
+        }
+        file.read_exact(&mut header[1..])?;
+        let block_bytes = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+        if block_bytes < OPUS_PACKET_STREAM_HEADER_BYTES_V1
+            || block_bytes > OPUS_PACKET_STREAM_MAX_BLOCK_BYTES_V1
+        {
+            anyhow::bail!("truncated or invalid Opus packet block length");
+        }
+        let mut bytes = vec![0u8; block_bytes];
+        bytes[..header.len()].copy_from_slice(&header);
+        file.read_exact(&mut bytes[header.len()..])?;
+        let blocks = decode_opus_packet_blocks_v1(&bytes).map_err(anyhow::Error::msg)?;
+        let block = &blocks[0];
+        if saw_end {
+            anyhow::bail!("Opus packet stream has bytes after END");
+        }
+        if block_count == 0 {
+            if !block.stream_start || block.pre_skip_48k == 0 {
+                anyhow::bail!("Opus packet stream is missing its START/pre-skip");
+            }
+            if block.pre_skip_48k % 3 != 0 {
+                anyhow::bail!("16 kHz Opus pre-skip is not integral in the 48 kHz clock");
+            }
+            pre_skip_48k = block.pre_skip_48k;
+        } else if block.stream_start || block.pre_skip_48k != 0 {
+            anyhow::bail!("Opus packet stream has a repeated START/pre-skip");
+        }
+        if block.source_start_frame != expected_source_start {
+            anyhow::bail!("Opus packet stream source frames contain a gap or overlap");
+        }
+        expected_source_start = expected_source_start
+            .checked_add(u64::from(block.source_frame_count))
+            .context("Opus packet stream source frame count overflowed")?;
+        if expected_source_start > MAX_SAFE_JSON_INTEGER {
+            anyhow::bail!("Opus packet stream source frame count exceeds V1");
+        }
+        packet_count = packet_count
+            .checked_add(block.packets.len() as u64)
+            .context("Opus packet count overflowed")?;
+        if !block.stream_end
+            && u64::from(block.source_frame_count)
+                != block.packets.len() as u64 * u64::from(block.frame_samples)
+        {
+            anyhow::bail!("non-terminal Opus block does not fully represent its packets");
+        }
+        saw_end = block.stream_end;
+        block_count += 1;
+    }
+    if block_count == 0 || !saw_end {
+        anyhow::bail!("Opus packet stream is missing END");
+    }
+    let decoded_capacity = packet_count
+        .checked_mul(u64::from(OPUS_PACKET_FRAME_SAMPLES_V1))
+        .context("Opus decoded frame capacity overflowed")?;
+    if decoded_capacity < expected_source_start.saturating_add(u64::from(pre_skip_48k / 3)) {
+        anyhow::bail!("Opus packet stream tail cannot cover source frames after pre-skip");
+    }
+    Ok(expected_source_start)
+}
+
+fn install_staged_projection(staged: tempfile::NamedTempFile, path: &Path) -> Result<()> {
+    let parent = path.parent().context("projection path has no parent")?;
+    match std::fs::hard_link(staged.path(), path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let mut current = File::open(path)?;
+            let mut proposed = File::open(staged.path())?;
+            if current.metadata()?.len() != proposed.metadata()?.len() {
+                anyhow::bail!("finalized lane projection conflicts with existing bytes");
+            }
+            let mut left = [0u8; 64 * 1024];
+            let mut right = [0u8; 64 * 1024];
+            loop {
+                let count = current.read(&mut left)?;
+                if count == 0 {
+                    break;
+                }
+                proposed.read_exact(&mut right[..count])?;
+                if left[..count] != right[..count] {
+                    anyhow::bail!("finalized lane projection conflicts with existing bytes");
+                }
+            }
+        }
+        Err(error) => return Err(error.into()),
+    }
+    File::open(parent)?.sync_all()?;
+    Ok(())
 }
 
 fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<()> {

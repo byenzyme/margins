@@ -248,6 +248,24 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Option<TuiAction> {
     let sup = key.modifiers.contains(KeyModifiers::SUPER);
     let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
 
+    if key.code == KeyCode::Char('g') && ctrl && app.conflict_draft_path().is_some() {
+        app.toggle_conflict_draft();
+        app.message = None;
+        return None;
+    }
+    if app.viewing_conflict_draft() {
+        let page = app.editor_area.height.saturating_sub(2).max(1) as usize;
+        match key.code {
+            KeyCode::Char('c') if ctrl => return Some(TuiAction::Quit),
+            KeyCode::Up => app.scroll_conflict_draft(-1, page),
+            KeyCode::Down => app.scroll_conflict_draft(1, page),
+            KeyCode::PageUp => app.scroll_conflict_draft(-(page as isize), page),
+            KeyCode::PageDown => app.scroll_conflict_draft(page as isize, page),
+            _ => {}
+        }
+        return None;
+    }
+
     match key.code {
         // Quit
         KeyCode::Char('c') if ctrl => return Some(TuiAction::Quit),
@@ -329,6 +347,15 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Option<TuiAction> {
 }
 
 fn handle_mouse(app: &mut App, mouse: MouseEvent) {
+    if app.viewing_conflict_draft() {
+        let page = app.editor_area.height.saturating_sub(2).max(1) as usize;
+        match mouse.kind {
+            MouseEventKind::ScrollUp => app.scroll_conflict_draft(-1, page),
+            MouseEventKind::ScrollDown => app.scroll_conflict_draft(1, page),
+            _ => {}
+        }
+        return;
+    }
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => {
             app.handle_click(mouse.column, mouse.row);
@@ -358,13 +385,32 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
     app.editor_area = editor_area;
 
     let visible_lines = editor_area.height.saturating_sub(2) as usize;
-    app.ensure_cursor_visible(visible_lines);
+    if !app.viewing_conflict_draft() {
+        app.ensure_cursor_visible(visible_lines);
+    }
 
     // Build visible lines
     let mut display_lines: Vec<Line> = Vec::new();
-    let end = (app.scroll + visible_lines).min(app.memo.len());
+    let draft_lines = app.conflict_draft_lines();
+    let lines = draft_lines.unwrap_or_else(|| app.memo.lines());
+    let scroll = if draft_lines.is_some() {
+        app.conflict_draft_scroll()
+    } else {
+        app.scroll
+    };
+    let end = (scroll + visible_lines).min(lines.len());
 
-    for i in app.scroll..end {
+    for i in scroll..end {
+        if draft_lines.is_some() {
+            display_lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{:>8} ", i + 1),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(&lines[i].text, Style::default().fg(Color::Yellow)),
+            ]));
+            continue;
+        }
         let (gutter, edited) = app.gutter_label(i);
 
         let gutter_style = if edited {
@@ -383,21 +429,28 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
 
         display_lines.push(Line::from(vec![
             Span::styled(gutter, gutter_style),
-            Span::styled(&app.memo.line(i).unwrap().text, text_style),
+            Span::styled(&lines[i].text, text_style),
         ]));
     }
 
-    let block = Block::default().borders(Borders::ALL).title(" margins ");
+    let title = if draft_lines.is_some() {
+        " local draft (read only) "
+    } else {
+        " margins "
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
     let paragraph = Paragraph::new(display_lines).block(block);
     f.render_widget(paragraph, editor_area);
 
     // Cursor
-    let cursor_x = editor_area.x + 1 + GUTTER_WIDTH + app.cursor_col as u16;
-    let cursor_y = editor_area.y + 1 + (app.cursor_line - app.scroll) as u16;
-    if cursor_x < editor_area.x + editor_area.width - 1
-        && cursor_y < editor_area.y + editor_area.height - 1
-    {
-        f.set_cursor_position((cursor_x, cursor_y));
+    if draft_lines.is_none() {
+        let cursor_x = editor_area.x + 1 + GUTTER_WIDTH + app.cursor_col as u16;
+        let cursor_y = editor_area.y + 1 + (app.cursor_line - app.scroll) as u16;
+        if cursor_x < editor_area.x + editor_area.width - 1
+            && cursor_y < editor_area.y + editor_area.height - 1
+        {
+            f.set_cursor_position((cursor_x, cursor_y));
+        }
     }
 
     // Status bar
@@ -442,8 +495,24 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
         ),
         _ => String::new(),
     };
-    let status_text = if let Some(ref msg) = app.message {
+    let status_text = if app.viewing_conflict_draft() {
+        format!(
+            " {} | LOCAL DRAFT read only | ^G return to remote memo | ^C stop",
+            time
+        )
+    } else if app.native_store_retrying.load(Ordering::Acquire) {
+        format!(
+            " {} | Audio storage busy, retrying; capture is buffered locally",
+            time
+        )
+    } else if let Some(ref msg) = app.message {
         format!(" {} | {}", time, msg)
+    } else if let Some(path) = app.conflict_draft_path() {
+        format!(
+            " {} | CONFLICT: remote memo shown | ^G view local draft ({})",
+            time,
+            path.display()
+        )
     } else if app.capture_paused {
         format!(
             " {} | PAUSED{} | {} lines |  ^P resume  ^S save  ^C stop",

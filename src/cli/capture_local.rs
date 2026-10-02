@@ -25,6 +25,12 @@ enum PostCaptureAction {
     NotOffered,
 }
 
+#[cfg(feature = "audio-capture")]
+struct SegmentOutcome {
+    action: PostCaptureAction,
+    error: Option<anyhow::Error>,
+}
+
 #[cfg(any(test, feature = "audio-capture"))]
 fn ask_post_capture_action(
     input: &mut dyn BufRead,
@@ -126,6 +132,7 @@ fn create_native_session(work_dir: &Path, title: Option<&str>) -> Result<()> {
     )?;
 
     std::fs::create_dir_all(&margins_dir).context("failed to create .margins directory")?;
+    let owner = capture_local_runtime::SessionOwnerLock::acquire(&margins_dir, &name)?;
     // Silent bookkeeping so desktop and `recent --all` can enumerate this folder.
     margins_workflows::project::register_vault_silently(work_dir);
     let mut meeting = capture_local_runtime::LocalMeetingProducer::reserve(
@@ -152,7 +159,7 @@ fn create_native_session(work_dir: &Path, title: Option<&str>) -> Result<()> {
     app.observe_memo(observed.revision, observed.lines);
     app.live_transcription_status = live_status;
 
-    let action = run_segment(
+    let outcome = run_segment(
         &mut app,
         0,
         live,
@@ -163,24 +170,12 @@ fn create_native_session(work_dir: &Path, title: Option<&str>) -> Result<()> {
         initial_stop,
         &mut meeting,
     )?;
-    match action {
-        PostCaptureAction::Distill => crate::note::run(false),
-        PostCaptureAction::SavedOnly => {
-            eprintln!("Session saved.");
-            Ok(())
-        }
-        PostCaptureAction::NotOffered => {
-            // One-line pointer at the moment of truth. A first capture nudges
-            // setup only until the bundled distillation skill is installed.
-            eprintln!("{}", post_new_session_hint(&name));
-            Ok(())
-        }
-    }
+    drop(owner);
+    complete_post_capture(outcome, Some(&name))
 }
 
 #[cfg(feature = "audio-capture")]
 fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> {
-    ensure_speech_model(false)?;
     let margins_dir = work_dir.join(".margins");
     let name = match selected {
         Some(name) => name.to_string(),
@@ -192,6 +187,8 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
     if name.is_empty() || !margins_store::canonical::session_exists(&margins_dir, &name)? {
         bail!("Session '{name}' not found. Run `margins ls` to choose one.");
     }
+    let owner = capture_local_runtime::SessionOwnerLock::acquire(&margins_dir, &name)?;
+    ensure_speech_model(false)?;
     let meta = margins_store::canonical::get_session_meta(&margins_dir, &name)?;
     let started_at = margins_store::canonical::get_session_start_time(&margins_dir, &name)?;
     let memo_path = resolve_artifact(work_dir, &meta.notes_path);
@@ -205,6 +202,7 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
         offset_ms as u64,
         meta.title.as_deref(),
         started_at,
+        &owner,
     )?;
     if let Some((pending, offset)) = meeting.pending_segment()? {
         meeting.recover_pending_segment(pending, offset)?;
@@ -245,7 +243,7 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
     app.observe_memo(observed.revision, observed.lines);
     app.live_transcription_status = live_status;
 
-    let action = run_segment(
+    let outcome = run_segment(
         &mut app,
         ordinal,
         live,
@@ -256,13 +254,31 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
         initial_stop,
         &mut meeting,
     )?;
-    match action {
+    drop(owner);
+    complete_post_capture(outcome, None)
+}
+
+#[cfg(feature = "audio-capture")]
+fn complete_post_capture(outcome: SegmentOutcome, new_session: Option<&str>) -> Result<()> {
+    let action_result = match outcome.action {
         PostCaptureAction::Distill => crate::note::run(false),
         PostCaptureAction::SavedOnly => {
             eprintln!("Session saved.");
             Ok(())
         }
-        PostCaptureAction::NotOffered => Ok(()),
+        PostCaptureAction::NotOffered => {
+            if outcome.error.is_none() {
+                if let Some(name) = new_session {
+                    eprintln!("{}", post_new_session_hint(name));
+                }
+            }
+            Ok(())
+        }
+    };
+    match (outcome.error, action_result) {
+        (Some(capture), Err(action)) => Err(anyhow::anyhow!("{capture}; {action}")),
+        (Some(capture), Ok(())) => Err(capture),
+        (None, result) => result,
     }
 }
 
@@ -278,7 +294,7 @@ fn run_segment(
     initial_recorder: crate::recorder::RecorderHandle,
     initial_stop: Arc<AtomicBool>,
     meeting: &mut capture_local_runtime::LocalMeetingProducer,
-) -> Result<PostCaptureAction> {
+) -> Result<SegmentOutcome> {
     let mut ordinal = initial_ordinal;
     let mut selected_device: Option<crate::recorder::InputDevice> = None;
     let mut live_timeline_duration_ms: u64 = 0;
@@ -286,6 +302,7 @@ fn run_segment(
     let mut initial_stop = Some(initial_stop);
     // Memo durability must not depend on the optional transcription path.
     let mut tui_error: Option<anyhow::Error> = None;
+    let mut flush_failed = false;
 
     loop {
         let segment_offset_ms = if initial_recorder.is_some() {
@@ -309,7 +326,7 @@ fn run_segment(
             )?
         };
         app.native_spool_overflow = recorder.bound_native_spool()?;
-        meeting.start_stream(
+        app.native_store_retrying = meeting.start_stream(
             ordinal,
             segment_offset_ms as u64,
             recorder.native_spool_sources(),
@@ -341,11 +358,32 @@ fn run_segment(
             margins_meeting_protocol::SegmentCloseReasonV1::Stop
         };
         let mut runtime_duration_ms = 0;
-        let _duration = recorder.stop_and_flush(|| {
+        let flush_result = recorder.stop_and_flush(|| {
             runtime_duration_ms =
                 meeting.flush_stream_and_close(ordinal, segment_offset_ms as u64, reason)?;
             Ok(())
-        })?;
+        });
+        if let Err(error) = flush_result {
+            let recovery =
+                meeting.recover_failed_stream_and_close(ordinal, segment_offset_ms as u64);
+            runtime_duration_ms = meeting
+                .last_end_ms()
+                .saturating_sub(segment_offset_ms as u64);
+            let recovery_note = recovery
+                .err()
+                .map(|error| format!("; recovery of committed audio also failed: {error:#}"))
+                .unwrap_or_default();
+            tui_error = Some(anyhow::anyhow!(
+                "audio writer failed: {error:#}{recovery_note}. Run margins attach to continue this session"
+            ));
+            flush_failed = true;
+            live_timeline_duration_ms = live_timeline_duration_ms.max(
+                (segment_offset_ms as u64)
+                    .saturating_sub(initial_offset_ms as u64)
+                    .saturating_add(runtime_duration_ms),
+            );
+            break;
+        }
         live_timeline_duration_ms = live_timeline_duration_ms.max(
             (segment_offset_ms as u64)
                 .saturating_sub(initial_offset_ms as u64)
@@ -413,20 +451,22 @@ fn run_segment(
         .save()
         .with_context(|| format!("could not save memo {}", &app.output_path))
         .err();
-    meeting.finish_with_reason(
-        (Local::now() - started_at).num_milliseconds().max(0) as u64,
-        if tui_error.is_some() {
-            margins_meeting_protocol::SessionFinalizeReasonV1::Error
-        } else {
-            margins_meeting_protocol::SessionFinalizeReasonV1::Completed
-        },
-    )?;
+    let finalization_error = meeting
+        .finish_with_reason(
+            (Local::now() - started_at).num_milliseconds().max(0) as u64,
+            if tui_error.is_some() {
+                margins_meeting_protocol::SessionFinalizeReasonV1::Error
+            } else {
+                margins_meeting_protocol::SessionFinalizeReasonV1::Completed
+            },
+        )
+        .err();
 
     // Signal terminal decoding before asking what to do next. The rolling
     // worker continues draining queued live audio while the user decides.
     let mut live_finalizer = live.map(|worker| worker.begin_finish(live_timeline_duration_ms));
 
-    let action_result = if tui_error.is_none() {
+    let action_result = if tui_error.is_none() || flush_failed {
         choose_post_capture_action()
     } else {
         Ok(PostCaptureAction::NotOffered)
@@ -450,15 +490,22 @@ fn run_segment(
         Ok(())
     })();
 
-    match (tui_error, memo_error) {
-        (Some(capture), Some(memo)) => return Err(anyhow::anyhow!("{capture}; {memo}")),
-        (Some(capture), None) => return Err(capture),
-        (None, Some(memo)) => return Err(memo),
-        (None, None) => {}
-    }
     let action = action_result?;
-    live_result?;
-    Ok(action)
+    let failures = [
+        tui_error.map(|error| error.to_string()),
+        memo_error.map(|error| error.to_string()),
+        finalization_error.map(|error| format!("could not finalize session: {error:#}")),
+        live_result
+            .err()
+            .map(|error| format!("live transcript failed: {error:#}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    Ok(SegmentOutcome {
+        action,
+        error: (!failures.is_empty()).then(|| anyhow::anyhow!(failures.join("; "))),
+    })
 }
 
 #[cfg(feature = "audio-capture")]

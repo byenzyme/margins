@@ -2,6 +2,7 @@
 //! batches from native device spools through the shared Recorder facade.
 
 use anyhow::{bail, Context, Result};
+use fs4::fs_std::FileExt;
 use margins_meeting_protocol::{
     AudioCodecV1, AudioContainerV1, AudioFormatV1, BeginCaptureGenerationV1, CaptureLaneV1,
     CaptureModeV1, CaptureProvenanceHopV1, CaptureProvenanceV1, CaptureSourceKindV1,
@@ -12,12 +13,15 @@ use margins_meeting_protocol::{
 use margins_meeting_runtime::{MeetingRuntime, MeetingRuntimeStorage, RecorderLaneV1};
 use margins_store::SqliteMeetingRuntimeStorage;
 use std::collections::BTreeMap;
+use std::fs::OpenOptions;
 use std::io::{Read, Seek};
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub(super) struct LocalMeetingProducer {
     runtime: MeetingRuntime<SqliteMeetingRuntimeStorage>,
@@ -26,6 +30,42 @@ pub(super) struct LocalMeetingProducer {
     last_end_ms: u64,
     origin_ms: u64,
     stream: Option<RuntimeStreamWorker>,
+}
+
+/// OS ownership fence for a local capture. The file stays in the vault; its
+/// advisory lock is released automatically when the process exits or crashes.
+#[derive(Debug)]
+pub(super) struct SessionOwnerLock {
+    session_id: String,
+    _file: std::fs::File,
+}
+
+impl SessionOwnerLock {
+    pub(super) fn acquire(dir: &Path, session_id: &str) -> Result<Self> {
+        if session_id.is_empty()
+            || session_id == "."
+            || session_id == ".."
+            || session_id.contains('/')
+            || session_id.contains('\\')
+        {
+            bail!("invalid local session id for capture ownership");
+        }
+        std::fs::create_dir_all(dir)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(dir.join(format!("{session_id}.capture.lock")))?;
+        if !file.try_lock_exclusive()? {
+            bail!(
+                "Session '{session_id}' is already recording in another process. Close that recorder before running margins attach."
+            );
+        }
+        Ok(Self {
+            session_id: session_id.to_owned(),
+            _file: file,
+        })
+    }
 }
 
 fn now_ms() -> UnixMillis {
@@ -47,6 +87,7 @@ struct PcmLaneSender {
     pending: Vec<u8>,
     offset_ms: u64,
     origin_ms: u64,
+    retrying: Arc<AtomicBool>,
 }
 
 impl PcmLaneSender {
@@ -58,6 +99,7 @@ impl PcmLaneSender {
         source_rate: u32,
         offset_ms: u64,
         origin_ms: u64,
+        retrying: Arc<AtomicBool>,
     ) -> Result<Self> {
         let segment = segment_id(session.as_ref(), ordinal);
         let handle = runtime
@@ -75,6 +117,7 @@ impl PcmLaneSender {
             pending: Vec::with_capacity(PCM_BATCH_FRAMES * 2),
             offset_ms,
             origin_ms,
+            retrying,
         })
     }
 
@@ -110,9 +153,8 @@ impl PcmLaneSender {
         let start_ms = self.offset_ms + self.sent_frames.div_ceil(16);
         let next_frames = self.sent_frames + frames;
         let end_ms = self.offset_ms + next_frames.div_ceil(16);
-        runtime
-            .recorder()
-            .append_chunk(
+        append_with_busy_retry(&self.retrying, || {
+            runtime.recorder().append_chunk(
                 &self.lane,
                 format!(
                     "{}-{}-{}",
@@ -125,9 +167,10 @@ impl PcmLaneSender {
                 self.sequence,
                 SessionMillis(start_ms),
                 DurationMillis(end_ms.saturating_sub(start_ms)),
-                std::mem::take(&mut self.pending),
+                self.pending.clone(),
             )
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        })?;
+        self.pending.clear();
         self.sequence += 1;
         self.sent_frames = next_frames;
         Ok(())
@@ -141,6 +184,53 @@ impl PcmLaneSender {
         self.push_converted(runtime, &final_samples)?;
         self.flush(runtime)?;
         Ok((self.sequence, self.sent_frames))
+    }
+}
+
+fn sqlite_is_busy(error: &margins_meeting_runtime::RecorderError<anyhow::Error>) -> bool {
+    use margins_meeting_runtime::{RecorderError, RuntimeError};
+    match error {
+        RecorderError::Runtime(RuntimeError::Contention) => true,
+        RecorderError::Runtime(RuntimeError::Storage(source)) => source.chain().any(|cause| {
+            cause
+                .downcast_ref::<rusqlite::Error>()
+                .is_some_and(|sqlite| match sqlite {
+                    rusqlite::Error::SqliteFailure(code, _) => matches!(
+                        code.code,
+                        rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                    ),
+                    _ => false,
+                })
+        }),
+        _ => false,
+    }
+}
+
+fn append_with_busy_retry<T>(
+    retrying: &AtomicBool,
+    mut operation: impl FnMut() -> std::result::Result<
+        T,
+        margins_meeting_runtime::RecorderError<anyhow::Error>,
+    >,
+) -> Result<T> {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let mut delay = Duration::from_millis(100);
+    loop {
+        match operation() {
+            Ok(value) => {
+                retrying.store(false, Ordering::Release);
+                return Ok(value);
+            }
+            Err(error) if sqlite_is_busy(&error) && Instant::now() < deadline => {
+                retrying.store(true, Ordering::Release);
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(Duration::from_secs(2));
+            }
+            Err(error) => {
+                retrying.store(false, Ordering::Release);
+                return Err(anyhow::anyhow!("{error}"));
+            }
+        }
     }
 }
 
@@ -190,6 +280,7 @@ impl SpoolReader {
 struct RuntimeStreamWorker {
     stop: mpsc::Sender<()>,
     join: JoinHandle<Result<[(u64, u64); 2]>>,
+    retrying: Arc<AtomicBool>,
 }
 
 impl RuntimeStreamWorker {
@@ -203,6 +294,8 @@ impl RuntimeStreamWorker {
     ) -> Result<Self> {
         let (stop, stop_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let retrying = Arc::new(AtomicBool::new(false));
+        let worker_retrying = retrying.clone();
         let join = std::thread::Builder::new()
             .name("margins-runtime-audio".into())
             .spawn(move || {
@@ -223,6 +316,7 @@ impl RuntimeStreamWorker {
                                 source.rate,
                                 offset_ms,
                                 origin_ms,
+                                worker_retrying.clone(),
                             )?,
                             source,
                         })
@@ -268,7 +362,11 @@ impl RuntimeStreamWorker {
             .recv()
             .context("native runtime worker stopped before readiness")?
         {
-            Ok(()) => Ok(Self { stop, join }),
+            Ok(()) => Ok(Self {
+                stop,
+                join,
+                retrying,
+            }),
             Err(message) => {
                 let _ = join.join();
                 bail!("native runtime worker could not start: {message}")
@@ -375,7 +473,11 @@ impl LocalMeetingProducer {
         offset_ms: u64,
         title: Option<&str>,
         started_at: chrono::DateTime<chrono::Local>,
+        owner: &SessionOwnerLock,
     ) -> Result<Self> {
+        if owner.session_id != name {
+            bail!("capture owner does not match the session being recovered");
+        }
         let runtime = MeetingRuntime::new(SqliteMeetingRuntimeStorage::open(margins_dir)?);
         let session_id = SessionId::from(name.to_owned());
         let recovered = runtime.recorder().recover(
@@ -519,20 +621,22 @@ impl LocalMeetingProducer {
         ordinal: i64,
         offset_ms: u64,
         sources: [crate::recorder::NativeSpoolSource; 2],
-    ) -> Result<()> {
+    ) -> Result<Arc<AtomicBool>> {
         if self.stream.is_some() {
             bail!("a native runtime segment is already streaming");
         }
         self.open(ordinal, offset_ms)?;
-        self.stream = Some(RuntimeStreamWorker::start(
+        let worker = RuntimeStreamWorker::start(
             self.runtime.storage().directory().to_path_buf(),
             self.session_id.clone(),
             ordinal,
             sources,
             offset_ms,
             self.origin_ms,
-        )?);
-        Ok(())
+        )?;
+        let retrying = worker.retrying.clone();
+        self.stream = Some(worker);
+        Ok(retrying)
     }
 
     pub(super) fn flush_stream_and_close(
@@ -586,6 +690,25 @@ impl LocalMeetingProducer {
         Ok(duration_ms)
     }
 
+    /// A failed native writer still leaves already committed chunks in the
+    /// runtime. Stop its worker, close that durable prefix with an error, and
+    /// allow the session to be finalized and attached later.
+    pub(super) fn recover_failed_stream_and_close(
+        &mut self,
+        ordinal: i64,
+        offset_ms: u64,
+    ) -> Result<()> {
+        if let Some(worker) = self.stream.take() {
+            let _ = worker.flush();
+        }
+        self.recover_pending_segment(ordinal, offset_ms)?;
+        Ok(())
+    }
+
+    pub(super) fn last_end_ms(&self) -> u64 {
+        self.last_end_ms
+    }
+
     /// Adopt an older native WAV left by a capture that stopped before the
     /// streaming runtime path was introduced. New capture writes chunks live.
     pub(super) fn ingest_wav_and_close(
@@ -619,6 +742,7 @@ impl LocalMeetingProducer {
             spec.sample_rate,
             offset_ms,
             self.origin_ms,
+            Arc::new(AtomicBool::new(false)),
         )?;
         let mut system = PcmLaneSender::new(
             &self.runtime,
@@ -628,6 +752,7 @@ impl LocalMeetingProducer {
             spec.sample_rate,
             offset_ms,
             self.origin_ms,
+            Arc::new(AtomicBool::new(false)),
         )?;
         let mut samples = reader.samples::<i16>();
         let mut mic_batch = Vec::with_capacity(4096);
@@ -815,6 +940,52 @@ mod tests {
     }
 
     #[test]
+    fn second_local_owner_cannot_recover_a_live_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = SessionOwnerLock::acquire(dir.path(), "live").unwrap();
+        let producer =
+            LocalMeetingProducer::reserve(dir.path(), "live", None, chrono::Local::now()).unwrap();
+        producer.open(0, 0).unwrap();
+        let denied = SessionOwnerLock::acquire(dir.path(), "live").unwrap_err();
+        assert!(denied.to_string().contains("already recording"));
+        assert_eq!(producer.pending_segment().unwrap(), Some((0, 0)));
+        drop(owner);
+        let new_owner = SessionOwnerLock::acquire(dir.path(), "live").unwrap();
+        let mut resumed = LocalMeetingProducer::recover(
+            dir.path(),
+            "live",
+            1_000,
+            None,
+            chrono::Local::now(),
+            &new_owner,
+        )
+        .unwrap();
+        assert!(!resumed.recover_pending_segment(0, 0).unwrap());
+    }
+
+    #[test]
+    fn sqlite_busy_retries_keep_audio_pending_until_commit() {
+        let retrying = AtomicBool::new(false);
+        let mut attempts = 0;
+        append_with_busy_retry(&retrying, || {
+            attempts += 1;
+            if attempts < 3 {
+                Err(margins_meeting_runtime::RecorderError::Runtime(
+                    margins_meeting_runtime::RuntimeError::Storage(anyhow::Error::new(
+                        rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(5), None),
+                    )),
+                ))
+            } else {
+                assert!(retrying.load(Ordering::Acquire));
+                Ok(())
+            }
+        })
+        .unwrap();
+        assert_eq!(attempts, 3);
+        assert!(!retrying.load(Ordering::Acquire));
+    }
+
+    #[test]
     fn fake_stereo_source_is_journaled_and_finalized() {
         let dir = tempfile::tempdir().unwrap();
         let wav = dir.path().join("fake_seg0.wav");
@@ -864,9 +1035,16 @@ mod tests {
             margins_store::canonical::list_sessions(dir.path()).unwrap()[0].segment_count,
             1
         );
-        let reopened =
-            LocalMeetingProducer::recover(dir.path(), "fake", 200, None, chrono::Local::now())
-                .unwrap();
+        let owner = SessionOwnerLock::acquire(dir.path(), "fake").unwrap();
+        let reopened = LocalMeetingProducer::recover(
+            dir.path(),
+            "fake",
+            200,
+            None,
+            chrono::Local::now(),
+            &owner,
+        )
+        .unwrap();
         let db = rusqlite::Connection::open(margins_store::canonical::database_path(dir.path()))
             .unwrap();
         let linked: String = db
@@ -895,8 +1073,10 @@ mod tests {
             Some(1.0),
         )
         .unwrap();
+        let owner = SessionOwnerLock::acquire(dir.path(), "old").unwrap();
         let producer =
-            LocalMeetingProducer::recover(dir.path(), "old", 2_000, None, started_at).unwrap();
+            LocalMeetingProducer::recover(dir.path(), "old", 2_000, None, started_at, &owner)
+                .unwrap();
         producer.open(1, 2_000).unwrap();
         assert_eq!(
             margins_store::canonical::list_sessions(dir.path()).unwrap()[0].segment_count,
@@ -915,8 +1095,10 @@ mod tests {
             ".margins/crashed.md",
         )
         .unwrap();
+        let owner = SessionOwnerLock::acquire(dir.path(), "crashed").unwrap();
         let producer =
-            LocalMeetingProducer::recover(dir.path(), "crashed", 2_000, None, started_at).unwrap();
+            LocalMeetingProducer::recover(dir.path(), "crashed", 2_000, None, started_at, &owner)
+                .unwrap();
         producer.open(0, 0).unwrap();
     }
 
@@ -1135,10 +1317,89 @@ mod tests {
             .export_native_wav("backlog", 0)
             .unwrap();
         assert_eq!(hound::WavReader::open(wav).unwrap().duration(), 960_000);
+        let owner = SessionOwnerLock::acquire(dir.path(), "backlog").unwrap();
         let resumed =
-            LocalMeetingProducer::recover(dir.path(), "backlog", 61_000, None, started_at).unwrap();
+            LocalMeetingProducer::recover(dir.path(), "backlog", 61_000, None, started_at, &owner)
+                .unwrap();
         assert_eq!(resumed.next_ordinal().unwrap(), 1);
         resumed.open(1, 61_000).unwrap();
+    }
+
+    #[test]
+    fn dead_writer_recovers_committed_prefix_and_keeps_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let started_at = chrono::Local::now();
+        let mut producer =
+            LocalMeetingProducer::reserve(dir.path(), "dead", None, started_at).unwrap();
+        let authority = margins_store::SqliteWorkspaceAuthorityStorage::open(dir.path()).unwrap();
+        let observed = authority.memo("dead").unwrap();
+        let mut app = crate::app::App::new(
+            dir.path().join("dead.md").to_string_lossy().into_owned(),
+            started_at,
+            "fake mic".into(),
+        );
+        app.bind_workspace_authority(dir.path().to_path_buf(), "dead".into());
+        app.observe_memo(observed.revision, observed.lines);
+        for letter in "memo survives writer failure".chars() {
+            app.insert_char(letter);
+        }
+        let paths = ["mic", "system"].map(|lane| dir.path().join(format!("{lane}.f32")));
+        let mut files = paths
+            .each_ref()
+            .map(|path| std::fs::File::create(path).unwrap());
+        producer
+            .start_stream(
+                0,
+                0,
+                paths.map(|path| crate::recorder::NativeSpoolSource::fake(path, 16_000)),
+            )
+            .unwrap();
+        let batch = vec![0.1f32.to_le_bytes(); 5 * 16_000].concat();
+        for file in &mut files {
+            file.write_all(&batch).unwrap();
+            file.sync_all().unwrap();
+        }
+        let started = Instant::now();
+        while producer
+            .runtime
+            .storage()
+            .native_chunk_boundaries("dead", 0)
+            .unwrap()[0]
+            .0
+            == 0
+        {
+            assert!(started.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        files[0].write_all(&[1, 2]).unwrap();
+        files[0].sync_all().unwrap();
+        app.save().unwrap();
+        assert!(producer
+            .flush_stream_and_close(0, 0, SegmentCloseReasonV1::Stop)
+            .is_err());
+        producer.recover_failed_stream_and_close(0, 0).unwrap();
+        producer
+            .finish_with_reason(5_000, SessionFinalizeReasonV1::Error)
+            .unwrap();
+        let meta = margins_store::canonical::get_session_meta(dir.path(), "dead").unwrap();
+        assert_eq!(meta.segments[0].duration_secs, Some(5.0));
+        assert_eq!(
+            authority.memo("dead").unwrap().lines[0].text,
+            "memo survives writer failure"
+        );
+        std::fs::write(dir.path().join("dead_seg0.live-transcript.json"), b"{}").unwrap();
+        producer.register_transcript(0).unwrap();
+        assert!(
+            margins_store::canonical::list_session_artifacts(dir.path(), "dead")
+                .unwrap()
+                .iter()
+                .any(|artifact| artifact.kind == "transcript")
+        );
+        let owner = SessionOwnerLock::acquire(dir.path(), "dead").unwrap();
+        let resumed =
+            LocalMeetingProducer::recover(dir.path(), "dead", 6_000, None, started_at, &owner)
+                .unwrap();
+        assert_eq!(resumed.next_ordinal().unwrap(), 1);
     }
 
     /// Performance fixture for the stop path: an hour reaches the runtime
@@ -1258,9 +1519,16 @@ mod tests {
             )
             .unwrap();
         drop(first);
-        let mut resumed =
-            LocalMeetingProducer::recover(dir.path(), "replay", 200, None, chrono::Local::now())
-                .unwrap();
+        let owner = SessionOwnerLock::acquire(dir.path(), "replay").unwrap();
+        let mut resumed = LocalMeetingProducer::recover(
+            dir.path(),
+            "replay",
+            200,
+            None,
+            chrono::Local::now(),
+            &owner,
+        )
+        .unwrap();
         assert_eq!(resumed.existing_segment_start(0).unwrap(), Some(0));
         assert_eq!(resumed.pending_segment().unwrap(), Some((0, 0)));
         resumed.recover_pending_segment(0, 0).unwrap();

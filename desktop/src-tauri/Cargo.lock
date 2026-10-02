@@ -5265,6 +5265,7 @@ dependencies = [
  "dasp",
  "dirs",
  "enzyme-core",
+ "fs4",
  "hound",
  "include_dir",
  "libsql-rusqlite",
@@ -5281,6 +5282,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "similar",
  "tempfile",
  "tokio",
  "toml 0.8.2",
@@ -5438,6 +5440,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
 ]
 
 [[package]]

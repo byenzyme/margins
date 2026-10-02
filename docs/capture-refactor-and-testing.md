@@ -94,12 +94,25 @@ chunks after a crash, and imports an older sealed WAV if one exists. With a
 writer keeping pace, a hard crash can lose the unflushed five-second batch per
 lane. A stalled writer may have up to 60 seconds of bounded transient spool
 backlog before capture stops and reports the error.
+Local capture holds an OS file lock per session through recording and releases
+it on process exit or crash; another attach refuses before recovery while the
+owner is live. SQLite busy/locked writes retry for up to 45 seconds with a
+visible storage status, while the 60-second spool bound remains in force. If
+the writer fails, capture closes and finalizes the committed prefix with an
+error reason, then registers any completed live transcript. Remote lane
+artifacts are streamed from chunks to their compatibility files at close;
+the full recording is never concatenated in process memory.
 
 The TUI remembers the memo revision and lines it actually read. On save, it
 compares and replaces against that revision. Independent line edits are merged
 and retried; conflicting edits to one line leave the remote version intact and
-write the local draft to a `*.memo-conflict-*.md` file for review. The memo's
-SQLite record is authoritative. `mirror_stale` now means its repairable Markdown
+write the local draft to a `*.memo-conflict-*.md` file for review. The remote
+version becomes the working document, and the TUI keeps a persistent
+conflict status. Ctrl+G toggles a read-only view of the local draft; subsequent
+edits start from the remote version, so a later save cannot automatically
+replace its conflicting or remote-only lines. Large memos use a patience diff
+instead of a fixed-size LCS cutoff. The memo's SQLite record is authoritative.
+`mirror_stale` now means its repairable Markdown
 projection differs from that record or could not be refreshed; it no longer
 needs to account for TUI writes made directly to Markdown. A stale projection
 can be refreshed with `SqliteWorkspaceAuthorityStorage::refresh_memo_mirror`.
