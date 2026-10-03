@@ -20,10 +20,8 @@ use std::sync::Arc;
 
 use crate::app::{App, AppMode, GUTTER_WIDTH};
 
-/// Duration of continuous speaker dead-silence (exact zeros) before warning about
-/// the computer-audio tap. A live tap with nobody talking often still produces a
-/// noise floor, but exact silence is not enough evidence to interrupt capture.
-const TAP_WARNING_THRESHOLD_SECS: u64 = 60;
+/// Show silence beside the speaker meter without interrupting the mic meter.
+const SYSTEM_AUDIO_SILENCE_MARKER_SECS: u64 = 3;
 const WATERMARK_HINT: &str = "  |  agent /watermark: live read";
 
 fn watermark_hint(available_width: u16, status_width: usize) -> Option<&'static str> {
@@ -33,7 +31,7 @@ fn watermark_hint(available_width: u16, status_width: usize) -> Option<&'static 
 
 /// Observe only the tap's startup window. A denied macOS process tap commonly
 /// starts IO successfully but then supplies no frames or only exact-zero frames.
-const TAP_PERMISSION_NUDGE_THRESHOLD_SECS: u64 = 3;
+const TAP_PERMISSION_NUDGE_THRESHOLD_SECS: u64 = 10;
 const SYSTEM_AUDIO_PERMISSION_WARNING_PREFIX: &str =
     "macOS system-audio IO started but delivered only empty buffers";
 const SYSTEM_AUDIO_SILENCE_WARNING_PREFIX: &str = "Computer audio silent ";
@@ -125,8 +123,8 @@ fn event_loop(
     app: &mut App,
     stop_flag: &AtomicBool,
 ) -> Result<TuiAction, Box<dyn std::error::Error>> {
-    // Reaching the TUI means system-audio IO returned Started. Probe once near
-    // startup; later quiet periods remain under the existing 60-second warning.
+    // Reaching the TUI means system-audio IO returned Started. Probe once after
+    // sustained startup silence; later quiet periods use the meter marker.
     let system_audio_io_started_at = std::time::Instant::now();
     let mut system_audio_permission_probe_pending = cfg!(target_os = "macos");
 
@@ -188,20 +186,6 @@ fn event_loop(
         let frame_count = app.spk_frames.load(Ordering::Relaxed);
         let silent_samples = app.spk_silence.load(Ordering::Relaxed);
         clear_system_audio_warning_after_recovery(&mut app.message, frame_count, silent_samples);
-
-        // Warn about sustained exact silence after the one-shot permission
-        // probe, but do not restart the whole capture. Mic audio and memo
-        // timing should remain continuous.
-        if app.spk_rate > 0 {
-            let silent_samples = app.spk_silence.load(Ordering::Relaxed);
-            let silent_secs = silent_samples / app.spk_rate as u64;
-            if silent_secs >= TAP_WARNING_THRESHOLD_SECS {
-                app.message = Some(format!(
-                    "Computer audio silent {}s — mic still recording",
-                    silent_secs
-                ));
-            }
-        }
 
         // Also check if stop was requested externally
         if stop_flag.load(Ordering::SeqCst) {
@@ -471,18 +455,20 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
     let mic_drops = app.mic_drops.load(Ordering::Relaxed);
     let spk_drops = app.spk_drops.load(Ordering::Relaxed);
 
-    // Build warning suffix for drops or silence
-    let mut warnings = String::new();
-    if mic_drops > 0 || spk_drops > 0 {
-        warnings.push_str(&format!(" DROPS mic:{} spk:{}", mic_drops, spk_drops));
-    }
-    if app.spk_rate > 0 {
-        let silent_samples = app.spk_silence.load(Ordering::Relaxed);
-        let silent_secs = silent_samples / app.spk_rate as u64;
-        if silent_secs >= 3 {
-            warnings.push_str(&format!(" SPK SILENT {}s", silent_secs));
-        }
-    }
+    let speaker_silent = app.spk_rate > 0
+        && app.spk_silence.load(Ordering::Relaxed) / app.spk_rate as u64
+            >= SYSTEM_AUDIO_SILENCE_MARKER_SECS;
+    let meter_text = format!(
+        "mic {} spk {}{}",
+        level_meter(mic_peak, 8),
+        level_meter(spk_peak, 8),
+        if speaker_silent { " silent" } else { "" },
+    );
+    let status_prefix = format!(
+        " {}{} | ",
+        time,
+        if app.capture_paused { " PAUSED" } else { "" }
+    );
 
     let remote_delivery = match app.remote_delivery_state.load(Ordering::Relaxed) {
         crate::app::REMOTE_DELIVERY_CURRENT => " | delivery current".to_string(),
@@ -495,45 +481,50 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
         ),
         _ => String::new(),
     };
-    let status_text = if app.viewing_conflict_draft() {
-        format!(
-            " {} | CONFLICTING LOCAL LINES read only | ^G return to merged memo | ^C stop",
-            time
-        )
+    let mut detail = if app.viewing_conflict_draft() {
+        "CONFLICTING LOCAL LINES read only | ^G return to merged memo | ^C stop".to_string()
     } else if app.native_store_retrying.load(Ordering::Acquire) {
-        format!(
-            " {} | Audio storage busy, retrying; capture is buffered locally",
-            time
-        )
+        "Audio storage busy, retrying; capture is buffered locally".to_string()
     } else if let Some(path) = app.conflict_draft_path() {
         format!(
-            " {} | CONFLICT: merged memo shown | ^G view conflicting local lines ({})",
-            time,
+            "CONFLICT: merged memo shown | ^G view conflicting local lines ({})",
             path.display()
         )
     } else if let Some(ref msg) = app.message {
-        format!(" {} | {}", time, msg)
+        msg.clone()
     } else if app.capture_paused {
         format!(
-            " {} | PAUSED{} | {} lines |  ^P resume  ^S save  ^C stop",
-            time,
-            remote_delivery,
+            "^C stop ^P resume ^S save | {} lines{}",
             app.memo.len(),
+            remote_delivery,
         )
     } else {
         format!(
-            " {} | {} lines{} | mic {} spk {} |{}  ^P pause  ^D device  ^S save  ^C stop",
-            time,
+            "^C stop ^P pause ^S save ^D device | {} lines{}",
             app.memo.len(),
             remote_delivery,
-            level_meter(mic_peak, 8),
-            level_meter(spk_peak, 8),
-            warnings,
         )
     };
+    if mic_drops > 0 || spk_drops > 0 {
+        detail = format!("DROPS mic:{mic_drops} spk:{spk_drops} | {detail}");
+    }
 
+    // The terminal clips only the trailing detail when a notice is long.
+    // Time and both meters occupy the fixed prefix in every status state.
+    let status_text = format!("{status_prefix}{meter_text} | {detail}");
     let hint = watermark_hint(status_area.width, Line::from(status_text.as_str()).width());
-    let mut status_spans = vec![Span::raw(status_text)];
+    let mut status_spans = vec![
+        Span::raw(status_prefix),
+        Span::styled(
+            meter_text,
+            if app.capture_paused {
+                Style::default().add_modifier(Modifier::DIM)
+            } else {
+                Style::default()
+            },
+        ),
+        Span::raw(format!(" | {detail}")),
+    ];
     if let Some(hint) = hint {
         status_spans.push(Span::styled(
             hint,
@@ -616,6 +607,7 @@ fn level_meter(peak_bits: u32, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::TestBackend;
     use std::time::Duration;
 
     const RATE: u32 = 48_000;
@@ -624,21 +616,21 @@ mod tests {
     fn startup_permission_nudge_waits_for_started_io_and_threshold() {
         assert!(!should_nudge_system_audio_permission(
             false,
-            Duration::from_secs(3),
+            Duration::from_secs(10),
             RATE,
             0,
             0,
         ));
         assert!(!should_nudge_system_audio_permission(
             true,
-            Duration::from_millis(2_999),
+            Duration::from_millis(9_999),
             RATE,
             0,
             0,
         ));
         assert!(should_nudge_system_audio_permission(
             true,
-            Duration::from_secs(3),
+            Duration::from_secs(10),
             RATE,
             0,
             0,
@@ -651,14 +643,14 @@ mod tests {
 
         assert!(!should_nudge_system_audio_permission(
             true,
-            Duration::from_secs(3),
+            Duration::from_secs(10),
             RATE,
             observed_frames,
             observed_frames - 1,
         ));
         assert!(should_nudge_system_audio_permission(
             true,
-            Duration::from_secs(3),
+            Duration::from_secs(10),
             RATE,
             observed_frames,
             observed_frames,
@@ -670,11 +662,123 @@ mod tests {
         let observed_frames = u64::from(RATE) * TAP_PERMISSION_NUDGE_THRESHOLD_SECS;
         assert!(!should_nudge_system_audio_permission(
             true,
-            Duration::from_secs(3),
+            Duration::from_secs(10),
             RATE,
             observed_frames,
             0,
         ));
+    }
+
+    fn rendered_status(app: &mut App, width: u16) -> String {
+        app.mic_level.store(0.5f32.to_bits(), Ordering::Relaxed);
+        let backend = TestBackend::new(width, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(width as usize)
+            .last()
+            .unwrap()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn status_keeps_mic_meter_beside_each_system_audio_warning() {
+        for width in [80, 120] {
+            for (warning, visible_notice) in [
+                (
+                    margins_cli::error::macos_system_audio_permission_likely_message(
+                        SYSTEM_AUDIO_PERMISSION_WARNING_PREFIX,
+                    ),
+                    "macOS system-audio",
+                ),
+                (
+                    "Computer audio silent 60s — mic still recording".to_string(),
+                    "Computer audio silent",
+                ),
+            ] {
+                let mut app = App::new("meeting.md".into(), chrono::Local::now(), "mic".into());
+                app.spk_rate = RATE;
+                app.spk_silence
+                    .store(u64::from(RATE) * 60, Ordering::Relaxed);
+                app.message = Some(warning);
+                let status = rendered_status(&mut app, width);
+                assert!(status.contains("mic █"), "{width}: {status}");
+                assert!(status.contains("spk ░░░░░░░░ silent"), "{width}: {status}");
+                assert!(status.contains(visible_notice), "{width}: {status}");
+            }
+        }
+    }
+
+    #[test]
+    fn status_keeps_meters_in_normal_paused_storage_and_message_states() {
+        for width in [80, 120] {
+            let mut app = App::new("meeting.md".into(), chrono::Local::now(), "mic".into());
+            for state in ["normal", "message", "paused", "storage"] {
+                app.message = (state == "message").then(|| "Memo saved".into());
+                app.capture_paused = state == "paused";
+                app.native_store_retrying
+                    .store(state == "storage", Ordering::Relaxed);
+                let status = rendered_status(&mut app, width);
+                assert!(status.contains("mic █"), "{width} {state}: {status}");
+                assert!(status.contains("spk ░░░░░░░░"), "{width} {state}: {status}");
+                if state == "paused" {
+                    assert!(status.contains("PAUSED"), "{width}: {status}");
+                }
+                if state == "normal" || state == "paused" {
+                    assert!(status.contains("^C stop"), "{width}: {status}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn status_keeps_meters_in_merged_and_draft_conflict_views() {
+        use margins_core::{MemoMoment, TimedMemoDocument, TimedMemoLine};
+
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join(".margins");
+        margins_store::canonical::create_session(
+            &dir,
+            "meeting",
+            &chrono::Local::now(),
+            ".margins/meeting.md",
+        )
+        .unwrap();
+        let authority = margins_store::SqliteWorkspaceAuthorityStorage::open(&dir).unwrap();
+        let initial = authority.memo("meeting").unwrap();
+        let line = |text| TimedMemoLine::at(text, MemoMoment::recording(1.0));
+        let base = authority
+            .replace_memo_lines("meeting", "tui", "base", &initial.revision, &[line("base")])
+            .unwrap();
+        let mut app = App::from_memo(
+            TimedMemoDocument::from_committed(base.lines.clone()),
+            dir.join("meeting.md").to_string_lossy().into_owned(),
+            chrono::Local::now(),
+            "mic".into(),
+        );
+        app.bind_workspace_authority(dir, "meeting".into());
+        app.observe_memo(base.revision.clone(), base.lines);
+        app.memo = TimedMemoDocument::from_committed(vec![line("local")]);
+        authority
+            .replace_memo_lines("meeting", "bb", "remote", &base.revision, &[line("remote")])
+            .unwrap();
+        assert!(app.save().is_err());
+
+        for width in [80, 120] {
+            let merged = rendered_status(&mut app, width);
+            assert!(merged.contains("mic █"), "{width}: {merged}");
+            assert!(merged.contains("CONFLICT:"), "{width}: {merged}");
+            app.toggle_conflict_draft();
+            let draft = rendered_status(&mut app, width);
+            assert!(draft.contains("mic █"), "{width}: {draft}");
+            assert!(draft.contains("CONFLICTING"), "{width}: {draft}");
+            app.toggle_conflict_draft();
+        }
     }
 
     #[test]
