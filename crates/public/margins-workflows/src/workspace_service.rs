@@ -9,16 +9,19 @@ use anyhow::{bail, Context, Result};
 use fs4::fs_std::FileExt;
 use margins_core::SessionRepository;
 use margins_meeting_protocol::{
-    decode_opus_packet_blocks_v1, ArtifactId, AudioCodecV1, AudioContainerV1, AudioFormatV1,
-    BeginCaptureGenerationV1, ClientMessageBodyV1, ClientMessageV1, DurationMillis, InstanceId,
-    ProtocolVersionV1, SequenceRangeV1, ServerMessageBodyV1, SessionId, WorkspaceArtifactV1,
-    WorkspaceAttachV1, WorkspaceCapabilitiesV1, WorkspaceId, WorkspaceLimitsV1,
-    WorkspaceMemoLineV1, WorkspaceMemoReplaceV1, WorkspaceMemoUpdateV1, WorkspaceMemoV1,
+    decode_opus_packet_blocks_v1, ArtifactId, AudioChunkV1, AudioCodecV1, AudioContainerV1,
+    AudioFormatV1, BeginCaptureGenerationV1, ClientMessageBodyV1, ClientMessageV1, DurationMillis,
+    InstanceId, LaneId, MessageId, ProtocolVersionV1, SequenceRangeV1, ServerMessageBodyV1,
+    SessionId, UnixMillis, WorkspaceArtifactV1, WorkspaceAttachV1, WorkspaceCapabilitiesV1,
+    WorkspaceCaptureGapV1, WorkspaceId, WorkspaceLimitsV1, WorkspaceMemoLineV1,
+    WorkspaceMemoReplaceV1, WorkspaceMemoUpdateV1, WorkspaceMemoV1,
     WorkspaceNoteAssociationUpdateV1, WorkspaceNoteAssociationV1, WorkspaceProcessingJobV1,
     WorkspaceRenameV1, WorkspaceSessionPageV1, WorkspaceSessionSummaryV1, WorkspaceSummaryV1,
     WorkspaceTranscriptV1,
 };
-use margins_meeting_runtime::{MeetingRuntime, MeetingRuntimeStorage, RuntimeResponseV1};
+use margins_meeting_runtime::{
+    MeetingRuntime, MeetingRuntimeStorage, RuntimeResponseV1, StoredSegmentSummaryV1,
+};
 use margins_store::{
     canonical, ImportReceipt, MemoWrite, SqliteMeetingRuntimeStorage, SqliteSessionRepository,
     SqliteWorkspaceAuthorityStorage,
@@ -52,6 +55,52 @@ pub const OP_JOB_READ: &str = "job.read";
 pub const OP_IMPORT_WRITE: &str = "import.write";
 pub const OP_IMPORT_RECEIPT: &str = "import.receipt";
 pub const OP_RECALL_QUERY: &str = "recall.query";
+
+/// A projection of durable recorder state; it contains no audio payloads or
+/// mutable registry state and can be reconstructed after a server restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureState {
+    pub input_finalized: bool,
+    pub expired_lease_finish: bool,
+    pub started_at_unix_ms: u64,
+    /// Browser clock at Start. The runtime start is the server receive time.
+    pub client_started_at_unix_ms: u64,
+    pub segments: Vec<StoredSegmentSummaryV1>,
+}
+
+fn browser_expired_lease_finish(session: &margins_meeting_runtime::StoredSessionV1) -> bool {
+    session.finalized_input().is_some_and(|(message_id, _)| {
+        message_id
+            .as_ref()
+            .starts_with("browser-lease-incomplete-finish-")
+    })
+}
+
+fn browser_client_clock_origin(session: &margins_meeting_runtime::StoredSessionV1) -> u64 {
+    session
+        .create()
+        .provenance
+        .hops
+        .iter()
+        .find(|hop| hop.producer == "bb-browser")
+        .and_then(|hop| hop.attributes.get("client_started_at_unix_ms"))
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(session.create().started_at_unix_ms.0)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacyBrowserAudioFormat {
+    Webm,
+    Wav,
+}
+
+/// A source left by browser captures made before MeetingRuntime owned audio.
+#[derive(Debug, Clone)]
+pub struct LegacyBrowserAudioSource {
+    pub path: PathBuf,
+    pub format: LegacyBrowserAudioFormat,
+    pub offset_ms: u64,
+}
 
 /// Preserve the typed storage conflict across the transport-neutral service.
 pub fn is_memo_revision_conflict(error: &anyhow::Error) -> bool {
@@ -401,12 +450,20 @@ impl WorkspaceService {
                 max_import_bytes: DEFAULT_MAX_IMPORT_BYTES,
                 spool_reserve_bytes: DEFAULT_SPOOL_RESERVE_BYTES,
             },
-            capture_formats: vec![AudioFormatV1 {
-                codec: AudioCodecV1::Opus,
-                container: AudioContainerV1::PacketStream,
-                sample_rate_hz: crate::remote_workspace::NATIVE_REMOTE_RATE_HZ,
-                channel_count: 1,
-            }],
+            capture_formats: vec![
+                AudioFormatV1 {
+                    codec: AudioCodecV1::Opus,
+                    container: AudioContainerV1::PacketStream,
+                    sample_rate_hz: crate::remote_workspace::NATIVE_REMOTE_RATE_HZ,
+                    channel_count: 1,
+                },
+                AudioFormatV1 {
+                    codec: AudioCodecV1::Opus,
+                    container: AudioContainerV1::Webm,
+                    sample_rate_hz: 48_000,
+                    channel_count: 1,
+                },
+            ],
             operations: principal
                 .operations
                 .iter()
@@ -452,6 +509,30 @@ impl WorkspaceService {
         principal: &ServicePrincipal,
         command: ClientMessageV1,
     ) -> Result<SessionReservation> {
+        self.reserve_session_inner(principal, command, random_secret(48))
+    }
+
+    /// Reserve with a producer identity supplied by a trusted capture
+    /// adapter. Browser owners use a cryptographically random UUIDv4 so a
+    /// lost start response can be retried without a second registry.
+    pub fn reserve_session_with_producer_token(
+        &self,
+        principal: &ServicePrincipal,
+        command: ClientMessageV1,
+        producer_token: &str,
+    ) -> Result<SessionReservation> {
+        if !is_uuid_v4(producer_token) {
+            bail!("capture producer token must be a secure UUIDv4");
+        }
+        self.reserve_session_inner(principal, command, producer_token.to_string())
+    }
+
+    fn reserve_session_inner(
+        &self,
+        principal: &ServicePrincipal,
+        command: ClientMessageV1,
+        producer_token: String,
+    ) -> Result<SessionReservation> {
         principal.require(self.workspace_id(), OP_SESSION_CREATE)?;
         if !matches!(command.body, ClientMessageBodyV1::CreateSession(_)) {
             bail!("session reservation requires create_session");
@@ -463,13 +544,17 @@ impl WorkspaceService {
                     && format.container == AudioContainerV1::PacketStream
                     && format.channel_count == 1
                     && format.sample_rate_hz == 16_000;
+                let browser_webm = format.codec == AudioCodecV1::Opus
+                    && format.container == AudioContainerV1::Webm
+                    && format.channel_count == 1
+                    && format.sample_rate_hz == 48_000;
                 let recoverable_pcm = format.codec == AudioCodecV1::PcmS16Le
                     && format.container == AudioContainerV1::Raw
                     && format.channel_count == 1
                     && matches!(format.sample_rate_hz, 16_000 | 48_000);
-                if !opus && !recoverable_pcm {
+                if !opus && !browser_webm && !recoverable_pcm {
                     bail!(
-                        "unsupported capture format for lane {}; use mono Margins Opus packet stream at 16 kHz (raw PCM s16le at 16/48 kHz is accepted only for durable recovery)",
+                        "unsupported capture format for lane {}; use mono Opus packet stream at 16 kHz, mono Opus WebM at 48 kHz, or recovery PCM s16le at 16/48 kHz",
                         lane.lane_id.as_ref()
                     );
                 }
@@ -480,7 +565,6 @@ impl WorkspaceService {
             .runtime
             .handle(command)
             .map_err(|error| anyhow::anyhow!(error))?;
-        let producer_token = random_secret(48);
         self.authority
             .reserve_producer(session_id.as_ref(), &principal.id, &producer_token)?;
         self.authority
@@ -588,6 +672,93 @@ impl WorkspaceService {
         Ok(response)
     }
 
+    /// Keep the browser producer reservation alive while the page is present.
+    /// The timestamp lives in the same SQLite row as the owner capability.
+    pub fn touch_capture_producer(
+        &self,
+        principal: &ServicePrincipal,
+        producer_token: &str,
+        session_id: &SessionId,
+    ) -> Result<()> {
+        principal.require(self.workspace_id(), OP_CAPTURE_WRITE)?;
+        self.authority
+            .touch_producer(session_id.as_ref(), &principal.id, producer_token)
+    }
+
+    /// Claim browser reservations that have had no owner activity since the
+    /// cutoff. Claimed rows are returned again after a crash until released.
+    pub fn claim_expired_browser_producers(
+        &self,
+        principal: &ServicePrincipal,
+        cutoff_ms: i64,
+    ) -> Result<Vec<SessionId>> {
+        principal.require(self.workspace_id(), OP_CAPTURE_WRITE)?;
+        self.authority
+            .claim_expired_browser_producers(&principal.id, cutoff_ms)
+            .map(|sessions| sessions.into_iter().map(SessionId).collect())
+    }
+
+    /// Trusted server-only completion after the durable owner lease is
+    /// claimed. It cannot run for a live producer or an arbitrary session.
+    pub fn execute_expired_capture(
+        &self,
+        principal: &ServicePrincipal,
+        command: ClientMessageV1,
+    ) -> Result<RuntimeResponseV1> {
+        principal.require(self.workspace_id(), OP_CAPTURE_WRITE)?;
+        if matches!(command.body, ClientMessageBodyV1::CreateSession(_)) {
+            bail!("create_session must use reservation");
+        }
+        self.authority
+            .require_abandoned_producer(command.session_id.as_ref(), &principal.id)?;
+        self.validate_capture_command(&command)?;
+        let finalized = matches!(command.body, ClientMessageBodyV1::FinalizeSession(_));
+        let session_id = command.session_id.clone();
+        let response = self
+            .runtime
+            .handle(command)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        ensure_runtime_accepted(&response)?;
+        if finalized
+            && response
+                .messages
+                .iter()
+                .any(|message| matches!(message.body, ServerMessageBodyV1::SessionFinalized(_)))
+        {
+            if self.can_admit_asr() {
+                self.admit_transcription_job(&session_id)?;
+            }
+            self.authority
+                .release_abandoned_producer(session_id.as_ref(), &principal.id)?;
+        }
+        Ok(response)
+    }
+
+    /// Complete the outbox step if the server crashed after runtime finalize
+    /// but before releasing a claimed browser reservation.
+    pub fn release_expired_finalized_capture(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+    ) -> Result<()> {
+        principal.require(self.workspace_id(), OP_CAPTURE_WRITE)?;
+        self.authority
+            .require_abandoned_producer(session_id.as_ref(), &principal.id)?;
+        let stored = self
+            .runtime
+            .storage()
+            .load_session(session_id)?
+            .context("claimed browser capture has no runtime state")?;
+        if !stored.input_finalized() {
+            bail!("claimed browser capture is not finalized");
+        }
+        if self.can_admit_asr() {
+            self.admit_transcription_job(session_id)?;
+        }
+        self.authority
+            .release_abandoned_producer(session_id.as_ref(), &principal.id)
+    }
+
     pub fn execute_audio_batch(
         &self,
         principal: &ServicePrincipal,
@@ -686,6 +857,14 @@ impl WorkspaceService {
                         .max(1);
                     if chunk.duration_ms.0 != expected_duration {
                         bail!("native Opus audio chunk duration does not match its source frames");
+                    }
+                }
+                (AudioCodecV1::Opus, AudioContainerV1::Webm, 1) => {
+                    // MediaRecorder fragments are opaque at the authority
+                    // boundary. The decoder validates the assembled stream
+                    // after its ordered chunks are durably finalized.
+                    if chunk.payload.is_empty() {
+                        bail!("WebM audio chunk must not be empty");
                     }
                 }
                 _ => bail!("audio chunk uses an unsupported declared lane format"),
@@ -969,17 +1148,21 @@ impl WorkspaceService {
             .runtime
             .storage()
             .load_session(&SessionId(session_id.to_string()))?;
-        let input_finalized = runtime
-            .as_ref()
-            .is_some_and(|value| value.input_finalized())
-            || (!meta.segments.is_empty()
+        let input_finalized = if let Some(runtime) = runtime.as_ref() {
+            runtime.input_finalized()
+        } else {
+            // Legacy/imported sessions predate runtime finalization. A paused
+            // runtime segment can have a duration while the session remains
+            // open for Resume, so these projections apply only without one.
+            (!meta.segments.is_empty()
                 && meta
                     .segments
                     .iter()
                     .all(|segment| segment.duration_secs.is_some()))
-            || canonical::list_session_artifacts(&self.margins_dir, session_id)?
-                .iter()
-                .any(|artifact| artifact.kind == "original_audio");
+                || canonical::list_session_artifacts(&self.margins_dir, session_id)?
+                    .iter()
+                    .any(|artifact| artifact.kind == "original_audio")
+        };
         let finalized_input = runtime.as_ref().and_then(|value| value.finalized_input());
         let capture_duration_ms = finalized_input.map(|(_, ended)| DurationMillis(ended.0));
         let capture_finalize_message_id = finalized_input.map(|(message, _)| message.clone());
@@ -987,6 +1170,56 @@ impl WorkspaceService {
             .as_ref()
             .map(|session| session.create().lanes.clone())
             .unwrap_or_default();
+        let mut capture_gaps = runtime
+            .as_ref()
+            .map(|session| {
+                session
+                    .discontinuities()
+                    .map(|gap| WorkspaceCaptureGapV1 {
+                        segment_id: gap.segment_id.0.clone(),
+                        start_sequence: gap.sequence_range.start,
+                        end_exclusive: gap.sequence_range.end_exclusive,
+                        reason: serde_json::to_value(gap.reason)
+                            .ok()
+                            .and_then(|value| value.as_str().map(str::to_string))
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        starts_at_ms: Some(gap.starts_at_ms),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        capture_gaps.extend(
+            canonical::list_processing_gaps(&self.margins_dir, session_id)?
+                .into_iter()
+                .map(|gap| WorkspaceCaptureGapV1 {
+                    segment_id: gap.segment_id,
+                    start_sequence: gap.start_sequence,
+                    end_exclusive: gap.end_exclusive,
+                    reason: gap.reason,
+                    starts_at_ms: None,
+                }),
+        );
+        capture_gaps.sort_by(|left, right| {
+            (
+                &left.segment_id,
+                left.start_sequence,
+                left.end_exclusive,
+                &left.reason,
+            )
+                .cmp(&(
+                    &right.segment_id,
+                    right.start_sequence,
+                    right.end_exclusive,
+                    &right.reason,
+                ))
+        });
+        capture_gaps.dedup();
+        let capture_incomplete = !capture_gaps.is_empty()
+            || runtime.as_ref().is_some_and(|session| {
+                session.finalized_reason().is_some_and(|reason| {
+                    reason != margins_meeting_protocol::SessionFinalizeReasonV1::Completed
+                })
+            });
         Ok(WorkspaceSessionSummaryV1 {
             session_id: SessionId(session_id.to_string()),
             title: meta.title,
@@ -996,6 +1229,8 @@ impl WorkspaceService {
             input_finalized,
             capture_duration_ms,
             capture_finalize_message_id,
+            capture_incomplete,
+            capture_gaps,
             processing_state: meta.processing_state.unwrap_or_else(|| "none".to_string()),
         })
     }
@@ -1312,8 +1547,198 @@ impl WorkspaceService {
             .context("capture lane was not declared")
     }
 
+    /// Reconstruct acknowledged sequence ranges and segment closes directly
+    /// from the runtime store. No browser process memory is consulted.
+    pub fn capture_state(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+    ) -> Result<CaptureState> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        let stored = self
+            .runtime
+            .storage()
+            .load_session(session_id)?
+            .context("session has no capture authority state")?;
+        Ok(CaptureState {
+            input_finalized: stored.input_finalized(),
+            expired_lease_finish: browser_expired_lease_finish(&stored),
+            started_at_unix_ms: stored.create().started_at_unix_ms.0,
+            client_started_at_unix_ms: browser_client_clock_origin(&stored),
+            segments: stored.segment_summaries(),
+        })
+    }
+
+    pub fn capture_chunk_end_before(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+        segment_id: &str,
+        lane_id: &LaneId,
+        sequence: u64,
+    ) -> Result<Option<u64>> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        self.runtime
+            .storage()
+            .latest_chunk_end_before(session_id, segment_id, lane_id, sequence)
+    }
+
+    pub fn capture_chunk_metadata(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+        segment_id: &str,
+        lane_id: &LaneId,
+        sequence: u64,
+    ) -> Result<Option<AudioChunkV1>> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        self.runtime
+            .storage()
+            .audio_chunk_metadata(session_id, segment_id, lane_id, sequence)
+    }
+
+    /// Owner-scoped version for browser capture routes. The producer token is
+    /// checked against the durable authority row before exposing state.
+    pub fn capture_state_for_producer(
+        &self,
+        principal: &ServicePrincipal,
+        producer_token: &str,
+        session_id: &SessionId,
+    ) -> Result<CaptureState> {
+        principal.require(self.workspace_id(), OP_CAPTURE_WRITE)?;
+        self.authority
+            .authorize_producer(session_id.as_ref(), &principal.id, producer_token)?;
+        self.capture_state(principal, session_id)
+    }
+
+    /// Reopen a browser producer against persisted state before opening its
+    /// lane after a process or transport loss. This also returns the bounded
+    /// runtime replay, including the durable acknowledgement watermark.
+    pub fn recover_capture_for_producer(
+        &self,
+        principal: &ServicePrincipal,
+        producer_token: &str,
+        session_id: &SessionId,
+        message_id: MessageId,
+    ) -> Result<(CaptureState, RuntimeResponseV1)> {
+        principal.require(self.workspace_id(), OP_CAPTURE_WRITE)?;
+        self.authority
+            .authorize_producer(session_id.as_ref(), &principal.id, producer_token)?;
+        let (stored, replay) = self
+            .runtime
+            .recorder()
+            // Recovery IDs are deterministic across retries. The envelope
+            // timestamp must be stable because it is part of the command
+            // fingerprint; zero is valid for this transport-generated query.
+            .recover(session_id, message_id, UnixMillis(0), None)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        Ok((
+            CaptureState {
+                input_finalized: stored.input_finalized(),
+                expired_lease_finish: browser_expired_lease_finish(&stored),
+                started_at_unix_ms: stored.create().started_at_unix_ms.0,
+                client_started_at_unix_ms: browser_client_clock_origin(&stored),
+                segments: stored.segment_summaries(),
+            },
+            replay,
+        ))
+    }
+
+    /// Check a durable command receipt without replaying or mutating capture.
+    /// Browser resume uses a deterministic message ID so a restarted adapter
+    /// can distinguish "paused" from "resumed but awaiting its first chunk".
+    pub fn capture_command_recorded(
+        &self,
+        principal: &ServicePrincipal,
+        producer_token: &str,
+        session_id: &SessionId,
+        message_id: &MessageId,
+    ) -> Result<bool> {
+        principal.require(self.workspace_id(), OP_CAPTURE_WRITE)?;
+        self.authority
+            .authorize_producer(session_id.as_ref(), &principal.id, producer_token)?;
+        let storage = self.runtime.storage();
+        let receipts = storage.load_command_receipts(session_id, message_id)?;
+        for receipt in receipts {
+            let end = receipt.response_range.end_exclusive;
+            if end == 0 {
+                continue;
+            }
+            let events = storage.load_events(
+                session_id,
+                SequenceRangeV1 {
+                    start: end - 1,
+                    end_exclusive: end,
+                },
+                1,
+            )?;
+            if events
+                .iter()
+                .any(|event| !matches!(event.body, ServerMessageBodyV1::CommandRejected(_)))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Idempotently admit the ASR-only job for the current finalized capture
     /// revision. A completed job for the same revision is never reset.
+    pub fn legacy_browser_audio_source(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+    ) -> Result<Option<LegacyBrowserAudioSource>> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        if self.runtime.storage().load_session(session_id)?.is_some() {
+            return Ok(None);
+        }
+        legacy_browser_audio_source(&self.margins_dir, session_id.as_ref())
+    }
+
+    /// A decode failure is durable session evidence, including after restart.
+    pub fn record_processing_gap(
+        &self,
+        session_id: &SessionId,
+        segment_id: &str,
+        start_sequence: u64,
+        end_exclusive: u64,
+        reason: &str,
+    ) -> Result<()> {
+        canonical::record_processing_gap(
+            &self.margins_dir,
+            session_id.as_ref(),
+            segment_id,
+            start_sequence,
+            end_exclusive,
+            reason,
+        )
+    }
+
+    pub fn capture_segment_sequence_boundary(
+        &self,
+        session_id: &SessionId,
+        segment_id: &str,
+        lane_id: &str,
+    ) -> Result<Option<u64>> {
+        let Some(stored) = self.runtime.storage().load_session(session_id)? else {
+            return Ok(None);
+        };
+        Ok(stored
+            .segment_summaries()
+            .into_iter()
+            .find(|segment| segment.segment_id.as_ref() == segment_id)
+            .and_then(|segment| segment.close)
+            .and_then(|close| {
+                close
+                    .command
+                    .lane_boundaries
+                    .into_iter()
+                    .find(|boundary| boundary.lane_id.as_ref() == lane_id)
+                    .map(|boundary| boundary.next_sequence)
+            }))
+    }
+
     pub fn admit_transcription_job(
         &self,
         session_id: &SessionId,
@@ -1321,16 +1746,28 @@ impl WorkspaceService {
         if !self.can_admit_asr() {
             bail!("ASR capability is unavailable on this instance");
         }
-        let stored = self
-            .runtime
-            .storage()
-            .load_session(session_id)?
-            .context("session has no capture authority state")?;
-        if !stored.input_finalized() {
-            bail!("transcription can begin only after durable input finalization");
-        }
+        let stored = self.runtime.storage().load_session(session_id)?;
+        let input_revision = if let Some(stored) = stored {
+            if !stored.input_finalized() {
+                bail!("transcription can begin only after durable input finalization");
+            }
+            format!("meeting:{}", stored.revision())
+        } else {
+            let source = legacy_browser_audio_source(&self.margins_dir, session_id.as_ref())?
+                .context("session has no capture authority state or legacy browser audio")?;
+            let metadata = std::fs::metadata(&source.path)?;
+            let modified_ns = metadata
+                .modified()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            format!(
+                "legacy-browser:{:?}:{}:{modified_ns}",
+                source.format,
+                metadata.len()
+            )
+        };
         let job_id = format!("transcribe:{}", session_id.as_ref());
-        let input_revision = format!("meeting:{}", stored.revision());
         if let Some(current) = canonical::get_processing_job(&self.margins_dir, &job_id)? {
             if current.input_revision == input_revision && current.status == "complete" {
                 return Ok(processing_job(current));
@@ -1476,6 +1913,95 @@ fn ensure_session(directory: &Path, session_id: &str) -> Result<()> {
     Ok(())
 }
 
+fn legacy_browser_audio_source(
+    directory: &Path,
+    session_id: &str,
+) -> Result<Option<LegacyBrowserAudioSource>> {
+    let mut components = Path::new(session_id).components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        bail!("invalid legacy browser session name");
+    }
+    if !canonical::session_exists(directory, session_id)? {
+        return Ok(None);
+    }
+    let recordings = directory.join("recordings");
+    match std::fs::symlink_metadata(&recordings) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => bail!("legacy recordings directory is not a regular directory"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    // A finalized v0.4.14 browser session has this canonical WAV. Prefer it
+    // over a leftover upload from an interrupted cleanup.
+    let meta = canonical::get_session_meta(directory, session_id)?;
+    let expected_wav = format!(".margins/recordings/{session_id}_seg0.wav");
+    if let Some(segment) = meta.segments.iter().find(|segment| {
+        segment.segment_index == 0
+            && segment.wav_path == expected_wav
+            && segment.duration_secs.is_some()
+    }) {
+        let wav = recordings.join(format!("{session_id}_seg0.wav"));
+        if regular_nonempty_legacy_audio(&wav)? {
+            return Ok(Some(LegacyBrowserAudioSource {
+                path: wav,
+                format: LegacyBrowserAudioFormat::Wav,
+                offset_ms: segment.offset_ms.max(0) as u64,
+            }));
+        }
+    }
+    // Failed finalization retained the upload and recovery marker so a new
+    // server can still transcribe the durable browser audio prefix.
+    let webm = recordings.join(format!("{session_id}_upload.webm"));
+    if regular_nonempty_legacy_audio(&webm)? {
+        if std::fs::metadata(&webm)?.len() > 128 * 1024 * 1024 {
+            bail!("legacy browser WebM exceeds the decoder's 128 MiB limit");
+        }
+        return Ok(Some(LegacyBrowserAudioSource {
+            path: webm,
+            format: LegacyBrowserAudioFormat::Webm,
+            offset_ms: 0,
+        }));
+    }
+    // A recovery marker has no audio of its own. Give a precise error when
+    // its referenced upload disappeared, rather than admitting a doomed job.
+    for entry in std::fs::read_dir(&recordings)? {
+        let entry = entry?;
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".recovery.json")
+        {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 128 * 1024 {
+            continue;
+        }
+        let value: Value = match serde_json::from_slice(&std::fs::read(path)?) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if value.get("session_name").and_then(Value::as_str) == Some(session_id) {
+            bail!("legacy browser recovery manifest exists, but its WebM upload is missing");
+        }
+    }
+    Ok(None)
+}
+
+fn regular_nonempty_legacy_audio(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                bail!("legacy browser audio is not a regular file");
+            }
+            Ok(metadata.len() > 0)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn remove_session_file(path: &Path) -> Result<()> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -1557,6 +2083,20 @@ fn processing_job(value: canonical::ProcessingJob) -> WorkspaceProcessingJobV1 {
         failure: value.failure,
         failed_stage: value.failed_stage,
     }
+}
+
+fn is_uuid_v4(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && [8, 13, 18, 23]
+            .into_iter()
+            .all(|index| bytes[index] == b'-')
+        && bytes[14] == b'4'
+        && matches!(bytes[19], b'8' | b'9' | b'a' | b'b' | b'A' | b'B')
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| [8, 13, 18, 23].contains(&index) || byte.is_ascii_hexdigit())
 }
 
 fn random_secret(length: usize) -> String {

@@ -53,7 +53,8 @@ vi.mock("@get-bb/plugin-sdk/app", () => ({
   useRpc: () => mocks.rpc,
 }));
 vi.mock("./browser-capture.js", () => ({
-  browserCaptureOwner: { startFromProject: mocks.startBrowser },
+  browserCaptureOwner: { startFromProject: mocks.startBrowser, panel: () => null,
+    subscribe: () => () => undefined, hasPendingStop: false, recordingId: null },
   detectClientCapabilities: () => ({ clientId: "mac", platform: "macos", secureContext: true,
     browserMicrophone: true, nativeMacCapture: false }),
 }));
@@ -76,6 +77,22 @@ afterEach(() => {
 });
 
 describe("Meetings Mac recorder choice", () => {
+  it("labels a saved recording and its transcript when audio ranges are missing", async () => {
+    mocks.meetings = [{ sessionId: "partial", title: "Partial call", startedAt: "2026-09-28T00:00:00Z",
+      inputFinalized: true, captureIncomplete: true, captureGaps: [{ segmentId: "browser-000000",
+        startSequence: 1, endExclusive: 3, reason: "upload_missing" }, { segmentId: "browser-000001",
+        startSequence: 0, endExclusive: 0, reason: "browser_reload" }],
+      notePath: null, threadIds: [], distilledMemoRevision: null }] as never;
+    mocks.call.mockImplementation((async (method: string, input?: { sessionId?: string }) => {
+      if (method === "readWorkspaceTranscript") return { ok: true, body: "[00:00] First saved words" };
+      return defaultCall(method, input);
+    }) as typeof mocks.call);
+    render(<MeetingsPage subPath="proj-mac/partial" />);
+    expect(await screen.findByText(/Audio gaps: browser-000000: 1–2/)).toBeTruthy();
+    expect(screen.getByText(/browser-000001: capture interrupted/)).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: "View transcript" }));
+    expect(await screen.findByText("Incomplete transcript: some recorded audio is missing.")).toBeTruthy();
+  });
   it("starts a note thread in the meeting's recorded project and opens it", async () => {
     mocks.meetings = [{ sessionId: "saved", title: "Customer call", startedAt: "2026-09-28T00:00:00Z",
       inputFinalized: true, notePath: null, threadIds: [], distilledMemoRevision: null,

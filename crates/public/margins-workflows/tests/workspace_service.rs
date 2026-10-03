@@ -208,6 +208,223 @@ fn finalize(session: &str) -> ClientMessageV1 {
 }
 
 #[test]
+fn browser_webm_capture_state_reconstructs_after_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let notes = temp.path().join("notes");
+    let captures = temp.path().join("captures");
+    std::fs::create_dir_all(&notes).unwrap();
+    let workspace =
+        ensure_service_workspace(&temp.path().join("state"), "team", None, &notes, &captures)
+            .unwrap();
+    let owner = ServicePrincipal::full("browser", "team");
+    let owner_token = "550e8400-e29b-41d4-a716-446655440000";
+    let session = SessionId("browser-restart".into());
+    let mut create = create(session.as_ref());
+    if let ClientMessageBodyV1::CreateSession(body) = &mut create.body {
+        body.lanes.truncate(1);
+        body.sources.truncate(1);
+        body.lanes[0].format = AudioFormatV1 {
+            codec: AudioCodecV1::Opus,
+            container: AudioContainerV1::Webm,
+            sample_rate_hz: 48_000,
+            channel_count: 1,
+        };
+    }
+    let service = WorkspaceService::open("host", workspace.clone()).unwrap();
+    assert!(service
+        .capabilities(&owner)
+        .unwrap()
+        .capture_formats
+        .iter()
+        .any(|format| format.codec == AudioCodecV1::Opus
+            && format.container == AudioContainerV1::Webm
+            && format.sample_rate_hz == 48_000));
+    assert!(service
+        .reserve_session_with_producer_token(&owner, create.clone(), "owner-1")
+        .is_err());
+    assert_eq!(
+        service
+            .reserve_session_with_producer_token(&owner, create, owner_token)
+            .unwrap()
+            .producer_token,
+        owner_token
+    );
+    let webm_chunk = |segment: &str, sequence: u64, start: u64| {
+        let payload = vec![0x1a, 0x45, 0xdf, 0xa3, sequence as u8];
+        command(
+            session.as_ref(),
+            &format!("{segment}-{sequence}"),
+            ClientMessageBodyV1::AudioChunk(AudioChunkV1 {
+                segment_id: segment.into(),
+                lane_id: "mic".into(),
+                sequence,
+                starts_at_ms: SessionMillis(start),
+                duration_ms: DurationMillis(100),
+                payload_digest: ContentDigestV1 {
+                    algorithm: DigestAlgorithmV1::Sha256,
+                    hex: format!("{:x}", Sha256::digest(&payload)),
+                },
+                payload,
+            }),
+        )
+    };
+    service
+        .execute_capture(&owner, owner_token, webm_chunk("browser", 0, 0))
+        .unwrap();
+    service
+        .execute_capture(&owner, owner_token, webm_chunk("browser", 2, 200))
+        .unwrap();
+    drop(service);
+
+    let service = WorkspaceService::open("host", workspace.clone()).unwrap();
+    assert!(service
+        .capture_state_for_producer(&owner, "wrong-owner", &session)
+        .is_err());
+    let recovered = service
+        .capture_state_for_producer(&owner, owner_token, &session)
+        .unwrap();
+    assert!(!recovered.input_finalized);
+    assert_eq!(recovered.segments.len(), 1);
+    let ack = &recovered.segments[0].lanes[0].acknowledgement;
+    assert_eq!(ack.durable_through_sequence, 1);
+    assert_eq!(ack.durable_out_of_order[0].start, 2);
+    assert_eq!(ack.durable_out_of_order[0].end_exclusive, 3);
+    let (reopened, replay) = service
+        .recover_capture_for_producer(&owner, owner_token, &session, "browser-recover".into())
+        .unwrap();
+    assert_eq!(reopened, recovered);
+    assert!(replay
+        .messages
+        .iter()
+        .any(|message| matches!(message.body, ServerMessageBodyV1::ReplayCompleted(_))));
+    let (_, repeated_replay) = service
+        .recover_capture_for_producer(&owner, owner_token, &session, "browser-recover".into())
+        .unwrap();
+    assert!(repeated_replay.idempotent_replay);
+    assert_eq!(repeated_replay.messages, replay.messages);
+
+    service
+        .execute_capture(&owner, owner_token, webm_chunk("browser", 1, 100))
+        .unwrap();
+    service
+        .execute_capture(
+            &owner,
+            owner_token,
+            command(
+                session.as_ref(),
+                "browser-pause",
+                ClientMessageBodyV1::CloseSegment(CloseSegmentV1 {
+                    segment_id: "browser".into(),
+                    ended_at_ms: SessionMillis(300),
+                    lane_boundaries: vec![LaneBoundaryV1 {
+                        lane_id: "mic".into(),
+                        next_sequence: 3,
+                    }],
+                    reason: SegmentCloseReasonV1::Pause,
+                }),
+            ),
+        )
+        .unwrap();
+    drop(service);
+
+    let service = WorkspaceService::open("host", workspace).unwrap();
+    let paused = service.capture_state(&owner, &session).unwrap();
+    assert_eq!(
+        paused.segments[0].lanes[0]
+            .acknowledgement
+            .durable_through_sequence,
+        3
+    );
+    let close = paused.segments[0].close.as_ref().unwrap();
+    assert_eq!(close.message_id.as_ref(), "browser-pause");
+    assert!(close.finalized);
+    assert_eq!(close.command.reason, SegmentCloseReasonV1::Pause);
+    assert_eq!(close.command.lane_boundaries[0].next_sequence, 3);
+    let resume_id: MessageId = "browser-resume-1".into();
+    assert!(!service
+        .capture_command_recorded(&owner, owner_token, &session, &resume_id)
+        .unwrap());
+    service
+        .execute_capture(
+            &owner,
+            owner_token,
+            command(
+                session.as_ref(),
+                resume_id.as_ref(),
+                ClientMessageBodyV1::ResumeSession(ResumeSessionV1 {
+                    after_server_sequence: None,
+                }),
+            ),
+        )
+        .unwrap();
+    assert!(service
+        .capture_command_recorded(&owner, owner_token, &session, &resume_id)
+        .unwrap());
+    service
+        .execute_capture(&owner, owner_token, webm_chunk("browser-2", 0, 300))
+        .unwrap();
+    service
+        .execute_capture(
+            &owner,
+            owner_token,
+            command(
+                session.as_ref(),
+                "browser-stop",
+                ClientMessageBodyV1::CloseSegment(CloseSegmentV1 {
+                    segment_id: "browser-2".into(),
+                    ended_at_ms: SessionMillis(400),
+                    lane_boundaries: vec![LaneBoundaryV1 {
+                        lane_id: "mic".into(),
+                        next_sequence: 1,
+                    }],
+                    reason: SegmentCloseReasonV1::Stop,
+                }),
+            ),
+        )
+        .unwrap();
+    service
+        .execute_capture(
+            &owner,
+            owner_token,
+            command(
+                session.as_ref(),
+                "browser-finish",
+                ClientMessageBodyV1::FinalizeSession(FinalizeSessionV1 {
+                    ended_at_ms: SessionMillis(400),
+                    segment_closes: vec![
+                        SegmentCloseReferenceV1 {
+                            segment_id: "browser".into(),
+                            close_message_id: "browser-pause".into(),
+                        },
+                        SegmentCloseReferenceV1 {
+                            segment_id: "browser-2".into(),
+                            close_message_id: "browser-stop".into(),
+                        },
+                    ],
+                    reason: SessionFinalizeReasonV1::Completed,
+                }),
+            ),
+        )
+        .unwrap();
+    let final_state = service
+        .capture_state_for_producer(&owner, owner_token, &session)
+        .unwrap();
+    assert!(final_state.input_finalized);
+    assert_eq!(final_state.segments.len(), 2);
+    assert_eq!(final_state.segments[0].segment_id.as_ref(), "browser");
+    assert_eq!(final_state.segments[1].segment_id.as_ref(), "browser-2");
+    assert_eq!(
+        final_state.segments[1]
+            .close
+            .as_ref()
+            .unwrap()
+            .message_id
+            .as_ref(),
+        "browser-stop"
+    );
+}
+
+#[test]
 fn discard_finished_session_removes_source_material_and_preserves_home_note() {
     let temp = tempfile::tempdir().unwrap();
     let notes = temp.path().join("notes");
@@ -572,7 +789,7 @@ fn composed_service_is_the_same_canonical_store_across_retry_and_restart() {
     let owner = ServicePrincipal::full("client-a", "team");
     let other = ServicePrincipal::full("client-b", "team");
     let capabilities = service.capabilities(&owner).unwrap();
-    assert_eq!(capabilities.capture_formats.len(), 1);
+    assert_eq!(capabilities.capture_formats.len(), 2);
     assert_eq!(capabilities.capture_formats[0].sample_rate_hz, 16_000);
     assert_eq!(
         capabilities.limits.max_in_flight_chunks,

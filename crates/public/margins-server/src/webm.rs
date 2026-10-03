@@ -22,20 +22,20 @@ const MAX_CODEC_PRIVATE_BYTES: usize = 1024;
 const STREAM_CHUNK_FRAMES: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HostedWebmFinalizer {
+pub enum HostedWebmFinalizer {
     Native,
     FfmpegCompatibility,
 }
 
 impl HostedWebmFinalizer {
-    pub(crate) fn from_env() -> Self {
+    pub fn from_env() -> Self {
         match std::env::var("MARGINS_HOSTED_WEBM_FINALIZER") {
             Ok(value) if value.eq_ignore_ascii_case("ffmpeg") => Self::FfmpegCompatibility,
             _ => Self::Native,
         }
     }
 
-    pub(crate) fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Self::Native => "native",
             Self::FfmpegCompatibility => "ffmpeg",
@@ -58,8 +58,31 @@ struct FinalizeStats {
     packet_count: usize,
 }
 
-pub(crate) fn finalize_webm_opus_to_wav(webm: &Path, wav: &Path) -> Result<(), String> {
+pub fn finalize_webm_opus_to_wav(webm: &Path, wav: &Path) -> Result<(), String> {
     finalize_webm_opus_to_wav_with_stats(webm, wav).map(|_| ())
+}
+
+/// Decode the runtime's concatenated browser WebM payload into mono 16 kHz
+/// samples for a model backend. The existing native finalizer enforces format,
+/// packet, duration, and allocation bounds before any samples are returned.
+pub fn decode_webm_opus_to_mono_16k(bytes: &[u8]) -> Result<Vec<f32>, String> {
+    let scratch = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let source = scratch.path().join("capture.webm");
+    let output = scratch.path().join("capture.wav");
+    std::fs::write(&source, bytes).map_err(|error| error.to_string())?;
+    finalize_webm_opus_to_wav(&source, &output)?;
+    let reader = hound::WavReader::open(&output).map_err(|error| error.to_string())?;
+    if reader.spec().channels != 1
+        || reader.spec().sample_rate != TARGET_SAMPLE_RATE
+        || reader.spec().bits_per_sample != 32
+        || reader.spec().sample_format != hound::SampleFormat::Float
+    {
+        return Err("native WebM decoder returned an unexpected WAV format".into());
+    }
+    reader
+        .into_samples::<f32>()
+        .map(|sample| sample.map_err(|error| error.to_string()))
+        .collect()
 }
 
 fn finalize_webm_opus_to_wav_with_stats(webm: &Path, wav: &Path) -> Result<FinalizeStats, String> {
@@ -539,7 +562,7 @@ mod tests {
         let paths = write_fixture("chrome-style", &fixture.webm);
         let stats = finalize_webm_opus_to_wav_with_stats(&paths.webm, &paths.wav).unwrap();
 
-        let wav = margins::audio_pipeline::load_wav(&paths.wav).unwrap();
+        let wav = margins_media::audio::load_audio_any(&paths.wav).unwrap();
         assert_eq!(wav.sample_rate, 16_000);
         assert_eq!(wav.channels, 1);
         assert!((wav.frame_count() as i64 - fixture.expected_16k_frames as i64).abs() <= 1);
@@ -549,6 +572,14 @@ mod tests {
         assert!(stats.max_decode_frames <= 320);
         assert!(stats.max_write_chunk_frames <= STREAM_CHUNK_FRAMES);
         assert_no_native_temp_wavs(paths.wav.parent().unwrap());
+    }
+
+    #[test]
+    fn batch_decoder_reads_native_float_wav_samples() {
+        let fixture = make_chrome_unknown_size_webm_fixture(20, 20, 1, true);
+        let samples = decode_webm_opus_to_mono_16k(&fixture.webm).unwrap();
+        assert!((samples.len() as i64 - fixture.expected_16k_frames as i64).abs() <= 1);
+        assert!(samples.iter().any(|sample| sample.abs() > 0.001));
     }
 
     #[test]
@@ -569,7 +600,7 @@ mod tests {
         drop(file);
 
         finalize_webm_opus_to_wav(&webm, &wav).unwrap();
-        let wav = margins::audio_pipeline::load_wav(&wav).unwrap();
+        let wav = margins_media::audio::load_audio_any(&wav).unwrap();
         assert_eq!(wav.sample_rate, 16_000);
         assert_eq!(wav.channels, 1);
         assert!((wav.frame_count() as i64 - fixture.expected_16k_frames as i64).abs() <= 1);
@@ -581,7 +612,7 @@ mod tests {
         let paths = write_fixture("short", &fixture.webm);
         finalize_webm_opus_to_wav(&paths.webm, &paths.wav).unwrap();
 
-        let wav = margins::audio_pipeline::load_wav(&paths.wav).unwrap();
+        let wav = margins_media::audio::load_audio_any(&paths.wav).unwrap();
         assert_eq!(wav.sample_rate, 16_000);
         assert_eq!(wav.channels, 1);
         assert!(wav.frame_count() > 0);
@@ -594,7 +625,7 @@ mod tests {
         let paths = write_fixture("gap", &fixture.webm);
         finalize_webm_opus_to_wav(&paths.webm, &paths.wav).unwrap();
 
-        let wav = margins::audio_pipeline::load_wav(&paths.wav).unwrap();
+        let wav = margins_media::audio::load_audio_any(&paths.wav).unwrap();
         assert!((wav.frame_count() as i64 - fixture.expected_16k_frames as i64).abs() <= 1);
         let silent_start = 400usize;
         let silent_end = 15_000usize.min(wav.samples.len());

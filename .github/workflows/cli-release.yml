@@ -84,12 +84,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: desktop/package-lock.json
-
       - name: Assert native runner architecture
         run: test "$(uname -m)" = "${{ matrix.host_arch }}"
 
@@ -103,16 +97,10 @@ jobs:
           --no-default-features --features "${{ matrix.features }}"
           --target "${{ matrix.target }}"
 
-      - name: Build project recording service web assets
-        # T4b: remove this after margins-server owns its web assets outside desktop/.
-        run: npm ci --prefix desktop && npm run --prefix desktop build
-
       - name: Compile the project recording service
         run: >-
-          cargo build --release --locked
-          --manifest-path desktop/src-tauri/Cargo.toml
-          --target-dir target
-          --no-default-features --features ${{ runner.os == 'macOS' && 'server,coreml-asr' || 'hosted-web' }}
+          cargo build --release --locked --package margins-server
+          --no-default-features --features "${{ runner.os == 'macOS' && 'coreml-asr' || 'parakeet-asr' }}"
           --bin margins-server
           --target "${{ matrix.target }}"
 

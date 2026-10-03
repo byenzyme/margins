@@ -17,7 +17,7 @@ import { promisify } from "node:util";
 
 const execFile = promisify(execFileCallback);
 
-const RUNTIME_RELEASE_VERSION = "0.4.14";
+const RUNTIME_RELEASE_VERSION = "0.4.15";
 const RELEASE_API = `https://api.github.com/repos/byenzyme/margins/releases/tags/v${RUNTIME_RELEASE_VERSION}`;
 const MAX_ARCHIVE_BYTES = 128 * 1024 * 1024;
 
@@ -227,7 +227,7 @@ export function createRuntimeManager(options: RuntimeManagerOptions = {}) {
       if (!target) throw new Error("Recording is not available on this project machine");
       const expectedName = `margins-${RUNTIME_RELEASE_VERSION}-${target}.tar.gz`;
       const archive = await downloadPinnedArchive(fetchImpl, expectedName, input.signal);
-      if (!archive) throw new Error(`Margins ${RUNTIME_RELEASE_VERSION} is not published for this project machine`);
+      if (!archive) throw new Error(`Margins runtime ${RUNTIME_RELEASE_VERSION} is not published yet for this project machine; upgrade the plugin and server together after release.`);
       await installRuntime({
         archive,
         dataDir: input.dataDir,

@@ -97,6 +97,24 @@ describe("Margins recording panel", () => {
     overlay.lifecycle.unmount();
   });
 
+  it("offers Finish with what was saved when the missing browser chunk cannot be replayed", async () => {
+    vi.spyOn(browserCaptureOwner, "recordingId", "get").mockReturnValue("rec-owner");
+    vi.spyOn(browserCaptureOwner, "hasPendingStop", "get").mockReturnValue(true);
+    vi.spyOn(browserCaptureOwner, "canFinishIncomplete", "get").mockReturnValue(true);
+    vi.spyOn(browserCaptureOwner, "panel").mockReturnValue(panel({ state: "needs_attention",
+      primaryAction: "finish_incomplete", primaryLabel: "Finish with what was saved",
+      error: { code: "browser_chunk_gap", message: "Audio sequence 1 was lost", retryable: false } }));
+    const finish = vi.spyOn(browserCaptureOwner, "finishIncomplete").mockResolvedValue(panel({
+      state: "saved", recordingId: null, ownsRecording: false, error: null,
+    }));
+    const overlay = renderSlot(app.appOverlays[0]!, {}, { context: { threadId: "thr-other" } });
+    const screen = within(overlay.container);
+    expect(screen.getByText("Audio sequence 1 was lost")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Finish with what was saved" }));
+    await waitFor(() => expect(finish).toHaveBeenCalledOnce());
+    overlay.lifecycle.unmount();
+  });
+
   it("switches meeting memo pads without controlling the live capture", async () => {
     const live = { sessionId: "live-1", title: "Planning", startedAt: "2026-09-25T01:00:00Z", inputFinalized: false,
       notepad: { text: "Live memo", revision: "live-r1" }, notePath: null };

@@ -95,14 +95,25 @@ function RecordingOverlay() {
     setBusy(true);
     if (action === "stop") setStopping(true);
     try {
+      let saved = Boolean(nativeLive);
       if (nativeLive) await nativeBridgeOwner.control(action);
       else {
         const next = await browserCaptureOwner[action]();
         if (next) browserCaptureOwner.acceptPanel(sessionId, next);
+        if (next?.state === "needs_attention") setFailure(true);
+        saved = next?.state === "saved";
       }
-      if (action === "stop") rememberStopAck(sessionId, elapsed);
-      setFailure(false);
-    } catch { setFailure(true); setStopping(false); }
+      if (action === "stop" && saved) rememberStopAck(sessionId, elapsed);
+    } catch { setFailure(true); }
+    finally { setBusy(false); setStopping(false); }
+  }
+  async function finishPending(incomplete: boolean) {
+    setBusy(true);
+    try {
+      const next = incomplete ? await browserCaptureOwner.finishIncomplete() : await browserCaptureOwner.retryPendingStop();
+      if (next) browserCaptureOwner.acceptPanel(sessionId, next);
+      setFailure(next?.state === "needs_attention");
+    } catch { setFailure(true); }
     finally { setBusy(false); }
   }
   return <aside className="margins-overlay" role="status" aria-label="Margins recording">
@@ -119,6 +130,13 @@ function RecordingOverlay() {
       <button onClick={() => void control(paused ? "resume" : "pause")} disabled={busy} aria-label={paused ? "Resume recording" : "Pause recording"}>{paused ? <Play size={13} /> : <Pause size={13} />}</button>
       <button onClick={() => void control("stop")} disabled={busy} aria-label="Stop and save recording"><Square size={12} /></button>
     </>}
+    {!nativeLive && status === "needs_attention" && browserCaptureOwner.hasPendingStop
+      && (browserCaptureOwner.canFinishIncomplete || state?.primaryAction === "retry") && <div className="margins-native-actions">
+      <span className="margins-overlay-error">{state?.error?.message || "Some browser audio was not saved."}</span>
+      <button disabled={busy} onClick={() => void finishPending(browserCaptureOwner.canFinishIncomplete)}>
+        {browserCaptureOwner.canFinishIncomplete ? "Finish with what was saved" : "Try again"}
+      </button>
+    </div>}
   </aside>;
 }
 

@@ -5,10 +5,71 @@ import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
-import type { ConnectedNoteResult, HostCaptureSnapshot, HostError, HostResult, ProjectTarget, TranscriptionRequestResult } from "./contracts.js";
+import { z } from "zod";
+import { CAPTURE_PROTOCOL_VERSION, type ConnectedNoteResult, type HostCaptureSnapshot, type HostError, type HostResult, type ProjectTarget, type TranscriptionRequestResult } from "./contracts.js";
 import { createRuntimeManager } from "./runtime-manager.js";
 
 const execFile = promisify(execFileCallback);
+
+// Workspace response shapes are checked against the Rust protocol structs by
+// protocol-contract.test.ts. Keep the request types tied to these schemas.
+const captureLaneSchema = z.strictObject({
+  lane_id: z.string(), source_ids: z.array(z.string()), label: z.string().nullable().optional(),
+  format: z.strictObject({
+    codec: z.enum(["pcm_s16_le", "pcm_f32_le", "opus", "aac_lc"]),
+    container: z.enum(["raw", "webm", "ogg", "mp4", "packet_stream"]),
+    sample_rate_hz: z.number().int().nonnegative(), channel_count: z.number().int().nonnegative(),
+  }),
+});
+export const workspaceSessionSummarySchema = z.strictObject({
+  session_id: z.string(), title: z.string().nullable(), started_at: z.string(),
+  capture_lanes: z.array(captureLaneSchema), segment_count: z.number().int().nonnegative(),
+  input_finalized: z.boolean(), capture_duration_ms: z.number().int().nonnegative().nullable(),
+  capture_finalize_message_id: z.string().nullable(), processing_state: z.string(),
+  capture_incomplete: z.boolean().default(false), capture_gaps: z.array(z.strictObject({
+    segment_id: z.string(), start_sequence: z.number().int().nonnegative(),
+    end_exclusive: z.number().int().nonnegative(), reason: z.string(),
+    starts_at_ms: z.number().int().nonnegative().optional(),
+  })).default([]),
+});
+export const workspaceSessionPageSchema = z.strictObject({
+  sessions: z.array(workspaceSessionSummarySchema), next_cursor: z.string().nullable(),
+});
+export const workspaceTranscriptSchema = z.strictObject({
+  session_id: z.string(), body: z.string(), view: z.string(),
+  decoded_until_ms: z.number().int().nonnegative(), committed_until_ms: z.number().int().nonnegative(),
+  updated_at_unix_ms: z.number().int().nonnegative(), live: z.boolean(), terminal: z.boolean(),
+  source_artifact: z.string(),
+});
+export const workspaceArtifactSchema = z.strictObject({
+  artifact_id: z.string(), session_id: z.string(), kind: z.string(), ordinal: z.number().int(),
+  size_bytes: z.number().int().nonnegative().nullable(), retention_class: z.string(), created_at: z.string(),
+});
+export const workspaceMemoSchema = z.strictObject({
+  session_id: z.string(), revision: z.string(), lines: z.array(z.strictObject({
+    text: z.string(), created_secs: z.number(), edited_secs: z.number().nullable(),
+    draft_started_secs: z.number().nullable(), audio_pending_at_mark: z.boolean(),
+    block_ordinal: z.number().int().nonnegative().nullable(),
+  })), mirror_stale: z.boolean().optional(),
+});
+export const workspaceNoteAssociationSchema = z.strictObject({
+  session_id: z.string(), source_id: z.string(), relative_path: z.string(),
+  observed_content_hash: z.string().nullable(), revision: z.number().int().nonnegative(),
+  bb_thread_ids: z.array(z.string()), distilled_memo_revision: z.string().nullable(),
+});
+export const workspaceProcessingJobSchema = z.strictObject({
+  job_id: z.string(), session_id: z.string(), operation: z.string(), input_revision: z.string(),
+  attempt: z.number().int().nonnegative(), status: z.enum(["queued", "running", "complete", "failed"]), progress: z.number().nullable(),
+  result_ref: z.string().nullable(), failure: z.string().nullable(), failed_stage: z.string().nullable(),
+});
+
+type WorkspaceSessionPage = z.infer<typeof workspaceSessionPageSchema>;
+type WorkspaceSessionSummary = z.infer<typeof workspaceSessionSummarySchema>;
+type WorkspaceTranscript = z.infer<typeof workspaceTranscriptSchema>;
+type WorkspaceArtifact = z.infer<typeof workspaceArtifactSchema>;
+type WorkspaceMemo = z.infer<typeof workspaceMemoSchema>;
+type WorkspaceNoteAssociation = z.infer<typeof workspaceNoteAssociationSchema>;
+type WorkspaceProcessingJob = z.infer<typeof workspaceProcessingJobSchema>;
 
 interface ServerHandle {
   baseUrl: string;
@@ -53,8 +114,39 @@ export async function readAsrRuntimeConfig(dataDir: string): Promise<AsrRuntimeC
   return selected;
 }
 
+async function verifyServerCompatibility(baseUrl: string, token: string, workspaceId: string, signal?: AbortSignal): Promise<string> {
+  const response = await fetch(`${baseUrl}/v1/capabilities`, {
+    signal, headers: { authorization: `Bearer ${token}` },
+  });
+  const envelope = await response.json().catch(() => null) as {
+    ok?: boolean;
+    result?: { workspace_id?: string; instance_id?: string; protocol_version?: number; capture_protocol_version?: number };
+    error?: { message?: string };
+  } | null;
+  if (response.status === 404 || (response.ok && !envelope?.ok)) {
+    throw new Error("Margins server version doesn't match this plugin; upgrade both");
+  }
+  if (!response.ok || !envelope?.ok) {
+    throw new Error(envelope?.error?.message || `Margins capability check failed (${response.status})`);
+  }
+  if (envelope.result?.protocol_version !== 1 || envelope.result.capture_protocol_version !== CAPTURE_PROTOCOL_VERSION) {
+    throw new Error("Margins server version doesn't match this plugin; upgrade both");
+  }
+  if (envelope.result.workspace_id !== workspaceId) {
+    throw new Error("Margins capability Workspace does not match configured Workspace");
+  }
+  if (!envelope.result.instance_id) throw new Error("Margins capability response lacks an instance identity");
+  return envelope.result.instance_id;
+}
+
 function hostError(code: string, message: string, retryable = true): HostError {
   return { code, message, retryable };
+}
+
+class WorkspaceRequestError extends Error {
+  constructor(readonly code: string, message: string, readonly retryable: boolean) {
+    super(message);
+  }
 }
 
 export function workspaceInstanceDir(dataDir: string, workspaceId: string) {
@@ -244,23 +336,8 @@ export class ProjectServerManager {
         throw new Error("remote Margins requires HTTPS or loopback HTTP");
       }
       const baseUrl = remoteUrl.replace(/\/$/, "");
-      const response = await fetch(`${baseUrl}/v1/capabilities`, {
-        signal,
-        headers: { authorization: `Bearer ${remoteToken}` },
-      });
-      const envelope = await response.json() as {
-        ok?: boolean;
-        result?: { workspace_id?: string; instance_id?: string };
-        error?: { message?: string };
-      };
-      if (!response.ok || !envelope.ok) {
-        throw new Error(envelope.error?.message || `remote Margins capability check failed (${response.status})`);
-      }
-      if (envelope.result?.workspace_id !== workspaceId) {
-        throw new Error("remote Margins capability Workspace does not match configured Workspace");
-      }
-      if (!envelope.result.instance_id) throw new Error("remote Margins capability response lacks an instance identity");
-      return { baseUrl, token: remoteToken, workspaceId, instanceId: envelope.result.instance_id };
+      const instanceId = await verifyServerCompatibility(baseUrl, remoteToken, workspaceId, signal);
+      return { baseUrl, token: remoteToken, workspaceId, instanceId };
     }
     const asrRuntime = await readAsrRuntimeConfig(dataDir);
     const binary = asrRuntime?.serverPath ?? await this.runtime.ensureProjectServer({ dataDir, signal });
@@ -292,6 +369,10 @@ export class ProjectServerManager {
       child.kill("SIGTERM");
       throw error;
     });
+    await verifyServerCompatibility(baseUrl, token, workspaceId, signal).catch((error) => {
+      child.kill("SIGTERM");
+      throw error;
+    });
     child.once("exit", () => this.handles.delete(key));
     return { baseUrl, token, workspaceId, instanceId: `bb-host-${target.hostId}`, child };
   }
@@ -305,21 +386,16 @@ export class ProjectServerManager {
 }
 
 export class ProjectMarginsTransport {
-  private readonly browserSessions = new Set<string>();
   constructor(private readonly manager = new ProjectServerManager()) {}
 
   async prepareCli(dataDir: string) { await this.manager.ensureCli(dataDir); }
-
-  private browserSessionKey(handle: ServerHandle, sessionId: string) {
-    return `${handle.instanceId}:${handle.workspaceId}:${sessionId}`;
-  }
 
   async listWorkspaceMeetings(target: ProjectTarget, dataDir: string) {
     try {
       const handle = await this.manager.ensure(target, dataDir);
       const [listed, active] = await Promise.all([
-        this.request<{ sessions: Array<{ session_id: string }> }>(handle, "sessions?limit=50", "GET"),
-        this.request<{ sessions: Array<{ session_id: string }> }>(handle, "active-sessions", "GET"),
+        this.request<WorkspaceSessionPage>(handle, "sessions?limit=50", "GET"),
+        this.request<WorkspaceSessionPage>(handle, "active-sessions", "GET"),
       ]);
       // Ordinary sessions omit empty reservations until audio arrives. Active
       // capture sessions must still be visible so BB can join their memo now.
@@ -327,10 +403,8 @@ export class ProjectMarginsTransport {
       const rows = await Promise.all(sessionIds.map(async (session_id) => {
         const id = encodeURIComponent(session_id);
         const [summary, note] = await Promise.all([
-          this.request<{ session_id: string; title: string | null; started_at: string; input_finalized: boolean;
-            capture_duration_ms?: number | null; segment_count?: number;
-            capture_lanes?: Array<{ label?: string | null; source_ids?: string[] }> }>(handle, `sessions/${id}`, "GET"),
-          this.request<{ relative_path: string; bb_thread_ids?: string[]; distilled_memo_revision?: string | null } | null>(handle, `sessions/${id}/note-association`, "GET"),
+          this.request<WorkspaceSessionSummary>(handle, `sessions/${id}`, "GET"),
+          this.request<WorkspaceNoteAssociation | null>(handle, `sessions/${id}/note-association`, "GET"),
         ]);
         return { summary, note };
       }));
@@ -343,6 +417,11 @@ export class ProjectMarginsTransport {
           ? "Microphone + computer audio" : summary.segment_count === 0 ? null : "Microphone";
         return { sessionId: summary.session_id, title: summary.title, startedAt: summary.started_at,
           inputFinalized: summary.input_finalized, durationMs: summary.capture_duration_ms ?? null, audioSource,
+          captureIncomplete: summary.capture_incomplete ?? false, captureGaps: (summary.capture_gaps ?? []).map((gap) => ({
+            segmentId: gap.segment_id, startSequence: gap.start_sequence,
+            endExclusive: gap.end_exclusive, reason: gap.reason,
+            ...(gap.starts_at_ms !== undefined ? { startsAtMs: gap.starts_at_ms } : {}),
+          })),
           notePath: note?.relative_path || null,
           noteFile: noteFilePath ? { hostId: target.hostId, path: noteFilePath } : null,
           threadIds: note?.bb_thread_ids || [], distilledMemoRevision: note?.distilled_memo_revision || null };
@@ -359,24 +438,27 @@ export class ProjectMarginsTransport {
       let selected = sessionId;
       let candidates = sessionId ? [sessionId] : [];
       if (!selected) {
-        const active = await this.request<{ sessions: Array<{ session_id: string }> }>(handle, "active-sessions", "GET");
+        const active = await this.request<WorkspaceSessionPage>(handle, "active-sessions", "GET");
         candidates = active.sessions.map((session) => session.session_id);
         selected = candidates.length === 1 ? candidates[0] : undefined;
         if (candidates.length === 0) {
           // The service orders ordinary sessions newest first. Keep the saved
           // meeting and its note available after a browser refresh or Stop.
-          const recent = await this.request<{ sessions: Array<{ session_id: string }> }>(handle, "sessions?limit=1", "GET");
+          const recent = await this.request<WorkspaceSessionPage>(handle, "sessions?limit=1", "GET");
           selected = recent.sessions[0]?.session_id;
         }
       }
       if (!selected) return { ok: true as const, meeting: null, candidates };
       const [summary, memo] = await Promise.all([
-        this.request<{ session_id: string; title: string | null; started_at: string; input_finalized: boolean }>(handle, `sessions/${encodeURIComponent(selected)}`, "GET"),
-        this.request<{ revision: string; lines: Array<{ text: string }> }>(handle, `sessions/${encodeURIComponent(selected)}/memo`, "GET"),
+        this.request<WorkspaceSessionSummary>(handle, `sessions/${encodeURIComponent(selected)}`, "GET"),
+        this.request<WorkspaceMemo>(handle, `sessions/${encodeURIComponent(selected)}/memo`, "GET"),
       ]);
       return { ok: true as const, candidates, meeting: {
         sessionId: summary.session_id, title: summary.title, startedAt: summary.started_at,
-        inputFinalized: summary.input_finalized,
+        inputFinalized: summary.input_finalized, captureIncomplete: summary.capture_incomplete ?? false,
+        captureGaps: (summary.capture_gaps ?? []).map((gap) => ({ segmentId: gap.segment_id,
+          startSequence: gap.start_sequence, endExclusive: gap.end_exclusive, reason: gap.reason,
+          ...(gap.starts_at_ms !== undefined ? { startsAtMs: gap.starts_at_ms } : {}) })),
         notepad: { revision: memo.revision, text: memo.lines.map((line) => line.text).join("\n") },
       } };
     } catch (cause) {
@@ -387,16 +469,8 @@ export class ProjectMarginsTransport {
   async saveWorkspaceMemo(target: ProjectTarget, dataDir: string, sessionId: string, expectedRevision: string, text: string) {
     try {
       const handle = await this.manager.ensure(target, dataDir);
-      const summary = await this.request<{ started_at: string; input_finalized: boolean; capture_duration_ms: number | null }>(
-        handle, `sessions/${encodeURIComponent(sessionId)}`, "GET",
-      );
-      const started = Date.parse(summary.started_at);
-      if (!Number.isFinite(started)) throw new Error("Meeting start time is invalid");
-      const observedAtMs = summary.input_finalized && summary.capture_duration_ms !== null
-        ? summary.capture_duration_ms : Math.max(0, Date.now() - started);
       await this.request(handle, `sessions/${encodeURIComponent(sessionId)}/memo`, "PUT", {
-        request_id: randomUUID(), expected_revision: expectedRevision,
-        observed_at_ms: Math.floor(observedAtMs), paused: false, text,
+        request_id: randomUUID(), expected_revision: expectedRevision, paused: false, text,
       });
       return this.readWorkspaceMeeting(target, dataDir, sessionId);
     } catch (cause) {
@@ -427,7 +501,7 @@ export class ProjectMarginsTransport {
   async readWorkspaceTranscript(target: ProjectTarget, dataDir: string, sessionId: string) {
     try {
       const handle = await this.manager.ensure(target, dataDir);
-      const transcript = await this.request<{ body: string }>(handle, `sessions/${encodeURIComponent(sessionId)}/transcript`, "GET");
+      const transcript = await this.request<WorkspaceTranscript>(handle, `sessions/${encodeURIComponent(sessionId)}/transcript`, "GET");
       return { ok: true as const, body: transcript.body };
     } catch (cause) {
       return { ok: false as const, error: hostError("workspace_transcript_unavailable", cause instanceof Error ? cause.message : String(cause)) };
@@ -454,7 +528,7 @@ export class ProjectMarginsTransport {
         || !await associatedNoteFile(await realpath(destination.homeRoot), input.relativePath)) {
         throw new Error("The note must exist inside the selected Workspace Home Source");
       }
-      const result = await this.request<{ revision: number }>(handle,
+      const result = await this.request<WorkspaceNoteAssociation>(handle,
         `sessions/${encodeURIComponent(input.sessionId)}/note-association`, "PUT", {
           request_id: randomUUID(), source_id: input.sourceId, relative_path: input.relativePath,
           observed_content_hash: null, expected_revision: input.expectedRevision,
@@ -492,9 +566,7 @@ export class ProjectMarginsTransport {
       let cursor: string | null = null;
       for (let page = 0; page < 10; page += 1) {
         const suffix: string = cursor ? `&after=${encodeURIComponent(cursor)}` : "";
-        const result: { sessions: Array<{ session_id: string }>; next_cursor: string | null } = await this.request<{
-          sessions: Array<{ session_id: string }>; next_cursor: string | null;
-        }>(
+        const result: WorkspaceSessionPage = await this.request<WorkspaceSessionPage>(
           handle, `sessions?limit=100${suffix}`, "GET",
         );
         if (result.sessions.some((session) => session.session_id === recordingId)) return { ok: true as const, found: true };
@@ -546,10 +618,16 @@ export class ProjectMarginsTransport {
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
-    const value = await response.json() as { ok: boolean; result?: T; error?: string | { message?: string } };
+    const value = await response.json() as { ok: boolean; result?: T; error?: string | { code?: string; message?: string; retryable?: boolean } };
     const detail = typeof value.error === "string" ? value.error : value.error?.message;
-    if (!response.ok) throw new Error(detail || `Margins could not save on the project machine (${response.status})`);
-    if (!value.ok) throw new Error(detail || "Margins could not complete the recording action");
+    if (!response.ok || !value.ok) {
+      const structured = typeof value.error === "object" ? value.error : undefined;
+      throw new WorkspaceRequestError(
+        structured?.code || "workspace_request_failed",
+        detail || `Margins could not save on the project machine (${response.status})`,
+        structured?.retryable ?? true,
+      );
+    }
     return value.result as T;
   }
 
@@ -559,7 +637,7 @@ export class ProjectMarginsTransport {
     });
     const envelope = await response.json() as {
       ok?: boolean;
-      result?: { terminal: boolean; live: boolean; updated_at_unix_ms: number; decoded_until_ms: number; body: string };
+      result?: WorkspaceTranscript;
       error?: { code?: string; message?: string };
     };
     if (response.status === 422 && envelope.error?.code === "invalid_request"
@@ -586,14 +664,16 @@ export class ProjectMarginsTransport {
     try {
       return { ok: true, snapshot: await action(await this.manager.ensure(target, dataDir)) };
     } catch (cause) {
-      return { ok: false, error: hostError("project_recorder_unavailable", cause instanceof Error ? cause.message : String(cause)) };
+      return { ok: false, error: cause instanceof WorkspaceRequestError
+        ? hostError(cause.code, cause.message, cause.retryable)
+        : hostError("project_recorder_unavailable", cause instanceof Error ? cause.message : String(cause)) };
     }
   }
 
-  start(target: ProjectTarget, dataDir: string, ownerId: string, name: string) {
+  start(target: ProjectTarget, dataDir: string, ownerId: string, name: string, startedAtUnixMs?: number) {
     return this.withHandle(target, dataDir, async (handle) => {
-      const snapshot = await this.request<HostCaptureSnapshot>(handle, "browser/sessions", "POST", { name, ownerId });
-      this.browserSessions.add(this.browserSessionKey(handle, snapshot.sessionId));
+      const snapshot = await this.request<HostCaptureSnapshot>(handle, "browser/sessions", "POST", { name, ownerId,
+        ...(startedAtUnixMs !== undefined ? { startedAtUnixMs } : {}) });
       return snapshot;
     });
   }
@@ -602,21 +682,35 @@ export class ProjectMarginsTransport {
     return this.withHandle(target, dataDir, (handle) => this.snapshot(handle, recordingId, ownerId));
   }
 
-  mutate(target: ProjectTarget, dataDir: string, recordingId: string, ownerId: string, command: "heartbeat_web_recording" | "pause_recording" | "resume_recording") {
+  mutate(target: ProjectTarget, dataDir: string, recordingId: string, ownerId: string, command: "heartbeat_web_recording" | "pause_recording" | "resume_recording", expectedNextSequence?: number, segmentTimeUnixMs?: number, recoveredAfterReload?: boolean) {
     return this.withHandle(target, dataDir, async (handle) => {
       const action = command === "heartbeat_web_recording" ? "heartbeat" : command === "pause_recording" ? "pause" : "resume";
-      return this.request<HostCaptureSnapshot>(handle, `browser/sessions/${recordingId}/${action}`, "POST", { ownerId });
+      return this.request<HostCaptureSnapshot>(handle, `browser/sessions/${recordingId}/${action}`, "POST",
+        command === "pause_recording" ? { ownerId, expectedNextSequence,
+          ...(segmentTimeUnixMs !== undefined ? { segmentEndedUnixMs: segmentTimeUnixMs } : {}),
+          ...(recoveredAfterReload ? { recoveredAfterReload: true } : {}) }
+          : command === "resume_recording" && segmentTimeUnixMs !== undefined
+            ? { ownerId, segmentStartedUnixMs: segmentTimeUnixMs } : { ownerId });
     });
   }
 
-  stop(target: ProjectTarget, dataDir: string, recordingId: string, ownerId: string) {
+  stop(target: ProjectTarget, dataDir: string, recordingId: string, ownerId: string, expectedNextSequence: number, segmentEndedUnixMs?: number) {
     return this.withHandle(target, dataDir, async (handle) => {
-      await this.request(handle, `browser/sessions/${recordingId}/stop`, "POST", { ownerId });
+      await this.request(handle, `browser/sessions/${recordingId}/stop`, "POST", { ownerId, expectedNextSequence,
+        ...(segmentEndedUnixMs !== undefined ? { segmentEndedUnixMs } : {}) });
       return null;
     });
   }
 
-  async upload(target: ProjectTarget, dataDir: string, recordingId: string, ownerId: string, sequence: number, bytesBase64: string) {
+  finishIncomplete(target: ProjectTarget, dataDir: string, recordingId: string, ownerId: string, expectedNextSequence: number) {
+    return this.withHandle(target, dataDir, async (handle) => {
+      await this.request(handle, `browser/sessions/${recordingId}/finish-incomplete`, "POST", { ownerId, expectedNextSequence });
+      return null;
+    });
+  }
+
+  async upload(target: ProjectTarget, dataDir: string, recordingId: string, ownerId: string, sequence: number, bytesBase64: string,
+    capturedStartUnixMs: number, capturedEndUnixMs: number) {
     try {
       const handle = await this.manager.ensure(target, dataDir);
       const response = await fetch(`${handle.baseUrl}/v1/workspaces/${handle.workspaceId}/browser/sessions/${recordingId}/chunks/${sequence}`, {
@@ -625,6 +719,9 @@ export class ProjectMarginsTransport {
           authorization: `Bearer ${handle.token}`,
           "content-type": "application/octet-stream",
           "x-margins-capture-owner": ownerId,
+          "X-Margins-Instance-Id": handle.instanceId,
+          "X-Margins-Captured-Start-Unix-Ms": String(capturedStartUnixMs),
+          "X-Margins-Captured-End-Unix-Ms": String(capturedEndUnixMs),
         },
         body: Buffer.from(bytesBase64, "base64"),
       });
@@ -641,11 +738,11 @@ export class ProjectMarginsTransport {
     try {
       const handle = await this.manager.ensure(target, dataDir);
       const [sessions, transcript, memo, artifacts, noteAssociation] = await Promise.all([
-        this.request<{ sessions: Array<{ session_id: string; title: string | null }> }>(handle, "sessions?limit=100", "GET"),
+        this.request<WorkspaceSessionPage>(handle, "sessions?limit=100", "GET"),
         this.transcriptSummary(handle, recordingId),
-        this.request<{ revision: string; lines: unknown[] }>(handle, `sessions/${recordingId}/memo`, "GET"),
-        this.request<Array<{ artifact_id: string; kind: string; retention_class: string }>>(handle, `sessions/${recordingId}/artifacts`, "GET"),
-        this.request<{ source_id: string; relative_path: string; revision: number } | null>(handle, `sessions/${recordingId}/note-association`, "GET"),
+        this.request<WorkspaceMemo>(handle, `sessions/${recordingId}/memo`, "GET"),
+        this.request<WorkspaceArtifact[]>(handle, `sessions/${recordingId}/artifacts`, "GET"),
+        this.request<WorkspaceNoteAssociation | null>(handle, `sessions/${recordingId}/note-association`, "GET"),
       ]);
       const summary = sessions.sessions.find((candidate) => candidate.session_id === recordingId);
       if (!summary) throw new Error("Pinned Margins session is not visible in the selected Workspace");
@@ -671,33 +768,12 @@ export class ProjectMarginsTransport {
   async requestTranscription(target: ProjectTarget, dataDir: string, recordingId: string): Promise<TranscriptionRequestResult> {
     try {
       const handle = await this.manager.ensure(target, dataDir);
-      if (handle.child && this.browserSessions.has(this.browserSessionKey(handle, recordingId))) {
-        await this.transcribeHostedBrowserSession(handle, recordingId);
-        return { ok: true, status: "complete", attempt: 1 };
-      }
-      let job: { status: "queued" | "running" | "complete" | "failed"; attempt: number };
-      try {
-        job = await this.request(handle, `sessions/${recordingId}/jobs/transcribe`, "POST");
-      } catch (error) {
-        // A browser session reopened after a worker restart is absent from the
-        // in-memory set, but still has finalized local WAV segments.
-        if (!handle.child || !(error instanceof Error) || !error.message.includes("session has no capture authority state")) throw error;
-        await this.transcribeHostedBrowserSession(handle, recordingId);
-        return { ok: true, status: "complete", attempt: 1 };
-      }
+      const job = await this.request<WorkspaceProcessingJob>(
+        handle, `sessions/${recordingId}/jobs/transcribe`, "POST");
       return { ok: true, status: job.status, attempt: job.attempt };
     } catch (cause) {
       return { ok: false, error: hostError("transcription_unavailable", cause instanceof Error ? cause.message : String(cause)) };
     }
-  }
-
-  private async transcribeHostedBrowserSession(handle: ServerHandle, sessionId: string) {
-    const response = await fetch(`${handle.baseUrl}/api/invoke/transcribe_hosted_browser_session`, {
-      method: "POST", headers: { authorization: `Bearer ${handle.token}`, "content-type": "application/json" },
-      body: JSON.stringify({ name: sessionId }),
-    });
-    const result = await response.json() as { ok?: boolean; error?: string };
-    if (!response.ok || !result.ok) throw new Error(result.error || `Hosted browser transcription failed (${response.status})`);
   }
 
   dispose() { return this.manager.dispose(); }

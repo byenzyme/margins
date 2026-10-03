@@ -10,12 +10,11 @@ Make note request. Step 7 requires the explicit
 `MARGINS_E2E_REAL_LLM=1` opt-in described below.
 
 Build from **this worktree** first. Keep Rust commands on the repo's guarded
-lane and build the frontend before the server binary:
+lane:
 
 ```bash
-cd desktop && npm ci && npm run build && cd ..
 scripts/cargo-lane shared -- cargo build -p margins-cli --bin margins-public
-scripts/cargo-lane shared -- cargo build -p margins-desktop --manifest-path desktop/src-tauri/Cargo.toml --no-default-features --features hosted-web --bin margins-server
+scripts/cargo-lane shared -- cargo build -p margins-server --no-default-features --features parakeet-asr --bin margins-server
 cd integrations/bb-plugin-margins && npm run typecheck && npm test && npm run build && cd ../..
 agent-browser install
 docker build -f integrations/bb-plugin-margins/test-harness/chrome.Dockerfile -t margins-bb-e2e-chrome:local .
@@ -47,12 +46,11 @@ Set `MARGINS_E2E_SPOKEN_WAV` to an existing speech WAV to override it.
 Set `MARGINS_E2E_ASR_MODEL_DIR` to the pinned Parakeet TDT v2 ONNX
 directory, and `MARGINS_E2E_ORT_LIBRARY` to the ONNX Runtime library. Set both
 ASR paths, and build the server with
-`scripts/cargo-lane shared -- cargo build -p margins-desktop --manifest-path
-desktop/src-tauri/Cargo.toml --no-default-features --features hosted-web --bin
-margins-server`. The runner repeats the WAV for 120 seconds so speech remains
+`scripts/cargo-lane shared -- cargo build -p margins-server --no-default-features
+--features parakeet-asr --bin margins-server`. The runner repeats the WAV for 120 seconds so speech remains
 available after a cold install, and creates `asr-runtime.json` under the disposable
 bb plugin host data directory,
-selecting the `hosted-web` server built above. It requests transcription of
+selecting the server built above. It requests transcription of
 the same browser session after Finish and requires at least one spoken timeline
 line; a memo-only live checkpoint is a failure. This lane makes no LLM call,
 but it requires ASR assets to prove that the meeting has real speech for the

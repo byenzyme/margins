@@ -722,6 +722,70 @@ impl StoredSessionV1 {
     pub fn next_event_sequence(&self) -> u64 {
         self.next_event_sequence
     }
+
+    /// Read-only durable capture state for producer adapters reopening after
+    /// a process or transport loss. Segment order follows the latest durable
+    /// audio or close boundary; IDs break ties deterministically.
+    pub fn segment_summaries(&self) -> Vec<StoredSegmentSummaryV1> {
+        let mut summaries = self
+            .segments
+            .iter()
+            .map(|(id, segment)| StoredSegmentSummaryV1 {
+                segment_id: id.clone().into(),
+                lanes: segment
+                    .lanes
+                    .iter()
+                    .map(|(lane_id, lane)| StoredLaneSummaryV1 {
+                        acknowledgement: lane.coverage.acknowledgement(id, lane_id),
+                        latest_end_ms: SessionMillis(lane.latest_end_ms),
+                    })
+                    .collect(),
+                close: segment.close.as_ref().map(|close| StoredSegmentCloseV1 {
+                    message_id: close.message_id.clone(),
+                    command: close.command.clone(),
+                    finalized: close.finalized,
+                }),
+            })
+            .collect::<Vec<_>>();
+        summaries.sort_by_key(|segment| {
+            (
+                segment
+                    .close
+                    .as_ref()
+                    .map_or(0, |close| close.command.ended_at_ms.0)
+                    .max(
+                        segment
+                            .lanes
+                            .iter()
+                            .map(|lane| lane.latest_end_ms.0)
+                            .max()
+                            .unwrap_or(0),
+                    ),
+                segment.segment_id.clone(),
+            )
+        });
+        summaries
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSegmentSummaryV1 {
+    pub segment_id: SegmentId,
+    pub lanes: Vec<StoredLaneSummaryV1>,
+    pub close: Option<StoredSegmentCloseV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredLaneSummaryV1 {
+    pub acknowledgement: AudioAcknowledgementV1,
+    pub latest_end_ms: SessionMillis,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSegmentCloseV1 {
+    pub message_id: MessageId,
+    pub command: CloseSegmentV1,
+    pub finalized: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

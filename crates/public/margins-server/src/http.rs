@@ -1,16 +1,9 @@
-// ---------------------------------------------------------------------------
-// http.rs — Axum route handlers for WP2
-// ---------------------------------------------------------------------------
+//! Typed Workspace HTTP routes over the shared service.
 
-use crate::ctx::Ctx;
-use crate::server::events::WsSink;
-use anyhow::Context as _;
+use crate::ServerState;
 use axum::{
     body::{Body, Bytes},
-    extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
-        DefaultBodyLimit, Multipart, Path, Query, Request, State,
-    },
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post, put},
@@ -23,57 +16,17 @@ use margins_meeting_protocol::{
     WorkspaceNoteAssociationUpdateV1, WorkspaceRenameV1, WorkspaceResponseV1,
     AUDIO_CHUNK_BATCH_CONTENT_TYPE_V1,
 };
-use margins_workflows::workspace_service::{
-    is_memo_revision_conflict, ScopedCredentialStore, ServicePrincipal, WorkspaceService,
-    OP_CAPTURE_WRITE, OP_MEMO_WRITE, OP_SESSION_CREATE, OP_SESSION_READ, OP_SESSION_WRITE,
-    OP_WORKSPACE_READ,
-};
+use margins_workflows::workspace_service::{ServicePrincipal, OP_SESSION_WRITE, OP_WORKSPACE_READ};
 use serde_json::{json, Value};
-use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
-
-// ---------------------------------------------------------------------------
-// Shared server state passed to every handler
-// ---------------------------------------------------------------------------
-
-#[derive(Clone)]
-pub struct ServerState {
-    pub ctx: Arc<CtxState>,
-    pub sink: Arc<WsSink>,
-    pub token: String,
-    pub workspace_service: Arc<WorkspaceService>,
-    pub credential_store: ScopedCredentialStore,
-    pub service_principal: ServicePrincipal,
-    pub asr_setup: super::asr_state::SpeechSetup,
-    #[cfg(any(
-        feature = "parakeet-asr",
-        all(feature = "coreml-asr", target_os = "macos")
-    ))]
-    pub remote_asr_jobs: super::remote_asr::RemoteAsrJobs,
-}
-
-/// Wrapper so `Ctx` (which is not Clone) lives behind an Arc.
-pub struct CtxState(pub Ctx);
-
-// ---------------------------------------------------------------------------
-// Build the router — all routes share the same ServerState
-// ---------------------------------------------------------------------------
 
 pub fn build_router(state: ServerState) -> Router {
     let health_cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
-
     Router::new()
-        // Health — no auth, permissive CORS
-        .route("/health", get(health_handler).layer(health_cors))
-        // Authenticated API — auth checked inside each handler
-        .route("/api/invoke/:command", post(invoke_handler))
-        .route("/api/audio/chunk", post(audio_chunk_handler))
-        .route("/api/live-audio/pcm", post(live_pcm_handler))
-        // Current Workspace authority API. Unlike /api/invoke, these routes
-        // are typed, explicitly Workspace-scoped, and use the shared service.
+        .route("/health", get(|| async { Json(json!({"ok": true})) }).layer(health_cors))
         .route("/v1/capabilities", get(workspace_capabilities))
         .route("/v1/workspaces/:workspace/speech-setup", get(workspace_speech_setup).post(workspace_retry_speech_setup))
         .route("/v1/workspaces/:workspace", get(workspace_summary))
@@ -161,6 +114,40 @@ pub fn build_router(state: ServerState) -> Router {
             post(workspace_request_transcription),
         )
         .route(
+            "/v1/workspaces/:workspace/browser/sessions",
+            post(crate::browser::start),
+        )
+        .route(
+            "/v1/workspaces/:workspace/browser/sessions/:recording/snapshot",
+            get(crate::browser::snapshot),
+        )
+        .route(
+            "/v1/workspaces/:workspace/browser/sessions/:recording/pause",
+            post(crate::browser::pause),
+        )
+        .route(
+            "/v1/workspaces/:workspace/browser/sessions/:recording/resume",
+            post(crate::browser::resume),
+        )
+        .route(
+            "/v1/workspaces/:workspace/browser/sessions/:recording/heartbeat",
+            post(crate::browser::heartbeat),
+        )
+        .route(
+            "/v1/workspaces/:workspace/browser/sessions/:recording/stop",
+            post(crate::browser::stop),
+        )
+        .route(
+            "/v1/workspaces/:workspace/browser/sessions/:recording/finish-incomplete",
+            post(crate::browser::finish_incomplete),
+        )
+        .route(
+            "/v1/workspaces/:workspace/browser/sessions/:recording/chunks/:sequence",
+            put(crate::browser::chunk).layer(DefaultBodyLimit::max(
+                margins_workflows::workspace_service::DEFAULT_MAX_CHUNK_BYTES as usize,
+            )),
+        )
+        .route(
             "/v1/workspaces/:workspace/imports",
             post(workspace_multipart_import).layer(DefaultBodyLimit::max(
                 margins_workflows::workspace_service::DEFAULT_MAX_IMPORT_BYTES as usize
@@ -175,42 +162,6 @@ pub fn build_router(state: ServerState) -> Router {
                     margins_workflows::workspace_service::DEFAULT_MAX_IMPORT_BYTES as usize,
                 )),
         )
-        .route(
-            "/v1/workspaces/:workspace/browser/sessions",
-            post(browser_start),
-        )
-        .route(
-            "/v1/workspaces/:workspace/browser/sessions/:recording/snapshot",
-            get(browser_snapshot),
-        )
-        .route(
-            "/v1/workspaces/:workspace/browser/sessions/:recording/pause",
-            post(browser_pause),
-        )
-        .route(
-            "/v1/workspaces/:workspace/browser/sessions/:recording/resume",
-            post(browser_resume),
-        )
-        .route(
-            "/v1/workspaces/:workspace/browser/sessions/:recording/heartbeat",
-            post(browser_heartbeat),
-        )
-        .route(
-            "/v1/workspaces/:workspace/browser/sessions/:recording/stop",
-            post(browser_stop),
-        )
-        .route(
-            "/v1/workspaces/:workspace/browser/sessions/:recording/notepad",
-            put(browser_notepad),
-        )
-        .route(
-            "/v1/workspaces/:workspace/browser/sessions/:recording/chunks/:sequence",
-            put(browser_chunk),
-        )
-        // WebSocket — token auth via ?token= query param
-        .route("/ws/events", get(ws_handler))
-        // SPA static assets — no auth, token injected into index.html
-        .fallback(assets_fallback)
         .with_state(state)
 }
 
@@ -252,13 +203,14 @@ fn workspace_auth(
         })
 }
 
-fn workspace_auth_operation(
+pub(crate) fn workspace_auth_operation(
     state: &ServerState,
     headers: &HeaderMap,
     workspace: &str,
     operation: &str,
 ) -> Result<ServicePrincipal, Response> {
     let principal = workspace_auth(state, headers, Some(workspace))?;
+    workspace_instance_fence(state, headers)?;
     principal
         .require(state.workspace_service.workspace_id(), operation)
         .map_err(|_| {
@@ -296,7 +248,7 @@ fn workspace_instance_fence(state: &ServerState, headers: &HeaderMap) -> Result<
     Ok(())
 }
 
-fn workspace_ok<T: serde::Serialize>(value: T) -> Response {
+pub(crate) fn workspace_ok<T: serde::Serialize>(value: T) -> Response {
     Json(WorkspaceResponseV1 {
         ok: true,
         result: Some(value),
@@ -305,7 +257,7 @@ fn workspace_ok<T: serde::Serialize>(value: T) -> Response {
     .into_response()
 }
 
-fn workspace_error(
+pub(crate) fn workspace_error(
     status: StatusCode,
     code: &str,
     retryable: bool,
@@ -327,10 +279,9 @@ fn workspace_error(
         .into_response()
 }
 
-fn service_error(error: anyhow::Error) -> Response {
+pub(crate) fn service_error(error: anyhow::Error) -> Response {
     let message = error.to_string();
-    let (status, code) = if is_memo_revision_conflict(&error)
-        || message.contains("revision conflict")
+    let (status, code) = if message.contains("revision conflict")
         || message.contains("changed somewhere else")
         || message.contains("different content")
         || message.contains("already has")
@@ -376,7 +327,12 @@ async fn workspace_capabilities(State(state): State<ServerState>, headers: Heade
     state
         .workspace_service
         .capabilities(&principal)
-        .map(workspace_ok)
+        .map(|capabilities| {
+            let mut value =
+                serde_json::to_value(capabilities).expect("Workspace capabilities serialize");
+            value["capture_protocol_version"] = json!(crate::HOSTED_CAPTURE_PROTOCOL_VERSION);
+            workspace_ok(value)
+        })
         .unwrap_or_else(service_error)
 }
 
@@ -401,31 +357,23 @@ async fn workspace_retry_speech_setup(
     {
         return response;
     }
-    #[cfg(any(
-        feature = "parakeet-asr",
-        all(feature = "coreml-asr", target_os = "macos")
-    ))]
-    {
-        return state
-            .asr_setup
-            .start(
-                state.workspace_service.clone(),
-                state.service_principal.clone(),
-                state.remote_asr_jobs.clone(),
-            )
-            .map(|_| workspace_ok(state.asr_setup.snapshot()))
-            .unwrap_or_else(service_error);
+    if !crate::asr::supported() {
+        return workspace_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "asr_unavailable",
+            false,
+            "This server cannot transcribe recordings",
+        );
     }
-    #[cfg(not(any(
-        feature = "parakeet-asr",
-        all(feature = "coreml-asr", target_os = "macos")
-    )))]
-    workspace_error(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "asr_unavailable",
-        false,
-        "This server cannot transcribe recordings",
-    )
+    state
+        .asr_setup
+        .start(
+            state.workspace_service.clone(),
+            state.service_principal.clone(),
+            state.remote_asr_jobs.clone(),
+        )
+        .map(|_| workspace_ok(state.asr_setup.snapshot()))
+        .unwrap_or_else(service_error)
 }
 
 async fn workspace_summary(
@@ -639,31 +587,9 @@ async fn workspace_session_command(
             "Missing producer token",
         );
     };
-    let finalized = matches!(&command.body, ClientMessageBodyV1::FinalizeSession(_));
     let result = state
         .workspace_service
         .execute_capture(&principal, token, command);
-    #[cfg(any(
-        feature = "parakeet-asr",
-        all(feature = "coreml-asr", target_os = "macos")
-    ))]
-    if finalized && result.is_ok() && state.workspace_service.asr_available() {
-        if let Ok(Some(job)) = state
-            .workspace_service
-            .latest_job(&state.service_principal, &SessionId(session))
-        {
-            state.remote_asr_jobs.schedule(
-                state.workspace_service.clone(),
-                state.service_principal.clone(),
-                job,
-            );
-        }
-    }
-    #[cfg(not(any(
-        feature = "parakeet-asr",
-        all(feature = "coreml-asr", target_os = "macos")
-    )))]
-    let _ = finalized;
     result.map(workspace_ok).unwrap_or_else(service_error)
 }
 
@@ -963,19 +889,73 @@ async fn workspace_memo(
         .unwrap_or_else(service_error)
 }
 
+#[derive(serde::Deserialize)]
+struct WorkspaceMemoHttpUpdate {
+    request_id: String,
+    expected_revision: String,
+    /// Omitted by browser clients so the server stamps memo and audio on its
+    /// own clock. Native capture may still provide an exact device offset.
+    observed_at_ms: Option<SessionMillis>,
+    paused: bool,
+    text: String,
+}
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 async fn workspace_update_memo(
     State(state): State<ServerState>,
     Path((workspace, session)): Path<(String, String)>,
     headers: HeaderMap,
-    Json(request): Json<WorkspaceMemoUpdateV1>,
+    Json(request): Json<WorkspaceMemoHttpUpdate>,
 ) -> Response {
     let principal = match workspace_auth(&state, &headers, Some(&workspace)) {
         Ok(value) => value,
         Err(response) => return response,
     };
+    let session_id = SessionId(session);
+    let observed_at_ms = match request.observed_at_ms {
+        Some(value) => value,
+        None => {
+            let summary = match state.workspace_service.session(&principal, &session_id) {
+                Ok(value) => value,
+                Err(error) => return service_error(error),
+            };
+            let started = match chrono::DateTime::parse_from_rfc3339(&summary.started_at) {
+                Ok(value) => value.timestamp_millis().max(0) as u64,
+                Err(_) => {
+                    return workspace_error(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "invalid_session_time",
+                        false,
+                        "Meeting start time is invalid",
+                    )
+                }
+            };
+            let observed = now_unix_ms().saturating_sub(started);
+            SessionMillis(if summary.input_finalized {
+                summary
+                    .capture_duration_ms
+                    .map_or(observed, |duration| observed.min(duration.0))
+            } else {
+                observed
+            })
+        }
+    };
+    let update = WorkspaceMemoUpdateV1 {
+        request_id: request.request_id,
+        expected_revision: request.expected_revision,
+        observed_at_ms,
+        paused: request.paused,
+        text: request.text,
+    };
     state
         .workspace_service
-        .update_memo(&principal, &SessionId(session), &request)
+        .update_memo(&principal, &session_id, &update)
         .map(workspace_ok)
         .unwrap_or_else(service_error)
 }
@@ -1086,9 +1066,6 @@ async fn workspace_request_transcription(
         Ok(value) => value,
         Err(response) => return response,
     };
-    if let Err(response) = workspace_instance_fence(&state, &headers) {
-        return response;
-    }
     let job = match state
         .workspace_service
         .request_transcription_job(&principal, &SessionId(session))
@@ -1096,10 +1073,6 @@ async fn workspace_request_transcription(
         Ok(value) => value,
         Err(error) => return service_error(error),
     };
-    #[cfg(any(
-        feature = "parakeet-asr",
-        all(feature = "coreml-asr", target_os = "macos")
-    ))]
     if state.workspace_service.asr_available() {
         state.remote_asr_jobs.schedule(
             state.workspace_service.clone(),
@@ -1244,668 +1217,4 @@ async fn workspace_import_receipt(
         .import_receipt(&principal, &upload)
         .map(workspace_ok)
         .unwrap_or_else(service_error)
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct BrowserOwnerBody {
-    owner_id: String,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct BrowserStartBody {
-    owner_id: String,
-    name: String,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct BrowserNotepadBody {
-    owner_id: String,
-    expected_revision: String,
-    text: String,
-}
-
-fn browser_snapshot_value(
-    state: &ServerState,
-    recording: &str,
-    owner: &str,
-) -> anyhow::Result<Value> {
-    let status = crate::web_session::web_recording_status_by_id(&state.ctx.0.state, recording)
-        .context("hosted recording not found")?;
-    let notepad =
-        crate::web_session::get_web_recording_notepad(&state.ctx.0.state, recording, owner)
-            .map_err(anyhow::Error::msg)?;
-    Ok(json!({
-        "recordingId": recording,
-        "sessionId": status.session_name,
-        "status": if status.capture_phase == "finalizing" { "saving" } else if status.paused { "paused" } else { "recording" },
-        "notepad": notepad,
-    }))
-}
-
-async fn browser_start(
-    State(state): State<ServerState>,
-    Path(workspace): Path<String>,
-    headers: HeaderMap,
-    Json(body): Json<BrowserStartBody>,
-) -> Response {
-    if let Err(response) = workspace_auth_operation(&state, &headers, &workspace, OP_SESSION_CREATE)
-    {
-        return response;
-    }
-    if let Err(response) = workspace_auth_operation(&state, &headers, &workspace, OP_CAPTURE_WRITE)
-    {
-        return response;
-    }
-    if let Err(error) = crate::validate_session_name(&body.name) {
-        return service_error(anyhow::anyhow!(error));
-    }
-    let work_dir = state.ctx.0.state.work_dir.lock().unwrap().clone();
-    let margins_dir = work_dir.join(".margins");
-    if let Err(error) = std::fs::create_dir_all(&margins_dir) {
-        return service_error(error.into());
-    }
-    let name = crate::unique_session_name(&work_dir, &margins_dir, &body.name);
-    match crate::web_session::start_web_recording(
-        &state.ctx.0.state,
-        work_dir,
-        name,
-        body.owner_id.clone(),
-    ) {
-        Ok(started) => browser_snapshot_value(&state, &started.recording_id, &body.owner_id)
-            .map(workspace_ok)
-            .unwrap_or_else(service_error),
-        Err(error) => service_error(anyhow::anyhow!(error)),
-    }
-}
-
-async fn browser_snapshot(
-    State(state): State<ServerState>,
-    Path((workspace, recording)): Path<(String, String)>,
-    Query(owner): Query<BrowserOwnerBody>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err(response) = workspace_auth_operation(&state, &headers, &workspace, OP_SESSION_READ) {
-        return response;
-    }
-    browser_snapshot_value(&state, &recording, &owner.owner_id)
-        .map(workspace_ok)
-        .unwrap_or_else(service_error)
-}
-
-fn browser_pause_value(
-    state: &ServerState,
-    recording: &str,
-    owner: &str,
-    paused: bool,
-) -> anyhow::Result<Value> {
-    crate::web_session::set_web_recording_paused(&state.ctx.0.state, recording, owner, paused)
-        .map_err(anyhow::Error::msg)?;
-    browser_snapshot_value(state, recording, owner)
-}
-
-async fn browser_pause(
-    State(state): State<ServerState>,
-    Path((workspace, recording)): Path<(String, String)>,
-    headers: HeaderMap,
-    Json(owner): Json<BrowserOwnerBody>,
-) -> Response {
-    if let Err(response) = workspace_auth_operation(&state, &headers, &workspace, OP_CAPTURE_WRITE)
-    {
-        return response;
-    }
-    browser_pause_value(&state, &recording, &owner.owner_id, true)
-        .map(workspace_ok)
-        .unwrap_or_else(service_error)
-}
-
-async fn browser_resume(
-    State(state): State<ServerState>,
-    Path((workspace, recording)): Path<(String, String)>,
-    headers: HeaderMap,
-    Json(owner): Json<BrowserOwnerBody>,
-) -> Response {
-    if let Err(response) = workspace_auth_operation(&state, &headers, &workspace, OP_CAPTURE_WRITE)
-    {
-        return response;
-    }
-    browser_pause_value(&state, &recording, &owner.owner_id, false)
-        .map(workspace_ok)
-        .unwrap_or_else(service_error)
-}
-
-async fn browser_heartbeat(
-    State(state): State<ServerState>,
-    Path((workspace, recording)): Path<(String, String)>,
-    headers: HeaderMap,
-    Json(owner): Json<BrowserOwnerBody>,
-) -> Response {
-    if let Err(response) = workspace_auth_operation(&state, &headers, &workspace, OP_CAPTURE_WRITE)
-    {
-        return response;
-    }
-    match crate::web_session::heartbeat_web_recording(
-        &state.ctx.0.state,
-        &recording,
-        &owner.owner_id,
-    ) {
-        Ok(()) => browser_snapshot_value(&state, &recording, &owner.owner_id)
-            .map(workspace_ok)
-            .unwrap_or_else(service_error),
-        Err(error) => service_error(anyhow::anyhow!(error)),
-    }
-}
-
-async fn browser_stop(
-    State(state): State<ServerState>,
-    Path((workspace, recording)): Path<(String, String)>,
-    headers: HeaderMap,
-    Json(owner): Json<BrowserOwnerBody>,
-) -> Response {
-    if let Err(response) = workspace_auth_operation(&state, &headers, &workspace, OP_CAPTURE_WRITE)
-    {
-        return response;
-    }
-    let app = state.ctx.0.state.clone();
-    match tokio::task::spawn_blocking(move || {
-        crate::web_session::stop_web_recording(&app, &recording, &owner.owner_id)
-    })
-    .await
-    {
-        Ok(Ok(session_id)) => workspace_ok(json!({"sessionId":session_id, "inputFinalized":true})),
-        Ok(Err(error)) => service_error(anyhow::anyhow!(error)),
-        Err(error) => service_error(error.into()),
-    }
-}
-
-async fn browser_notepad(
-    State(state): State<ServerState>,
-    Path((workspace, recording)): Path<(String, String)>,
-    headers: HeaderMap,
-    Json(body): Json<BrowserNotepadBody>,
-) -> Response {
-    if let Err(response) = workspace_auth_operation(&state, &headers, &workspace, OP_MEMO_WRITE) {
-        return response;
-    }
-    match crate::web_session::update_web_recording_notepad(
-        &state.ctx.0.state,
-        &recording,
-        &body.owner_id,
-        &body.expected_revision,
-        &body.text,
-    ) {
-        Ok(_) => browser_snapshot_value(&state, &recording, &body.owner_id)
-            .map(workspace_ok)
-            .unwrap_or_else(service_error),
-        Err(error) => service_error(anyhow::anyhow!(error)),
-    }
-}
-
-async fn browser_chunk(
-    State(state): State<ServerState>,
-    Path((workspace, recording, sequence)): Path<(String, String, u64)>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    if let Err(response) = workspace_auth_operation(&state, &headers, &workspace, OP_CAPTURE_WRITE)
-    {
-        return response;
-    }
-    let Some(owner) = capture_owner(&headers) else {
-        return workspace_error(
-            StatusCode::UNAUTHORIZED,
-            "owner_required",
-            false,
-            "Missing capture owner",
-        );
-    };
-    match crate::web_session::handle_audio_chunk(
-        &state.ctx.0.state,
-        &recording,
-        owner,
-        sequence,
-        &body,
-    ) {
-        Ok(()) => workspace_ok(json!({"sequence":sequence, "durable":true})),
-        Err(error) => service_error(anyhow::anyhow!(error)),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Auth helper — used inside handlers that need bearer auth
-// ---------------------------------------------------------------------------
-
-fn check_bearer(headers: &HeaderMap, expected: &str) -> bool {
-    headers
-        .get("Authorization")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v == format!("Bearer {}", expected))
-        .unwrap_or(false)
-}
-
-fn capture_owner(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get("X-Margins-Capture-Owner")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
-}
-
-fn capture_recording_id(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get("X-Margins-Recording-Id")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
-}
-
-fn capture_protocol_is_current(headers: &HeaderMap) -> bool {
-    headers
-        .get("X-Margins-Capture-Protocol")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u8>().ok())
-        == Some(crate::web_session::HOSTED_CAPTURE_PROTOCOL_VERSION)
-}
-
-fn capture_protocol_error() -> Response {
-    Json(json!({
-        "ok": false,
-        "error": format!(
-            "Hosted capture protocol changed to v{}; reload this browser tab before recording.",
-            crate::web_session::HOSTED_CAPTURE_PROTOCOL_VERSION
-        )
-    }))
-    .into_response()
-}
-
-fn hosted_capture_command(command: &str) -> bool {
-    matches!(
-        command,
-        "start_recording"
-            | "stop_recording"
-            | "discard_recording"
-            | "pause_recording"
-            | "resume_recording"
-            | "get_web_recording_status"
-            | "list_web_recording_recoveries"
-            | "sync_memo"
-            | "checkpoint_memo_line"
-            | "heartbeat_web_recording"
-            | "claim_web_recording_recovery"
-            | "hydrate_web_recording_memo"
-            | "update_web_recording_notepad"
-            | "get_web_recording_notepad"
-            | "request_backchannel_for_memo"
-            | "steer_backchannel_for_memo"
-    )
-}
-
-// ---------------------------------------------------------------------------
-// Handlers
-// ---------------------------------------------------------------------------
-
-/// GET /health — no auth
-async fn health_handler() -> Json<Value> {
-    Json(json!({
-        "status": "ok",
-        "version": env!("CARGO_PKG_VERSION"),
-        "workspace_protocol": 1,
-    }))
-}
-
-/// POST /api/invoke/{command} — dispatch to the shared command router
-async fn invoke_handler(
-    State(state): State<ServerState>,
-    Path(command): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    if !check_bearer(&headers, &state.token) {
-        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
-    }
-    if hosted_capture_command(&command) && !capture_protocol_is_current(&headers) {
-        return capture_protocol_error();
-    }
-
-    let args: Value = if body.is_empty() {
-        Value::Object(Default::default())
-    } else {
-        match serde_json::from_slice(&body) {
-            Ok(v) => v,
-            Err(e) => {
-                return Json(json!({ "ok": false, "error": format!("invalid JSON body: {e}") }))
-                    .into_response();
-            }
-        }
-    };
-
-    let ctx = &state.ctx.0;
-    match crate::dispatch::dispatch(ctx, &command, args).await {
-        Ok(result) => Json(json!({ "ok": true, "result": result })).into_response(),
-        Err(e) => Json(json!({ "ok": false, "error": e })).into_response(),
-    }
-}
-
-#[derive(serde::Deserialize)]
-struct LivePcmQuery {
-    channel: Option<String>,
-    sample_rate: Option<u32>,
-}
-
-/// POST raw little-endian f32 PCM into the continuously decoding Linux worker.
-async fn live_pcm_handler(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-    Query(query): Query<LivePcmQuery>,
-    body: Bytes,
-) -> Response {
-    if !check_bearer(&headers, &state.token) {
-        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
-    }
-    if !capture_protocol_is_current(&headers) {
-        return capture_protocol_error();
-    }
-    let Some(recording_id) = capture_recording_id(&headers) else {
-        return Json(json!({ "ok": false, "error": "missing X-Margins-Recording-Id header" }))
-            .into_response();
-    };
-    let Some(owner_id) = capture_owner(&headers) else {
-        return Json(json!({ "ok": false, "error": "missing X-Margins-Capture-Owner header" }))
-            .into_response();
-    };
-    let channel = match query.channel.as_deref().unwrap_or("mic") {
-        "mic" => margins::recorder::LiveAudioChannel::Mic,
-        "system" => margins::recorder::LiveAudioChannel::System,
-        other => {
-            return Json(json!({ "ok": false, "error": format!("unknown channel: {other}") }))
-                .into_response();
-        }
-    };
-    let sample_rate = query.sample_rate.unwrap_or(16_000);
-    match crate::web_session::handle_live_pcm_chunk(
-        &state.ctx.0.state,
-        recording_id,
-        owner_id,
-        channel,
-        sample_rate,
-        &body,
-    ) {
-        Ok(()) => Json(json!({ "ok": true })).into_response(),
-        Err(error) => Json(json!({ "ok": false, "error": error })).into_response(),
-    }
-}
-
-/// POST /api/audio/chunk — append a browser webm/opus chunk. Both the
-/// non-secret recording ID and secret owner capability stay out of URLs/logs.
-async fn audio_chunk_handler(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    if !check_bearer(&headers, &state.token) {
-        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
-    }
-    if !capture_protocol_is_current(&headers) {
-        return capture_protocol_error();
-    }
-
-    let Some(recording_id) = capture_recording_id(&headers) else {
-        return Json(json!({ "ok": false, "error": "missing X-Margins-Recording-Id header" }))
-            .into_response();
-    };
-    let Some(owner_id) = capture_owner(&headers) else {
-        return Json(json!({ "ok": false, "error": "missing X-Margins-Capture-Owner header" }))
-            .into_response();
-    };
-    let Some(sequence) = headers
-        .get("X-Margins-Chunk-Sequence")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-    else {
-        return Json(
-            json!({ "ok": false, "error": "missing or invalid X-Margins-Chunk-Sequence header" }),
-        )
-        .into_response();
-    };
-
-    match crate::web_session::handle_audio_chunk(
-        &state.ctx.0.state,
-        recording_id,
-        owner_id,
-        sequence,
-        &body,
-    ) {
-        Ok(()) => Json(json!({ "ok": true })).into_response(),
-        Err(e) => Json(json!({ "ok": false, "error": e })).into_response(),
-    }
-}
-
-/// Fallback: serve embedded static assets with SPA index.html fallback.
-async fn assets_fallback(State(state): State<ServerState>, request: Request) -> Response {
-    crate::server::assets::serve_asset(request.uri().path(), &state.token)
-}
-
-// ---------------------------------------------------------------------------
-// WebSocket handler
-// ---------------------------------------------------------------------------
-
-#[derive(serde::Deserialize)]
-struct WsQuery {
-    token: Option<String>,
-}
-
-/// GET /ws/events — token auth via ?token= query param, then upgrade
-async fn ws_handler(
-    State(state): State<ServerState>,
-    Query(query): Query<WsQuery>,
-    ws: WebSocketUpgrade,
-) -> Response {
-    let provided = query.token.unwrap_or_default();
-    if provided != state.token {
-        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
-    }
-
-    let sink = state.sink.clone();
-    ws.on_upgrade(move |socket| handle_ws(socket, sink))
-}
-
-async fn handle_ws(mut socket: WebSocket, sink: Arc<WsSink>) {
-    let mut rx = sink.subscribe();
-    loop {
-        tokio::select! {
-            // Forward broadcast events to the WebSocket client
-            msg = rx.recv() => {
-                match msg {
-                    Ok(text) => {
-                        if socket.send(Message::Text(text.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        // Slow consumer — skip missed messages, keep going
-                    }
-                }
-            }
-            // Handle client messages (ping/close)
-            client_msg = socket.recv() => {
-                match client_msg {
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Ok(Message::Ping(data))) => {
-                        let _ = socket.send(Message::Pong(data)).await;
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-}
-
-#[cfg(all(
-    test,
-    any(
-        feature = "parakeet-asr",
-        all(feature = "coreml-asr", target_os = "macos")
-    )
-))]
-mod remote_finalize_authority_tests {
-    use super::*;
-    use axum::http::{header::AUTHORIZATION, HeaderValue};
-    use margins_meeting_protocol::{
-        ClientMessageBodyV1, SegmentCloseReasonV1, SessionFinalizeReasonV1,
-    };
-    use margins_workflows::{
-        remote_workspace::{
-            native_create_session_command, DurableTransferSpool, NativeRemoteLane,
-            NativeRemoteTransfer,
-        },
-        workspace::ensure_service_workspace,
-        workspace_service::{OP_CAPTURE_WRITE, OP_SESSION_CREATE},
-    };
-
-    #[tokio::test]
-    async fn capture_only_http_finalize_schedules_with_internal_service_principal() {
-        let temp = tempfile::tempdir().unwrap();
-        let notes = temp.path().join("notes");
-        let captures = temp.path().join("captures");
-        std::fs::create_dir_all(&notes).unwrap();
-        let workspace = ensure_service_workspace(
-            &temp.path().join("home"),
-            "http-authority",
-            Some("HTTP authority"),
-            &notes,
-            &captures,
-        )
-        .unwrap();
-        let service = Arc::new(
-            WorkspaceService::open_with_capabilities(
-                "http-authority-instance",
-                workspace,
-                true,
-                false,
-            )
-            .unwrap(),
-        );
-        let capture = ServicePrincipal::scoped(
-            "capture-only",
-            ["http-authority".to_string()],
-            [OP_SESSION_CREATE.to_string(), OP_CAPTURE_WRITE.to_string()],
-        );
-        let internal = ServicePrincipal::full("service-internal", "http-authority");
-        let session = SessionId("http-capture-finalize".into());
-        let reservation = service
-            .reserve_session(
-                &capture,
-                native_create_session_command(
-                    session.as_ref(),
-                    "http-capture-finalize",
-                    None,
-                    "test",
-                ),
-            )
-            .unwrap();
-        let spool = DurableTransferSpool::create(
-            &temp.path().join("spool"),
-            "http-capture-finalize",
-            "http-authority-instance",
-            "https://fixture.invalid",
-            "http-authority",
-            session.as_ref(),
-            &reservation.producer_token,
-            0,
-        )
-        .unwrap();
-        let mut transfer = NativeRemoteTransfer::new(spool);
-        transfer.begin_segment("segment".into(), 0).unwrap();
-        for lane in [NativeRemoteLane::Microphone, NativeRemoteLane::System] {
-            transfer
-                .append_s16le(lane, 16_000, &vec![0; 3_200])
-                .unwrap();
-        }
-        let close = transfer.close_segment(SegmentCloseReasonV1::Stop).unwrap();
-        let ended_at_ms = match &close.body {
-            ClientMessageBodyV1::CloseSegment(close) => close.ended_at_ms.0,
-            _ => unreachable!(),
-        };
-        let finalize = transfer
-            .seal_session(ended_at_ms, SessionFinalizeReasonV1::Completed)
-            .unwrap();
-        for chunk in transfer.spool().pending_chunks().unwrap() {
-            service
-                .execute_capture(&capture, &reservation.producer_token, chunk.command)
-                .unwrap();
-        }
-        service
-            .execute_capture(&capture, &reservation.producer_token, close)
-            .unwrap();
-
-        let credentials =
-            ScopedCredentialStore::open(temp.path().join("credentials.json")).unwrap();
-        credentials
-            .register(
-                "capture-only",
-                "capture-token",
-                vec!["http-authority".to_string()],
-                vec![OP_CAPTURE_WRITE.to_string()],
-                None,
-            )
-            .unwrap();
-        let sink = Arc::new(WsSink::new(8));
-        let ctx = crate::ctx::Ctx {
-            state: crate::build_app_state(
-                temp.path().join("work"),
-                crate::settings::Settings::default(),
-            ),
-            sink: sink.clone(),
-        };
-        let state = ServerState {
-            ctx: Arc::new(CtxState(ctx)),
-            sink,
-            token: "unused-admin-token".to_string(),
-            workspace_service: service.clone(),
-            credential_store: credentials,
-            service_principal: internal.clone(),
-            asr_setup: super::super::asr_state::SpeechSetup::new(true, true),
-            remote_asr_jobs: super::super::remote_asr::RemoteAsrJobs::default(),
-        };
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_static("Bearer capture-token"),
-        );
-        headers.insert(
-            "X-Margins-Producer-Token",
-            HeaderValue::from_str(&reservation.producer_token).unwrap(),
-        );
-        headers.insert(
-            "X-Margins-Instance-Id",
-            HeaderValue::from_static("http-authority-instance"),
-        );
-        assert!(service.latest_job(&capture, &session).is_err());
-        let response = workspace_session_command(
-            State(state),
-            Path(("http-authority".to_string(), session.as_ref().to_string())),
-            headers,
-            Json(finalize),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            let job = service.latest_job(&internal, &session).unwrap().unwrap();
-            if job.status != "queued" {
-                assert!(matches!(
-                    job.status.as_str(),
-                    "running" | "complete" | "failed"
-                ));
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "internal scheduler never claimed the durable job"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    }
 }

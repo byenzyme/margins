@@ -108,6 +108,11 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   const [nativeStatus, setNativeStatus] = useState(() => nativeBridgeOwner.status);
   const [nativeConnectionError, setNativeConnectionError] = useState(() => nativeBridgeOwner.connectionError);
   const [panel, setPanel] = useState<PanelState | null>(null);
+  const [, setCaptureVersion] = useState(0);
+  useEffect(() => {
+    const unsubscribe = browserCaptureOwner.subscribe(() => setCaptureVersion((version) => version + 1));
+    return () => { unsubscribe(); };
+  }, []);
   const [meetings, setMeetings] = useState<WorkspaceMeetingSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(() => subPath.split("/")[1] || null);
   const [meeting, setMeeting] = useState<WorkspaceMeeting | null>(() => openedMeetings.get(`${projectId}/${selectedId}`) || null);
@@ -402,6 +407,14 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
       return true;
     } catch (error) { setMessage(String(error)); return false; }
   }
+  async function settleIncompleteCapture() {
+    try {
+      const result = browserCaptureOwner.canFinishIncomplete
+        ? await browserCaptureOwner.finishIncomplete() : await browserCaptureOwner.retryPendingStop();
+      if (result?.error) setMessage(result.error.message);
+      else if (result?.state === "saved") { setMessage(""); await refresh(); }
+    } catch (error) { setMessage(String(error)); }
+  }
   async function start() {
     if (!projectId) return;
     if (nativeBridgeOwner.paired) {
@@ -643,6 +656,12 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   const threadLinks = selected?.threadLinks?.length ? selected.threadLinks
     : (selected?.threadIds || []).map((id) => ({ id, title: "Meeting note thread" }));
   const shownTranscript = transcriptStatus?.sessionId === selectedId ? transcriptStatus.state : "checking";
+  const localCapturePanel = browserCaptureOwner.panel();
+  const pendingBrowserStop = Boolean(selected && browserCaptureOwner.hasPendingStop
+    && browserCaptureOwner.recordingId === selected.sessionId);
+  const missingAudio = selected?.captureGaps?.map((gap) => gap.endExclusive > gap.startSequence
+    ? `${gap.segmentId}: ${gap.startSequence}–${gap.endExclusive - 1}`
+    : `${gap.segmentId}: capture interrupted`).join(", ");
   const groups = [["Live", live], ["Preparing note", preparing], ["Ready to refine", ready], ["Distilled", distilled], ["Archived", showArchived ? archived : []]] as const;
   return <main className="margins-meetings-page">
     <aside className="margins-meeting-list">
@@ -654,7 +673,8 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
       {groups.map(([label, items]) => items.length > 0 && <section key={label}>
         <h3>{label}</h3>{items.map((item) => <button key={item.sessionId} className={item.sessionId === selectedId ? "selected" : ""}
           onClick={() => void choose(item.sessionId)}><span>{item.title || meetingListTitle(item.startedAt)}</span>
-          {!item.inputFinalized && pausedSession(item.sessionId) && <small>Paused</small>}</button>)}
+          {!item.inputFinalized && pausedSession(item.sessionId) && <small>Paused</small>}
+          {item.captureIncomplete && <small>Incomplete</small>}</button>)}
       </section>)}
       {archived.length > 0 && <button className="margins-archive-toggle" onClick={() => {
         if (showArchived && selected?.archived) {
@@ -756,6 +776,15 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
         {!selected.inputFinalized && !selected.originProjectId && audioStartingId !== selected.sessionId
           && nativeStatus?.sessionId === selected.sessionId &&
           <p className="margins-workspace-notice">Taking notes on the meeting already recording in Margins Menu.</p>}
+        {pendingBrowserStop && <div className="margins-workspace-notice" role="alert">
+          <span>{localCapturePanel?.error?.message || "Some browser audio may be missing."}</span>
+          {(browserCaptureOwner.canFinishIncomplete || localCapturePanel?.primaryAction === "retry") && <button onClick={() => void settleIncompleteCapture()}>
+            {browserCaptureOwner.canFinishIncomplete ? "Finish with what was saved" : "Try again"}
+          </button>}
+        </div>}
+        {selected.captureIncomplete && <p className="margins-workspace-notice" role="alert">
+          Recording incomplete. {missingAudio ? `Audio gaps: ${missingAudio}.` : "Some audio could not be decoded or saved."}
+        </p>}
         {audioStartingId === selected.sessionId && nativeStatus?.state === "needs_attention" &&
           <p role="alert">{nativeStatus.error || "Margins Menu could not start recording."}</p>}
         <textarea ref={memoRef} aria-label="Meeting memo pad" placeholder="Write notes..." value={draft} onChange={(event) => { dirty.current = true; latestDraft.current = event.target.value; setDraft(event.target.value); setMessage(""); }} onBlur={() => void saveMemo().catch((error) => setMessage(String(error)))} />
@@ -764,7 +793,10 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
             {shownTranscript === "ready" && <button onClick={() => void viewTranscript()}>{transcriptOpen ? "Hide transcript" : "View transcript"}</button>}
             {(shownTranscript === "failed" || shownTranscript === "not_ready") && <button disabled={speechSetup?.state === "preparing"} onClick={() => void retryTranscription()}>{shownTranscript === "failed" ? "Retry" : "Transcribe"}</button>}
           </div>}
-          {transcriptOpen && <div className="margins-meeting-transcript" aria-label="Meeting transcript">{transcriptBody || "Transcript is empty."}</div>}
+          {transcriptOpen && <div className="margins-meeting-transcript" aria-label="Meeting transcript">
+            {selected.captureIncomplete && <p>Incomplete transcript: some recorded audio is missing.</p>}
+            {transcriptBody || "Transcript is empty."}
+          </div>}
           {memoChangedSinceNote && <span>Note uses an earlier memo revision</span>}
           {selected.inputFinalized && <div className="margins-meeting-next">
             {noteAction && <button disabled={noteBusy} onClick={() => void distill()}>{noteBusy ? "Starting note thread…" : selected.notePath ? "Update note" : selected.threadIds?.length ? "Open note thread" : "Make note"} →</button>}

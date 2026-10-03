@@ -86,6 +86,15 @@ pub struct SessionArtifact {
     pub expires_at: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionProcessingGap {
+    pub session_name: String,
+    pub segment_id: String,
+    pub start_sequence: u64,
+    pub end_exclusive: u64,
+    pub reason: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionArtifactPathUpdate {
     pub session_name: String,
@@ -253,6 +262,16 @@ fn init_schema(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_session_processing_jobs_session
             ON session_processing_jobs(session_name, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS session_processing_gaps (
+            session_name TEXT NOT NULL,
+            segment_id TEXT NOT NULL,
+            start_sequence INTEGER NOT NULL,
+            end_exclusive INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            PRIMARY KEY (session_name, segment_id, start_sequence, end_exclusive, reason),
+            FOREIGN KEY (session_name) REFERENCES sessions(name) ON DELETE CASCADE
+        );
 
         CREATE INDEX IF NOT EXISTS idx_session_segments_session
             ON session_segments(session_name, segment_index);
@@ -1201,6 +1220,47 @@ fn list_session_artifacts_with_connection(
         artifacts.push(row.context("corrupt session artifact row")?);
     }
     Ok(artifacts)
+}
+
+/// Idempotently preserve a gap discovered while processing durable audio.
+pub fn record_processing_gap(
+    dir: &Path,
+    session_name: &str,
+    segment_id: &str,
+    start_sequence: u64,
+    end_exclusive: u64,
+    reason: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        end_exclusive >= start_sequence,
+        "invalid processing gap range"
+    );
+    let start = i64::try_from(start_sequence).context("gap start is too large")?;
+    let end = i64::try_from(end_exclusive).context("gap end is too large")?;
+    let conn = open_db(dir)?;
+    conn.execute(
+        "INSERT OR IGNORE INTO session_processing_gaps (session_name, segment_id, start_sequence, end_exclusive, reason) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![session_name, segment_id, start, end, reason],
+    )?;
+    Ok(())
+}
+
+pub fn list_processing_gaps(dir: &Path, session_name: &str) -> Result<Vec<SessionProcessingGap>> {
+    let conn = open_db(dir)?;
+    let mut statement = conn.prepare(
+        "SELECT session_name, segment_id, start_sequence, end_exclusive, reason FROM session_processing_gaps WHERE session_name = ?1 ORDER BY segment_id, start_sequence, end_exclusive, reason",
+    )?;
+    let rows = statement.query_map(params![session_name], |row| {
+        Ok(SessionProcessingGap {
+            session_name: row.get(0)?,
+            segment_id: row.get(1)?,
+            start_sequence: row.get::<_, i64>(2)?.max(0) as u64,
+            end_exclusive: row.get::<_, i64>(3)?.max(0) as u64,
+            reason: row.get(4)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 pub fn list_expired_session_artifacts(

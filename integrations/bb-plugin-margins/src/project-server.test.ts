@@ -10,6 +10,7 @@ const saved = {
   workspace: process.env.MARGINS_BB_REMOTE_WORKSPACE,
   home: process.env.MARGINS_HOME,
   cli: process.env.MARGINS_CLI_BIN,
+  serverPath: process.env.MARGINS_PROJECT_SERVER_PATH,
 };
 
 afterEach(() => {
@@ -20,6 +21,7 @@ afterEach(() => {
     MARGINS_BB_REMOTE_WORKSPACE: saved.workspace,
     MARGINS_HOME: saved.home,
     MARGINS_CLI_BIN: saved.cli,
+    MARGINS_PROJECT_SERVER_PATH: saved.serverPath,
   })) {
     if (value === undefined) delete process.env[name];
     else process.env[name] = value;
@@ -27,6 +29,69 @@ afterEach(() => {
 });
 
 describe("ProjectServerManager remote adapter", () => {
+  it("sends the durable chunk boundary with browser Pause", async () => {
+    const manager = { ensure: vi.fn(async () => ({ baseUrl: "https://margins.example.test", token: "scoped-token",
+      workspaceId: "practice", instanceId: "instance-remote" })) } as unknown as ProjectServerManager;
+    const fetchMock = vi.fn(async (_input: string | URL | Request, _options?: RequestInit) => new Response(JSON.stringify({ ok: true, result: {
+      recording_id: "recording", status: "paused", next_sequence: 4,
+    } }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await new ProjectMarginsTransport(manager).mutate(
+      { projectId: "project", projectRoot: "/tmp/project", hostId: "host" },
+      "/tmp/data", "recording", "owner", "pause_recording", 4,
+    );
+    expect(new URL(String(fetchMock.mock.calls[0]![0])).pathname).toBe("/v1/workspaces/practice/browser/sessions/recording/pause");
+    expect(JSON.parse(fetchMock.mock.calls[0]![1]!.body as string)).toEqual({ ownerId: "owner", expectedNextSequence: 4 });
+  });
+
+  it("preserves a typed browser chunk gap for Stop repair", async () => {
+    const manager = { ensure: vi.fn(async () => ({ baseUrl: "https://margins.example.test", token: "scoped-token",
+      workspaceId: "practice", instanceId: "instance-remote" })) } as unknown as ProjectServerManager;
+    const fetchMock = vi.fn(async (_input: string | URL | Request, _options?: RequestInit) => new Response(JSON.stringify({ ok: false, error: {
+      code: "browser_chunk_gap", retryable: true,
+      message: "Missing browser audio sequence 1; retry the chunk before Stop.",
+    } }), { status: 409 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await new ProjectMarginsTransport(manager).stop(
+      { projectId: "project", projectRoot: "/tmp/project", hostId: "host" },
+      "/tmp/data", "recording", "owner", 3,
+    );
+    expect(result).toEqual({ ok: false, error: {
+      code: "browser_chunk_gap", retryable: true,
+      message: "Missing browser audio sequence 1; retry the chunk before Stop.",
+    } });
+    expect(JSON.parse(fetchMock.mock.calls[0]![1]!.body as string)).toEqual({ ownerId: "owner", expectedNextSequence: 3 });
+  });
+
+  it("forwards browser capture clock boundaries and incomplete finish to the project server", async () => {
+    const manager = { ensure: vi.fn(async () => ({ baseUrl: "https://margins.example.test", token: "scoped-token",
+      workspaceId: "practice", instanceId: "instance-remote" })) } as unknown as ProjectServerManager;
+    const fetchMock = vi.fn(async (_input: string | URL | Request, _options?: RequestInit) => new Response(JSON.stringify({ ok: true, result: {
+      recordingId: "recording", sessionId: "recording", status: "recording", nextSequence: 2,
+      notepad: { text: "", revision: "memo-1" },
+    } }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const transport = new ProjectMarginsTransport(manager);
+    const target = { projectId: "project", projectRoot: "/tmp/project", hostId: "host" };
+    await transport.start(target, "/tmp/data", "owner", "meeting", 1_000);
+    await transport.mutate(target, "/tmp/data", "recording", "owner", "pause_recording", 2, 4_000, true);
+    await transport.mutate(target, "/tmp/data", "recording", "owner", "resume_recording", undefined, 8_000);
+    await transport.upload(target, "/tmp/data", "recording", "owner", 2, "YQ==", 8_000, 9_000);
+    await transport.stop(target, "/tmp/data", "recording", "owner", 3, 9_000);
+    await transport.finishIncomplete(target, "/tmp/data", "recording", "owner", 3);
+    const calls = fetchMock.mock.calls as Array<[string | URL | Request, RequestInit]>;
+    expect(JSON.parse(String(calls[0]![1].body))).toEqual({ name: "meeting", ownerId: "owner", startedAtUnixMs: 1_000 });
+    expect(JSON.parse(String(calls[1]![1].body))).toEqual({ ownerId: "owner", expectedNextSequence: 2,
+      segmentEndedUnixMs: 4_000, recoveredAfterReload: true });
+    expect(JSON.parse(String(calls[2]![1].body))).toEqual({ ownerId: "owner", segmentStartedUnixMs: 8_000 });
+    expect(calls[3]![1].headers).toMatchObject({
+      "X-Margins-Captured-Start-Unix-Ms": "8000", "X-Margins-Captured-End-Unix-Ms": "9000",
+    });
+    expect(JSON.parse(String(calls[4]![1].body))).toEqual({ ownerId: "owner", expectedNextSequence: 3, segmentEndedUnixMs: 9_000 });
+    expect(new URL(String(calls[5]![0])).pathname).toBe("/v1/workspaces/practice/browser/sessions/recording/finish-incomplete");
+    expect(JSON.parse(String(calls[5]![1].body))).toEqual({ ownerId: "owner", expectedNextSequence: 3 });
+  });
+
   it("reads speech setup progress and retries through the selected host", async () => {
     const manager = { ensure: vi.fn(async () => ({ baseUrl: "https://margins.example.test", token: "scoped-token",
       workspaceId: "practice", instanceId: "instance-remote" })) } as unknown as ProjectServerManager;
@@ -227,7 +292,7 @@ describe("ProjectServerManager remote adapter", () => {
         if (options?.method === "PUT") {
           const body = JSON.parse(String(options.body));
           expect(body).toMatchObject({ expected_revision: "rev-1", text: "First point\nSecond point", paused: false });
-          expect(body.observed_at_ms).toBeGreaterThanOrEqual(0);
+          expect(body).not.toHaveProperty("observed_at_ms");
           expect(body.request_id).toBeTruthy();
           memo = { revision: "rev-2", lines: [{ text: "First point" }, { text: "Second point" }] };
         }
@@ -251,7 +316,7 @@ describe("ProjectServerManager remote adapter", () => {
     process.env.MARGINS_BB_REMOTE_WORKSPACE = "practice";
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       ok: true,
-      result: { workspace_id: "practice", instance_id: "instance-remote" },
+      result: { workspace_id: "practice", instance_id: "instance-remote", protocol_version: 1, capture_protocol_version: 3 },
     }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -272,12 +337,54 @@ describe("ProjectServerManager remote adapter", () => {
     );
   });
 
+  it("rejects a remote server with the previous capture protocol", async () => {
+    process.env.MARGINS_BB_REMOTE_URL = "https://margins.example.test";
+    process.env.MARGINS_BB_REMOTE_TOKEN = "scoped-token";
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      result: { workspace_id: "practice", instance_id: "older-server", protocol_version: 1, capture_protocol_version: 2 },
+    }))));
+    await expect(new ProjectServerManager().ensure({
+      projectId: "project", projectRoot: "/tmp/project", hostId: "host", workspaceId: "practice",
+    }, "/tmp/plugin-data")).rejects.toThrow("server version doesn't match this plugin; upgrade both");
+  });
+
+  it("rejects an incompatible spawned MARGINS_PROJECT_SERVER_PATH override", async () => {
+    const root = await mkdtemp(join(tmpdir(), "margins-bb-older-override-"));
+    const manager = new ProjectServerManager();
+    try {
+      delete process.env.MARGINS_BB_REMOTE_URL;
+      delete process.env.MARGINS_BB_REMOTE_TOKEN;
+      process.env.MARGINS_HOME = join(root, "home");
+      await mkdir(process.env.MARGINS_HOME);
+      const serverPath = join(root, "old-server");
+      await writeFile(serverPath, `#!/usr/bin/env node
+const fs=require('node:fs');const http=require('node:http');const path=require('node:path');
+const data=process.env.MARGINS_DATA_DIR;fs.mkdirSync(data,{recursive:true});
+fs.writeFileSync(path.join(data,'token'),'fixture-token');
+http.createServer((req,res)=>{
+  if(req.url==='/health'){res.writeHead(200);res.end('ok');return;}
+  res.setHeader('Content-Type','application/json');
+  res.end(JSON.stringify({ok:true,result:{workspace_id:'practice',instance_id:'old-server',protocol_version:1,capture_protocol_version:2}}));
+}).listen(Number(process.env.MARGINS_PORT),'127.0.0.1');
+`);
+      await chmod(serverPath, 0o755);
+      process.env.MARGINS_PROJECT_SERVER_PATH = serverPath;
+      await expect(manager.ensure({
+        projectId: "project", projectRoot: join(root, "project"), hostId: "host", workspaceId: "practice",
+      }, root)).rejects.toThrow("server version doesn't match this plugin; upgrade both");
+    } finally {
+      await manager.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("shares one Workspace server and Meetings list across bb projects", async () => {
     process.env.MARGINS_BB_REMOTE_URL = "https://margins.example.test";
     process.env.MARGINS_BB_REMOTE_TOKEN = "scoped-token";
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const path = new URL(String(input)).pathname;
-      const result = path === "/v1/capabilities" ? { workspace_id: "practice", instance_id: "instance-remote" }
+      const result = path === "/v1/capabilities" ? { workspace_id: "practice", instance_id: "instance-remote", protocol_version: 1, capture_protocol_version: 3 }
         : path.endsWith("/active-sessions") ? { sessions: [] }
           : path.endsWith("/sessions") ? { sessions: [{ session_id: "meeting-1" }] }
           : path.endsWith("/note-association") ? null
@@ -319,7 +426,8 @@ fs.appendFileSync(${JSON.stringify(join(root, "spawns"))},String(process.pid)+'\
 fs.writeFileSync(path.join(data,'token'),'fixture-token');
 http.createServer((req,res)=>{if(req.url==='/health'){res.writeHead(200);res.end('ok');return;}
 const pathname=new URL(req.url,'http://localhost').pathname;
-const result=pathname.endsWith('/active-sessions')?{sessions:[]}:
+const result=pathname==='/v1/capabilities'?{workspace_id:'practice',instance_id:'bb-host-host',protocol_version:1,capture_protocol_version:3}:
+pathname.endsWith('/active-sessions')?{sessions:[]}:
 pathname.endsWith('/sessions')?{sessions:[{session_id:'meeting-1'}]}:
 pathname.endsWith('/note-association')?null:
 {session_id:'meeting-1',title:'Shared meeting',started_at:'2026-09-25T01:00:00Z',input_finalized:true};
@@ -448,7 +556,7 @@ res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:true
     );
   });
 
-  it("transcribes a local browser capture from its finalized WAV without a remote producer job", async () => {
+  it("transcribes a local browser capture through the typed Workspace job", async () => {
     const manager = { ensure: vi.fn(async () => ({
       baseUrl: "http://127.0.0.1:8787", token: "scoped-token", workspaceId: "practice", instanceId: "instance-local", child: {},
     })) } as unknown as ProjectServerManager;
@@ -457,7 +565,7 @@ res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:true
       if (url.endsWith("/browser/sessions")) return new Response(JSON.stringify({ ok: true, result: {
         recordingId: "browser-1", sessionId: "meeting-1", status: "recording", notepad: { text: "", revision: "memo-1" },
       } }));
-      if (url.endsWith("/api/invoke/transcribe_hosted_browser_session")) return new Response(JSON.stringify({ ok: true, result: "1 transcript entry" }));
+      if (url.endsWith("/jobs/transcribe")) return new Response(JSON.stringify({ ok: true, result: { status: "queued", attempt: 1 } }));
       throw new Error(`unexpected URL ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -465,8 +573,8 @@ res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:true
     const target = { projectId: "project", projectRoot: "/tmp/project", hostId: "host" };
     expect(await transport.start(target, "/tmp/data", "owner-1", "meeting-1")).toMatchObject({ ok: true });
     expect(await transport.requestTranscription(target, "/tmp/data", "meeting-1"))
-      .toMatchObject({ ok: true, status: "complete" });
-    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/jobs/transcribe"))).toBe(false);
+      .toMatchObject({ ok: true, status: "queued" });
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/api/invoke"))).toBe(false);
   });
 
   it("rejects incomplete or non-TLS remote configuration before transport", async () => {

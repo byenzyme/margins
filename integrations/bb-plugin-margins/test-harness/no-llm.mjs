@@ -278,7 +278,7 @@ try {
   }
   if (freshRelease) await until("fresh release runtime install", () =>
     existsSync(path.join(freshCliBinDir, "margins"))
-      && existsSync(path.join(hostData, "runtime", "v0.4.14", "margins-server")), 120_000);
+      && existsSync(path.join(hostData, "runtime", "v0.4.15", "margins-server")), 120_000);
   shot("01-workspace.png");
 
   // The fake microphone is this harness's deliberate browser-only choice.
@@ -308,7 +308,7 @@ try {
   browser(["click", 'textarea[aria-label="Meeting memo pad"]']);
   browser(["keyboard", "type", liveMemo]);
   browser(["press", "Tab"]);
-  const liveSessionId = await until("meeting route", () => browserEval(`location.pathname.endsWith('/meeting') ? location.pathname.split('/').pop() : null`));
+  const liveSessionId = await until("meeting route", () => browserEval(`(() => { const id = location.pathname.split('/').pop(); return id?.startsWith('browser-') ? id : null; })()`));
   await until("Live memo saved", async () => {
     const response = await fetch(`${bbEnv.BB_SERVER_URL}/api/v1/plugins/margins/rpc/readWorkspaceMeeting`, {
       method: "POST", headers: { "content-type": "application/json" },
@@ -355,7 +355,7 @@ try {
   await until("Resumed", () => browserEval(`!!document.querySelector('button[aria-label="Pause recording"]')`));
   browser(["click", 'button[aria-label="Stop and save recording"]']);
   await until("Ready to refine", () => browserEval(`document.querySelector('.margins-meeting-list')?.innerText.toLowerCase().includes('ready to refine') && !document.querySelector('button[aria-label="Stop and save recording"]')`));
-  await until("Stop acknowledgment", () => browserEval(`(document.querySelector('.margins-meetings-page')?.innerText || '').includes('Saved · e2e')`), 4_000);
+  await until("Stop acknowledgment", () => browserEval(`(() => { const text = document.querySelector('.margins-meetings-page')?.innerText || ''; return text.includes('Saved ·') && text.includes('· e2e'); })()`), 4_000);
   assertMemo(liveMemo);
   assert(browserEval(`document.querySelector('.margins-meeting-next')?.innerText.includes('Make note →')`));
   shot("05-ready.png");
@@ -387,7 +387,7 @@ try {
   const transcript = await until("Parakeet transcript", () => {
     const result = jsonCommand(marginsBin, ["--workspace", "e2e", "transcript", "latest", "--format", "json"], { env: marginsEnv });
     const utterances = String(result.body || "").split("\n").filter((line) => /^\[\d{2}:\d{2}(?::\d{2})?\]/.test(line) && !/\] memo:/.test(line));
-    return result.view === "aligned" && String(result.body).includes("Source: Headless parakeet-onnx transcript")
+    return result.view === "aligned" && String(result.body).includes("Source: Margins remote offline speech transcript")
       && utterances.length > 0 ? result : null;
   }, coldAsr ? 240_000 : 120_000);
   writeFileSync(path.join(artifacts, "transcript.json"), `${JSON.stringify(transcript, null, 2)}\n`);

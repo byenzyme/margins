@@ -1,21 +1,19 @@
-Margins 0.4.14 fixes first-run BB recording while transcription models are still
-being installed on the project host. The official Linux and Apple Silicon macOS
-archives continue to include `margins` and `margins-server`; the macOS archive
-also includes `margins-live`.
+Margins 0.4.15 ships the CLI/TUI and bb plugin with a standalone project server.
+The release archives contain `margins` and `margins-server`.
 
-- Linux's managed Parakeet setup now selects the model kind accepted by the
-  live and offline transcription loaders.
-- A browser meeting can start and save durable audio while the managed speech
-  model downloads. Offline transcription can run after setup finishes.
-- The BB Meetings panel keeps Transcribe unavailable while speech setup is
-  preparing. On BB 0.41, the panel remains available without the newer overlay
-  slot, with recording controls shown inside Meetings.
-- On Apple Silicon, the project server can transcribe saved meetings with
-  CoreML, and a stale derived preprocessor cache falls back to the downloaded
-  original model. The saved-session Mac retry reached a terminal transcript and
-  linked a connected note.
-- The BB plugin pins this release and installs the checksum-verified runtime
-  on its project host. Its empty-cache E2E lane covers recording and spoken
-  transcription from a fresh model directory.
+- BB browser recordings recover across reloads and network drops. Missing audio
+  is marked incomplete rather than treated as a complete meeting: choose
+  **Finish with what was saved**, or let the server finish an abandoned capture.
+  Memo and transcript timing now share one clock.
+- The TUI streams audio safely during capture, making Stop fast and limiting a
+  crash to at most about five seconds of uncommitted audio with bounded temporary
+  storage. BB and TUI memo edits merge or show a conflict instead of silently
+  overwriting each other. A second recorder cannot take over the same session.
+- Speech uses one transcription path. `--speakers` works for stereo recordings,
+  and CoreML model downloads and cache repair are safer.
+- The desktop app and `margins-live` no longer ship. Margins Menu records only
+  in BB project mode.
 
-Meeting audio, transcripts, and Workspace notes remain under the user's control.
+Known limits: a page reload can lose browser chunks that the server has not
+acknowledged; the recording shows those gaps. Linux live transcription is not
+available.

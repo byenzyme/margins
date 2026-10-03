@@ -185,6 +185,67 @@ fn pending_context_requires_finalized_audio_and_normal_finish() {
     assert!(!temp.path().join("cancelled_capture_context.md").exists());
 }
 
+#[test]
+fn finalized_webm_lane_projects_ordered_bytes_without_decoding() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = MeetingRuntime::new(SqliteMeetingRuntimeStorage::open(temp.path()).unwrap());
+    let mut create_webm = create("webm");
+    if let ClientMessageBodyV1::CreateSession(create) = &mut create_webm.body {
+        create.lanes[0].format = AudioFormatV1 {
+            codec: AudioCodecV1::Opus,
+            container: AudioContainerV1::Webm,
+            sample_rate_hz: 48_000,
+            channel_count: 1,
+        };
+    }
+    runtime.handle(create_webm).unwrap();
+
+    let blobs: [&[u8]; 2] = [b"\x1a\x45\xdf\xa3webm-header", b"webm-continuation"];
+    for (sequence, payload) in blobs.iter().enumerate() {
+        let mut command = chunk("webm", format!("chunk-{sequence}"), sequence as u64, 0);
+        if let ClientMessageBodyV1::AudioChunk(chunk) = &mut command.body {
+            chunk.payload = payload.to_vec();
+            chunk.payload_digest.hex = format!("{:x}", Sha256::digest(payload));
+        }
+        assert_eq!(ack_count(&runtime.handle(command).unwrap().messages), 1);
+    }
+    runtime.handle(close("webm", 2)).unwrap();
+
+    let connection = rusqlite::Connection::open(runtime.storage().database_path()).unwrap();
+    let (kind, artifact_path): (String, String) = connection
+        .query_row(
+            "SELECT kind, path FROM session_artifacts WHERE session_name = 'webm'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(kind, "audio_audio_webm");
+    assert!(artifact_path.ends_with(".webm"));
+    let relative = artifact_path.strip_prefix(".margins/").unwrap();
+    assert_eq!(
+        std::fs::read(temp.path().join(relative)).unwrap(),
+        blobs.concat()
+    );
+
+    let contract: margins_core::NewSegment = connection
+        .query_row(
+            "SELECT contract_json FROM session_segment_contracts WHERE session_name = 'webm'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .map(|json| serde_json::from_str(&json).unwrap())
+        .unwrap();
+    assert_eq!(contract.audio.uri, artifact_path);
+    assert_eq!(
+        contract.audio.byte_length,
+        Some(blobs.concat().len() as u64)
+    );
+    assert_eq!(
+        contract.audio.frame_count, 0,
+        "encoded frame count is unknown until decode"
+    );
+}
+
 fn message(session: &str, id: impl Into<String>, body: ClientMessageBodyV1) -> ClientMessageV1 {
     ClientMessageV1 {
         protocol_version: ProtocolVersionV1,
