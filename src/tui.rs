@@ -22,6 +22,8 @@ use crate::app::{App, AppMode, GUTTER_WIDTH};
 
 /// Show silence beside the speaker meter without interrupting the mic meter.
 const SYSTEM_AUDIO_SILENCE_MARKER_SECS: u64 = 3;
+const MIC_NO_AUDIO_THRESHOLD_SECS: u64 = 3;
+const SYSTEM_NO_AUDIO_THRESHOLD_SECS: u64 = 10;
 const WATERMARK_HINT: &str = "  |  agent /watermark: live read";
 
 fn watermark_hint(available_width: u16, status_width: usize) -> Option<&'static str> {
@@ -83,6 +85,51 @@ fn clear_system_audio_warning_after_recovery(
     false
 }
 
+fn no_callback_audio_received(
+    elapsed: std::time::Duration,
+    real_spool_frames: u64,
+    threshold_secs: u64,
+) -> bool {
+    elapsed >= std::time::Duration::from_secs(threshold_secs) && real_spool_frames == 0
+}
+
+fn update_no_audio_guard(app: &App, elapsed: std::time::Duration) {
+    if app.capture_paused {
+        return;
+    }
+    for (lane, callbacks, spooled, warning, threshold) in [
+        (
+            "mic",
+            &app.mic_frames,
+            &app.mic_real_spool_frames,
+            &app.mic_no_audio_received,
+            MIC_NO_AUDIO_THRESHOLD_SECS,
+        ),
+        (
+            "system",
+            &app.spk_frames,
+            &app.spk_real_spool_frames,
+            &app.spk_no_audio_received,
+            SYSTEM_NO_AUDIO_THRESHOLD_SECS,
+        ),
+    ] {
+        let real_frames = spooled.load(Ordering::Acquire);
+        let missing = no_callback_audio_received(elapsed, real_frames, threshold);
+        if missing && !warning.swap(true, Ordering::AcqRel) {
+            crate::cli_log::event(
+                "capture_no_audio_received",
+                format!(
+                    "lane={lane} callback_frames={} real_spool_frames={real_frames} elapsed_s={}",
+                    callbacks.load(Ordering::Relaxed),
+                    elapsed.as_secs(),
+                ),
+            );
+        } else if !missing {
+            warning.store(false, Ordering::Release);
+        }
+    }
+}
+
 pub enum TuiAction {
     Quit,
     Pause,
@@ -126,6 +173,7 @@ fn event_loop(
     // Reaching the TUI means system-audio IO returned Started. Probe once after
     // sustained startup silence; later quiet periods use the meter marker.
     let system_audio_io_started_at = std::time::Instant::now();
+    let capture_started_at = std::time::Instant::now();
     let mut system_audio_permission_probe_pending = cfg!(target_os = "macos");
 
     loop {
@@ -186,6 +234,8 @@ fn event_loop(
         let frame_count = app.spk_frames.load(Ordering::Relaxed);
         let silent_samples = app.spk_silence.load(Ordering::Relaxed);
         clear_system_audio_warning_after_recovery(&mut app.message, frame_count, silent_samples);
+
+        update_no_audio_guard(app, capture_started_at.elapsed());
 
         // Also check if stop was requested externally
         if stop_flag.load(Ordering::SeqCst) {
@@ -277,6 +327,7 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Option<TuiAction> {
         KeyCode::Char('d') if ctrl => {
             let devices = crate::recorder::list_input_devices();
             app.devices = devices.iter().map(|(name, _)| name.clone()).collect();
+            app.device_uids = crate::recorder::input_device_uid_snapshot(&app.devices);
             // Pre-select the current mic
             app.selected_device = app
                 .devices
@@ -459,9 +510,19 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
         && app.spk_silence.load(Ordering::Relaxed) / app.spk_rate as u64
             >= SYSTEM_AUDIO_SILENCE_MARKER_SECS;
     let meter_text = format!(
-        "mic {} spk {}{}",
+        "mic {}{} spk {}{}{}",
         level_meter(mic_peak, 8),
+        if app.mic_no_audio_received.load(Ordering::Acquire) {
+            " NO AUDIO"
+        } else {
+            ""
+        },
         level_meter(spk_peak, 8),
+        if app.spk_no_audio_received.load(Ordering::Acquire) {
+            " NO AUDIO"
+        } else {
+            ""
+        },
         if speaker_silent { " silent" } else { "" },
     );
     let status_prefix = format!(
@@ -611,6 +672,36 @@ mod tests {
     use std::time::Duration;
 
     const RATE: u32 = 48_000;
+
+    #[test]
+    fn zero_callback_guard_shows_a_lane_marker_and_recovers_on_real_spool_frames() {
+        assert!(!no_callback_audio_received(
+            Duration::from_millis(2_999),
+            0,
+            MIC_NO_AUDIO_THRESHOLD_SECS,
+        ));
+        assert!(no_callback_audio_received(
+            Duration::from_secs(3),
+            0,
+            MIC_NO_AUDIO_THRESHOLD_SECS,
+        ));
+        assert!(!no_callback_audio_received(
+            Duration::from_secs(3),
+            1,
+            MIC_NO_AUDIO_THRESHOLD_SECS,
+        ));
+        let mut app = App::new("meeting.md".into(), chrono::Local::now(), "mic".into());
+        app.mic_frames.store(3 * RATE as u64, Ordering::Release);
+        update_no_audio_guard(&app, Duration::from_secs(3));
+        assert!(app.mic_no_audio_received.load(Ordering::Acquire));
+        let status = rendered_status(&mut app, 80);
+        assert!(status.contains("mic █"), "{status}");
+        assert!(status.contains("NO AUDIO"), "{status}");
+        assert!(status.contains("spk ░░░░░░░░"), "{status}");
+        app.mic_real_spool_frames.store(1, Ordering::Release);
+        update_no_audio_guard(&app, Duration::from_secs(4));
+        assert!(!app.mic_no_audio_received.load(Ordering::Acquire));
+    }
 
     #[test]
     fn startup_permission_nudge_waits_for_started_io_and_threshold() {

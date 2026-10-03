@@ -121,7 +121,12 @@ fn run_remote_native_capture(
             crate::recorder::list_input_devices()
                 .into_iter()
                 .find(|(available, _)| available == name)
-                .map(|(_, device)| device)
+                .map(|(name, device)| crate::recorder::SelectedInputDevice {
+                    uid: crate::recorder::input_device_uid_at(&name, 0),
+                    name,
+                    occurrence: 0,
+                    device,
+                })
                 .with_context(|| format!("microphone input device not found: {name}"))
         })
         .transpose()?;
@@ -505,7 +510,7 @@ fn run_remote_native_capture(
             queued_samples: queued_samples.clone(),
             queue_max_samples: u64::from(NATIVE_REMOTE_RATE_HZ) * 10 * 2,
         };
-        let recorder = match crate::recorder::RecorderHandle::start_with_live_audio(
+        let recorder = match crate::recorder::RecorderHandle::start_with_selected_audio(
             stop.clone(),
             selected_device.as_ref(),
             Some(sink.clone()),
@@ -651,13 +656,13 @@ fn run_remote_native_capture(
                         }
                         crate::tui::TuiAction::Quit => break 'capture,
                         crate::tui::TuiAction::SwitchDevice(index) => {
-                            let mut devices = crate::recorder::list_input_devices();
-                            if index >= devices.len() {
-                                bail!("selected audio input is no longer available");
-                            }
-                            let (name, device) = devices.swap_remove(index);
-                            app.current_mic_name = name;
-                            selected_device = Some(device);
+                            let selected = crate::recorder::selected_input_device(
+                                &app.devices,
+                                &app.device_uids,
+                                index,
+                            )?;
+                            app.current_mic_name = selected.name.clone();
+                            selected_device = Some(selected);
                         }
                         crate::tui::TuiAction::Pause => {}
                     }
@@ -665,13 +670,10 @@ fn run_remote_native_capture(
             }
             crate::tui::TuiAction::SwitchDevice(index) => {
                 transfer.close_segment(SegmentCloseReasonV1::Rollover)?;
-                let mut devices = crate::recorder::list_input_devices();
-                if index >= devices.len() {
-                    bail!("selected audio input is no longer available");
-                }
-                let (name, device) = devices.swap_remove(index);
-                app.current_mic_name = name;
-                selected_device = Some(device);
+                let selected =
+                    crate::recorder::selected_input_device(&app.devices, &app.device_uids, index)?;
+                app.current_mic_name = selected.name.clone();
+                selected_device = Some(selected);
             }
             crate::tui::TuiAction::Quit => {
                 transfer.close_segment(SegmentCloseReasonV1::Stop)?;

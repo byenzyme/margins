@@ -53,6 +53,9 @@ pub struct PacketDesc {
 
 #[derive(Default)]
 pub struct LaneTelemetry {
+    /// Real resampled samples written to the native spool, excluding padding.
+    pub real_spool_frames: Arc<AtomicU64>,
+    pub nonzero_spool_frames: AtomicU64,
     pub rejected_token_samples: AtomicU64,
     pub overlap_trimmed_frames: AtomicU64,
     pub synthesized_durable_frames: AtomicU64,
@@ -1098,6 +1101,16 @@ impl LaneActor {
             self.pending_overlap_trim -= trim as u64;
         }
         self.write_samples(&converted)?;
+        self.telemetry
+            .real_spool_frames
+            .fetch_add(self.durable_frame - durable_start, Ordering::Release);
+        self.telemetry.nonzero_spool_frames.fetch_add(
+            converted
+                .iter()
+                .filter(|sample| sample.abs() >= 1.0 / 32_768.0)
+                .count() as u64,
+            Ordering::Relaxed,
+        );
         if self
             .spool_overflow
             .as_ref()
@@ -1146,7 +1159,17 @@ impl LaneActor {
                 tail.drain(..trim);
                 self.pending_overlap_trim -= trim as u64;
             }
+            let before = self.durable_frame;
             self.write_samples(&tail)?;
+            self.telemetry
+                .real_spool_frames
+                .fetch_add(self.durable_frame - before, Ordering::Release);
+            self.telemetry.nonzero_spool_frames.fetch_add(
+                tail.iter()
+                    .filter(|sample| sample.abs() >= 1.0 / 32_768.0)
+                    .count() as u64,
+                Ordering::Relaxed,
+            );
             if !tail.is_empty()
                 && self.live_frame_enqueued + tail.len() as u64 == self.durable_frame
             {

@@ -928,9 +928,24 @@ impl RecorderHandle {
         device: Option<&InputDevice>,
         live_audio: Option<LiveAudioSink>,
     ) -> Result<Self> {
-        Self::start_with_live_audio_and_mic_error(
+        Self::start_with_identity(
             stop_flag,
             device,
+            None,
+            live_audio,
+            Arc::new(AtomicU8::new(0)),
+        )
+    }
+
+    pub fn start_with_selected_audio(
+        stop_flag: Arc<AtomicBool>,
+        selected: Option<&SelectedInputDevice>,
+        live_audio: Option<LiveAudioSink>,
+    ) -> Result<Self> {
+        Self::start_with_identity(
+            stop_flag,
+            selected.map(|selection| &selection.device),
+            selected,
             live_audio,
             Arc::new(AtomicU8::new(0)),
         )
@@ -939,6 +954,16 @@ impl RecorderHandle {
     pub fn start_with_live_audio_and_mic_error(
         stop_flag: Arc<AtomicBool>,
         device: Option<&InputDevice>,
+        live_audio: Option<LiveAudioSink>,
+        mic_error: Arc<AtomicU8>,
+    ) -> Result<Self> {
+        Self::start_with_identity(stop_flag, device, None, live_audio, mic_error)
+    }
+
+    fn start_with_identity(
+        stop_flag: Arc<AtomicBool>,
+        device: Option<&InputDevice>,
+        selected: Option<&SelectedInputDevice>,
         live_audio: Option<LiveAudioSink>,
         mic_error: Arc<AtomicU8>,
     ) -> Result<Self> {
@@ -960,6 +985,19 @@ impl RecorderHandle {
         let raw_system = start_speaker_raw(&system_telemetry)?;
         let sample_rate = raw_mic.native_rate;
         let spk_rate = raw_system.native_rate;
+        let opened_name = device
+            .and_then(|device| device.name().ok())
+            .or_else(default_input_device_name)
+            .unwrap_or_else(|| "unknown".into());
+        let occurrence = selected.map_or(0, |selection| selection.occurrence);
+        let opened_uid = selected
+            .and_then(|selection| selection.uid.clone())
+            .or_else(|| input_device_uid_at(&opened_name, occurrence))
+            .unwrap_or_else(|| "unknown".into());
+        let requested_name = selected.map_or("system default", |selection| selection.name.as_str());
+        let requested_uid = selected
+            .and_then(|selection| selection.uid.as_deref())
+            .unwrap_or("default");
         let writer = SegmentWriter::start(0, sample_rate, spk_rate, live_audio)?;
         let mic = MicCapture::from_raw(raw_mic, writer.mic_sink(1), mic_telemetry.clone(), false)?;
         let system = match SystemCapture::from_raw(
@@ -978,10 +1016,16 @@ impl RecorderHandle {
             "capture_rates",
             format!("mic={sample_rate} speaker={spk_rate}"),
         );
+        crate::cli_log::event(
+            "capture_device_opened",
+            format!(
+                "requested_name={requested_name:?} requested_uid={requested_uid:?} requested_occurrence={occurrence} opened_name={opened_name:?} opened_uid={opened_uid:?} mic_rate={sample_rate} system_rate={spk_rate}"
+            ),
+        );
         if sample_rate != spk_rate {
-            // The recorder aligns both lanes to the mic clock, so a mic/speaker
-            // rate mismatch is handled — record it for diagnostics rather than
-            // alarming the user on stderr.
+            // Each lane retains its own native rate. Seal maps the shared
+            // timeline boundary into both rates; the runtime then resamples
+            // each lane to 16 kHz independently.
             crate::cli_log::event(
                 "capture_rate_mismatch",
                 format!("mic={sample_rate} speaker={spk_rate} using={sample_rate}"),
@@ -1008,6 +1052,18 @@ impl RecorderHandle {
 
     pub fn mic_drops(&self) -> Arc<AtomicU64> {
         self.mic_telemetry.drops.clone()
+    }
+
+    pub fn mic_frames(&self) -> Arc<AtomicU64> {
+        self.mic_telemetry.frames.clone()
+    }
+
+    pub fn real_spool_frames(&self, lane: CaptureLane) -> Arc<AtomicU64> {
+        let telemetry = self.writer.telemetry();
+        match lane {
+            CaptureLane::Mic => telemetry.mic.real_spool_frames.clone(),
+            CaptureLane::System => telemetry.system.real_spool_frames.clone(),
+        }
     }
 
     pub fn spk_drops(&self) -> Arc<AtomicU64> {
@@ -1070,8 +1126,31 @@ impl RecorderHandle {
                 format!("mic={mic_dropped} speaker={spk_dropped}"),
             );
         }
-        self.writer.seal()
+        let telemetry = self.writer.telemetry();
+        let sealed = self.writer.seal()?;
+        crate::cli_log::event(
+            "capture_lane_summary",
+            format!(
+                "mic_callback={} mic_real_spool={} mic_nonzero_spool={} mic_padded={} system_callback={} system_real_spool={} system_nonzero_spool={} system_padded={}",
+                self.mic_telemetry.frames.load(Ordering::Relaxed),
+                telemetry.mic.real_spool_frames.load(Ordering::Relaxed),
+                telemetry.mic.nonzero_spool_frames.load(Ordering::Relaxed),
+                telemetry.mic.synthesized_durable_frames.load(Ordering::Relaxed),
+                self.system_telemetry.frames.load(Ordering::Relaxed),
+                telemetry.system.real_spool_frames.load(Ordering::Relaxed),
+                telemetry.system.nonzero_spool_frames.load(Ordering::Relaxed),
+                telemetry.system.synthesized_durable_frames.load(Ordering::Relaxed),
+            ),
+        );
+        Ok(sealed)
     }
+}
+
+pub struct SelectedInputDevice {
+    pub name: String,
+    pub occurrence: usize,
+    pub uid: Option<String>,
+    pub device: InputDevice,
 }
 
 /// Enumerate all available input devices. Returns (name, device) pairs.
@@ -1087,6 +1166,90 @@ pub fn list_input_devices() -> Vec<(String, cpal::Device)> {
             Some((name, d))
         })
         .collect()
+}
+
+/// Resolve the user's picker choice against its displayed name snapshot.
+/// Re-enumeration may reorder devices between opening the picker and selecting
+/// one, so the old numeric index must never be applied to the new list.
+pub fn selected_input_device(
+    displayed_names: &[String],
+    displayed_uids: &[Option<String>],
+    selected_index: usize,
+) -> Result<SelectedInputDevice> {
+    let (name, occurrence) = selected_name_occurrence(displayed_names, selected_index)
+        .context("selected audio input is no longer available")?;
+    let requested_uid = displayed_uids.get(selected_index).cloned().flatten();
+    let devices = list_input_devices();
+    let available_names = devices
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let available_uids = input_device_uid_snapshot(&available_names);
+    let available_index = selected_device_position(
+        displayed_names,
+        displayed_uids,
+        selected_index,
+        &available_names,
+        &available_uids,
+    )
+    .with_context(|| format!("selected audio input is no longer available: {name}"))?;
+    let (_, device) = devices
+        .into_iter()
+        .nth(available_index)
+        .context("selected audio input disappeared during enumeration")?;
+    let uid = requested_uid.or_else(|| available_uids[available_index].clone());
+    Ok(SelectedInputDevice {
+        name,
+        occurrence,
+        uid,
+        device,
+    })
+}
+
+pub fn input_device_uid_snapshot(names: &[String]) -> Vec<Option<String>> {
+    names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let occurrence = names[..index]
+                .iter()
+                .filter(|candidate| *candidate == name)
+                .count();
+            input_device_uid_at(name, occurrence)
+        })
+        .collect()
+}
+
+fn selected_device_position(
+    displayed_names: &[String],
+    displayed_uids: &[Option<String>],
+    selected_index: usize,
+    available_names: &[String],
+    available_uids: &[Option<String>],
+) -> Option<usize> {
+    let (name, occurrence) = selected_name_occurrence(displayed_names, selected_index)?;
+    if let Some(uid) = displayed_uids.get(selected_index).and_then(Option::as_ref) {
+        // A UID is authoritative. Refuse to open a different device if the
+        // selected one disappeared or changed its display name.
+        return available_uids
+            .iter()
+            .position(|candidate| candidate.as_ref() == Some(uid));
+    }
+    available_names
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| **candidate == name)
+        .nth(occurrence)
+        .map(|(index, _)| index)
+}
+
+fn selected_name_occurrence(names: &[String], index: usize) -> Option<(String, usize)> {
+    let name = names.get(index)?.clone();
+    let occurrence = names[..index]
+        .iter()
+        .filter(|candidate| **candidate == name)
+        .count();
+    Some((name, occurrence))
 }
 
 /// Get the name of the default input device, if any.
@@ -2584,6 +2747,42 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
     use std::sync::Arc;
+
+    #[test]
+    fn picker_choice_keeps_uid_when_enumeration_reorders() {
+        let displayed = ["Built-in".into(), "USB".into(), "USB".into()];
+        let reordered = ["USB".into(), "Built-in".into(), "USB".into()];
+        let displayed_uids = [
+            Some("builtin".into()),
+            Some("usb-1".into()),
+            Some("usb-2".into()),
+        ];
+        let reordered_uids = [
+            Some("usb-2".into()),
+            Some("builtin".into()),
+            Some("usb-1".into()),
+        ];
+        let (name, occurrence) = selected_name_occurrence(&displayed, 2).unwrap();
+        assert_eq!((name.as_str(), occurrence), ("USB", 1));
+        let actual =
+            selected_device_position(&displayed, &displayed_uids, 2, &reordered, &reordered_uids);
+        assert_eq!(actual, Some(0));
+        assert_eq!(
+            selected_device_position(
+                &displayed,
+                &displayed_uids,
+                2,
+                &reordered,
+                &[
+                    Some("other".into()),
+                    Some("builtin".into()),
+                    Some("usb-1".into())
+                ],
+            ),
+            None,
+        );
+        assert_ne!(displayed[0], reordered[0]);
+    }
 
     #[test]
     fn microphone_progress_health_detects_and_resets_stalls() {
