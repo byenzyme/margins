@@ -85,19 +85,33 @@ fn clear_system_audio_warning_after_recovery(
     false
 }
 
-fn no_callback_audio_received(
-    elapsed: std::time::Duration,
-    real_spool_frames: u64,
-    threshold_secs: u64,
-) -> bool {
-    elapsed >= std::time::Duration::from_secs(threshold_secs) && real_spool_frames == 0
+#[derive(Default)]
+struct SpoolProgress {
+    last_frames: u64,
+    last_progress_at: std::time::Duration,
 }
 
-fn update_no_audio_guard(app: &App, elapsed: std::time::Duration) {
+impl SpoolProgress {
+    fn missing(&mut self, elapsed: std::time::Duration, frames: u64, threshold_secs: u64) -> bool {
+        if frames != self.last_frames {
+            self.last_frames = frames;
+            self.last_progress_at = elapsed;
+            return false;
+        }
+        elapsed.saturating_sub(self.last_progress_at)
+            >= std::time::Duration::from_secs(threshold_secs)
+    }
+}
+
+fn update_no_audio_guard(
+    app: &App,
+    progress: &mut [SpoolProgress; 2],
+    elapsed: std::time::Duration,
+) {
     if app.capture_paused {
         return;
     }
-    for (lane, callbacks, spooled, warning, threshold) in [
+    for (index, (lane, callbacks, spooled, warning, threshold)) in [
         (
             "mic",
             &app.mic_frames,
@@ -112,9 +126,12 @@ fn update_no_audio_guard(app: &App, elapsed: std::time::Duration) {
             &app.spk_no_audio_received,
             SYSTEM_NO_AUDIO_THRESHOLD_SECS,
         ),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let real_frames = spooled.load(Ordering::Acquire);
-        let missing = no_callback_audio_received(elapsed, real_frames, threshold);
+        let missing = progress[index].missing(elapsed, real_frames, threshold);
         if missing && !warning.swap(true, Ordering::AcqRel) {
             crate::cli_log::event(
                 "capture_no_audio_received",
@@ -174,6 +191,7 @@ fn event_loop(
     // sustained startup silence; later quiet periods use the meter marker.
     let system_audio_io_started_at = std::time::Instant::now();
     let capture_started_at = std::time::Instant::now();
+    let mut spool_progress = [SpoolProgress::default(), SpoolProgress::default()];
     let mut system_audio_permission_probe_pending = cfg!(target_os = "macos");
 
     loop {
@@ -235,7 +253,7 @@ fn event_loop(
         let silent_samples = app.spk_silence.load(Ordering::Relaxed);
         clear_system_audio_warning_after_recovery(&mut app.message, frame_count, silent_samples);
 
-        update_no_audio_guard(app, capture_started_at.elapsed());
+        update_no_audio_guard(app, &mut spool_progress, capture_started_at.elapsed());
 
         // Also check if stop was requested externally
         if stop_flag.load(Ordering::SeqCst) {
@@ -675,32 +693,22 @@ mod tests {
 
     #[test]
     fn zero_callback_guard_shows_a_lane_marker_and_recovers_on_real_spool_frames() {
-        assert!(!no_callback_audio_received(
-            Duration::from_millis(2_999),
-            0,
-            MIC_NO_AUDIO_THRESHOLD_SECS,
-        ));
-        assert!(no_callback_audio_received(
-            Duration::from_secs(3),
-            0,
-            MIC_NO_AUDIO_THRESHOLD_SECS,
-        ));
-        assert!(!no_callback_audio_received(
-            Duration::from_secs(3),
-            1,
-            MIC_NO_AUDIO_THRESHOLD_SECS,
-        ));
         let mut app = App::new("meeting.md".into(), chrono::Local::now(), "mic".into());
+        let mut progress = [SpoolProgress::default(), SpoolProgress::default()];
         app.mic_frames.store(3 * RATE as u64, Ordering::Release);
-        update_no_audio_guard(&app, Duration::from_secs(3));
+        update_no_audio_guard(&app, &mut progress, Duration::from_millis(2_999));
+        assert!(!app.mic_no_audio_received.load(Ordering::Acquire));
+        update_no_audio_guard(&app, &mut progress, Duration::from_secs(3));
         assert!(app.mic_no_audio_received.load(Ordering::Acquire));
         let status = rendered_status(&mut app, 80);
         assert!(status.contains("mic █"), "{status}");
         assert!(status.contains("NO AUDIO"), "{status}");
         assert!(status.contains("spk ░░░░░░░░"), "{status}");
         app.mic_real_spool_frames.store(1, Ordering::Release);
-        update_no_audio_guard(&app, Duration::from_secs(4));
+        update_no_audio_guard(&app, &mut progress, Duration::from_secs(4));
         assert!(!app.mic_no_audio_received.load(Ordering::Acquire));
+        update_no_audio_guard(&app, &mut progress, Duration::from_secs(7));
+        assert!(app.mic_no_audio_received.load(Ordering::Acquire));
     }
 
     #[test]

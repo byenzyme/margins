@@ -517,7 +517,7 @@ mod native_smoke_tests {
                 Ok(())
             })
             .unwrap();
-        let wav = margins_meeting_runtime::SqliteMeetingRuntimeStorage::open(&margins_dir)
+        let wav = margins_store::SqliteMeetingRuntimeStorage::open(&margins_dir)
             .unwrap()
             .export_native_wav("native-smoke", 0)
             .unwrap();

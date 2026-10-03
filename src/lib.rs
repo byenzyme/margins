@@ -108,7 +108,7 @@ pub mod recorder {
     pub struct InputDevice;
 
     pub fn input_device_uid_snapshot(names: &[String]) -> Vec<Option<String>> {
-        names.iter().map(|name| Some(name.clone())).collect()
+        vec![None; names.len()]
     }
 
     pub struct NativeSpoolSource {

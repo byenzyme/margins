@@ -1207,6 +1207,10 @@ pub fn selected_input_device(
 }
 
 pub fn input_device_uid_snapshot(names: &[String]) -> Vec<Option<String>> {
+    #[cfg(not(target_os = "macos"))]
+    return vec![None; names.len()];
+
+    #[cfg(target_os = "macos")]
     names
         .iter()
         .enumerate()
@@ -2767,6 +2771,16 @@ mod tests {
         let actual =
             selected_device_position(&displayed, &displayed_uids, 2, &reordered, &reordered_uids);
         assert_eq!(actual, Some(0));
+        assert_eq!(
+            selected_device_position(
+                &displayed,
+                &[None, None, None],
+                2,
+                &reordered,
+                &[None, None, None],
+            ),
+            Some(2),
+        );
         assert_eq!(
             selected_device_position(
                 &displayed,
