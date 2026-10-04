@@ -67,31 +67,15 @@ pub fn preferred_transcript_path(margins_dir: &Path, name: &str) -> Option<PathB
     {
         return Some(artifact);
     }
-    if let Some(path) = canonical::list_session_artifacts(margins_dir, name)
-        .unwrap_or_default()
-        .into_iter()
+    let artifacts =
+        canonical::list_session_artifacts_read_only(margins_dir, name).unwrap_or_default();
+    if let Some(path) = artifacts
+        .iter()
         .filter(|artifact| artifact.kind == canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT)
+        .filter(|artifact| !artifact.path.ends_with(".live-transcript.json"))
         .find_map(|artifact| {
             let path =
                 confined_session_artifact_access_disk_path(margins_dir, name, &artifact.path)?;
-            if artifact.path.ends_with(".live-transcript.json")
-                && artifact.path.contains(&format!("{name}_seg"))
-                && meta
-                    .as_ref()
-                    .and_then(|value| {
-                        value
-                            .segments
-                            .iter()
-                            .map(|segment| segment.segment_index)
-                            .max()
-                    })
-                    .is_some_and(|latest| {
-                        path.file_name().and_then(|file| file.to_str())
-                            != Some(format!("{name}_seg{latest}.live-transcript.json").as_str())
-                    })
-            {
-                return None;
-            }
             (!artifact.path.ends_with(".md")
                 || final_transcript_current(meta.as_ref(), &path, coverage))
             .then_some(path)
@@ -108,15 +92,33 @@ pub fn preferred_transcript_path(margins_dir: &Path, name: &str) -> Option<PathB
         value
             .segments
             .iter()
-            .rev()
             .map(|segment| {
-                margins_dir.join(format!(
-                    "{name}_seg{}.live-transcript.json",
-                    segment.segment_index
-                ))
+                (
+                    segment.segment_index,
+                    margins_dir.join(format!(
+                        "{name}_seg{}.live-transcript.json",
+                        segment.segment_index
+                    )),
+                )
             })
-            .find(|path| path.is_file())
+            .filter(|(_, path)| path.is_file())
+            .max_by_key(|(ordinal, _)| *ordinal)
+            .map(|(_, path)| path)
     }) {
+        return Some(path);
+    }
+    if let Some(path) = artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT)
+        .filter(|artifact| artifact.path.ends_with(".live-transcript.json"))
+        .filter_map(|artifact| {
+            confined_session_artifact_access_disk_path(margins_dir, name, &artifact.path)
+                .map(|path| (artifact.ordinal, path))
+        })
+        .filter(|(_, path)| path.is_file())
+        .max_by_key(|(ordinal, _)| *ordinal)
+        .map(|(_, path)| path)
+    {
         return Some(path);
     }
     let capture = margins_dir.join(format!("{name}_capture_context.md"));
@@ -370,7 +372,9 @@ fn local_capture_owner_active(margins_dir: &Path, name: &str) -> Result<bool> {
         .read(true)
         .write(true)
         .open(path)?;
-    Ok(!file.try_lock_exclusive()?)
+    // Readers only need to observe whether the recorder's exclusive lock is
+    // held. A shared probe avoids taking exclusive ownership during polling.
+    Ok(!FileExt::try_lock_shared(&file)?)
 }
 
 /// Remote ASR artifacts retain the spoken timeline. Rebuild their readable
@@ -560,26 +564,12 @@ fn read_checkpoint_body_at(
             })
         })
         .unwrap_or(0);
-    let latest_checkpoint = meta
-        .and_then(|value| {
-            value
-                .segments
-                .iter()
-                .map(|segment| segment.segment_index)
-                .max()
-        })
-        .is_none_or(|latest| {
-            path.file_name().and_then(|file| file.to_str())
-                == Some(format!("{name}_seg{latest}.live-transcript.json").as_str())
-                || provisional
-        });
     let terminal = !provisional
         && checkpoint
             .get("terminal")
             .and_then(Value::as_bool)
             .unwrap_or(false)
         && dropped_samples == 0
-        && latest_checkpoint
         && captured_until_ms
             .is_none_or(|captured| decoded_until_ms.saturating_add(1_000) >= captured);
     let entries = crate::processing::read_transcript_entries(&path)?;

@@ -306,11 +306,84 @@ fn attached_terminal_checkpoint_cannot_cover_the_earlier_segment() {
         .unwrap();
     }
     let view = load_transcript_view(work, &dir, "attached").unwrap();
+    assert_eq!(
+        margins_workflows::transcript_view::preferred_transcript_path(&dir, "attached"),
+        Some(dir.join("attached_seg1.live-transcript.json"))
+    );
     assert_eq!(view.view, "full");
     assert!(!view.terminal);
     assert_eq!(view.captured_until_ms, 11_000);
     assert!(view.body.contains("part-1"));
     assert!(!view.body.contains("part-0"));
+}
+
+fn assert_single_worker_checkpoint_spans_segments(name: &str, offsets_ms: &[i64]) {
+    let temp = tempfile::tempdir().unwrap();
+    let work = temp.path();
+    let dir = work.join(".margins");
+    let started = Local::now() - Duration::minutes(1);
+    canonical::create_session(&dir, name, &started, &format!(".margins/{name}.md")).unwrap();
+    std::fs::write(dir.join(format!("{name}.md")), "").unwrap();
+    for (ordinal, offset_ms) in offsets_ms.iter().enumerate() {
+        canonical::add_segment(
+            &dir,
+            name,
+            ordinal as i64,
+            &format!("{name}_seg{ordinal}.wav"),
+            *offset_ms,
+            Some(1.0),
+        )
+        .unwrap();
+    }
+    canonical::mark_session_ended(&dir, name).unwrap();
+    let captured_until_ms = offsets_ms.last().copied().unwrap().max(0) + 1_000;
+    let checkpoint_name = format!("{name}_seg0.live-transcript.json");
+    std::fs::write(
+        dir.join(&checkpoint_name),
+        serde_json::json!({
+            "version": 2, "terminal": true, "start_offset_ms": 0,
+            "captured_until_ms": captured_until_ms,
+            "decoded_until_ms": captured_until_ms,
+            "committed_until_ms": captured_until_ms,
+            "live_dropped_samples": 0,
+            "transcripts": [{"words": [{"channel": 0, "start_ms": 100,
+                "end_ms": 500, "text": "first"},
+                {"channel": 0, "start_ms": captured_until_ms - 900,
+                    "end_ms": captured_until_ms - 500, "text": "last"}]}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    canonical::upsert_session_artifact(
+        &dir,
+        name,
+        canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT,
+        0,
+        &format!(".margins/{checkpoint_name}"),
+        "durable",
+        None,
+    )
+    .unwrap();
+    let view = load_transcript_view(work, &dir, name).unwrap();
+    assert_eq!(view.view, "full");
+    assert!(view.terminal, "same worker covered every segment: {name}");
+    assert_eq!(view.captured_until_ms, captured_until_ms as u64);
+    assert!(view.body.contains("first"));
+    assert!(view.body.contains("last"));
+    assert_eq!(
+        margins_workflows::transcript_view::preferred_transcript_path(&dir, name),
+        Some(dir.join(checkpoint_name))
+    );
+}
+
+#[test]
+fn paused_and_resumed_session_keeps_its_seg0_checkpoint_terminal() {
+    assert_single_worker_checkpoint_spans_segments("paused", &[0, 10_000]);
+}
+
+#[test]
+fn mic_switched_session_keeps_its_seg0_checkpoint_terminal() {
+    assert_single_worker_checkpoint_spans_segments("switched", &[0, 1_000, 2_000]);
 }
 
 #[test]
