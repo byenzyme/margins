@@ -118,33 +118,28 @@ fn create_native_session(work_dir: &Path, title: Option<&str>) -> Result<()> {
         live_status.clone(),
     );
 
-    // Open both native lanes before reserving any session state. Permission or
-    // device-start failures therefore leave no memo, segment, or current
-    // pointer behind.
-    let initial_live_sink = live
-        .as_ref()
-        .map(|worker| worker.sink_for_offset(initial_offset_ms as u64));
-    let initial_stop = Arc::new(AtomicBool::new(false));
-    let initial_recorder = crate::recorder::RecorderHandle::start_with_live_audio(
-        initial_stop.clone(),
-        None,
-        initial_live_sink,
-    )?;
-
-    std::fs::create_dir_all(&margins_dir).context("failed to create .margins directory")?;
-    let owner = capture_local_runtime::SessionOwnerLock::acquire(&margins_dir, &name)?;
-    // Silent bookkeeping so desktop and `recent --all` can enumerate this folder.
-    margins_workflows::project::register_vault_silently(work_dir);
-    let mut meeting = capture_local_runtime::LocalMeetingProducer::reserve(
-        &margins_dir,
-        &name,
-        title,
-        started_at,
-    )?;
-    margins_cli::commands::sessions::write_current_session(
-        &margins_cli::standalone_services(),
-        &margins_dir,
-        &name,
+    // A failed first device open must not reserve an empty meeting or move the
+    // current-session pointer. The recorder can be bound after reservation.
+    let (initial_input, (owner, mut meeting)) = open_before_reserving_session(
+        || prepare_initial_native_input(live.as_ref().map(|worker| worker.sink_for_offset(0))),
+        || {
+            std::fs::create_dir_all(&margins_dir).context("failed to create .margins directory")?;
+            let owner = capture_local_runtime::SessionOwnerLock::acquire(&margins_dir, &name)?;
+            // Silent bookkeeping so desktop and `recent --all` can enumerate this folder.
+            margins_workflows::project::register_vault_silently(work_dir);
+            let meeting = capture_local_runtime::LocalMeetingProducer::reserve(
+                &margins_dir,
+                &name,
+                title,
+                started_at,
+            )?;
+            margins_cli::commands::sessions::write_current_session(
+                &margins_cli::standalone_services(),
+                &margins_dir,
+                &name,
+            )?;
+            Ok((owner, meeting))
+        },
     )?;
 
     let mic_name = crate::recorder::default_input_device_name().unwrap_or_else(|| "Unknown".into());
@@ -166,9 +161,8 @@ fn create_native_session(work_dir: &Path, title: Option<&str>) -> Result<()> {
         live_artifact_ordinal,
         started_at,
         initial_offset_ms,
-        initial_recorder,
-        initial_stop,
         &mut meeting,
+        Some(initial_input),
     )?;
     drop(owner);
     complete_post_capture(outcome, Some(&name))
@@ -218,15 +212,6 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
         initial_offset_ms as u64,
         live_status.clone(),
     );
-    let initial_live_sink = live
-        .as_ref()
-        .map(|worker| worker.sink_for_offset(initial_offset_ms as u64));
-    let initial_stop = Arc::new(AtomicBool::new(false));
-    let initial_recorder = crate::recorder::RecorderHandle::start_with_live_audio(
-        initial_stop.clone(),
-        None,
-        initial_live_sink,
-    )?;
     margins_cli::commands::sessions::write_current_session(
         &margins_cli::standalone_services(),
         &margins_dir,
@@ -250,9 +235,8 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
         live_artifact_ordinal,
         started_at,
         initial_offset_ms,
-        initial_recorder,
-        initial_stop,
         &mut meeting,
+        None,
     )?;
     drop(owner);
     complete_post_capture(outcome, None)
@@ -282,6 +266,131 @@ fn complete_post_capture(outcome: SegmentOutcome, new_session: Option<&str>) -> 
     }
 }
 
+#[cfg(feature = "audio-capture")]
+struct StartedNativeSegment {
+    recorder: crate::recorder::RecorderHandle,
+    stop: Arc<AtomicBool>,
+    overflow: Arc<AtomicBool>,
+    retrying: Arc<AtomicBool>,
+}
+
+#[cfg(feature = "audio-capture")]
+struct InitialNativeInput {
+    recorder: crate::recorder::RecorderHandle,
+    stop: Arc<AtomicBool>,
+    selected: Option<crate::recorder::SelectedInputDevice>,
+    preference: Option<audio_preferences::InputPreference>,
+    note: Option<String>,
+}
+
+#[cfg(feature = "audio-capture")]
+fn open_before_reserving_session<T, U>(
+    open: impl FnOnce() -> Result<T>,
+    reserve: impl FnOnce() -> Result<U>,
+) -> Result<(T, U)> {
+    let opened = open()?;
+    Ok((opened, reserve()?))
+}
+
+#[cfg(feature = "audio-capture")]
+fn resolve_native_input() -> Result<(
+    Option<audio_preferences::InputPreference>,
+    Option<crate::recorder::SelectedInputDevice>,
+    Option<String>,
+)> {
+    let (preference, load_note) = match audio_preferences::load() {
+        Ok(preference) => (preference, None),
+        Err(error) => (
+            None,
+            Some(format!(
+                "Could not read saved mic choice ({error}); using system default"
+            )),
+        ),
+    };
+    let (selected, note) = audio_preferences::resolve(preference.as_ref())?;
+    Ok((preference, selected, note.or(load_note)))
+}
+
+#[cfg(feature = "audio-capture")]
+fn open_native_recorder(
+    selected: Option<&crate::recorder::SelectedInputDevice>,
+    saved: Option<&audio_preferences::InputPreference>,
+    live_sink: Option<crate::recorder::LiveAudioSink>,
+) -> Result<(
+    crate::recorder::RecorderHandle,
+    Arc<AtomicBool>,
+    bool,
+    Option<String>,
+)> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let (recorder, fell_back, note) =
+        audio_preferences::open_with_saved_fallback(saved, selected, |choice| {
+            crate::recorder::RecorderHandle::start_with_selected_audio(
+                stop.clone(),
+                choice,
+                live_sink.clone(),
+            )
+        })?;
+    Ok((recorder, stop, fell_back, note))
+}
+
+#[cfg(feature = "audio-capture")]
+fn prepare_initial_native_input(
+    live_sink: Option<crate::recorder::LiveAudioSink>,
+) -> Result<InitialNativeInput> {
+    let (preference, mut selected, resolve_note) = resolve_native_input()?;
+    let (recorder, stop, fell_back, open_note) =
+        open_native_recorder(selected.as_ref(), preference.as_ref(), live_sink)?;
+    if fell_back {
+        selected = None;
+    }
+    Ok(InitialNativeInput {
+        recorder,
+        stop,
+        selected,
+        preference,
+        note: open_note.or(resolve_note),
+    })
+}
+
+#[cfg(feature = "audio-capture")]
+fn bind_native_segment(
+    meeting: &mut capture_local_runtime::LocalMeetingProducer,
+    ordinal: i64,
+    offset_ms: u64,
+    recorder: crate::recorder::RecorderHandle,
+    stop: Arc<AtomicBool>,
+) -> Result<StartedNativeSegment> {
+    let overflow = match recorder.bound_native_spool() {
+        Ok(overflow) => overflow,
+        Err(error) => {
+            stop.store(true, Ordering::SeqCst);
+            let _ = recorder.stop_and_flush(|| Ok(()));
+            return Err(error.context("could not bound the native audio spool"));
+        }
+    };
+    let retrying = match meeting.start_stream(ordinal, offset_ms, recorder.native_spool_sources()) {
+        Ok(retrying) => retrying,
+        Err(error) => {
+            stop.store(true, Ordering::SeqCst);
+            let _ = recorder.stop_and_flush(|| Ok(()));
+            let recovery = meeting.recover_failed_stream_and_close(ordinal, offset_ms);
+            return Err(match recovery {
+                Ok(()) => error.context("could not start runtime audio storage"),
+                Err(recovery_error) => anyhow::anyhow!(
+                    "could not start runtime audio storage: {error:#}; recovery failed: {recovery_error:#}"
+                ),
+            });
+        }
+    };
+    Ok(StartedNativeSegment {
+        recorder,
+        stop,
+        overflow,
+        retrying,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 #[cfg(feature = "audio-capture")]
 fn run_segment(
@@ -291,15 +400,31 @@ fn run_segment(
     live_artifact_ordinal: i64,
     started_at: chrono::DateTime<Local>,
     initial_offset_ms: i64,
-    initial_recorder: crate::recorder::RecorderHandle,
-    initial_stop: Arc<AtomicBool>,
     meeting: &mut capture_local_runtime::LocalMeetingProducer,
+    initial_input: Option<InitialNativeInput>,
 ) -> Result<SegmentOutcome> {
     let mut ordinal = initial_ordinal;
-    let mut selected_device: Option<crate::recorder::InputDevice> = None;
+    let (mut preopened, preference, mut selected_device, fallback_note) =
+        if let Some(initial) = initial_input {
+            (
+                Some((initial.recorder, initial.stop)),
+                initial.preference,
+                initial.selected,
+                initial.note,
+            )
+        } else {
+            let (preference, selected, note) = resolve_native_input()?;
+            (None, preference, selected, note)
+        };
+    app.preferred_mic_name = preference.as_ref().map(|choice| choice.name.clone());
+    app.preferred_mic_uid = preference.as_ref().and_then(|choice| choice.uid.clone());
+    if let Some(note) = fallback_note {
+        app.message = Some(note);
+    }
+    let mut saved_choice_active = selected_device.is_some();
+    let mut pending_selection = false;
     let mut live_timeline_duration_ms: u64 = 0;
-    let mut initial_recorder = Some(initial_recorder);
-    let mut initial_stop = Some(initial_stop);
+    let mut first_segment = true;
     // Memo durability must not depend on the optional transcription path.
     let mut tui_error: Option<anyhow::Error> = None;
     let mut flush_failed = false;
@@ -308,60 +433,69 @@ fn run_segment(
     // save and runtime finalization below always run.
     let capture_result = (|| -> Result<()> {
         loop {
-            let segment_offset_ms = if initial_recorder.is_some() {
+            let segment_offset_ms = if first_segment {
                 initial_offset_ms
             } else {
                 (Local::now() - started_at).num_milliseconds().max(0)
             };
-            let stop = initial_stop
-                .take()
-                .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
-            let recorder = if let Some(recorder) = initial_recorder.take() {
-                recorder
+            first_segment = false;
+            let live_sink = live
+                .as_ref()
+                .map(|worker| worker.sink_for_offset(segment_offset_ms as u64));
+            let (recorder, stop) = if let Some(initial) = preopened.take() {
+                initial
             } else {
-                let live_sink = live
-                    .as_ref()
-                    .map(|worker| worker.sink_for_offset(segment_offset_ms as u64));
-                crate::recorder::RecorderHandle::start_with_live_audio(
-                    stop.clone(),
+                let (recorder, stop, fell_back, note) = open_native_recorder(
                     selected_device.as_ref(),
+                    saved_choice_active.then_some(preference.as_ref()).flatten(),
                     live_sink,
-                )?
-            };
-            app.native_spool_overflow = match recorder.bound_native_spool() {
-                Ok(overflow) => overflow,
-                Err(error) => {
-                    stop.store(true, Ordering::SeqCst);
-                    let _ = recorder.stop_and_flush(|| Ok(()));
-                    return Err(error.context("could not bound the native audio spool"));
+                )?;
+                if fell_back {
+                    selected_device = None;
+                    saved_choice_active = false;
                 }
-            };
-            app.native_store_retrying = match meeting.start_stream(
-                ordinal,
-                segment_offset_ms as u64,
-                recorder.native_spool_sources(),
-            ) {
-                Ok(retrying) => retrying,
-                Err(error) => {
-                    stop.store(true, Ordering::SeqCst);
-                    let _ = recorder.stop_and_flush(|| Ok(()));
-                    let recovery =
-                        meeting.recover_failed_stream_and_close(ordinal, segment_offset_ms as u64);
-                    return Err(match recovery {
-                    Ok(()) => error.context("could not start runtime audio storage"),
-                    Err(recovery_error) => anyhow::anyhow!(
-                        "could not start runtime audio storage: {error:#}; recovery failed: {recovery_error:#}"
-                    ),
-                });
+                if let Some(note) = note {
+                    app.message = Some(note);
                 }
+                (recorder, stop)
             };
+            let started =
+                bind_native_segment(meeting, ordinal, segment_offset_ms as u64, recorder, stop)?;
+            if pending_selection {
+                if let Some(selected) = selected_device.as_ref() {
+                    audio_preferences::remember_selection(app, selected);
+                }
+                pending_selection = false;
+            }
+            let recorder = started.recorder;
+            let stop = started.stop;
+            app.current_mic_name = recorder.mic_name().to_owned();
+            app.current_mic_uid = recorder.mic_uid().map(str::to_owned);
+            app.mic_silent = false;
+            app.suggested_mic_name = None;
+            app.devices = crate::recorder::list_input_devices()
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
+            app.device_uids = crate::recorder::input_device_uid_snapshot(&app.devices);
+            app.native_spool_overflow = started.overflow;
+            app.native_store_retrying = started.retrying;
 
             app.mic_level = recorder.mic_peak();
             app.spk_level = recorder.spk_peak();
             app.mic_drops = recorder.mic_drops();
             app.spk_drops = recorder.spk_drops();
+            app.mic_frames = recorder.mic_frames();
+            app.mic_silence = recorder.mic_silence();
+            app.mic_rate = recorder.mic_rate();
             app.spk_silence = recorder.spk_silence();
             app.spk_frames = recorder.spk_frames();
+            app.mic_real_spool_frames =
+                recorder.real_spool_frames(crate::recorder::CaptureLane::Mic);
+            app.spk_real_spool_frames =
+                recorder.real_spool_frames(crate::recorder::CaptureLane::System);
+            app.mic_no_audio_received.store(false, Ordering::Release);
+            app.spk_no_audio_received.store(false, Ordering::Release);
             app.spk_rate = recorder.spk_rate();
 
             let tui_result = crate::tui::run_tui(app, stop.clone())
@@ -432,15 +566,14 @@ fn run_segment(
                             crate::tui::TuiAction::Resume => break true,
                             crate::tui::TuiAction::Quit => break false,
                             crate::tui::TuiAction::SwitchDevice(index) => {
-                                let mut devices = crate::recorder::list_input_devices();
-                                if index >= devices.len() {
-                                    return Err(anyhow::anyhow!(
-                                        "selected audio input is no longer available"
-                                    ));
-                                }
-                                let (device_name, device) = devices.swap_remove(index);
-                                app.current_mic_name = device_name;
-                                selected_device = Some(device);
+                                let selected = crate::recorder::selected_input_device(
+                                    &app.devices,
+                                    &app.device_uids,
+                                    index,
+                                )?;
+                                selected_device = Some(selected);
+                                saved_choice_active = false;
+                                pending_selection = true;
                             }
                             crate::tui::TuiAction::Pause => {}
                         }
@@ -455,15 +588,14 @@ fn run_segment(
                     return Err(anyhow::anyhow!("resume requested while capture was active"));
                 }
                 Ok(crate::tui::TuiAction::SwitchDevice(index)) => {
-                    let mut devices = crate::recorder::list_input_devices();
-                    if index >= devices.len() {
-                        return Err(anyhow::anyhow!(
-                            "selected audio input is no longer available"
-                        ));
-                    }
-                    let (device_name, device) = devices.swap_remove(index);
-                    app.current_mic_name = device_name;
-                    selected_device = Some(device);
+                    let selected = crate::recorder::selected_input_device(
+                        &app.devices,
+                        &app.device_uids,
+                        index,
+                    )?;
+                    selected_device = Some(selected);
+                    saved_choice_active = false;
+                    pending_selection = true;
                     ordinal = meeting.next_ordinal()?;
                 }
             }
@@ -484,6 +616,109 @@ fn run_segment(
         tui_error,
         flush_failed,
     )
+}
+
+#[cfg(all(test, feature = "audio-capture"))]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn failed_first_device_open_leaves_no_session_or_current_pointer() {
+        let root = tempfile::tempdir().unwrap();
+        let margins_dir = root.path().join(".margins");
+        let result: Result<((), ())> = open_before_reserving_session(
+            || anyhow::bail!("input device failed to open"),
+            || {
+                std::fs::create_dir_all(&margins_dir)?;
+                margins_store::canonical::create_session(
+                    &margins_dir,
+                    "would-be-session",
+                    &Local::now(),
+                    "would-be-session.md",
+                )?;
+                std::fs::write(margins_dir.join("current"), "would-be-session")?;
+                Ok(())
+            },
+        );
+        assert!(result.unwrap_err().to_string().contains("device failed"));
+        assert!(!margins_dir.exists());
+    }
+}
+
+#[cfg(all(test, target_os = "macos", feature = "audio-capture"))]
+mod native_smoke_tests {
+    use super::*;
+
+    /// Run in Ghostty with microphone permission and speak for the full test.
+    #[test]
+    #[ignore = "requires a real macOS microphone; speak while it records"]
+    fn real_initial_create_path_stores_nonzero_mic_audio() {
+        let temp = tempfile::tempdir().unwrap();
+        let margins_dir = temp.path().join(".margins");
+        std::fs::create_dir_all(&margins_dir).unwrap();
+        let mut meeting = capture_local_runtime::LocalMeetingProducer::reserve(
+            &margins_dir,
+            "native-smoke",
+            None,
+            Local::now(),
+        )
+        .unwrap();
+        let smoke_uid = std::env::var("MARGINS_SMOKE_MIC_UID")
+            .ok()
+            .filter(|uid| !uid.is_empty());
+        let preference = if let Some(uid) = &smoke_uid {
+            Some(audio_preferences::InputPreference {
+                name: "smoke target".into(),
+                uid: Some(uid.clone()),
+            })
+        } else {
+            audio_preferences::load().unwrap()
+        };
+        let (selected, note) = audio_preferences::resolve(preference.as_ref()).unwrap();
+        if smoke_uid.is_some() {
+            assert!(
+                selected.is_some(),
+                "requested smoke mic UID unavailable: {note:?}"
+            );
+        }
+        let (recorder, stop, _, _) =
+            open_native_recorder(selected.as_ref(), preference.as_ref(), None).unwrap();
+        let StartedNativeSegment { recorder, stop, .. } =
+            bind_native_segment(&mut meeting, 0, 0, recorder, stop).unwrap();
+        let opened_name = recorder.mic_name().to_owned();
+        let opened_uid = recorder.mic_uid().map(str::to_owned);
+        if let Some(requested_uid) = smoke_uid.as_deref() {
+            assert_eq!(
+                opened_uid.as_deref(),
+                Some(requested_uid),
+                "smoke test opened {opened_name:?} instead of requested UID"
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        stop.store(true, Ordering::SeqCst);
+        recorder
+            .stop_and_flush(|| {
+                meeting.flush_stream_and_close(
+                    0,
+                    0,
+                    margins_meeting_protocol::SegmentCloseReasonV1::Stop,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let wav = margins_store::SqliteMeetingRuntimeStorage::open(&margins_dir)
+            .unwrap()
+            .export_native_wav("native-smoke", 0)
+            .unwrap();
+        let reader = hound::WavReader::open(wav).unwrap();
+        assert!(
+            reader
+                .into_samples::<i16>()
+                .step_by(2)
+                .any(|sample| sample.unwrap() != 0),
+            "microphone lane stored only zeros from {opened_name:?} UID {opened_uid:?}; inspect capture_lane_summary in the CLI log"
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

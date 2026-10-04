@@ -22,6 +22,8 @@ use crate::app::{App, AppMode, GUTTER_WIDTH};
 
 /// Show silence beside the speaker meter without interrupting the mic meter.
 const SYSTEM_AUDIO_SILENCE_MARKER_SECS: u64 = 3;
+const MIC_NO_AUDIO_THRESHOLD_SECS: u64 = 3;
+const SYSTEM_NO_AUDIO_THRESHOLD_SECS: u64 = 10;
 const WATERMARK_HINT: &str = "  |  agent /watermark: live read";
 
 fn watermark_hint(available_width: u16, status_width: usize) -> Option<&'static str> {
@@ -83,6 +85,210 @@ fn clear_system_audio_warning_after_recovery(
     false
 }
 
+#[derive(Default)]
+struct SpoolProgress {
+    last_frames: u64,
+    last_progress_at: std::time::Duration,
+    last_callbacks: u64,
+    last_callback_at: std::time::Duration,
+    callback_stall_since: Option<std::time::Duration>,
+}
+
+impl SpoolProgress {
+    fn missing(&mut self, elapsed: std::time::Duration, frames: u64, threshold_secs: u64) -> bool {
+        if frames != self.last_frames {
+            self.last_frames = frames;
+            self.last_progress_at = elapsed;
+            return false;
+        }
+        elapsed.saturating_sub(self.last_progress_at)
+            >= std::time::Duration::from_secs(threshold_secs)
+    }
+
+    fn system_missing(
+        &mut self,
+        elapsed: std::time::Duration,
+        callbacks: u64,
+        frames: u64,
+        threshold_secs: u64,
+    ) -> bool {
+        let spool_advanced = frames != self.last_frames;
+        self.missing(elapsed, frames, threshold_secs);
+        if spool_advanced {
+            self.callback_stall_since = None;
+        }
+        if callbacks != self.last_callbacks {
+            let callback_gap = elapsed.saturating_sub(self.last_callback_at);
+            self.last_callbacks = callbacks;
+            self.last_callback_at = elapsed;
+            if !spool_advanced
+                && (self.callback_stall_since.is_none()
+                    || callback_gap > std::time::Duration::from_secs(1))
+            {
+                self.callback_stall_since = Some(elapsed);
+            }
+        }
+        let callbacks_recent =
+            elapsed.saturating_sub(self.last_callback_at) <= std::time::Duration::from_secs(1);
+        if !callbacks_recent {
+            self.callback_stall_since = None;
+        }
+        callbacks_recent
+            && self.callback_stall_since.is_some_and(|since| {
+                elapsed.saturating_sub(since) >= std::time::Duration::from_secs(threshold_secs)
+            })
+    }
+}
+
+fn update_no_audio_guard(
+    app: &mut App,
+    progress: &mut [SpoolProgress; 2],
+    elapsed: std::time::Duration,
+) {
+    if app.capture_paused {
+        return;
+    }
+    for (index, (lane, callbacks, spooled, warning, threshold)) in [
+        (
+            "mic",
+            &app.mic_frames,
+            &app.mic_real_spool_frames,
+            &app.mic_no_audio_received,
+            MIC_NO_AUDIO_THRESHOLD_SECS,
+        ),
+        (
+            "system",
+            &app.spk_frames,
+            &app.spk_real_spool_frames,
+            &app.spk_no_audio_received,
+            SYSTEM_NO_AUDIO_THRESHOLD_SECS,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let real_frames = spooled.load(Ordering::Acquire);
+        let callback_frames = callbacks.load(Ordering::Acquire);
+        let missing = if index == 0 {
+            progress[index].missing(elapsed, real_frames, threshold)
+        } else {
+            progress[index].system_missing(elapsed, callback_frames, real_frames, threshold)
+        };
+        if missing && !warning.swap(true, Ordering::AcqRel) {
+            crate::cli_log::event(
+                "capture_no_audio_received",
+                format!(
+                    "lane={lane} callback_frames={} real_spool_frames={real_frames} elapsed_s={}",
+                    callback_frames,
+                    elapsed.as_secs(),
+                ),
+            );
+        } else if !missing {
+            warning.store(false, Ordering::Release);
+        }
+    }
+    let silent = app.mic_rate != 0
+        && app.mic_frames.load(Ordering::Acquire) > 0
+        && app.mic_silence.load(Ordering::Acquire)
+            >= u64::from(app.mic_rate) * MIC_NO_AUDIO_THRESHOLD_SECS;
+    if silent && !app.mic_silent {
+        let suggestion = suggested_device_index(
+            &app.devices,
+            &app.device_uids,
+            &app.current_mic_name,
+            app.current_mic_uid.as_deref(),
+            app.preferred_mic_name.as_deref(),
+            app.preferred_mic_uid.as_deref(),
+        );
+        app.suggested_mic_name = suggestion.map(|index| app.devices[index].clone());
+        crate::cli_log::event(
+            "capture_lane_silent",
+            format!(
+                "lane=mic name={:?} uid={:?} callback_frames={} consecutive_exact_zero_frames={} suggestion={:?}",
+                app.current_mic_name,
+                app.current_mic_uid,
+                app.mic_frames.load(Ordering::Relaxed),
+                app.mic_silence.load(Ordering::Relaxed),
+                app.suggested_mic_name,
+            ),
+        );
+    } else if !silent {
+        app.suggested_mic_name = None;
+    }
+    app.mic_silent = silent;
+}
+
+fn is_virtual_loopback(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [
+        "blackhole",
+        "loopback",
+        "soundflower",
+        "virtual",
+        "vb-cable",
+        "cable input",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+fn suggested_device_index(
+    names: &[String],
+    uids: &[Option<String>],
+    current_name: &str,
+    current_uid: Option<&str>,
+    preferred_name: Option<&str>,
+    preferred_uid: Option<&str>,
+) -> Option<usize> {
+    let is_current = |index: usize| {
+        if let Some(uid) = current_uid {
+            uids.get(index).and_then(Option::as_deref) == Some(uid)
+        } else {
+            names[index] == current_name
+        }
+    };
+    let preferred = if let Some(uid) = preferred_uid {
+        uids.iter()
+            .position(|candidate| candidate.as_deref() == Some(uid))
+    } else {
+        preferred_name.and_then(|name| names.iter().position(|candidate| candidate == name))
+    };
+    if let Some(index) = preferred.filter(|index| !is_current(*index)) {
+        return Some(index);
+    }
+    names
+        .iter()
+        .enumerate()
+        .find(|(index, name)| !is_current(*index) && !is_virtual_loopback(name))
+        .map(|(index, _)| index)
+}
+
+fn picker_preselection(app: &App) -> usize {
+    let suggestion = app
+        .mic_silent
+        .then(|| {
+            suggested_device_index(
+                &app.devices,
+                &app.device_uids,
+                &app.current_mic_name,
+                app.current_mic_uid.as_deref(),
+                app.preferred_mic_name.as_deref(),
+                app.preferred_mic_uid.as_deref(),
+            )
+        })
+        .flatten();
+    suggestion
+        .or_else(|| {
+            app.current_mic_uid.as_deref().and_then(|uid| {
+                app.device_uids
+                    .iter()
+                    .position(|candidate| candidate.as_deref() == Some(uid))
+            })
+        })
+        .or_else(|| app.devices.iter().position(|n| *n == app.current_mic_name))
+        .unwrap_or(0)
+}
+
 pub enum TuiAction {
     Quit,
     Pause,
@@ -126,6 +332,8 @@ fn event_loop(
     // Reaching the TUI means system-audio IO returned Started. Probe once after
     // sustained startup silence; later quiet periods use the meter marker.
     let system_audio_io_started_at = std::time::Instant::now();
+    let capture_started_at = std::time::Instant::now();
+    let mut spool_progress = [SpoolProgress::default(), SpoolProgress::default()];
     let mut system_audio_permission_probe_pending = cfg!(target_os = "macos");
 
     loop {
@@ -186,6 +394,8 @@ fn event_loop(
         let frame_count = app.spk_frames.load(Ordering::Relaxed);
         let silent_samples = app.spk_silence.load(Ordering::Relaxed);
         clear_system_audio_warning_after_recovery(&mut app.message, frame_count, silent_samples);
+
+        update_no_audio_guard(app, &mut spool_progress, capture_started_at.elapsed());
 
         // Also check if stop was requested externally
         if stop_flag.load(Ordering::SeqCst) {
@@ -277,12 +487,8 @@ fn handle_key_normal(app: &mut App, key: KeyEvent) -> Option<TuiAction> {
         KeyCode::Char('d') if ctrl => {
             let devices = crate::recorder::list_input_devices();
             app.devices = devices.iter().map(|(name, _)| name.clone()).collect();
-            // Pre-select the current mic
-            app.selected_device = app
-                .devices
-                .iter()
-                .position(|n| *n == app.current_mic_name)
-                .unwrap_or(0);
+            app.device_uids = crate::recorder::input_device_uid_snapshot(&app.devices);
+            app.selected_device = picker_preselection(app);
             app.mode = AppMode::DeviceSelect;
         }
 
@@ -357,9 +563,13 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
 }
 
 fn render(f: &mut ratatui::Frame, app: &mut App) {
+    let input_notice = app.message.as_deref().is_some_and(|message| {
+        message.starts_with("Saved mic '") || message.starts_with("Could not read saved mic choice")
+    });
+    let status_height = if app.mic_silent || input_notice { 2 } else { 1 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .constraints([Constraint::Min(1), Constraint::Length(status_height)])
         .split(f.area());
 
     let editor_area = chunks[0];
@@ -459,9 +669,21 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
         && app.spk_silence.load(Ordering::Relaxed) / app.spk_rate as u64
             >= SYSTEM_AUDIO_SILENCE_MARKER_SECS;
     let meter_text = format!(
-        "mic {} spk {}{}",
+        "mic {}{} spk {}{}{}",
         level_meter(mic_peak, 8),
+        if app.mic_silent {
+            " SILENT"
+        } else if app.mic_no_audio_received.load(Ordering::Acquire) {
+            " NO AUDIO"
+        } else {
+            ""
+        },
         level_meter(spk_peak, 8),
+        if app.spk_no_audio_received.load(Ordering::Acquire) {
+            " NO AUDIO"
+        } else {
+            ""
+        },
         if speaker_silent { " silent" } else { "" },
     );
     let status_prefix = format!(
@@ -508,6 +730,7 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
     if mic_drops > 0 || spk_drops > 0 {
         detail = format!("DROPS mic:{mic_drops} spk:{spk_drops} | {detail}");
     }
+    detail = format!("input: {} | {detail}", app.current_mic_name);
 
     // The terminal clips only the trailing detail when a notice is long.
     // Time and both meters occupy the fixed prefix in every status state.
@@ -536,7 +759,26 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
         ));
     }
 
-    let status = Paragraph::new(Line::from(status_spans)).style(
+    let mut status_lines = vec![Line::from(status_spans)];
+    if app.mic_silent {
+        let mut warning = format!("mic silent: {} — ^D choose input", app.current_mic_name);
+        if let Some(suggested) = &app.suggested_mic_name {
+            warning = format!(
+                "mic silent: {} — ^D (suggest: {suggested})",
+                app.current_mic_name
+            );
+        }
+        status_lines.push(Line::from(Span::styled(
+            warning,
+            Style::default().fg(Color::Black).bg(Color::Yellow),
+        )));
+    } else if input_notice {
+        status_lines.push(Line::from(Span::styled(
+            app.message.as_deref().unwrap_or_default(),
+            Style::default().fg(Color::Black).bg(Color::Yellow),
+        )));
+    }
+    let status = Paragraph::new(status_lines).style(
         Style::default()
             .fg(Color::Black)
             .bg(Color::White)
@@ -613,6 +855,168 @@ mod tests {
     const RATE: u32 = 48_000;
 
     #[test]
+    fn zero_callback_guard_shows_a_lane_marker_and_recovers_on_real_spool_frames() {
+        let mut app = App::new("meeting.md".into(), chrono::Local::now(), "mic".into());
+        let mut progress = [SpoolProgress::default(), SpoolProgress::default()];
+        app.mic_frames.store(3 * RATE as u64, Ordering::Release);
+        update_no_audio_guard(&mut app, &mut progress, Duration::from_millis(2_999));
+        assert!(!app.mic_no_audio_received.load(Ordering::Acquire));
+        update_no_audio_guard(&mut app, &mut progress, Duration::from_secs(3));
+        assert!(app.mic_no_audio_received.load(Ordering::Acquire));
+        let status = rendered_status(&mut app, 80);
+        assert!(status.contains("mic █"), "{status}");
+        assert!(status.contains("NO AUDIO"), "{status}");
+        assert!(status.contains("spk ░░░░░░░░"), "{status}");
+        app.mic_real_spool_frames.store(1, Ordering::Release);
+        update_no_audio_guard(&mut app, &mut progress, Duration::from_secs(4));
+        assert!(!app.mic_no_audio_received.load(Ordering::Acquire));
+        update_no_audio_guard(&mut app, &mut progress, Duration::from_secs(7));
+        assert!(app.mic_no_audio_received.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn system_no_playback_keeps_silent_marker_without_no_audio_alarm() {
+        let mut app = App::new("meeting.md".into(), chrono::Local::now(), "mic".into());
+        app.spk_rate = RATE;
+        app.spk_silence.store(12 * RATE as u64, Ordering::Release);
+        let mut progress = [SpoolProgress::default(), SpoolProgress::default()];
+        update_no_audio_guard(&mut app, &mut progress, Duration::from_secs(12));
+        assert!(!app.spk_no_audio_received.load(Ordering::Acquire));
+        let status = rendered_status(&mut app, 80);
+        assert!(status.contains("spk ░░░░░░░░ silent"), "{status}");
+    }
+
+    #[test]
+    fn system_clip_stopping_does_not_arm_no_audio_but_live_callbacks_without_spool_do() {
+        let mut app = App::new("meeting.md".into(), chrono::Local::now(), "mic".into());
+        let mut progress = [SpoolProgress::default(), SpoolProgress::default()];
+        app.spk_frames.store(RATE as u64, Ordering::Release);
+        app.spk_real_spool_frames
+            .store(RATE as u64, Ordering::Release);
+        update_no_audio_guard(&mut app, &mut progress, Duration::from_secs(1));
+        // Playback stopped; the tap stopped calling back too.
+        update_no_audio_guard(&mut app, &mut progress, Duration::from_secs(12));
+        assert!(!app.spk_no_audio_received.load(Ordering::Acquire));
+        // A new stream of callbacks with no spool progress is a real stall.
+        for second in 13..=23 {
+            app.spk_frames.fetch_add(RATE as u64, Ordering::Release);
+            update_no_audio_guard(&mut app, &mut progress, Duration::from_secs(second));
+        }
+        assert!(app.spk_no_audio_received.load(Ordering::Acquire));
+        update_no_audio_guard(&mut app, &mut progress, Duration::from_secs(25));
+        assert!(!app.spk_no_audio_received.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn exact_zero_mic_callbacks_name_the_input_and_suggest_a_physical_alternative() {
+        let mut app = App::new(
+            "meeting.md".into(),
+            chrono::Local::now(),
+            "MacBook Pro Microphone".into(),
+        );
+        app.current_mic_uid = Some("built-in".into());
+        app.devices = vec![
+            "MacBook Pro Microphone".into(),
+            "BlackHole 2ch".into(),
+            "Yeti Stereo Microphone".into(),
+        ];
+        app.device_uids = vec![
+            Some("built-in".into()),
+            Some("blackhole".into()),
+            Some("yeti".into()),
+        ];
+        app.mic_rate = RATE;
+        let mut progress = [SpoolProgress::default(), SpoolProgress::default()];
+        // Fake callbacks delivered three seconds of exact-zero PCM. They did
+        // reach the spool, so the missing-callback guard must stay clear.
+        app.mic_frames.store(3 * RATE as u64, Ordering::Release);
+        app.mic_real_spool_frames
+            .store(3 * RATE as u64, Ordering::Release);
+        app.mic_silence.store(3 * RATE as u64, Ordering::Release);
+        update_no_audio_guard(&mut app, &mut progress, Duration::from_secs(3));
+        assert!(app.mic_silent);
+        assert!(!app.mic_no_audio_received.load(Ordering::Acquire));
+        assert_eq!(
+            app.suggested_mic_name.as_deref(),
+            Some("Yeti Stereo Microphone")
+        );
+        assert_eq!(picker_preselection(&app), 2);
+        for width in [80, 120] {
+            let status = rendered_status_block(&mut app, width, 2);
+            assert!(status.contains("mic █"), "{width}: {status}");
+            assert!(status.contains("spk ░░░░░░░░"), "{width}: {status}");
+            assert!(
+                status.contains("mic silent: MacBook Pro Microphone"),
+                "{width}: {status}"
+            );
+            assert!(
+                status.contains("suggest: Yeti Stereo Microphone"),
+                "{width}: {status}"
+            );
+        }
+        app.mic_silence.store(0, Ordering::Release);
+        update_no_audio_guard(&mut app, &mut progress, Duration::from_secs(4));
+        assert!(!app.mic_silent);
+    }
+
+    #[test]
+    fn suggestion_prefers_saved_uid_then_skips_virtual_loopbacks() {
+        let names = vec![
+            "MacBook Pro Microphone".into(),
+            "BlackHole 2ch".into(),
+            "Yeti Stereo Microphone".into(),
+            "USB Digital Audio".into(),
+        ];
+        let uids = vec![
+            Some("built-in".into()),
+            Some("blackhole".into()),
+            Some("yeti".into()),
+            Some("usb".into()),
+        ];
+        assert_eq!(
+            suggested_device_index(
+                &names,
+                &uids,
+                &names[0],
+                Some("built-in"),
+                Some(&names[3]),
+                Some("usb")
+            ),
+            Some(3)
+        );
+        assert_eq!(
+            suggested_device_index(&names, &uids, &names[0], Some("built-in"), None, None),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn missing_saved_mic_note_remains_visible_with_active_input_and_meters() {
+        let mut app = App::new(
+            "meeting.md".into(),
+            chrono::Local::now(),
+            "MacBook Pro Microphone".into(),
+        );
+        app.message = Some(
+            "Saved mic 'Yeti Stereo Microphone' is unavailable; using system default. ^D to choose input"
+                .into(),
+        );
+        for width in [80, 120] {
+            let status = rendered_status_block(&mut app, width, 2);
+            assert!(status.contains("mic █"), "{width}: {status}");
+            assert!(status.contains("spk ░░░░░░░░"), "{width}: {status}");
+            assert!(
+                status.contains("input: MacBook Pro Microphone"),
+                "{width}: {status}"
+            );
+            assert!(
+                status.contains("Saved mic 'Yeti Stereo Microphone'"),
+                "{width}: {status}"
+            );
+        }
+    }
+
+    #[test]
     fn startup_permission_nudge_waits_for_started_io_and_threshold() {
         assert!(!should_nudge_system_audio_permission(
             false,
@@ -684,6 +1088,18 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    fn rendered_status_block(app: &mut App, width: u16, lines: usize) -> String {
+        app.mic_level.store(0.5f32.to_bits(), Ordering::Relaxed);
+        let backend = TestBackend::new(width, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        let rows = terminal.backend().buffer().content.chunks(width as usize);
+        rows.skip(8 - lines)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]

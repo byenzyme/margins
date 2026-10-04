@@ -84,6 +84,8 @@ struct PcmLaneSender {
     resampler: margins_media::timeline::RationalResampler,
     source_rate: u32,
     input_frames: u64,
+    nonzero_input_frames: u64,
+    nonzero_encoded_frames: u64,
     last_input_sample: Option<f32>,
     sequence: u64,
     sent_frames: u64,
@@ -117,6 +119,8 @@ impl PcmLaneSender {
             )?,
             source_rate,
             input_frames: 0,
+            nonzero_input_frames: 0,
+            nonzero_encoded_frames: 0,
             last_input_sample: None,
             sequence: 0,
             sent_frames: 0,
@@ -137,6 +141,10 @@ impl PcmLaneSender {
             .input_frames
             .checked_add(u64::try_from(samples.len())?)
             .context("native audio frame count overflow")?;
+        self.nonzero_input_frames += samples
+            .iter()
+            .filter(|sample| sample.abs() >= 1.0 / 32_768.0)
+            .count() as u64;
         if let Some(sample) = samples.last() {
             self.last_input_sample = Some(*sample);
         }
@@ -150,6 +158,7 @@ impl PcmLaneSender {
     ) -> Result<()> {
         for sample in samples {
             let value = (sample.clamp(-1.0, 1.0) * 32_767.0).round() as i16;
+            self.nonzero_encoded_frames += u64::from(value != 0);
             self.pending.extend_from_slice(&value.to_le_bytes());
         }
         if self.pending.len() >= PCM_BATCH_FRAMES * 2 {
@@ -403,10 +412,25 @@ impl RuntimeStreamWorker {
                 if readers.iter().any(|reader| !reader.tail.is_empty()) {
                     bail!("native spool ended with a partial f32 sample");
                 }
-                Ok([
+                let boundaries = [
                     readers[0].sender.finish(&runtime)?,
                     readers[1].sender.finish(&runtime)?,
-                ])
+                ];
+                crate::cli_log::event(
+                    "runtime_audio_summary",
+                    format!(
+                        "segment={ordinal} mic_source_rate={} mic_input={} mic_nonzero_input={} mic_nonzero_encoded={} system_source_rate={} system_input={} system_nonzero_input={} system_nonzero_encoded={}",
+                        readers[0].sender.source_rate,
+                        readers[0].sender.input_frames,
+                        readers[0].sender.nonzero_input_frames,
+                        readers[0].sender.nonzero_encoded_frames,
+                        readers[1].sender.source_rate,
+                        readers[1].sender.input_frames,
+                        readers[1].sender.nonzero_input_frames,
+                        readers[1].sender.nonzero_encoded_frames,
+                    ),
+                );
+                Ok(boundaries)
             })?;
         match ready_rx
             .recv()
@@ -913,6 +937,37 @@ impl LocalMeetingProducer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lane_has_nonzero_audio(
+        producer: &LocalMeetingProducer,
+        name: &str,
+        ordinal: i64,
+        lane: &str,
+    ) -> bool {
+        let segment = segment_id(name, ordinal);
+        let counts = producer
+            .runtime
+            .storage()
+            .native_chunk_boundaries(name, ordinal)
+            .unwrap();
+        let count = counts[if lane == "mic" { 0 } else { 1 }].0;
+        (0..count).any(|sequence| {
+            producer
+                .runtime
+                .storage()
+                .load_audio_chunk(
+                    &SessionId::from(name.to_owned()),
+                    &segment,
+                    &lane.into(),
+                    sequence,
+                )
+                .unwrap()
+                .unwrap()
+                .payload
+                .chunks_exact(2)
+                .any(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]) != 0)
+        })
+    }
     use margins_meeting_protocol::{ClientMessageBodyV1, ClientMessageV1, ServerMessageBodyV1};
     use margins_meeting_runtime::test_support::{
         assert_recorder_conformance, RecorderConformanceAdapter,
@@ -1231,6 +1286,8 @@ mod tests {
             6_000
         );
         producer.finish(6_000).unwrap();
+        assert!(lane_has_nonzero_audio(&producer, "streamed", 0, "mic"));
+        assert!(lane_has_nonzero_audio(&producer, "streamed", 0, "system"));
         let stats = producer.runtime.storage().stats().unwrap();
         assert_eq!(stats.blob_bytes, 6 * 16_000 * 2 * 2);
         assert!(!dir.path().join("artifacts/streamed").exists());
@@ -1293,6 +1350,39 @@ mod tests {
                 "source rate {rate}"
             );
         }
+    }
+
+    #[cfg(feature = "audio-capture")]
+    #[test]
+    fn mixed_ninety_six_and_forty_eight_khz_lanes_keep_real_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut producer =
+            LocalMeetingProducer::reserve(dir.path(), "mixed", None, chrono::Local::now()).unwrap();
+        let writer = crate::recorder::SegmentWriter::start(0, 96_000, 48_000, None).unwrap();
+        writer
+            .bound_spool(60, Arc::new(AtomicBool::new(false)))
+            .unwrap();
+        producer
+            .start_stream(0, 0, writer.native_spool_sources())
+            .unwrap();
+        let mic = writer.mic_sink(1);
+        let system = writer.system_sink(2);
+        mic.attach(96_000, 0).unwrap();
+        system.attach(48_000, 0).unwrap();
+        mic.samples(96_000, vec![0.25; 96_000 * 6], Vec::new())
+            .unwrap();
+        system
+            .samples(48_000, vec![0.5; 48_000 * 6], Vec::new())
+            .unwrap();
+        mic.retire().unwrap();
+        system.retire().unwrap();
+        let sealed = writer.seal_at(96_000 * 6).unwrap();
+        producer
+            .flush_stream_and_close(0, 0, SegmentCloseReasonV1::Stop)
+            .unwrap();
+        sealed.finish_without_wav(|| Ok(())).unwrap();
+        assert!(lane_has_nonzero_audio(&producer, "mixed", 0, "mic"));
+        assert!(lane_has_nonzero_audio(&producer, "mixed", 0, "system"));
     }
 
     #[cfg(feature = "audio-capture")]

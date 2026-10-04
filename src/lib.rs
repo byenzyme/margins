@@ -107,6 +107,10 @@ pub mod recorder {
 
     pub struct InputDevice;
 
+    pub fn input_device_uid_snapshot(names: &[String]) -> Vec<Option<String>> {
+        vec![None; names.len()]
+    }
+
     pub struct NativeSpoolSource {
         pub path: std::path::PathBuf,
         pub rate: u32,
@@ -281,6 +285,7 @@ pub mod recorder {
         pub drops: Arc<AtomicU64>,
         pub packet_drops: Arc<AtomicU64>,
         pub frames: Arc<AtomicU64>,
+        pub silence: Arc<AtomicU64>,
         pub error: Arc<AtomicU8>,
     }
 
@@ -394,6 +399,7 @@ pub mod recorder {
                 drops: Arc::new(AtomicU64::new(0)),
                 packet_drops: Arc::new(AtomicU64::new(0)),
                 frames: Arc::new(AtomicU64::new(0)),
+                silence: Arc::new(AtomicU64::new(0)),
                 error: Arc::new(AtomicU8::new(0)),
             }
         }
