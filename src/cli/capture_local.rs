@@ -153,6 +153,12 @@ fn create_native_session(work_dir: &Path, title: Option<&str>) -> Result<()> {
         margins_store::SqliteWorkspaceAuthorityStorage::open(&margins_dir)?.memo(&name)?;
     app.observe_memo(observed.revision, observed.lines);
     app.live_transcription_status = live_status;
+    if let Some(worker) = &live {
+        (
+            app.live_mic_dropped_samples,
+            app.live_system_dropped_samples,
+        ) = worker.dropped_counters();
+    }
 
     let outcome = run_segment(
         &mut app,
@@ -227,6 +233,12 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
     app.bind_workspace_authority(margins_dir.clone(), name.clone());
     app.observe_memo(observed.revision, observed.lines);
     app.live_transcription_status = live_status;
+    if let Some(worker) = &live {
+        (
+            app.live_mic_dropped_samples,
+            app.live_system_dropped_samples,
+        ) = worker.dropped_counters();
+    }
 
     let outcome = run_segment(
         &mut app,
@@ -290,6 +302,15 @@ fn open_before_reserving_session<T, U>(
 ) -> Result<(T, U)> {
     let opened = open()?;
     Ok((opened, reserve()?))
+}
+
+#[cfg(any(test, feature = "audio-capture"))]
+fn sink_for_new_recorder<T>(preopened: bool, make_sink: impl FnOnce() -> Option<T>) -> Option<T> {
+    if preopened {
+        None
+    } else {
+        make_sink()
+    }
 }
 
 #[cfg(feature = "audio-capture")]
@@ -439,9 +460,12 @@ fn run_segment(
                 (Local::now() - started_at).num_milliseconds().max(0)
             };
             first_segment = false;
-            let live_sink = live
-                .as_ref()
-                .map(|worker| worker.sink_for_offset(segment_offset_ms as u64));
+            // The first recorder was already given a sink before reservation.
+            // Advancing its generation here makes every live send look stale.
+            let live_sink = sink_for_new_recorder(preopened.is_some(), || {
+                live.as_ref()
+                    .map(|worker| worker.sink_for_offset(segment_offset_ms as u64))
+            });
             let (recorder, stop) = if let Some(initial) = preopened.take() {
                 initial
             } else {
@@ -642,6 +666,50 @@ mod startup_tests {
         );
         assert!(result.unwrap_err().to_string().contains("device failed"));
         assert!(!margins_dir.exists());
+    }
+
+    #[test]
+    fn initial_recorder_feeds_live_sink_for_simulated_minute() {
+        use crate::recorder::{LiveAudioSink, LiveGenerationClock, SegmentWriter};
+        use std::sync::atomic::AtomicU64;
+        use std::sync::{mpsc, Mutex};
+
+        let (sender, receiver) = mpsc::channel();
+        let clock = Arc::new(Mutex::new(LiveGenerationClock {
+            generation: 1,
+            session_offset_ms: 0,
+        }));
+        let accepted = Arc::new(AtomicU64::new(0));
+        let dropped = Arc::new(AtomicU64::new(0));
+        let initial_sink = LiveAudioSink {
+            sender,
+            generation: 1,
+            generation_clock: clock.clone(),
+            mic_accepted_samples: accepted.clone(),
+            system_accepted_samples: Arc::new(AtomicU64::new(0)),
+            mic_dropped_samples: dropped.clone(),
+            system_dropped_samples: Arc::new(AtomicU64::new(0)),
+            queued_samples: Arc::new(AtomicU64::new(0)),
+            queue_max_samples: LIVE_QUEUE_MAX_SAMPLES,
+        };
+        let writer = SegmentWriter::start(0, 100, 100, Some(initial_sink)).unwrap();
+        let mic = writer.mic_sink(1);
+        mic.attach(100, 0).unwrap();
+        let _second_sink: Option<()> = sink_for_new_recorder(true, || {
+            clock.lock().unwrap().generation += 1;
+            Some(())
+        });
+        assert_eq!(clock.lock().unwrap().generation, 1);
+        for _ in 0..60 {
+            mic.samples(100, vec![0.25; 100], Vec::new()).unwrap();
+        }
+        mic.retire().unwrap();
+        writer.seal_at(6_000).unwrap();
+        assert!(accepted.load(Ordering::Acquire) > 0);
+        assert_eq!(dropped.load(Ordering::Acquire), 0);
+        assert!(receiver
+            .try_iter()
+            .any(|chunk| chunk.samples.iter().any(|s| *s != 0.0)));
     }
 }
 

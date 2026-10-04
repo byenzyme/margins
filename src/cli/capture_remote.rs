@@ -447,6 +447,12 @@ fn run_remote_native_capture(
     app.remote_pending_chunks = uploader_pending_chunks.clone();
     app.remote_pending_bytes = uploader_pending_bytes.clone();
     app.live_transcription_status = live_status;
+    if let Some(worker) = &live {
+        (
+            app.live_mic_dropped_samples,
+            app.live_system_dropped_samples,
+        ) = worker.dropped_counters();
+    }
     let uploader_parent = transfer
         .spool()
         .root()
@@ -611,13 +617,7 @@ fn run_remote_native_capture(
         let recovery_path = transfer.spool().recovery_path(&segment_id)?;
         let active_transfer_id = transfer.spool().manifest().transfer_id.clone();
         let worker_stop = stop.clone();
-        let live_sink = live.as_ref().map(|worker| {
-            let mut sink = worker.sink_for_offset(offset_ms);
-            // Native devices can deliver 48 kHz on both lanes. Bound the
-            // unresampled queue to roughly thirty seconds of those samples.
-            sink.queue_max_samples = 48_000 * 30 * 2;
-            sink
-        });
+        let live_sink = live.as_ref().map(|worker| worker.sink_for_offset(offset_ms));
         let worker = std::thread::Builder::new()
             .name("margins-remote-spool".into())
             .spawn(move || {

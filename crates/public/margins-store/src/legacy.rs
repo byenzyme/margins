@@ -623,6 +623,20 @@ pub fn create_session(
     Ok(())
 }
 
+/// Record completion of a direct offline transcription after its final
+/// transcript artifact has been registered.
+pub fn mark_transcript_processed(dir: &Path, name: &str) -> Result<()> {
+    let conn = open_db(dir)?;
+    let changed = conn.execute(
+        "UPDATE sessions SET processing_state = 'done', failed_stage = NULL WHERE name = ?1",
+        params![name],
+    )?;
+    if changed != 1 {
+        anyhow::bail!("session '{name}' not found");
+    }
+    Ok(())
+}
+
 pub fn begin_delete_session(dir: &Path, name: &str) -> Result<()> {
     let mut conn = open_db(dir)?;
     let tx = conn.transaction()?;

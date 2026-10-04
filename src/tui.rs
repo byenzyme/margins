@@ -25,6 +25,12 @@ const SYSTEM_AUDIO_SILENCE_MARKER_SECS: u64 = 3;
 const MIC_NO_AUDIO_THRESHOLD_SECS: u64 = 3;
 const SYSTEM_NO_AUDIO_THRESHOLD_SECS: u64 = 10;
 const WATERMARK_HINT: &str = "  |  agent /watermark: live read";
+const LIVE_DROP_WARNING_SAMPLES: u64 = 4_800;
+
+fn live_dropped_samples(app: &App) -> u64 {
+    app.live_mic_dropped_samples.load(Ordering::Relaxed)
+        + app.live_system_dropped_samples.load(Ordering::Relaxed)
+}
 
 fn watermark_hint(available_width: u16, status_width: usize) -> Option<&'static str> {
     (status_width.saturating_add(WATERMARK_HINT.len()) <= usize::from(available_width))
@@ -335,6 +341,7 @@ fn event_loop(
     let capture_started_at = std::time::Instant::now();
     let mut spool_progress = [SpoolProgress::default(), SpoolProgress::default()];
     let mut system_audio_permission_probe_pending = cfg!(target_os = "macos");
+    let mut live_drop_warned = false;
 
     loop {
         terminal.draw(|f| render(f, app))?;
@@ -396,6 +403,17 @@ fn event_loop(
         clear_system_audio_warning_after_recovery(&mut app.message, frame_count, silent_samples);
 
         update_no_audio_guard(app, &mut spool_progress, capture_started_at.elapsed());
+        if !live_drop_warned && live_dropped_samples(app) >= LIVE_DROP_WARNING_SAMPLES {
+            live_drop_warned = true;
+            crate::cli_log::event(
+                "live_audio_dropped",
+                format!(
+                    "mic_samples={} system_samples={} live_transcript_incomplete=true",
+                    app.live_mic_dropped_samples.load(Ordering::Relaxed),
+                    app.live_system_dropped_samples.load(Ordering::Relaxed),
+                ),
+            );
+        }
 
         // Also check if stop was requested externally
         if stop_flag.load(Ordering::SeqCst) {
@@ -731,6 +749,9 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
         detail = format!("DROPS mic:{mic_drops} spk:{spk_drops} | {detail}");
     }
     detail = format!("input: {} | {detail}", app.current_mic_name);
+    if live_dropped_samples(app) >= LIVE_DROP_WARNING_SAMPLES {
+        detail = format!("LIVE DROPS; run margins process | {detail}");
+    }
 
     // The terminal clips only the trailing detail when a notice is long.
     // Time and both meters occupy the fixed prefix in every status state.
@@ -1127,6 +1148,19 @@ mod tests {
                 assert!(status.contains("spk ░░░░░░░░ silent"), "{width}: {status}");
                 assert!(status.contains(visible_notice), "{width}: {status}");
             }
+        }
+    }
+
+    #[test]
+    fn live_drop_warning_stays_visible_beside_meters_at_narrow_width() {
+        for width in [80, 120] {
+            let mut app = App::new("meeting.md".into(), chrono::Local::now(), "Yeti".into());
+            app.live_mic_dropped_samples
+                .store(LIVE_DROP_WARNING_SAMPLES, Ordering::Release);
+            let status = rendered_status(&mut app, width);
+            assert!(status.contains("mic █"), "{width}: {status}");
+            assert!(status.contains("spk ░░░░░░░░"), "{width}: {status}");
+            assert!(status.contains("LIVE DROPS"), "{width}: {status}");
         }
     }
 

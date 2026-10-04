@@ -5,6 +5,7 @@ use margins_store::canonical;
 use margins_workflows::processing::{
     process_session, transcribe_audio, ProcessRequest, TranscribeRequest,
 };
+use margins_workflows::transcript_view::load_transcript_view;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct FakeAsr(AtomicUsize);
@@ -123,6 +124,16 @@ fn multipart_offsets_apply_once_and_align_only_makes_no_asr_calls() {
         .unwrap();
     }
     let asr = FakeAsr(AtomicUsize::new(0));
+    std::fs::write(
+        dir.join("meet_seg0.live-transcript.json"),
+        serde_json::json!({
+            "version": 2, "terminal": true,
+            "decoded_until_ms": 11, "committed_until_ms": 11,
+            "transcripts": [{"words": [{"channel": 0, "start_ms": 0, "end_ms": 11, "text": "Mm."}]}]
+        })
+        .to_string(),
+    )
+    .unwrap();
     let request = || ProcessRequest {
         work_dir: work,
         margins_dir: &dir,
@@ -138,6 +149,18 @@ fn multipart_offsets_apply_once_and_align_only_makes_no_asr_calls() {
     assert_eq!(words[0]["start_ms"], 1_000);
     assert_eq!(words[1]["start_ms"], 91_000);
     assert_eq!(first.asr_backend, "fake-asr");
+    assert_eq!(
+        canonical::get_session_meta(&dir, "meet")
+            .unwrap()
+            .processing_state
+            .as_deref(),
+        Some("done")
+    );
+    let final_view = load_transcript_view(work, &dir, "meet").unwrap();
+    assert_eq!(final_view.view, "aligned");
+    assert!(final_view.terminal);
+    assert!(final_view.body.contains("part-0"));
+    assert!(!final_view.body.contains("Mm."));
 
     let second = process_session(
         ProcessRequest {

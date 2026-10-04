@@ -106,25 +106,27 @@ pub fn load_transcript_view(
         .unwrap_or_else(|| "ended".to_string());
     let meta = canonical::get_session_meta(margins_dir, &name).ok();
     let final_path = transcript_artifact_path(margins_dir, &name);
-    let final_source = if meta
-        .as_ref()
-        .and_then(|value| value.processing_state.as_deref())
-        == Some("done")
-    {
-        std::fs::read_to_string(&final_path)
-            .ok()
-            .filter(|body| !body.trim().is_empty())
-            .map(|body| TranscriptSource {
-                source_path: final_path.clone(),
-                body,
-                decoded_until_ms: 0,
-                committed_until_ms: 0,
-                terminal: true,
-                live_checkpoint: false,
-            })
-    } else {
-        None
-    };
+    let final_source = registered_final_transcript(margins_dir, &name)?.or_else(|| {
+        if meta
+            .as_ref()
+            .and_then(|value| value.processing_state.as_deref())
+            == Some("done")
+        {
+            std::fs::read_to_string(&final_path)
+                .ok()
+                .filter(|body| !body.trim().is_empty())
+                .map(|body| TranscriptSource {
+                    source_path: final_path.clone(),
+                    body,
+                    decoded_until_ms: 0,
+                    committed_until_ms: 0,
+                    terminal: true,
+                    live_checkpoint: false,
+                })
+        } else {
+            None
+        }
+    });
     let (source, view) = if let Some(source) = final_source {
         (source, "aligned")
     } else if let Some(source) =
@@ -362,11 +364,35 @@ fn read_checkpoint_body_at(
         .and_then(Value::as_u64)
         .unwrap_or(decoded_until_ms)
         .min(decoded_until_ms);
+    let captured_until_ms = checkpoint
+        .get("captured_until_ms")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            meta.and_then(|value| {
+                value
+                    .segments
+                    .iter()
+                    .filter_map(|segment| {
+                        segment.duration_secs.map(|duration| {
+                            (segment.offset_ms.max(0) as u64)
+                                .saturating_add((duration.max(0.0) * 1_000.0).round() as u64)
+                        })
+                    })
+                    .max()
+            })
+        });
+    let dropped_samples = checkpoint
+        .get("live_dropped_samples")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let terminal = !provisional
         && checkpoint
             .get("terminal")
             .and_then(Value::as_bool)
-            .unwrap_or(false);
+            .unwrap_or(false)
+        && dropped_samples == 0
+        && captured_until_ms
+            .is_none_or(|captured| decoded_until_ms.saturating_add(1_000) >= captured);
     let entries = crate::processing::read_transcript_entries(&path)?;
     let Some(meta) = meta else {
         return Ok(None);
@@ -414,6 +440,34 @@ pub fn read_registered_or_fallback(
         return Ok((source.source_path, source.body));
     }
     bail!("No aligned transcript or capture context found for '{name}'.")
+}
+
+fn registered_final_transcript(margins_dir: &Path, name: &str) -> Result<Option<TranscriptSource>> {
+    for artifact in canonical::list_session_artifacts_read_only(margins_dir, name)? {
+        if artifact.kind != canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT
+            || !artifact.path.ends_with(".md")
+        {
+            continue;
+        }
+        let Some(path) =
+            confined_session_artifact_access_disk_path(margins_dir, name, &artifact.path)
+        else {
+            continue;
+        };
+        if let Ok(body) = std::fs::read_to_string(&path) {
+            if !body.trim().is_empty() {
+                return Ok(Some(TranscriptSource {
+                    source_path: path,
+                    body,
+                    decoded_until_ms: 0,
+                    committed_until_ms: 0,
+                    terminal: true,
+                    live_checkpoint: false,
+                }));
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn freshest_live_transcript_path(dir: &Path, name: &str) -> Option<PathBuf> {
@@ -930,6 +984,50 @@ mod tests {
         assert!(final_view.terminal);
         assert!(final_view.body.contains("recognized remotely"));
         assert!(!final_view.body.contains("provisional"));
+    }
+
+    #[test]
+    fn terminal_live_checkpoint_with_large_capture_gap_is_incomplete() {
+        let temp = tempfile::tempdir().unwrap();
+        let work_dir = temp.path();
+        let margins_dir = work_dir.join(".margins");
+        canonical::create_session(&margins_dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
+        canonical::add_segment(
+            &margins_dir,
+            "meet",
+            0,
+            ".margins/meet_seg0.wav",
+            0,
+            Some(48.5),
+        )
+        .unwrap();
+        std::fs::write(margins_dir.join("meet.md"), "").unwrap();
+        std::fs::write(
+            margins_dir.join("meet_seg0.live-transcript.json"),
+            serde_json::json!({
+                "version": 2, "terminal": true,
+                "decoded_until_ms": 11, "committed_until_ms": 11,
+                "transcripts": [{"words": [{"channel": 0, "start_ms": 0, "end_ms": 11, "text": "Mm."}]}]
+            }).to_string(),
+        ).unwrap();
+        let view = load_transcript_view(work_dir, &margins_dir, "meet").unwrap();
+        assert_eq!(view.view, "full");
+        assert!(!view.terminal);
+        assert_eq!(view.decoded_until_ms, 11);
+
+        std::fs::write(
+            margins_dir.join("meet_seg0.live-transcript.json"),
+            serde_json::json!({
+                "version": 2, "terminal": true,
+                "decoded_until_ms": 48_500, "committed_until_ms": 48_500,
+                "captured_until_ms": 48_500, "live_dropped_samples": 2_000_000,
+                "transcripts": [{"words": []}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let dropped_view = load_transcript_view(work_dir, &margins_dir, "meet").unwrap();
+        assert!(!dropped_view.terminal);
     }
 
     #[test]

@@ -189,6 +189,7 @@ pub fn process_session(
         "durable",
         None,
     )?;
+    canonical::mark_transcript_processed(request.margins_dir, request.session_name)?;
     Ok(ProcessResult {
         session_name: request.session_name.to_string(),
         segment_count: meta.segments.len(),
@@ -291,6 +292,7 @@ pub fn transcribe_audio(
         "durable",
         None,
     )?;
+    canonical::mark_transcript_processed(request.margins_dir, &name)?;
     Ok(TranscribeResult {
         session_name: name,
         audio_path: audio_dest,

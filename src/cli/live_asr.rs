@@ -21,7 +21,14 @@ fn start_live_transcript_worker(
 
 // ── Live transcription ────────────────────────────────────────────────────────
 
-const LIVE_QUEUE_MAX_SAMPLES: u64 = 16_000 * 30;
+// The recorder sends native-rate samples before the worker resamples to 16 kHz.
+// Budget 30 seconds for two lanes at up to 96 kHz, not 30 seconds at 16 kHz.
+const LIVE_QUEUE_MAX_SAMPLES: u64 = 96_000 * 2 * 30;
+
+#[cfg(any(test, all(feature = "coreml-asr", target_os = "macos")))]
+fn live_checkpoint_complete(captured_until_ms: u64, decoded_until_ms: u64, dropped: u64) -> bool {
+    dropped == 0 && decoded_until_ms.saturating_add(1_000) >= captured_until_ms
+}
 
 #[cfg(feature = "audio-capture")]
 struct LiveTranscriptWorker {
@@ -60,7 +67,11 @@ impl LiveTranscriptWorker {
         let (tx, rx) = mpsc::channel();
         let (finish_tx, finish_rx) = mpsc::channel();
         let queued_samples = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mic_dropped_samples = Arc::new(AtomicU64::new(0));
+        let system_dropped_samples = Arc::new(AtomicU64::new(0));
         let queued_for_thread = queued_samples.clone();
+        let mic_dropped_for_thread = mic_dropped_samples.clone();
+        let system_dropped_for_thread = system_dropped_samples.clone();
         let status_for_thread = status.clone();
         let join = std::thread::Builder::new()
             .name("margins-cli-live-transcription".into())
@@ -108,6 +119,8 @@ impl LiveTranscriptWorker {
                     checkpoint,
                     offset_ms,
                     queued_for_thread,
+                    mic_dropped_for_thread,
+                    system_dropped_for_thread,
                 )
             })?;
         Ok(Some(Self {
@@ -118,8 +131,8 @@ impl LiveTranscriptWorker {
             })),
             mic_accepted_samples: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             system_accepted_samples: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            mic_dropped_samples: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            system_dropped_samples: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            mic_dropped_samples,
+            system_dropped_samples,
             queued_samples,
             status,
             finish_tx,
@@ -154,6 +167,13 @@ impl LiveTranscriptWorker {
             queued_samples: self.queued_samples.clone(),
             queue_max_samples: LIVE_QUEUE_MAX_SAMPLES,
         }
+    }
+
+    fn dropped_counters(&self) -> (Arc<AtomicU64>, Arc<AtomicU64>) {
+        (
+            self.mic_dropped_samples.clone(),
+            self.system_dropped_samples.clone(),
+        )
     }
 
     fn begin_finish(self, duration_ms: u64) -> LiveTranscriptFinalizer {
@@ -269,6 +289,8 @@ fn run_live_worker(
     checkpoint: PathBuf,
     offset_ms: u64,
     queued_samples: Arc<std::sync::atomic::AtomicU64>,
+    mic_dropped_samples: Arc<AtomicU64>,
+    system_dropped_samples: Arc<AtomicU64>,
 ) -> Result<()> {
     use crate::recorder::LiveAudioChannel;
     use margins_core::AsrStreamDecoder;
@@ -329,7 +351,7 @@ fn run_live_worker(
                 if local_end_ms.saturating_sub(last_update_local_ms) >= 3_000 {
                     let mic = AsrStreamDecoder::update_until(&mut rolling.mic, local_end_ms)?;
                     let system = AsrStreamDecoder::update_until(&mut rolling.system, local_end_ms)?;
-                    write_checkpoint(&checkpoint, &mic, &system, offset_ms, false)?;
+                    write_checkpoint(&checkpoint, &mic, &system, offset_ms, false, None, 0)?;
                     last_update_local_ms = local_end_ms;
                 }
             }
@@ -343,7 +365,30 @@ fn run_live_worker(
                 let mic = AsrStreamDecoder::finish_until(&mut rolling.mic, local_duration_ms)?;
                 let system =
                     AsrStreamDecoder::finish_until(&mut rolling.system, local_duration_ms)?;
-                write_checkpoint(&checkpoint, &mic, &system, offset_ms, true)?;
+                let dropped_samples = mic_dropped_samples.load(Ordering::Acquire)
+                    + system_dropped_samples.load(Ordering::Acquire);
+                let captured_until_ms = offset_ms.saturating_add(duration_ms);
+                let decoded_until_ms = offset_ms
+                    .saturating_add(mic.decoded_until_ms.max(system.decoded_until_ms));
+                let terminal = live_checkpoint_complete(
+                    captured_until_ms,
+                    decoded_until_ms,
+                    dropped_samples,
+                );
+                write_checkpoint(
+                    &checkpoint,
+                    &mic,
+                    &system,
+                    offset_ms,
+                    terminal,
+                    Some(captured_until_ms),
+                    dropped_samples,
+                )?;
+                if !terminal {
+                    bail!(
+                        "live transcript incomplete: captured_until_ms={captured_until_ms} decoded_until_ms={decoded_until_ms} dropped_samples={dropped_samples}; run margins process for an offline transcript"
+                    );
+                }
                 return Ok(());
             }
         }
@@ -392,6 +437,8 @@ fn write_checkpoint(
     system: &margins_core::AsrStreamUpdate,
     offset_ms: u64,
     terminal: bool,
+    captured_until_ms: Option<u64>,
+    dropped_samples: u64,
 ) -> Result<()> {
     let to_entries = |words: &[margins_core::TranscriptWord], channel| {
         let timings = words
@@ -416,6 +463,8 @@ fn write_checkpoint(
         "terminal": terminal,
         "decoded_until_ms": decoded_until_ms,
         "committed_until_ms": committed_until_ms,
+        "captured_until_ms": captured_until_ms,
+        "live_dropped_samples": dropped_samples,
         "transcripts": [{ "words": entries }],
     });
     write_checkpoint_value(path, &value)?;
