@@ -2,6 +2,7 @@
 
 use crate::artifacts::{artifact_registry_disk_path, confined_session_artifact_access_disk_path};
 use anyhow::{bail, Context, Result};
+use chrono::DateTime;
 use margins_store::canonical;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -15,6 +16,7 @@ pub struct TranscriptView {
     pub body: String,
     pub view: &'static str,
     pub decoded_until_ms: u64,
+    pub captured_until_ms: u64,
     pub committed_until_ms: u64,
     /// Filesystem-derived snapshot time. This is deliberately not persisted in
     /// the transcript schema: the source artifact's mtime is the freshness
@@ -38,6 +40,7 @@ struct TranscriptSource {
     source_path: PathBuf,
     body: String,
     decoded_until_ms: u64,
+    captured_until_ms: u64,
     committed_until_ms: u64,
     terminal: bool,
     live_checkpoint: bool,
@@ -51,8 +54,15 @@ pub fn transcript_artifact_path(margins_dir: &Path, name: &str) -> PathBuf {
 }
 
 pub fn preferred_transcript_path(margins_dir: &Path, name: &str) -> Option<PathBuf> {
+    let meta = canonical::get_session_meta(margins_dir, name).ok();
+    let coverage = canonical::transcript_coverage_read_only(margins_dir, name)
+        .ok()
+        .flatten();
     let artifact = transcript_artifact_path(margins_dir, name);
-    if artifact.exists() {
+    if coverage.is_none()
+        && artifact.exists()
+        && final_transcript_current(meta.as_ref(), &artifact, coverage)
+    {
         return Some(artifact);
     }
     if let Some(path) = canonical::list_session_artifacts(margins_dir, name)
@@ -60,15 +70,52 @@ pub fn preferred_transcript_path(margins_dir: &Path, name: &str) -> Option<PathB
         .into_iter()
         .filter(|artifact| artifact.kind == canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT)
         .find_map(|artifact| {
-            confined_session_artifact_access_disk_path(margins_dir, name, &artifact.path)
+            let path =
+                confined_session_artifact_access_disk_path(margins_dir, name, &artifact.path)?;
+            if artifact.path.ends_with(".live-transcript.json")
+                && artifact.path.contains(&format!("{name}_seg"))
+                && meta
+                    .as_ref()
+                    .and_then(|value| {
+                        value
+                            .segments
+                            .iter()
+                            .map(|segment| segment.segment_index)
+                            .max()
+                    })
+                    .is_some_and(|latest| {
+                        path.file_name().and_then(|file| file.to_str())
+                            != Some(format!("{name}_seg{latest}.live-transcript.json").as_str())
+                    })
+            {
+                return None;
+            }
+            (!artifact.path.ends_with(".md")
+                || final_transcript_current(meta.as_ref(), &path, coverage))
+            .then_some(path)
         })
         .filter(|path| path.exists())
     {
         return Some(path);
     }
     let aligned = margins_dir.join(format!("{name}_aligned.md"));
-    if aligned.exists() {
+    if aligned.exists() && final_transcript_current(meta.as_ref(), &aligned, coverage) {
         return Some(aligned);
+    }
+    if let Some(path) = meta.as_ref().and_then(|value| {
+        value
+            .segments
+            .iter()
+            .rev()
+            .map(|segment| {
+                margins_dir.join(format!(
+                    "{name}_seg{}.live-transcript.json",
+                    segment.segment_index
+                ))
+            })
+            .find(|path| path.is_file())
+    }) {
+        return Some(path);
     }
     let capture = margins_dir.join(format!("{name}_capture_context.md"));
     if capture.exists() {
@@ -106,27 +153,29 @@ pub fn load_transcript_view(
         .unwrap_or_else(|| "ended".to_string());
     let meta = canonical::get_session_meta(margins_dir, &name).ok();
     let final_path = transcript_artifact_path(margins_dir, &name);
-    let final_source = registered_final_transcript(margins_dir, &name)?.or_else(|| {
-        if meta
-            .as_ref()
-            .and_then(|value| value.processing_state.as_deref())
-            == Some("done")
-        {
-            std::fs::read_to_string(&final_path)
-                .ok()
-                .filter(|body| !body.trim().is_empty())
-                .map(|body| TranscriptSource {
-                    source_path: final_path.clone(),
-                    body,
-                    decoded_until_ms: 0,
-                    committed_until_ms: 0,
-                    terminal: true,
-                    live_checkpoint: false,
-                })
-        } else {
-            None
-        }
-    });
+    let coverage = canonical::transcript_coverage_read_only(margins_dir, &name)?;
+    let final_source = registered_final_transcript(margins_dir, &name, meta.as_ref(), coverage)?
+        .or_else(|| {
+            if coverage.is_none()
+                && final_path.is_file()
+                && final_transcript_current(meta.as_ref(), &final_path, coverage)
+            {
+                std::fs::read_to_string(&final_path)
+                    .ok()
+                    .filter(|body| !body.trim().is_empty())
+                    .map(|body| TranscriptSource {
+                        source_path: final_path.clone(),
+                        body,
+                        decoded_until_ms: 0,
+                        captured_until_ms: 0,
+                        committed_until_ms: 0,
+                        terminal: true,
+                        live_checkpoint: false,
+                    })
+            } else {
+                None
+            }
+        });
     let (source, view) = if let Some(source) = final_source {
         (source, "aligned")
     } else if let Some(source) =
@@ -139,6 +188,28 @@ pub fn load_transcript_view(
         read_terminal_checkpoint_body(work_dir, margins_dir, &name, meta.as_ref())?
     {
         (source, "full")
+    } else if final_path.is_file()
+        || canonical::list_session_artifacts_read_only(margins_dir, &name)?
+            .iter()
+            .any(|artifact| {
+                artifact.kind == canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT
+                    && artifact.path.ends_with(".md")
+            })
+    {
+        (
+            TranscriptSource {
+                source_path: final_path.clone(),
+                body: format!("# Transcript incomplete\n\nNew audio was recorded after the last processing pass. Run margins process {name}."),
+                decoded_until_ms: 0,
+                captured_until_ms: canonical::transcript_coverage(
+                    meta.as_ref().map(|value| value.segments.as_slice()).unwrap_or_default(),
+                ).map_or(0, |value| value.covered_until_ms),
+                committed_until_ms: 0,
+                terminal: false,
+                live_checkpoint: false,
+            },
+            "incomplete",
+        )
     } else {
         let (path, body) = read_registered_or_fallback(work_dir, margins_dir, &name)?;
         let pending = path == margins_dir.join(format!("{name}_capture_context.md"))
@@ -148,6 +219,7 @@ pub fn load_transcript_view(
                 source_path: path,
                 body,
                 decoded_until_ms: 0,
+                captured_until_ms: 0,
                 committed_until_ms: 0,
                 terminal: !pending,
                 live_checkpoint: false,
@@ -155,6 +227,26 @@ pub fn load_transcript_view(
             if pending { "pending" } else { "aligned" },
         )
     };
+    let mut source = source;
+    if source.live_checkpoint {
+        if let Some(meta) = meta.as_ref() {
+            source.captured_until_ms = source.captured_until_ms.max(
+                meta.segments
+                    .iter()
+                    .filter_map(|segment| {
+                        segment.duration_secs.map(|duration| {
+                            (segment.offset_ms.max(0) as u64)
+                                .saturating_add((duration.max(0.0) * 1_000.0).round() as u64)
+                        })
+                    })
+                    .max()
+                    .unwrap_or(0),
+            );
+            if !live_source_covers_segments(&source, meta) {
+                source.terminal = false;
+            }
+        }
+    }
     // The public store has no process-level capture status. A current session
     // with a non-terminal live source is the strongest honest available signal.
     let live = source.live_checkpoint
@@ -183,6 +275,7 @@ pub fn load_transcript_view(
         body,
         view,
         decoded_until_ms: source.decoded_until_ms,
+        captured_until_ms: source.captured_until_ms,
         committed_until_ms: source.committed_until_ms,
         updated_at_unix_ms,
         live,
@@ -211,6 +304,26 @@ pub fn load_transcript_view(
             .map(|m| m.notes_path.clone())
             .unwrap_or_default(),
         saved_note_path,
+    })
+}
+
+fn live_source_covers_segments(source: &TranscriptSource, meta: &canonical::SessionMeta) -> bool {
+    if source.decoded_until_ms.saturating_add(1_000) < source.captured_until_ms {
+        return false;
+    }
+    let Some(modified_ns) = std::fs::metadata(&source.source_path)
+        .ok()
+        .and_then(|value| value.modified().ok())
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_nanos())
+    else {
+        return false;
+    };
+    meta.segments.iter().all(|segment| {
+        DateTime::parse_from_rfc3339(&segment.started_at)
+            .ok()
+            .and_then(|value| value.timestamp_nanos_opt())
+            .is_some_and(|started_ns| modified_ns >= started_ns.max(0) as u128)
     })
 }
 
@@ -385,12 +498,26 @@ fn read_checkpoint_body_at(
         .get("live_dropped_samples")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let latest_checkpoint = meta
+        .and_then(|value| {
+            value
+                .segments
+                .iter()
+                .map(|segment| segment.segment_index)
+                .max()
+        })
+        .is_none_or(|latest| {
+            path.file_name().and_then(|file| file.to_str())
+                == Some(format!("{name}_seg{latest}.live-transcript.json").as_str())
+                || provisional
+        });
     let terminal = !provisional
         && checkpoint
             .get("terminal")
             .and_then(Value::as_bool)
             .unwrap_or(false)
         && dropped_samples == 0
+        && latest_checkpoint
         && captured_until_ms
             .is_none_or(|captured| decoded_until_ms.saturating_add(1_000) >= captured);
     let entries = crate::processing::read_transcript_entries(&path)?;
@@ -405,6 +532,7 @@ fn read_checkpoint_body_at(
         source_path: path,
         body,
         decoded_until_ms,
+        captured_until_ms: captured_until_ms.unwrap_or(decoded_until_ms),
         committed_until_ms,
         terminal,
         live_checkpoint: true,
@@ -416,6 +544,8 @@ pub fn read_registered_or_fallback(
     margins_dir: &Path,
     name: &str,
 ) -> Result<(PathBuf, String)> {
+    let meta = canonical::get_session_meta(margins_dir, name).ok();
+    let coverage = canonical::transcript_coverage_read_only(margins_dir, name)?;
     let registered = canonical::list_session_artifacts(margins_dir, name)
         .unwrap_or_default()
         .into_iter()
@@ -430,6 +560,12 @@ pub fn read_registered_or_fallback(
         margins_dir.join(format!("{name}_capture_context.md")),
     ];
     for path in registered.chain(fallbacks) {
+        if path.extension().is_some_and(|extension| extension == "md")
+            && path != margins_dir.join(format!("{name}_capture_context.md"))
+            && !final_transcript_current(meta.as_ref(), &path, coverage)
+        {
+            continue;
+        }
         if let Ok(body) = std::fs::read_to_string(&path) {
             if !body.trim().is_empty() {
                 return Ok((path, body));
@@ -442,10 +578,16 @@ pub fn read_registered_or_fallback(
     bail!("No aligned transcript or capture context found for '{name}'.")
 }
 
-fn registered_final_transcript(margins_dir: &Path, name: &str) -> Result<Option<TranscriptSource>> {
+fn registered_final_transcript(
+    margins_dir: &Path,
+    name: &str,
+    meta: Option<&canonical::SessionMeta>,
+    coverage: Option<canonical::TranscriptCoverage>,
+) -> Result<Option<TranscriptSource>> {
     for artifact in canonical::list_session_artifacts_read_only(margins_dir, name)? {
         if artifact.kind != canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT
             || !artifact.path.ends_with(".md")
+            || artifact.path.ends_with("_capture_context.md")
         {
             continue;
         }
@@ -454,12 +596,16 @@ fn registered_final_transcript(margins_dir: &Path, name: &str) -> Result<Option<
         else {
             continue;
         };
+        if !final_transcript_current(meta, &path, coverage) {
+            continue;
+        }
         if let Ok(body) = std::fs::read_to_string(&path) {
             if !body.trim().is_empty() {
                 return Ok(Some(TranscriptSource {
                     source_path: path,
                     body,
                     decoded_until_ms: 0,
+                    captured_until_ms: 0,
                     committed_until_ms: 0,
                     terminal: true,
                     live_checkpoint: false,
@@ -468,6 +614,38 @@ fn registered_final_transcript(margins_dir: &Path, name: &str) -> Result<Option<
         }
     }
     Ok(None)
+}
+
+fn final_transcript_current(
+    meta: Option<&canonical::SessionMeta>,
+    path: &Path,
+    coverage: Option<canonical::TranscriptCoverage>,
+) -> bool {
+    let Some(meta) = meta else { return false };
+    if let Some(recorded) = coverage {
+        return canonical::transcript_coverage(&meta.segments) == Some(recorded);
+    }
+    if meta
+        .segments
+        .iter()
+        .any(|segment| segment.duration_secs.is_none())
+    {
+        return false;
+    }
+    let Some(modified_ns) = std::fs::metadata(path)
+        .ok()
+        .and_then(|value| value.modified().ok())
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_nanos())
+    else {
+        return false;
+    };
+    meta.segments.iter().all(|segment| {
+        DateTime::parse_from_rfc3339(&segment.started_at)
+            .ok()
+            .and_then(|value| value.timestamp_nanos_opt())
+            .is_some_and(|started_ns| modified_ns >= started_ns.max(0) as u128)
+    })
 }
 
 fn freshest_live_transcript_path(dir: &Path, name: &str) -> Option<PathBuf> {
@@ -566,6 +744,10 @@ fn read_live_transcript_snapshot(
             &memo,
         ),
         decoded_until_ms,
+        captured_until_ms: snapshot
+            .get("captured_until_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(decoded_until_ms),
         committed_until_ms,
         terminal: snapshot
             .get("terminal")
@@ -674,6 +856,7 @@ fn read_live_transcript_body(
         source_path: path,
         body,
         decoded_until_ms: decoded,
+        captured_until_ms: decoded,
         committed_until_ms: committed.min(decoded),
         terminal,
         live_checkpoint: true,

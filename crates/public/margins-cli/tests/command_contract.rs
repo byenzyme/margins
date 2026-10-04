@@ -3037,8 +3037,9 @@ fn transcript_defaults_to_latest_json_and_preserves_default_xml() {
 
     let (result, default_xml, stderr) = invoke(&services, temp.path(), &["margins", "transcript"]);
     assert!(result.is_ok(), "{stderr}");
-    assert!(default_xml
-        .starts_with("<margins_transcript meeting_id=\"latest-json\" view=\"aligned\">\n"));
+    assert!(default_xml.starts_with(
+        "<margins_transcript meeting_id=\"latest-json\" view=\"aligned\" terminal=\"true\" incomplete=\"false\""
+    ));
 
     let (result, explicit_text, stderr) = invoke(
         &services,
@@ -3061,6 +3062,7 @@ fn transcript_defaults_to_latest_json_and_preserves_default_xml() {
         "body",
         "view",
         "decoded_until_ms",
+        "captured_until_ms",
         "committed_until_ms",
         "updated_at_unix_ms",
         "live",
@@ -3076,6 +3078,25 @@ fn transcript_defaults_to_latest_json_and_preserves_default_xml() {
     assert!(value["updated_at_unix_ms"].as_u64().unwrap() > 0);
     assert_eq!(value["live"], false);
     assert_eq!(value["terminal"], true);
+}
+
+#[test]
+fn transcript_xml_marks_finished_short_live_checkpoint_incomplete() {
+    let temp = tempfile::tempdir().unwrap();
+    let meeting_id = "short-live";
+    seed_checkpoint_session(temp.path(), meeting_id, true, 11);
+    let dir = temp.path().join(".margins");
+    canonical::update_segment_duration(&dir, meeting_id, 0, 48.5).unwrap();
+    canonical::mark_session_ended(&dir, meeting_id).unwrap();
+    std::fs::remove_file(dir.join("current")).unwrap();
+    let (result, xml, stderr) = invoke(
+        &services(temp.path()),
+        temp.path(),
+        &["margins", "transcript", meeting_id],
+    );
+    assert!(result.is_ok(), "{stderr}");
+    assert!(xml.contains("view=\"incomplete\" terminal=\"false\" incomplete=\"true\""));
+    assert!(xml.contains("captured_until_ms=\"48500\" decoded_until_ms=\"11\""));
 }
 
 #[test]

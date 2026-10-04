@@ -191,6 +191,7 @@ pub fn transcript(
             body: &transcript.body,
             view: transcript.view,
             decoded_until_ms: transcript.decoded_until_ms,
+            captured_until_ms: transcript.captured_until_ms,
             committed_until_ms: transcript.committed_until_ms,
             updated_at_unix_ms: transcript.updated_at_unix_ms,
             live: transcript.live,
@@ -210,12 +211,23 @@ pub fn transcript(
             serde_json::to_string(&report).map_err(|error| CliError::from_anyhow(error.into()))?;
         return line(stdout, format_args!("{json}")).map_err(CliError::from_anyhow);
     }
+    let incomplete = !transcript.terminal && !transcript.live;
+    let xml_view = if incomplete {
+        "incomplete"
+    } else {
+        transcript.view
+    };
     line(
         stdout,
         format_args!(
-            "<margins_transcript meeting_id=\"{}\" view=\"{}\">",
+            "<margins_transcript meeting_id=\"{}\" view=\"{}\" terminal=\"{}\" incomplete=\"{}\" live=\"{}\" captured_until_ms=\"{}\" decoded_until_ms=\"{}\">",
             xml_escape_attr(&transcript.session_name),
-            transcript.view
+            xml_view,
+            transcript.terminal,
+            incomplete,
+            transcript.live,
+            transcript.captured_until_ms,
+            transcript.decoded_until_ms,
         ),
     )
     .map_err(CliError::from_anyhow)?;
@@ -316,6 +328,7 @@ struct TranscriptJson<'a> {
     body: &'a str,
     view: &'a str,
     decoded_until_ms: u64,
+    captured_until_ms: u64,
     committed_until_ms: u64,
     updated_at_unix_ms: u64,
     live: bool,

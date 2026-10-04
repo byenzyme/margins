@@ -25,7 +25,8 @@ const SYSTEM_AUDIO_SILENCE_MARKER_SECS: u64 = 3;
 const MIC_NO_AUDIO_THRESHOLD_SECS: u64 = 3;
 const SYSTEM_NO_AUDIO_THRESHOLD_SECS: u64 = 10;
 const WATERMARK_HINT: &str = "  |  agent /watermark: live read";
-const LIVE_DROP_WARNING_SAMPLES: u64 = 4_800;
+// Any dropped live sample makes the checkpoint non-terminal.
+const LIVE_DROP_WARNING_SAMPLES: u64 = 1;
 
 fn live_dropped_samples(app: &App) -> u64 {
     app.live_mic_dropped_samples.load(Ordering::Relaxed)
@@ -413,6 +414,14 @@ fn event_loop(
                     app.live_system_dropped_samples.load(Ordering::Relaxed),
                 ),
             );
+            if app.live_transcription_status.load(Ordering::Acquire)
+                == crate::app::LIVE_TRANSCRIPTION_WARMING
+            {
+                crate::cli_log::event(
+                    "live_audio_dropped_during_warmup",
+                    "native-rate live queue reached its bound before CoreML became ready",
+                );
+            }
         }
 
         // Also check if stop was requested externally

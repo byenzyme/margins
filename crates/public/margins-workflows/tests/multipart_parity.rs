@@ -183,3 +183,89 @@ fn multipart_offsets_apply_once_and_align_only_makes_no_asr_calls() {
         canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT
     );
 }
+
+#[test]
+fn attached_audio_invalidates_processed_transcript_until_reprocessed() {
+    let temp = tempfile::tempdir().unwrap();
+    let work = temp.path();
+    let dir = work.join(".margins");
+    canonical::create_session(&dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
+    std::fs::write(dir.join("meet.md"), "").unwrap();
+    for (ordinal, offset_ms) in [(0, 0), (1, 10_000)] {
+        if ordinal == 1 {
+            let old = load_transcript_view(work, &dir, "meet").unwrap();
+            assert_eq!(old.view, "aligned");
+            assert!(old.body.contains("part-0"));
+        }
+        let path = format!(".margins/meet_seg{ordinal}.wav");
+        write_interleaved_wav(work.join(&path), &[0.0; 16_000], 16_000, 1).unwrap();
+        canonical::add_segment(&dir, "meet", ordinal, &path, offset_ms, Some(1.0)).unwrap();
+        if ordinal == 0 {
+            process_session(
+                ProcessRequest {
+                    work_dir: work,
+                    margins_dir: &dir,
+                    session_name: "meet",
+                    speakers: 1,
+                    align_only: false,
+                },
+                &FakeAsr(AtomicUsize::new(0)),
+                None,
+            )
+            .unwrap();
+        }
+    }
+    let stale = load_transcript_view(work, &dir, "meet").unwrap();
+    assert_eq!(stale.view, "incomplete");
+    assert!(!stale.terminal);
+    assert!(!stale.body.contains("part-0"));
+    std::fs::write(
+        dir.join("meet_seg1.live-transcript.json"),
+        serde_json::json!({
+            "version": 2, "terminal": false,
+            "decoded_until_ms": 10_500, "committed_until_ms": 10_500,
+            "transcripts": [{"words": [{"channel": 0, "start_ms": 10_100, "end_ms": 10_500, "text": "second"}]}]
+        }).to_string(),
+    ).unwrap();
+    let live = load_transcript_view(work, &dir, "meet").unwrap();
+    assert_eq!(
+        margins_workflows::transcript_view::preferred_transcript_path(&dir, "meet"),
+        Some(dir.join("meet_seg1.live-transcript.json"))
+    );
+    assert_eq!(live.view, "full");
+    assert!(!live.terminal);
+    assert!(live.body.contains("second"));
+    assert!(!live.body.contains("part-0"));
+
+    let stale_align = process_session(
+        ProcessRequest {
+            work_dir: work,
+            margins_dir: &dir,
+            session_name: "meet",
+            speakers: 1,
+            align_only: true,
+        },
+        &FakeAsr(AtomicUsize::new(0)),
+        None,
+    )
+    .unwrap_err();
+    assert!(stale_align.to_string().contains("predates newer audio"));
+
+    process_session(
+        ProcessRequest {
+            work_dir: work,
+            margins_dir: &dir,
+            session_name: "meet",
+            speakers: 1,
+            align_only: false,
+        },
+        &FakeAsr(AtomicUsize::new(0)),
+        None,
+    )
+    .unwrap();
+    let final_view = load_transcript_view(work, &dir, "meet").unwrap();
+    assert_eq!(final_view.view, "aligned");
+    assert!(final_view.terminal);
+    assert!(final_view.body.contains("part-0"));
+    assert!(final_view.body.contains("part-1"));
+}

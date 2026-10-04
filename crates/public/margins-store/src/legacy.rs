@@ -86,6 +86,13 @@ pub struct SessionArtifact {
     pub expires_at: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TranscriptCoverage {
+    pub segment_count: i64,
+    pub max_segment_index: i64,
+    pub covered_until_ms: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionProcessingGap {
     pub session_name: String,
@@ -223,6 +230,14 @@ fn init_schema(conn: &Connection) -> Result<()> {
             created_at TEXT NOT NULL,
             expires_at TEXT,
             PRIMARY KEY (session_name, kind, ordinal),
+            FOREIGN KEY (session_name) REFERENCES sessions(name) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS session_transcript_coverage (
+            session_name TEXT PRIMARY KEY NOT NULL,
+            segment_count INTEGER NOT NULL,
+            max_segment_index INTEGER NOT NULL,
+            covered_until_ms INTEGER NOT NULL,
             FOREIGN KEY (session_name) REFERENCES sessions(name) ON DELETE CASCADE
         );
 
@@ -623,18 +638,109 @@ pub fn create_session(
     Ok(())
 }
 
-/// Record completion of a direct offline transcription after its final
-/// transcript artifact has been registered.
-pub fn mark_transcript_processed(dir: &Path, name: &str) -> Result<()> {
-    let conn = open_db(dir)?;
-    let changed = conn.execute(
+/// The exact finalized segment set represented by an offline transcript.
+pub fn transcript_coverage(segments: &[SegmentMeta]) -> Option<TranscriptCoverage> {
+    summarize_transcript_coverage(segments.iter().map(|segment| {
+        (
+            segment.segment_index,
+            segment.offset_ms,
+            segment.duration_secs,
+        )
+    }))
+}
+
+fn summarize_transcript_coverage(
+    segments: impl IntoIterator<Item = (i64, i64, Option<f64>)>,
+) -> Option<TranscriptCoverage> {
+    let mut count = 0i64;
+    let mut max_index = -1i64;
+    let mut end_ms = 0u64;
+    for (index, offset_ms, duration_secs) in segments {
+        let duration = duration_secs?;
+        count += 1;
+        max_index = max_index.max(index);
+        end_ms = end_ms.max(
+            (offset_ms.max(0) as u64).saturating_add((duration.max(0.0) * 1_000.0).round() as u64),
+        );
+    }
+    (count > 0).then_some(TranscriptCoverage {
+        segment_count: count,
+        max_segment_index: max_index,
+        covered_until_ms: end_ms,
+    })
+}
+
+fn db_transcript_coverage(conn: &Connection, name: &str) -> Result<Option<TranscriptCoverage>> {
+    let mut stmt = conn.prepare(
+        "SELECT segment_index, offset_ms, duration_secs FROM session_segments WHERE session_name = ?1",
+    )?;
+    let rows = stmt.query_map(params![name], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Option<f64>>(2)?,
+        ))
+    })?;
+    Ok(summarize_transcript_coverage(
+        rows.collect::<rusqlite::Result<Vec<_>>>()?,
+    ))
+}
+
+/// Commit the final artifact, its segment coverage, and the processed state
+/// together. Refuse a transcript if capture changed its segment set during ASR.
+pub fn register_processed_transcript(
+    dir: &Path,
+    name: &str,
+    path: &str,
+    expected: TranscriptCoverage,
+) -> Result<()> {
+    let mut conn = open_db(dir)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if db_transcript_coverage(&tx, name)? != Some(expected) {
+        anyhow::bail!("session '{name}' changed during transcription; process it again");
+    }
+    let now = Local::now().to_rfc3339();
+    tx.execute(
+        "INSERT INTO session_artifacts (session_name, kind, ordinal, path, retention_class, created_at, expires_at) VALUES (?1, ?2, 0, ?3, 'durable', ?4, NULL) ON CONFLICT(session_name, kind, ordinal) DO UPDATE SET path = excluded.path, retention_class = excluded.retention_class, created_at = excluded.created_at, expires_at = NULL",
+        params![name, SESSION_ARTIFACT_KIND_TRANSCRIPT, path, now],
+    )?;
+    tx.execute(
+        "INSERT INTO session_transcript_coverage (session_name, segment_count, max_segment_index, covered_until_ms) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(session_name) DO UPDATE SET segment_count = excluded.segment_count, max_segment_index = excluded.max_segment_index, covered_until_ms = excluded.covered_until_ms",
+        params![name, expected.segment_count, expected.max_segment_index, i64::try_from(expected.covered_until_ms)?],
+    )?;
+    tx.execute(
         "UPDATE sessions SET processing_state = 'done', failed_stage = NULL WHERE name = ?1",
         params![name],
     )?;
-    if changed != 1 {
-        anyhow::bail!("session '{name}' not found");
-    }
+    tx.commit()?;
     Ok(())
+}
+
+/// Read a processed artifact's coverage without creating schema or blob dirs.
+pub fn transcript_coverage_read_only(dir: &Path, name: &str) -> Result<Option<TranscriptCoverage>> {
+    let path = database_path(dir);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    let has_table: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_transcript_coverage')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_table {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT segment_count, max_segment_index, covered_until_ms FROM session_transcript_coverage WHERE session_name = ?1",
+        params![name],
+        |row| Ok(TranscriptCoverage {
+            segment_count: row.get(0)?,
+            max_segment_index: row.get(1)?,
+            covered_until_ms: row.get::<_, i64>(2)?.max(0) as u64,
+        }),
+    ).optional().map_err(Into::into)
 }
 
 pub fn begin_delete_session(dir: &Path, name: &str) -> Result<()> {
@@ -1099,6 +1205,12 @@ pub fn get_session_meta(dir: &Path, name: &str) -> Result<SessionMeta> {
         meta.failed_stage = job.failed_stage;
     }
 
+    if transcript_coverage_read_only(dir, name)?
+        .is_some_and(|recorded| transcript_coverage(&meta.segments) != Some(recorded))
+    {
+        meta.processing_state = Some("none".to_string());
+    }
+
     Ok(meta)
 }
 
@@ -1111,9 +1223,10 @@ pub fn upsert_session_artifact(
     retention_class: &str,
     expires_at: Option<&str>,
 ) -> Result<()> {
-    let conn = open_db(dir)?;
+    let mut conn = open_db(dir)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let now = Local::now().to_rfc3339();
-    conn.execute(
+    tx.execute(
         r#"
         INSERT INTO session_artifacts
             (session_name, kind, ordinal, path, retention_class, created_at, expires_at)
@@ -1133,6 +1246,15 @@ pub fn upsert_session_artifact(
             expires_at
         ],
     )?;
+    // A different transcript writer has replaced the covered artifact. Its
+    // own processing state and file freshness now decide whether it is final.
+    if kind == SESSION_ARTIFACT_KIND_TRANSCRIPT && ordinal == 0 {
+        tx.execute(
+            "DELETE FROM session_transcript_coverage WHERE session_name = ?1",
+            params![session_name],
+        )?;
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -1987,6 +2109,59 @@ pub fn remove_vault_note_by_path(dir: &Path, path: &str) -> Result<bool> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn processed_transcript_registration_is_atomic_and_fenced_by_segments() {
+        let root = tempdir().unwrap();
+        let dir = root.path().join(".margins");
+        create_session(&dir, "meet", &Local::now(), "meet.md").unwrap();
+        add_segment(&dir, "meet", 0, "meet_seg0.wav", 0, Some(10.0)).unwrap();
+        let first = transcript_coverage(&get_session_meta(&dir, "meet").unwrap().segments).unwrap();
+        register_processed_transcript(&dir, "meet", ".margins/meet_aligned.md", first).unwrap();
+        assert_eq!(
+            transcript_coverage_read_only(&dir, "meet").unwrap(),
+            Some(first)
+        );
+        assert_eq!(
+            get_session_meta(&dir, "meet")
+                .unwrap()
+                .processing_state
+                .as_deref(),
+            Some("done")
+        );
+
+        add_segment(&dir, "meet", 1, "meet_seg1.wav", 10_000, Some(10.0)).unwrap();
+        assert_eq!(
+            get_session_meta(&dir, "meet")
+                .unwrap()
+                .processing_state
+                .as_deref(),
+            Some("none")
+        );
+        assert!(
+            register_processed_transcript(&dir, "meet", ".margins/new.md", first)
+                .unwrap_err()
+                .to_string()
+                .contains("changed during transcription")
+        );
+        assert_eq!(
+            transcript_coverage_read_only(&dir, "meet").unwrap(),
+            Some(first)
+        );
+        let artifacts = list_session_artifacts_read_only(&dir, "meet").unwrap();
+        assert_eq!(artifacts[0].path, ".margins/meet_aligned.md");
+        upsert_session_artifact(
+            &dir,
+            "meet",
+            SESSION_ARTIFACT_KIND_TRANSCRIPT,
+            0,
+            ".margins/artifacts/meet/transcript.md",
+            "durable",
+            None,
+        )
+        .unwrap();
+        assert_eq!(transcript_coverage_read_only(&dir, "meet").unwrap(), None);
+    }
 
     #[test]
     fn finalized_capture_is_ended_and_remains_listed() {

@@ -114,13 +114,12 @@ registered artifact precedence without teaching agents storage internals.
    pass the `vault` id from `recent --all` as the historical global selector:
    `margins --project "<id-or-path>" ...`. Relative audio, memo, and Granola
    paths remain relative to the invocation directory.
-5. Treat a successful `margins transcript` body as the usable transcript. In
-   particular, `view="full"` may be rendered directly from a terminal
-   `*.live-transcript.json` checkpoint; consume that body and do **not** run
-   `margins process` merely because no `_aligned.md` file exists. Process only
-   when the transcript command has no usable body, the user explicitly asks to
-   reprocess, or alignment genuinely must be rebuilt. Memo-only bodies with no
-   spoken timeline line are not usable transcripts.
+5. Use a `view="full"` body only when `terminal="true"`; a terminal live
+   checkpoint needs no redundant processing. When `incomplete="true"` or
+   `terminal="false"` and `live="false"`, run `margins process "<session-id>"`
+   before distilling, then read the transcript again. Do not process an active
+   live meeting for a final note. Memo-only bodies without spoken timeline
+   lines are not usable transcripts.
 6. For audio-only input, call `margins transcribe`; a memo is optional. Do not
    fail solely because timed memo lines are absent.
 7. Never delete artifacts unless the user explicitly asks. Use
@@ -205,9 +204,8 @@ If deterministic resolution fails, present the candidate files found and ask the
 
 ### Step 2: Transcribe audio
 
-Skip this step when `margins transcript` already returned a usable body. Do not
-re-run ASR for a terminal live checkpoint that the CLI rendered as
-`view="full"`.
+Skip this step when `margins transcript` returned a usable terminal body. Run
+it for an incomplete or non-terminal, non-live transcript before distilling.
 
 When processing is actually required, use the standalone public Rust CLI. For
 an existing Margins session, it resolves every registered segment, applies
@@ -272,8 +270,8 @@ Before drafting, read and apply the shared interpretation rules in `skills/margi
 ### Step 4: Host-specific evidence setup
 
 Use the body returned by `margins transcript "<session-id>"` as the complete
-transcript source. This includes a terminal live checkpoint rendered with
-`view="full"`; it does not need a redundant `margins process` pass. If the CLI
+transcript source after the terminal/incomplete check above. A terminal live
+checkpoint with `view="full"` needs no redundant `margins process` pass. If the CLI
 falls back to an `_aligned.md` file, that body remains usable but can omit
 stretches where no memo was taken. If a desktop `_capture_context.md` sidecar is
 present, pass it through the core's evidence-priority rule rather than treating
