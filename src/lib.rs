@@ -285,6 +285,7 @@ pub mod recorder {
         pub drops: Arc<AtomicU64>,
         pub packet_drops: Arc<AtomicU64>,
         pub frames: Arc<AtomicU64>,
+        pub silence: Arc<AtomicU64>,
         pub error: Arc<AtomicU8>,
     }
 
@@ -398,6 +399,7 @@ pub mod recorder {
                 drops: Arc::new(AtomicU64::new(0)),
                 packet_drops: Arc::new(AtomicU64::new(0)),
                 frames: Arc::new(AtomicU64::new(0)),
+                silence: Arc::new(AtomicU64::new(0)),
                 error: Arc::new(AtomicU8::new(0)),
             }
         }

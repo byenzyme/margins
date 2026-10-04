@@ -320,7 +320,21 @@ fn run_segment(
     meeting: &mut capture_local_runtime::LocalMeetingProducer,
 ) -> Result<SegmentOutcome> {
     let mut ordinal = initial_ordinal;
-    let mut selected_device: Option<crate::recorder::SelectedInputDevice> = None;
+    let preference = match audio_preferences::load() {
+        Ok(preference) => preference,
+        Err(error) => {
+            app.message = Some(format!(
+                "Could not read saved mic choice ({error}); using system default"
+            ));
+            None
+        }
+    };
+    app.preferred_mic_name = preference.as_ref().map(|choice| choice.name.clone());
+    app.preferred_mic_uid = preference.as_ref().and_then(|choice| choice.uid.clone());
+    let (mut selected_device, fallback_note) = audio_preferences::resolve(preference.as_ref())?;
+    if let Some(note) = fallback_note {
+        app.message = Some(note);
+    }
     let mut live_timeline_duration_ms: u64 = 0;
     let mut first_segment = true;
     // Memo durability must not depend on the optional transcription path.
@@ -349,6 +363,15 @@ fn run_segment(
             )?;
             let recorder = started.recorder;
             let stop = started.stop;
+            app.current_mic_name = recorder.mic_name().to_owned();
+            app.current_mic_uid = recorder.mic_uid().map(str::to_owned);
+            app.mic_silent = false;
+            app.suggested_mic_name = None;
+            app.devices = crate::recorder::list_input_devices()
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
+            app.device_uids = crate::recorder::input_device_uid_snapshot(&app.devices);
             app.native_spool_overflow = started.overflow;
             app.native_store_retrying = started.retrying;
 
@@ -357,6 +380,8 @@ fn run_segment(
             app.mic_drops = recorder.mic_drops();
             app.spk_drops = recorder.spk_drops();
             app.mic_frames = recorder.mic_frames();
+            app.mic_silence = recorder.mic_silence();
+            app.mic_rate = recorder.mic_rate();
             app.spk_silence = recorder.spk_silence();
             app.spk_frames = recorder.spk_frames();
             app.mic_real_spool_frames =
@@ -440,7 +465,7 @@ fn run_segment(
                                     &app.device_uids,
                                     index,
                                 )?;
-                                app.current_mic_name = selected.name.clone();
+                                audio_preferences::remember_selection(app, &selected);
                                 selected_device = Some(selected);
                             }
                             crate::tui::TuiAction::Pause => {}
@@ -461,7 +486,7 @@ fn run_segment(
                         &app.device_uids,
                         index,
                     )?;
-                    app.current_mic_name = selected.name.clone();
+                    audio_preferences::remember_selection(app, &selected);
                     selected_device = Some(selected);
                     ordinal = meeting.next_ordinal()?;
                 }
@@ -503,8 +528,28 @@ mod native_smoke_tests {
             Local::now(),
         )
         .unwrap();
+        let smoke_uid = std::env::var("MARGINS_SMOKE_MIC_UID")
+            .ok()
+            .filter(|uid| !uid.is_empty());
+        let preference = if let Some(uid) = &smoke_uid {
+            Some(audio_preferences::InputPreference {
+                name: "smoke target".into(),
+                uid: Some(uid.clone()),
+            })
+        } else {
+            audio_preferences::load().unwrap()
+        };
+        let (selected, note) = audio_preferences::resolve(preference.as_ref()).unwrap();
+        if smoke_uid.is_some() {
+            assert!(
+                selected.is_some(),
+                "requested smoke mic UID unavailable: {note:?}"
+            );
+        }
         let StartedNativeSegment { recorder, stop, .. } =
-            start_native_segment(&mut meeting, 0, 0, None, None).unwrap();
+            start_native_segment(&mut meeting, 0, 0, selected.as_ref(), None).unwrap();
+        let opened_name = recorder.mic_name().to_owned();
+        let opened_uid = recorder.mic_uid().map(str::to_owned);
         std::thread::sleep(std::time::Duration::from_secs(3));
         stop.store(true, Ordering::SeqCst);
         recorder
@@ -527,7 +572,7 @@ mod native_smoke_tests {
                 .into_samples::<i16>()
                 .step_by(2)
                 .any(|sample| sample.unwrap() != 0),
-            "microphone lane stored only zeros; inspect capture_lane_summary in the CLI log"
+            "microphone lane stored only zeros from {opened_name:?} UID {opened_uid:?}; inspect capture_lane_summary in the CLI log"
         );
     }
 }

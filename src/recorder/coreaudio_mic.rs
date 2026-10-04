@@ -4,7 +4,10 @@
 //! headers/documentation, cidre 0.14.2's public API, and this repository's
 //! existing process-tap IOProc. No external GPL implementation was consulted.
 
-use super::{MicCaptureTelemetry, MicStreamErrorKind, PacketDesc, MIC_GAIN, RING_BUF_SECONDS};
+use super::{
+    next_exact_zero_run, MicCaptureTelemetry, MicStreamErrorKind, PacketDesc, MIC_GAIN,
+    RING_BUF_SECONDS,
+};
 use anyhow::{bail, Context, Result};
 use cidre::{cat, core_audio as ca, mach, os};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -258,11 +261,13 @@ extern "C" fn input_io_proc(
     let mut local_drops = 0u64;
     let mut pushed = 0u64;
     let mut last_bits = 0u32;
+    let mut silent_run = ctx.telemetry.silence.load(Ordering::Relaxed);
 
     for frame in 0..frames {
         let sample =
             unsafe { read_channel_zero(buffer.data, frame, channels, ctx.format.encoding) };
         let sample = (sample * MIC_GAIN).clamp(-1.0, 1.0);
+        silent_run = next_exact_zero_run(silent_run, sample);
         local_peak = local_peak.max(sample.abs());
         if ctx.sample_producer.push(sample).is_ok() {
             pushed += 1;
@@ -274,6 +279,7 @@ extern "C" fn input_io_proc(
     ctx.telemetry
         .peak
         .fetch_max(local_peak.to_bits(), Ordering::Relaxed);
+    ctx.telemetry.silence.store(silent_run, Ordering::Relaxed);
     if local_drops > 0 {
         ctx.telemetry
             .drops
@@ -693,6 +699,7 @@ fn spike_telemetry() -> MicCaptureTelemetry {
         drops: Arc::new(AtomicU64::new(0)),
         packet_drops: Arc::new(AtomicU64::new(0)),
         frames: Arc::new(AtomicU64::new(0)),
+        silence: Arc::new(AtomicU64::new(0)),
         error: Arc::new(AtomicU8::new(0)),
     }
 }

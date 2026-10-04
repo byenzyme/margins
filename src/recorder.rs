@@ -215,7 +215,17 @@ pub struct MicCaptureTelemetry {
     pub drops: Arc<AtomicU64>,
     pub packet_drops: Arc<AtomicU64>,
     pub frames: Arc<AtomicU64>,
+    /// Consecutive callback frames containing exact digital zero.
+    pub silence: Arc<AtomicU64>,
     pub error: Arc<AtomicU8>,
+}
+
+fn next_exact_zero_run(run: u64, sample: f32) -> u64 {
+    if sample == 0.0 {
+        run.saturating_add(1)
+    } else {
+        0
+    }
 }
 
 #[derive(Clone)]
@@ -450,6 +460,7 @@ impl MicCapture {
             drops: Arc::new(AtomicU64::new(0)),
             packet_drops: Arc::new(AtomicU64::new(0)),
             frames: Arc::new(AtomicU64::new(0)),
+            silence: Arc::new(AtomicU64::new(0)),
             error,
         };
         let raw = start_mic_raw_for_backend(target, &telemetry, preferred).or_else(|primary| {
@@ -916,6 +927,8 @@ pub struct RecorderHandle {
     spk_rate: u32,
     mic_telemetry: MicCaptureTelemetry,
     system_telemetry: SystemCaptureTelemetry,
+    opened_mic_name: String,
+    opened_mic_uid: Option<String>,
 }
 
 impl RecorderHandle {
@@ -972,6 +985,7 @@ impl RecorderHandle {
             drops: Arc::new(AtomicU64::new(0)),
             packet_drops: Arc::new(AtomicU64::new(0)),
             frames: Arc::new(AtomicU64::new(0)),
+            silence: Arc::new(AtomicU64::new(0)),
             error: mic_error,
         };
         let system_telemetry = SystemCaptureTelemetry {
@@ -990,10 +1004,8 @@ impl RecorderHandle {
             .or_else(default_input_device_name)
             .unwrap_or_else(|| "unknown".into());
         let occurrence = selected.map_or(0, |selection| selection.occurrence);
-        let opened_uid = selected
-            .and_then(|selection| selection.uid.clone())
-            .or_else(|| input_device_uid_at(&opened_name, occurrence))
-            .unwrap_or_else(|| "unknown".into());
+        let opened_uid = input_device_uid_at(&opened_name, occurrence);
+        let opened_uid_label = opened_uid.as_deref().unwrap_or("unknown");
         let requested_name = selected.map_or("system default", |selection| selection.name.as_str());
         let requested_uid = selected
             .and_then(|selection| selection.uid.as_deref())
@@ -1019,7 +1031,7 @@ impl RecorderHandle {
         crate::cli_log::event(
             "capture_device_opened",
             format!(
-                "requested_name={requested_name:?} requested_uid={requested_uid:?} requested_occurrence={occurrence} opened_name={opened_name:?} opened_uid={opened_uid:?} mic_rate={sample_rate} system_rate={spk_rate}"
+                "requested_name={requested_name:?} requested_uid={requested_uid:?} requested_occurrence={occurrence} opened_name={opened_name:?} opened_uid={opened_uid_label:?} mic_rate={sample_rate} system_rate={spk_rate}"
             ),
         );
         if sample_rate != spk_rate {
@@ -1039,7 +1051,17 @@ impl RecorderHandle {
             spk_rate,
             mic_telemetry,
             system_telemetry,
+            opened_mic_name: opened_name,
+            opened_mic_uid: opened_uid,
         })
+    }
+
+    pub fn mic_name(&self) -> &str {
+        &self.opened_mic_name
+    }
+
+    pub fn mic_uid(&self) -> Option<&str> {
+        self.opened_mic_uid.as_deref()
     }
 
     pub fn mic_peak(&self) -> Arc<AtomicU32> {
@@ -1056,6 +1078,14 @@ impl RecorderHandle {
 
     pub fn mic_frames(&self) -> Arc<AtomicU64> {
         self.mic_telemetry.frames.clone()
+    }
+
+    pub fn mic_silence(&self) -> Arc<AtomicU64> {
+        self.mic_telemetry.silence.clone()
+    }
+
+    pub fn mic_rate(&self) -> u32 {
+        self.mic.native_rate()
     }
 
     pub fn real_spool_frames(&self, lane: CaptureLane) -> Arc<AtomicU64> {
@@ -1327,6 +1357,7 @@ pub fn test_input_target_level(
         drops: drops.clone(),
         packet_drops: Arc::new(AtomicU64::new(0)),
         frames: Arc::new(AtomicU64::new(0)),
+        silence: Arc::new(AtomicU64::new(0)),
         error: Arc::new(AtomicU8::new(0)),
     };
     let raw = start_mic_raw_for_backend(target, &telemetry, preferred).or_else(|primary| {
@@ -1852,8 +1883,10 @@ fn build_mic_stream<S: SizedSample + ToSample<f32> + Send + 'static>(
         move |data: &[S], info: &cpal::InputCallbackInfo| {
             let mut local_peak = 0.0f32;
             let mut local_drops = 0u64;
+            let mut silent_run = telemetry.silence.load(Ordering::Relaxed);
             for sample in data.iter().step_by(channels) {
                 let s = (sample.to_sample::<f32>() * MIC_GAIN).clamp(-1.0, 1.0);
+                silent_run = next_exact_zero_run(silent_run, s);
                 local_peak = local_peak.max(s.abs());
                 if producer.push(s).is_err() {
                     local_drops += 1;
@@ -1862,6 +1895,7 @@ fn build_mic_stream<S: SizedSample + ToSample<f32> + Send + 'static>(
             telemetry
                 .peak
                 .fetch_max(local_peak.to_bits(), Ordering::Relaxed);
+            telemetry.silence.store(silent_run, Ordering::Relaxed);
             if local_drops > 0 {
                 telemetry.drops.fetch_add(local_drops, Ordering::Relaxed);
             }
@@ -2749,6 +2783,17 @@ fn start_speaker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_zero_mic_run_resets_for_a_real_noise_floor() {
+        let mut run = 0;
+        for sample in vec![0.0; 3 * 48_000] {
+            run = next_exact_zero_run(run, sample);
+        }
+        assert_eq!(run, 144_000);
+        assert_eq!(next_exact_zero_run(run, -0.0), 144_001);
+        assert_eq!(next_exact_zero_run(run, 0.000_000_1), 0);
+    }
     use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
     use std::sync::Arc;
 

@@ -54,6 +54,10 @@ mod native_bridge;
 #[path = "cli/capture_local_runtime.rs"]
 mod capture_local_runtime;
 
+#[cfg(feature = "audio-capture")]
+#[path = "cli/audio_preferences.rs"]
+mod audio_preferences;
+
 trait InteractiveSession {
     fn create(&self, work_dir: &Path, title: Option<&str>) -> Result<()>;
     fn attach(&self, work_dir: &Path, selected: Option<&str>) -> Result<()>;

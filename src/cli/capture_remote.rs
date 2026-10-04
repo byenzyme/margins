@@ -130,6 +130,23 @@ fn run_remote_native_capture(
                 .with_context(|| format!("microphone input device not found: {name}"))
         })
         .transpose()?;
+    let mut preference_note = None;
+    let preference = match audio_preferences::load() {
+        Ok(preference) => preference,
+        Err(error) => {
+            preference_note = Some(if mic_device_name.is_some() {
+                format!("Could not read saved mic choice ({error}); using requested input")
+            } else {
+                format!("Could not read saved mic choice ({error}); using system default")
+            });
+            None
+        }
+    };
+    if selected_device.is_none() {
+        let (preferred_device, note) = audio_preferences::resolve(preference.as_ref())?;
+        selected_device = preferred_device;
+        preference_note = note.or(preference_note);
+    }
     let token = std::env::var("MARGINS_REMOTE_TOKEN").ok();
     let connection = match prepared_connection {
         Some(connection) => connection,
@@ -410,6 +427,9 @@ fn run_remote_native_capture(
         started_at,
         mic_name,
     );
+    app.preferred_mic_name = preference.as_ref().map(|choice| choice.name.clone());
+    app.preferred_mic_uid = preference.as_ref().and_then(|choice| choice.uid.clone());
+    app.message = preference_note;
     let uploader_done = Arc::new(AtomicBool::new(false));
     let uploader_state = Arc::new(AtomicU8::new(crate::app::REMOTE_DELIVERY_CURRENT));
     let uploader_pending_chunks = Arc::new(AtomicU64::new(0));
@@ -537,6 +557,15 @@ fn run_remote_native_capture(
                 return Err(error.context(cleanup_errors.join("; ")));
             }
         };
+        app.current_mic_name = recorder.mic_name().to_owned();
+        app.current_mic_uid = recorder.mic_uid().map(str::to_owned);
+        app.mic_silent = false;
+        app.suggested_mic_name = None;
+        app.devices = crate::recorder::list_input_devices()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        app.device_uids = crate::recorder::input_device_uid_snapshot(&app.devices);
         if !announced_sources {
             eprintln!(
                 "Recording on this Mac · Saving to {} / {} · Microphone + system audio enabled",
@@ -589,6 +618,14 @@ fn run_remote_native_capture(
         app.spk_level = recorder.spk_peak();
         app.mic_drops = recorder.mic_drops();
         app.spk_drops = recorder.spk_drops();
+        app.mic_frames = recorder.mic_frames();
+        app.mic_silence = recorder.mic_silence();
+        app.mic_rate = recorder.mic_rate();
+        app.mic_real_spool_frames = recorder.real_spool_frames(crate::recorder::CaptureLane::Mic);
+        app.spk_real_spool_frames =
+            recorder.real_spool_frames(crate::recorder::CaptureLane::System);
+        app.mic_no_audio_received.store(false, Ordering::Release);
+        app.spk_no_audio_received.store(false, Ordering::Release);
         app.spk_silence = recorder.spk_silence();
         app.spk_frames = recorder.spk_frames();
         app.spk_rate = recorder.spk_rate();
@@ -661,7 +698,7 @@ fn run_remote_native_capture(
                                 &app.device_uids,
                                 index,
                             )?;
-                            app.current_mic_name = selected.name.clone();
+                            audio_preferences::remember_selection(&mut app, &selected);
                             selected_device = Some(selected);
                         }
                         crate::tui::TuiAction::Pause => {}
@@ -672,7 +709,7 @@ fn run_remote_native_capture(
                 transfer.close_segment(SegmentCloseReasonV1::Rollover)?;
                 let selected =
                     crate::recorder::selected_input_device(&app.devices, &app.device_uids, index)?;
-                app.current_mic_name = selected.name.clone();
+                audio_preferences::remember_selection(&mut app, &selected);
                 selected_device = Some(selected);
             }
             crate::tui::TuiAction::Quit => {
