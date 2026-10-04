@@ -57,11 +57,16 @@ impl CaptureStatus {
         let load = |counter: &Option<Arc<AtomicU64>>| {
             counter.as_ref().map_or(0, |v| v.load(Ordering::Relaxed))
         };
+        let opened_mic = if matches!(self.state, "recording" | "paused") {
+            self.opened_mic_name.clone()
+        } else {
+            None
+        };
         json!({
             "state": if self.state.is_empty() { "ready" } else { self.state },
             "instanceId": instance_id,
             "workspaceId": workspace_id,
-            "microphoneDeviceName": self.opened_mic_name.clone()
+            "microphoneDeviceName": opened_mic
                 .or_else(|| selected_mic.map(str::to_string))
                 .or_else(crate::recorder::default_input_device_name),
             "microphoneDevicePinned": selected_mic.is_some(),
@@ -164,6 +169,7 @@ impl CaptureController {
         let mut state = self.status.lock().unwrap();
         state.fold_live();
         state.state = "saving";
+        state.opened_mic_name = None;
     }
 
     pub(super) fn local_audio_saved(&self, path: &std::path::Path) {
@@ -539,6 +545,7 @@ fn handle_stream(mut stream: TcpStream, bridge: &mut Bridge) -> Result<()> {
                 )
             } else {
                 bridge.mic_device_name = name.map(str::to_string);
+                bridge.status.lock().unwrap().opened_mic_name = None;
                 (200, microphones(bridge))
             }
         }
@@ -595,6 +602,7 @@ fn handle_stream(mut stream: TcpStream, bridge: &mut Bridge) -> Result<()> {
                                 )
                             });
                         let mut state = bridge_status.lock().unwrap();
+                        state.opened_mic_name = None;
                         match result {
                             Ok(()) => state.state = "saved",
                             Err(error) => {
@@ -822,12 +830,20 @@ mod tests {
     #[test]
     fn unpinned_bridge_reports_the_input_it_actually_opened() {
         let status = CaptureStatus {
+            state: "recording",
             opened_mic_name: Some("Yeti Stereo Microphone".into()),
             ..Default::default()
         };
         let snapshot = status.snapshot("instance", "workspace", None);
         assert_eq!(snapshot["microphoneDeviceName"], "Yeti Stereo Microphone");
         assert_eq!(snapshot["microphoneDevicePinned"], false);
+        let finished = CaptureStatus {
+            state: "saved",
+            ..status
+        };
+        let snapshot = finished.snapshot("instance", "workspace", Some("USB Digital Audio"));
+        assert_eq!(snapshot["microphoneDeviceName"], "USB Digital Audio");
+        assert_eq!(snapshot["microphoneDevicePinned"], true);
     }
 
     #[test]
@@ -933,11 +949,13 @@ mod tests {
         )
         .starts_with("HTTP/1.1 409"));
         bridge.status.lock().unwrap().state = "ready";
+        bridge.status.lock().unwrap().opened_mic_name = Some("previous microphone".into());
         assert!(exchange(
             &mut bridge,
             &request("POST", "/v1/microphone", "{\"deviceName\":null}")
         )
         .starts_with("HTTP/1.1 200"));
+        assert!(bridge.status.lock().unwrap().opened_mic_name.is_none());
     }
 
     #[test]

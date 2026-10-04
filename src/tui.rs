@@ -89,6 +89,9 @@ fn clear_system_audio_warning_after_recovery(
 struct SpoolProgress {
     last_frames: u64,
     last_progress_at: std::time::Duration,
+    last_callbacks: u64,
+    last_callback_at: std::time::Duration,
+    callback_stall_since: Option<std::time::Duration>,
 }
 
 impl SpoolProgress {
@@ -100,6 +103,40 @@ impl SpoolProgress {
         }
         elapsed.saturating_sub(self.last_progress_at)
             >= std::time::Duration::from_secs(threshold_secs)
+    }
+
+    fn system_missing(
+        &mut self,
+        elapsed: std::time::Duration,
+        callbacks: u64,
+        frames: u64,
+        threshold_secs: u64,
+    ) -> bool {
+        let spool_advanced = frames != self.last_frames;
+        self.missing(elapsed, frames, threshold_secs);
+        if spool_advanced {
+            self.callback_stall_since = None;
+        }
+        if callbacks != self.last_callbacks {
+            let callback_gap = elapsed.saturating_sub(self.last_callback_at);
+            self.last_callbacks = callbacks;
+            self.last_callback_at = elapsed;
+            if !spool_advanced
+                && (self.callback_stall_since.is_none()
+                    || callback_gap > std::time::Duration::from_secs(1))
+            {
+                self.callback_stall_since = Some(elapsed);
+            }
+        }
+        let callbacks_recent =
+            elapsed.saturating_sub(self.last_callback_at) <= std::time::Duration::from_secs(1);
+        if !callbacks_recent {
+            self.callback_stall_since = None;
+        }
+        callbacks_recent
+            && self.callback_stall_since.is_some_and(|since| {
+                elapsed.saturating_sub(since) >= std::time::Duration::from_secs(threshold_secs)
+            })
     }
 }
 
@@ -131,14 +168,18 @@ fn update_no_audio_guard(
     .enumerate()
     {
         let real_frames = spooled.load(Ordering::Acquire);
-        let missing = progress[index].missing(elapsed, real_frames, threshold)
-            && (index == 0 || callbacks.load(Ordering::Acquire) > 0);
+        let callback_frames = callbacks.load(Ordering::Acquire);
+        let missing = if index == 0 {
+            progress[index].missing(elapsed, real_frames, threshold)
+        } else {
+            progress[index].system_missing(elapsed, callback_frames, real_frames, threshold)
+        };
         if missing && !warning.swap(true, Ordering::AcqRel) {
             crate::cli_log::event(
                 "capture_no_audio_received",
                 format!(
                     "lane={lane} callback_frames={} real_spool_frames={real_frames} elapsed_s={}",
-                    callbacks.load(Ordering::Relaxed),
+                    callback_frames,
                     elapsed.as_secs(),
                 ),
             );
@@ -843,6 +884,27 @@ mod tests {
         assert!(!app.spk_no_audio_received.load(Ordering::Acquire));
         let status = rendered_status(&mut app, 80);
         assert!(status.contains("spk ░░░░░░░░ silent"), "{status}");
+    }
+
+    #[test]
+    fn system_clip_stopping_does_not_arm_no_audio_but_live_callbacks_without_spool_do() {
+        let mut app = App::new("meeting.md".into(), chrono::Local::now(), "mic".into());
+        let mut progress = [SpoolProgress::default(), SpoolProgress::default()];
+        app.spk_frames.store(RATE as u64, Ordering::Release);
+        app.spk_real_spool_frames
+            .store(RATE as u64, Ordering::Release);
+        update_no_audio_guard(&mut app, &mut progress, Duration::from_secs(1));
+        // Playback stopped; the tap stopped calling back too.
+        update_no_audio_guard(&mut app, &mut progress, Duration::from_secs(12));
+        assert!(!app.spk_no_audio_received.load(Ordering::Acquire));
+        // A new stream of callbacks with no spool progress is a real stall.
+        for second in 13..=23 {
+            app.spk_frames.fetch_add(RATE as u64, Ordering::Release);
+            update_no_audio_guard(&mut app, &mut progress, Duration::from_secs(second));
+        }
+        assert!(app.spk_no_audio_received.load(Ordering::Acquire));
+        update_no_audio_guard(&mut app, &mut progress, Duration::from_secs(25));
+        assert!(!app.spk_no_audio_received.load(Ordering::Acquire));
     }
 
     #[test]
