@@ -3,6 +3,7 @@
 use crate::artifacts::{artifact_registry_disk_path, confined_session_artifact_access_disk_path};
 use anyhow::{bail, Context, Result};
 use chrono::DateTime;
+use fs4::fs_std::FileExt;
 use margins_store::canonical;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -41,6 +42,7 @@ struct TranscriptSource {
     body: String,
     decoded_until_ms: u64,
     captured_until_ms: u64,
+    coverage_start_ms: u64,
     committed_until_ms: u64,
     terminal: bool,
     live_checkpoint: bool,
@@ -168,6 +170,7 @@ pub fn load_transcript_view(
                         body,
                         decoded_until_ms: 0,
                         captured_until_ms: 0,
+                        coverage_start_ms: 0,
                         committed_until_ms: 0,
                         terminal: true,
                         live_checkpoint: false,
@@ -177,7 +180,12 @@ pub fn load_transcript_view(
             }
         });
     let (source, view) = if let Some(source) = final_source {
-        (source, "aligned")
+        let view = if source.terminal {
+            "aligned"
+        } else {
+            "incomplete"
+        };
+        (source, view)
     } else if let Some(source) =
         read_remote_live_checkpoint(work_dir, margins_dir, &name, meta.as_ref())?
     {
@@ -196,19 +204,34 @@ pub fn load_transcript_view(
                     && artifact.path.ends_with(".md")
             })
     {
+        let remote =
+            margins_store::SqliteWorkspaceAuthorityStorage::session_producer_state_read_only(
+                margins_dir,
+                &name,
+            )?
+            .is_some();
         (
             TranscriptSource {
                 source_path: final_path.clone(),
-                body: format!("# Transcript incomplete\n\nNew audio was recorded after the last processing pass. Run margins process {name}."),
+                body: if remote {
+                    "# Transcript pending\n\nRemote audio is waiting for server transcription."
+                        .to_string()
+                } else {
+                    format!("# Transcript incomplete\n\nNew audio was recorded after the last processing pass. Run margins process {name}.")
+                },
                 decoded_until_ms: 0,
                 captured_until_ms: canonical::transcript_coverage(
-                    meta.as_ref().map(|value| value.segments.as_slice()).unwrap_or_default(),
-                ).map_or(0, |value| value.covered_until_ms),
+                    meta.as_ref()
+                        .map(|value| value.segments.as_slice())
+                        .unwrap_or_default(),
+                )
+                .map_or(0, |value| value.covered_until_ms),
+                coverage_start_ms: 0,
                 committed_until_ms: 0,
                 terminal: false,
                 live_checkpoint: false,
             },
-            "incomplete",
+            if remote { "pending" } else { "incomplete" },
         )
     } else {
         let (path, body) = read_registered_or_fallback(work_dir, margins_dir, &name)?;
@@ -220,6 +243,7 @@ pub fn load_transcript_view(
                 body,
                 decoded_until_ms: 0,
                 captured_until_ms: 0,
+                coverage_start_ms: 0,
                 committed_until_ms: 0,
                 terminal: !pending,
                 live_checkpoint: false,
@@ -252,7 +276,8 @@ pub fn load_transcript_view(
     let live = source.live_checkpoint
         && !source.terminal
         && capture_state == "active"
-        && current_session_matches(margins_dir, &name);
+        && current_session_matches(margins_dir, &name)
+        && local_capture_owner_active(margins_dir, &name)?;
     let speaker_alias = speaker_alias_from_meta(meta.as_ref());
     let body = if source.source_path == final_path {
         meta.as_ref()
@@ -308,6 +333,15 @@ pub fn load_transcript_view(
 }
 
 fn live_source_covers_segments(source: &TranscriptSource, meta: &canonical::SessionMeta) -> bool {
+    if meta
+        .segments
+        .iter()
+        .map(|segment| segment.offset_ms.max(0) as u64)
+        .min()
+        .is_some_and(|first_start| source.coverage_start_ms > first_start)
+    {
+        return false;
+    }
     if source.decoded_until_ms.saturating_add(1_000) < source.captured_until_ms {
         return false;
     }
@@ -325,6 +359,18 @@ fn live_source_covers_segments(source: &TranscriptSource, meta: &canonical::Sess
             .and_then(|value| value.timestamp_nanos_opt())
             .is_some_and(|started_ns| modified_ns >= started_ns.max(0) as u128)
     })
+}
+
+fn local_capture_owner_active(margins_dir: &Path, name: &str) -> Result<bool> {
+    let path = margins_dir.join(format!("{name}.capture.lock"));
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
+    Ok(!file.try_lock_exclusive()?)
 }
 
 /// Remote ASR artifacts retain the spoken timeline. Rebuild their readable
@@ -498,6 +544,22 @@ fn read_checkpoint_body_at(
         .get("live_dropped_samples")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let coverage_start_ms = checkpoint
+        .get("start_offset_ms")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            meta.and_then(|value| {
+                value.segments.iter().find_map(|segment| {
+                    (path.file_name().and_then(|file| file.to_str())
+                        == Some(
+                            format!("{name}_seg{}.live-transcript.json", segment.segment_index)
+                                .as_str(),
+                        ))
+                    .then_some(segment.offset_ms.max(0) as u64)
+                })
+            })
+        })
+        .unwrap_or(0);
     let latest_checkpoint = meta
         .and_then(|value| {
             value
@@ -533,6 +595,7 @@ fn read_checkpoint_body_at(
         body,
         decoded_until_ms,
         captured_until_ms: captured_until_ms.unwrap_or(decoded_until_ms),
+        coverage_start_ms,
         committed_until_ms,
         terminal,
         live_checkpoint: true,
@@ -606,8 +669,11 @@ fn registered_final_transcript(
                     body,
                     decoded_until_ms: 0,
                     captured_until_ms: 0,
+                    coverage_start_ms: 0,
                     committed_until_ms: 0,
-                    terminal: true,
+                    terminal: coverage.is_none_or(|recorded| {
+                        recorded.finished_segment_count == recorded.segment_count
+                    }),
                     live_checkpoint: false,
                 }));
             }
@@ -748,6 +814,10 @@ fn read_live_transcript_snapshot(
             .get("captured_until_ms")
             .and_then(Value::as_u64)
             .unwrap_or(decoded_until_ms),
+        coverage_start_ms: snapshot
+            .get("start_offset_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
         committed_until_ms,
         terminal: snapshot
             .get("terminal")
@@ -857,6 +927,7 @@ fn read_live_transcript_body(
         body,
         decoded_until_ms: decoded,
         captured_until_ms: decoded,
+        coverage_start_ms: 0,
         committed_until_ms: committed.min(decoded),
         terminal,
         live_checkpoint: true,
@@ -1076,6 +1147,17 @@ fn artifact_session_names(dir: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hold_local_capture_owner(dir: &Path, name: &str) -> std::fs::File {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(dir.join(format!("{name}.capture.lock")))
+            .unwrap();
+        assert!(file.try_lock_exclusive().unwrap());
+        file
+    }
     use chrono::Local;
 
     #[test]
@@ -1253,6 +1335,7 @@ mod tests {
         canonical::create_session(&margins_dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
         std::fs::write(margins_dir.join("meet.md"), "[00:02] memo").unwrap();
         std::fs::write(margins_dir.join("current"), "meet\n").unwrap();
+        let owner = hold_local_capture_owner(&margins_dir, "meet");
         std::fs::write(
             margins_dir.join("meet_live_transcript_segments.jsonl"),
             concat!(
@@ -1270,6 +1353,12 @@ mod tests {
         assert!(view.updated_at_unix_ms > 0);
         assert!(view.live);
         assert!(!view.terminal);
+        drop(owner);
+        assert!(
+            !load_transcript_view(work_dir, &margins_dir, "meet")
+                .unwrap()
+                .live
+        );
     }
 
     #[test]
@@ -1280,6 +1369,7 @@ mod tests {
         canonical::create_session(&margins_dir, "meet", &Local::now(), ".margins/meet.md").unwrap();
         std::fs::write(margins_dir.join("meet.md"), "[00:02] memo").unwrap();
         std::fs::write(margins_dir.join("current"), "meet\n").unwrap();
+        let _owner = hold_local_capture_owner(&margins_dir, "meet");
         std::fs::write(
             margins_dir.join("meet_live_transcript_snapshot.json"),
             serde_json::to_vec(&serde_json::json!({

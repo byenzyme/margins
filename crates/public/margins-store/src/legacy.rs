@@ -91,6 +91,7 @@ pub struct TranscriptCoverage {
     pub segment_count: i64,
     pub max_segment_index: i64,
     pub covered_until_ms: u64,
+    pub finished_segment_count: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -238,6 +239,7 @@ fn init_schema(conn: &Connection) -> Result<()> {
             segment_count INTEGER NOT NULL,
             max_segment_index INTEGER NOT NULL,
             covered_until_ms INTEGER NOT NULL,
+            finished_segment_count INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY (session_name) REFERENCES sessions(name) ON DELETE CASCADE
         );
 
@@ -318,6 +320,20 @@ fn init_schema(conn: &Connection) -> Result<()> {
         "TEXT NOT NULL DEFAULT 'active'",
     )?;
     ensure_column(conn, "sessions", "lifecycle_updated_at", "TEXT")?;
+    if ensure_column(
+        conn,
+        "session_transcript_coverage",
+        "finished_segment_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )? {
+        // Receipts written before this column existed represented only fully
+        // finished sessions. Run this write once during the schema upgrade;
+        // newer incomplete receipts may legitimately have zero finished rows.
+        conn.execute(
+            "UPDATE session_transcript_coverage SET finished_segment_count = segment_count",
+            [],
+        )?;
+    }
     ensure_column(
         conn,
         "session_note_associations",
@@ -333,19 +349,19 @@ fn init_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn ensure_column(conn: &Connection, table: &str, column: &str, kind: &str) -> Result<()> {
+fn ensure_column(conn: &Connection, table: &str, column: &str, kind: &str) -> Result<bool> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
     for row in rows {
         if row?.eq_ignore_ascii_case(column) {
-            return Ok(());
+            return Ok(false);
         }
     }
     conn.execute(
         &format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"),
         [],
     )?;
-    Ok(())
+    Ok(true)
 }
 
 fn migrate_json_metadata_if_needed(conn: &mut Connection, dir: &Path) -> Result<()> {
@@ -638,7 +654,7 @@ pub fn create_session(
     Ok(())
 }
 
-/// The exact finalized segment set represented by an offline transcript.
+/// The segment set and finished audio extent represented by an offline transcript.
 pub fn transcript_coverage(segments: &[SegmentMeta]) -> Option<TranscriptCoverage> {
     summarize_transcript_coverage(segments.iter().map(|segment| {
         (
@@ -653,20 +669,25 @@ fn summarize_transcript_coverage(
     segments: impl IntoIterator<Item = (i64, i64, Option<f64>)>,
 ) -> Option<TranscriptCoverage> {
     let mut count = 0i64;
+    let mut finished_count = 0i64;
     let mut max_index = -1i64;
     let mut end_ms = 0u64;
     for (index, offset_ms, duration_secs) in segments {
-        let duration = duration_secs?;
         count += 1;
         max_index = max_index.max(index);
-        end_ms = end_ms.max(
-            (offset_ms.max(0) as u64).saturating_add((duration.max(0.0) * 1_000.0).round() as u64),
-        );
+        if let Some(duration) = duration_secs {
+            finished_count += 1;
+            end_ms = end_ms.max(
+                (offset_ms.max(0) as u64)
+                    .saturating_add((duration.max(0.0) * 1_000.0).round() as u64),
+            );
+        }
     }
     (count > 0).then_some(TranscriptCoverage {
         segment_count: count,
         max_segment_index: max_index,
         covered_until_ms: end_ms,
+        finished_segment_count: finished_count,
     })
 }
 
@@ -705,12 +726,21 @@ pub fn register_processed_transcript(
         params![name, SESSION_ARTIFACT_KIND_TRANSCRIPT, path, now],
     )?;
     tx.execute(
-        "INSERT INTO session_transcript_coverage (session_name, segment_count, max_segment_index, covered_until_ms) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(session_name) DO UPDATE SET segment_count = excluded.segment_count, max_segment_index = excluded.max_segment_index, covered_until_ms = excluded.covered_until_ms",
-        params![name, expected.segment_count, expected.max_segment_index, i64::try_from(expected.covered_until_ms)?],
+        "INSERT INTO session_transcript_coverage (session_name, segment_count, max_segment_index, covered_until_ms, finished_segment_count) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(session_name) DO UPDATE SET segment_count = excluded.segment_count, max_segment_index = excluded.max_segment_index, covered_until_ms = excluded.covered_until_ms, finished_segment_count = excluded.finished_segment_count",
+        params![name, expected.segment_count, expected.max_segment_index, i64::try_from(expected.covered_until_ms)?, expected.finished_segment_count],
     )?;
     tx.execute(
-        "UPDATE sessions SET processing_state = 'done', failed_stage = NULL WHERE name = ?1",
-        params![name],
+        "UPDATE sessions SET processing_state = ?2, failed_stage = NULL WHERE name = ?1",
+        params![
+            name,
+            // A partial transcript is readable but cannot satisfy the final
+            // processing state or the distillation contract.
+            if expected.finished_segment_count == expected.segment_count {
+                "done"
+            } else {
+                "none"
+            }
+        ],
     )?;
     tx.commit()?;
     Ok(())
@@ -733,12 +763,13 @@ pub fn transcript_coverage_read_only(dir: &Path, name: &str) -> Result<Option<Tr
         return Ok(None);
     }
     conn.query_row(
-        "SELECT segment_count, max_segment_index, covered_until_ms FROM session_transcript_coverage WHERE session_name = ?1",
+        "SELECT segment_count, max_segment_index, covered_until_ms, finished_segment_count FROM session_transcript_coverage WHERE session_name = ?1",
         params![name],
         |row| Ok(TranscriptCoverage {
             segment_count: row.get(0)?,
             max_segment_index: row.get(1)?,
             covered_until_ms: row.get::<_, i64>(2)?.max(0) as u64,
+            finished_segment_count: row.get(3)?,
         }),
     ).optional().map_err(Into::into)
 }
@@ -2161,6 +2192,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(transcript_coverage_read_only(&dir, "meet").unwrap(), None);
+    }
+
+    #[test]
+    fn old_coverage_receipts_upgrade_as_complete() {
+        let root = tempdir().unwrap();
+        let dir = root.path().join(".margins");
+        create_session(&dir, "meet", &Local::now(), "meet.md").unwrap();
+        add_segment(&dir, "meet", 0, "meet_seg0.wav", 0, Some(1.0)).unwrap();
+        let conn = Connection::open(database_path(&dir)).unwrap();
+        conn.execute_batch(
+            "DROP TABLE session_transcript_coverage;
+             CREATE TABLE session_transcript_coverage (
+                 session_name TEXT PRIMARY KEY NOT NULL,
+                 segment_count INTEGER NOT NULL,
+                 max_segment_index INTEGER NOT NULL,
+                 covered_until_ms INTEGER NOT NULL
+             );
+             INSERT INTO session_transcript_coverage VALUES ('meet', 1, 0, 1000);",
+        )
+        .unwrap();
+        drop(conn);
+        open_db(&dir).unwrap();
+        assert_eq!(
+            transcript_coverage_read_only(&dir, "meet").unwrap(),
+            Some(TranscriptCoverage {
+                segment_count: 1,
+                max_segment_index: 0,
+                covered_until_ms: 1_000,
+                finished_segment_count: 1,
+            })
+        );
     }
 
     #[test]

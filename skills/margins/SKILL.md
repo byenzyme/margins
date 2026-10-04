@@ -114,12 +114,14 @@ registered artifact precedence without teaching agents storage internals.
    pass the `vault` id from `recent --all` as the historical global selector:
    `margins --project "<id-or-path>" ...`. Relative audio, memo, and Granola
    paths remain relative to the invocation directory.
-5. Use a `view="full"` body only when `terminal="true"`; a terminal live
-   checkpoint needs no redundant processing. When `incomplete="true"` or
-   `terminal="false"` and `live="false"`, run `margins process "<session-id>"`
-   before distilling, then read the transcript again. Do not process an active
-   live meeting for a final note. Memo-only bodies without spoken timeline
-   lines are not usable transcripts.
+5. For `view="pending"`, wait for the server transcript; do not start local
+   processing. Use a `view="full"` body only when `terminal="true"`; a terminal
+   live checkpoint needs no redundant processing. For other non-live results,
+   when `incomplete="true"` or `terminal="false"`, run
+   `margins process "<session-id>"` before distilling, then read the transcript
+   again. If it remains incomplete, disclose the gap and do not present the
+   partial body as complete. Do not process an active live meeting for a final
+   note. Memo-only bodies without spoken timeline lines are not usable transcripts.
 6. For audio-only input, call `margins transcribe`; a memo is optional. Do not
    fail solely because timed memo lines are absent.
 7. Never delete artifacts unless the user explicitly asks. Use

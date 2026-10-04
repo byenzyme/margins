@@ -3100,6 +3100,187 @@ fn transcript_xml_marks_finished_short_live_checkpoint_incomplete() {
 }
 
 #[test]
+fn transcript_xml_keeps_pending_remote_sessions_out_of_offline_processing() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join(".margins");
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in ["remote-pending", "remote-active"] {
+        canonical::create_session(&dir, name, &Local::now(), &format!(".margins/{name}.md"))
+            .unwrap();
+        canonical::add_segment(
+            &dir,
+            name,
+            0,
+            &format!("{name}_seg0.wav"),
+            0,
+            (name == "remote-pending").then_some(1.0),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(format!("{name}_capture_context.md")),
+            "<!-- margins:transcript-pending-v1 -->\nRemote ASR pending.\n",
+        )
+        .unwrap();
+    }
+    canonical::mark_session_ended(&dir, "remote-pending").unwrap();
+    let authority = margins_store::SqliteWorkspaceAuthorityStorage::open(&dir).unwrap();
+    authority
+        .reserve_producer("remote-active", "browser", "token")
+        .unwrap();
+    for (name, live) in [("remote-pending", false), ("remote-active", true)] {
+        let (result, xml, stderr) = invoke(
+            &services(temp.path()),
+            temp.path(),
+            &["margins", "transcript", name],
+        );
+        assert!(result.is_ok(), "{stderr}");
+        assert!(xml.contains("view=\"pending\" terminal=\"false\" incomplete=\"false\""));
+        assert!(xml.contains(&format!("live=\"{live}\"")));
+    }
+}
+
+#[test]
+fn active_remote_checkpoint_is_live_in_default_xml() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join(".margins");
+    std::fs::create_dir_all(&dir).unwrap();
+    canonical::create_session(
+        &dir,
+        "remote-live",
+        &Local::now(),
+        ".margins/remote-live.md",
+    )
+    .unwrap();
+    canonical::add_segment(&dir, "remote-live", 0, "remote-live_seg0.wav", 0, None).unwrap();
+    std::fs::write(
+        dir.join("remote-live_remote.live-transcript.json"),
+        serde_json::json!({
+            "version": 2, "terminal": false, "decoded_until_ms": 500,
+            "transcripts": [{"words": [{"channel": 0, "start_ms": 100,
+                "end_ms": 500, "text": "hello"}]}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let authority = margins_store::SqliteWorkspaceAuthorityStorage::open(&dir).unwrap();
+    authority
+        .reserve_producer("remote-live", "browser", "token")
+        .unwrap();
+    let (result, xml, stderr) = invoke(
+        &services(temp.path()),
+        temp.path(),
+        &["margins", "transcript", "remote-live"],
+    );
+    assert!(result.is_ok(), "{stderr}");
+    assert!(xml.contains("view=\"full\" terminal=\"false\" incomplete=\"false\" live=\"true\""));
+    authority
+        .release_producer("remote-live", "browser", "token")
+        .unwrap();
+    let (result, xml, stderr) = invoke(
+        &services(temp.path()),
+        temp.path(),
+        &["margins", "transcript", "remote-live"],
+    );
+    assert!(result.is_ok(), "{stderr}");
+    assert!(xml.contains("view=\"pending\" terminal=\"false\" incomplete=\"false\" live=\"false\""));
+    let (result, json, stderr) = invoke(
+        &services(temp.path()),
+        temp.path(),
+        &["margins", "transcript", "remote-live", "--format", "json"],
+    );
+    assert!(result.is_ok(), "{stderr}");
+    let report: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(report["view"], "pending");
+    assert_eq!(report["live"], false);
+}
+
+#[test]
+fn remote_session_with_stale_final_remains_pending_for_server_asr() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join(".margins");
+    std::fs::create_dir_all(&dir).unwrap();
+    canonical::create_session(
+        &dir,
+        "remote-stale",
+        &Local::now(),
+        ".margins/remote-stale.md",
+    )
+    .unwrap();
+    canonical::add_segment(&dir, "remote-stale", 0, "seg0.wav", 0, Some(1.0)).unwrap();
+    std::fs::write(dir.join("remote-stale_aligned.md"), "old remote transcript").unwrap();
+    let coverage = canonical::transcript_coverage(
+        &canonical::get_session_meta(&dir, "remote-stale")
+            .unwrap()
+            .segments,
+    )
+    .unwrap();
+    canonical::register_processed_transcript(
+        &dir,
+        "remote-stale",
+        ".margins/remote-stale_aligned.md",
+        coverage,
+    )
+    .unwrap();
+    let authority = margins_store::SqliteWorkspaceAuthorityStorage::open(&dir).unwrap();
+    authority
+        .reserve_producer("remote-stale", "browser", "token")
+        .unwrap();
+    authority
+        .release_producer("remote-stale", "browser", "token")
+        .unwrap();
+    canonical::add_segment(&dir, "remote-stale", 1, "seg1.wav", 10_000, Some(1.0)).unwrap();
+    let (result, xml, stderr) = invoke(
+        &services(temp.path()),
+        temp.path(),
+        &["margins", "transcript", "remote-stale"],
+    );
+    assert!(result.is_ok(), "{stderr}");
+    assert!(xml.contains("view=\"pending\" terminal=\"false\" incomplete=\"false\" live=\"false\""));
+    assert!(xml.contains("Remote audio is waiting for server transcription"));
+    assert!(!xml.contains("old remote transcript"));
+}
+
+#[test]
+fn crashed_local_session_with_partial_final_is_explicitly_incomplete() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join(".margins");
+    std::fs::create_dir_all(&dir).unwrap();
+    canonical::create_session(
+        &dir,
+        "crashed-local",
+        &Local::now(),
+        ".margins/crashed-local.md",
+    )
+    .unwrap();
+    canonical::add_segment(&dir, "crashed-local", 0, "seg0.wav", 0, Some(1.0)).unwrap();
+    canonical::add_segment(&dir, "crashed-local", 1, "seg1.wav", 10_000, None).unwrap();
+    std::fs::write(dir.join("crashed-local_aligned.md"), "partial transcript").unwrap();
+    let coverage = canonical::transcript_coverage(
+        &canonical::get_session_meta(&dir, "crashed-local")
+            .unwrap()
+            .segments,
+    )
+    .unwrap();
+    canonical::register_processed_transcript(
+        &dir,
+        "crashed-local",
+        ".margins/crashed-local_aligned.md",
+        coverage,
+    )
+    .unwrap();
+    let (result, xml, stderr) = invoke(
+        &services(temp.path()),
+        temp.path(),
+        &["margins", "transcript", "crashed-local"],
+    );
+    assert!(result.is_ok(), "{stderr}");
+    assert!(
+        xml.contains("view=\"incomplete\" terminal=\"false\" incomplete=\"true\" live=\"false\"")
+    );
+    assert!(xml.contains("partial transcript"));
+}
+
+#[test]
 fn transcript_json_reports_live_and_terminal_checkpoint_state() {
     for (meeting_id, terminal, expected_live, decoded) in [
         ("live-meeting", false, true, 12_345),
@@ -3107,6 +3288,12 @@ fn transcript_json_reports_live_and_terminal_checkpoint_state() {
     ] {
         let temp = tempfile::tempdir().unwrap();
         seed_checkpoint_session(temp.path(), meeting_id, terminal, decoded);
+        if expected_live {
+            margins_store::SqliteWorkspaceAuthorityStorage::open(temp.path().join(".margins"))
+                .unwrap()
+                .reserve_producer(meeting_id, "test-producer", "token")
+                .unwrap();
+        }
         let services = services(temp.path());
         let (result, stdout, stderr) = invoke(
             &services,

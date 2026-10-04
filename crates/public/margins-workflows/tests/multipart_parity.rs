@@ -222,8 +222,9 @@ fn attached_audio_invalidates_processed_transcript_until_reprocessed() {
     std::fs::write(
         dir.join("meet_seg1.live-transcript.json"),
         serde_json::json!({
-            "version": 2, "terminal": false,
-            "decoded_until_ms": 10_500, "committed_until_ms": 10_500,
+            "version": 2, "terminal": true, "start_offset_ms": 10_000,
+            "captured_until_ms": 11_000,
+            "decoded_until_ms": 11_000, "committed_until_ms": 11_000,
             "transcripts": [{"words": [{"channel": 0, "start_ms": 10_100, "end_ms": 10_500, "text": "second"}]}]
         }).to_string(),
     ).unwrap();
@@ -268,4 +269,134 @@ fn attached_audio_invalidates_processed_transcript_until_reprocessed() {
     assert!(final_view.terminal);
     assert!(final_view.body.contains("part-0"));
     assert!(final_view.body.contains("part-1"));
+}
+
+#[test]
+fn attached_terminal_checkpoint_cannot_cover_the_earlier_segment() {
+    let temp = tempfile::tempdir().unwrap();
+    let work = temp.path();
+    let dir = work.join(".margins");
+    canonical::create_session(&dir, "attached", &Local::now(), ".margins/attached.md").unwrap();
+    std::fs::write(dir.join("attached.md"), "").unwrap();
+    for (ordinal, offset) in [(0, 0), (1, 10_000)] {
+        canonical::add_segment(
+            &dir,
+            "attached",
+            ordinal,
+            &format!("attached_seg{ordinal}.wav"),
+            offset,
+            Some(1.0),
+        )
+        .unwrap();
+        let end = offset as u64 + 1_000;
+        std::fs::write(
+            dir.join(format!("attached_seg{ordinal}.live-transcript.json")),
+            serde_json::json!({
+                "version": 2, "terminal": true,
+                "start_offset_ms": offset,
+                "captured_until_ms": end,
+                "decoded_until_ms": end,
+                "committed_until_ms": end,
+                "live_dropped_samples": 0,
+                "transcripts": [{"words": [{"channel": 0, "start_ms": offset + 100,
+                    "end_ms": offset + 500, "text": format!("part-{ordinal}")}]}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+    let view = load_transcript_view(work, &dir, "attached").unwrap();
+    assert_eq!(view.view, "full");
+    assert!(!view.terminal);
+    assert_eq!(view.captured_until_ms, 11_000);
+    assert!(view.body.contains("part-1"));
+    assert!(!view.body.contains("part-0"));
+}
+
+#[test]
+fn crashed_unfinished_segment_is_recorded_as_an_incomplete_processing_gap() {
+    let temp = tempfile::tempdir().unwrap();
+    let work = temp.path();
+    let dir = work.join(".margins");
+    canonical::create_session(&dir, "crashed", &Local::now(), ".margins/crashed.md").unwrap();
+    std::fs::write(dir.join("crashed.md"), "").unwrap();
+    let path = ".margins/crashed_seg0.wav";
+    write_interleaved_wav(work.join(path), &[0.0; 16_000], 16_000, 1).unwrap();
+    canonical::add_segment(&dir, "crashed", 0, path, 0, Some(1.0)).unwrap();
+    canonical::add_segment(&dir, "crashed", 1, "crashed_seg1.wav", 10_000, None).unwrap();
+    let result = process_session(
+        ProcessRequest {
+            work_dir: work,
+            margins_dir: &dir,
+            session_name: "crashed",
+            speakers: 1,
+            align_only: false,
+        },
+        &FakeAsr(AtomicUsize::new(0)),
+        None,
+    )
+    .unwrap();
+    assert_eq!(result.segment_count, 2);
+    let view = load_transcript_view(work, &dir, "crashed").unwrap();
+    assert_eq!(view.view, "incomplete");
+    assert!(!view.terminal);
+    assert!(view.body.contains("part-0"));
+    assert!(view
+        .body
+        .contains("Segment 1 began at 10000 ms but did not finish"));
+    assert_eq!(
+        canonical::list_processing_gaps(&dir, "crashed")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        canonical::get_session_meta(&dir, "crashed")
+            .unwrap()
+            .processing_state
+            .as_deref(),
+        Some("none")
+    );
+}
+
+#[test]
+fn crashed_first_segment_can_be_reported_without_claiming_audio_was_transcribed() {
+    let temp = tempfile::tempdir().unwrap();
+    let work = temp.path();
+    let dir = work.join(".margins");
+    canonical::create_session(
+        &dir,
+        "first-crash",
+        &Local::now(),
+        ".margins/first-crash.md",
+    )
+    .unwrap();
+    std::fs::write(dir.join("first-crash.md"), "").unwrap();
+    canonical::add_segment(&dir, "first-crash", 0, "first-crash_seg0.wav", 0, None).unwrap();
+    let calls = AtomicUsize::new(0);
+    let result = process_session(
+        ProcessRequest {
+            work_dir: work,
+            margins_dir: &dir,
+            session_name: "first-crash",
+            speakers: 1,
+            align_only: false,
+        },
+        &FakeAsr(calls),
+        None,
+    )
+    .unwrap();
+    assert_eq!(result.transcript_entries, 0);
+    let view = load_transcript_view(work, &dir, "first-crash").unwrap();
+    assert_eq!(view.view, "incomplete");
+    assert!(!view.terminal);
+    assert!(view
+        .body
+        .contains("Segment 0 began at 0 ms but did not finish"));
+    assert_eq!(
+        canonical::list_processing_gaps(&dir, "first-crash")
+            .unwrap()
+            .len(),
+        1
+    );
 }

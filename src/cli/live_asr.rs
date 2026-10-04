@@ -368,13 +368,10 @@ fn run_live_worker(
                 let dropped_samples = mic_dropped_samples.load(Ordering::Acquire)
                     + system_dropped_samples.load(Ordering::Acquire);
                 let captured_until_ms = offset_ms.saturating_add(duration_ms);
-                let decoded_until_ms = offset_ms
-                    .saturating_add(mic.decoded_until_ms.max(system.decoded_until_ms));
-                let terminal = live_checkpoint_complete(
-                    captured_until_ms,
-                    decoded_until_ms,
-                    dropped_samples,
-                );
+                let decoded_until_ms =
+                    offset_ms.saturating_add(mic.decoded_until_ms.max(system.decoded_until_ms));
+                let terminal =
+                    live_checkpoint_complete(captured_until_ms, decoded_until_ms, dropped_samples);
                 write_checkpoint(
                     &checkpoint,
                     &mic,
@@ -461,6 +458,7 @@ fn write_checkpoint(
     let value = serde_json::json!({
         "version": 2,
         "terminal": terminal,
+        "start_offset_ms": offset_ms,
         "decoded_until_ms": decoded_until_ms,
         "committed_until_ms": committed_until_ms,
         "captured_until_ms": captured_until_ms,
