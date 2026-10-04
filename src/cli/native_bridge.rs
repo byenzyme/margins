@@ -46,6 +46,7 @@ struct CaptureStatus {
     session_id: Option<String>,
     transfer_id: Option<String>,
     error: Option<String>,
+    opened_mic_name: Option<String>,
     local_audio_paths: Vec<String>,
     completed: Counters,
     live: LiveCounters,
@@ -60,7 +61,8 @@ impl CaptureStatus {
             "state": if self.state.is_empty() { "ready" } else { self.state },
             "instanceId": instance_id,
             "workspaceId": workspace_id,
-            "microphoneDeviceName": selected_mic.map(str::to_string)
+            "microphoneDeviceName": self.opened_mic_name.clone()
+                .or_else(|| selected_mic.map(str::to_string))
                 .or_else(crate::recorder::default_input_device_name),
             "microphoneDevicePinned": selected_mic.is_some(),
             "pid": std::process::id(),
@@ -110,6 +112,7 @@ impl CaptureController {
         state.state = "recording";
         state.session_id = Some(session.into());
         state.transfer_id = Some(transfer.into());
+        state.opened_mic_name = Some(recorder.mic_name().to_owned());
         state.live = LiveCounters {
             mic: Some(sink.mic_accepted_samples.clone()),
             system: Some(sink.system_accepted_samples.clone()),
@@ -814,6 +817,17 @@ mod tests {
             permission_request: mpsc::channel().0,
             status: Arc::new(Mutex::new(CaptureStatus::default())),
         }
+    }
+
+    #[test]
+    fn unpinned_bridge_reports_the_input_it_actually_opened() {
+        let status = CaptureStatus {
+            opened_mic_name: Some("Yeti Stereo Microphone".into()),
+            ..Default::default()
+        };
+        let snapshot = status.snapshot("instance", "workspace", None);
+        assert_eq!(snapshot["microphoneDeviceName"], "Yeti Stereo Microphone");
+        assert_eq!(snapshot["microphoneDevicePinned"], false);
     }
 
     #[test]

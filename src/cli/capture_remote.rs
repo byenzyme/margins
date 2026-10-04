@@ -131,7 +131,13 @@ fn run_remote_native_capture(
         })
         .transpose()?;
     let mut preference_note = None;
-    let preference = match audio_preferences::load() {
+    // The Menu owns its input selection. Its unpinned mode means the system
+    // default, regardless of a separate TUI preference.
+    let preference = match if controller.is_some() {
+        Ok(None)
+    } else {
+        audio_preferences::load()
+    } {
         Ok(preference) => preference,
         Err(error) => {
             preference_note = Some(if mic_device_name.is_some() {
@@ -147,6 +153,9 @@ fn run_remote_native_capture(
         selected_device = preferred_device;
         preference_note = note.or(preference_note);
     }
+    let mut saved_choice_active =
+        controller.is_none() && mic_device_name.is_none() && selected_device.is_some();
+    let mut pending_selection = false;
     let token = std::env::var("MARGINS_REMOTE_TOKEN").ok();
     let connection = match prepared_connection {
         Some(connection) => connection,
@@ -530,12 +539,27 @@ fn run_remote_native_capture(
             queued_samples: queued_samples.clone(),
             queue_max_samples: u64::from(NATIVE_REMOTE_RATE_HZ) * 10 * 2,
         };
-        let recorder = match crate::recorder::RecorderHandle::start_with_selected_audio(
-            stop.clone(),
+        let recorder = match audio_preferences::open_with_saved_fallback(
+            saved_choice_active.then_some(preference.as_ref()).flatten(),
             selected_device.as_ref(),
-            Some(sink.clone()),
+            |choice| {
+                crate::recorder::RecorderHandle::start_with_selected_audio(
+                    stop.clone(),
+                    choice,
+                    Some(sink.clone()),
+                )
+            },
         ) {
-            Ok(recorder) => recorder,
+            Ok((recorder, fell_back, note)) => {
+                if fell_back {
+                    selected_device = None;
+                    saved_choice_active = false;
+                }
+                if let Some(note) = note {
+                    app.message = Some(note);
+                }
+                recorder
+            }
             Err(error) => {
                 // A reservation is not a successful capture. Seal it aborted,
                 // retaining the transfer if the server cannot acknowledge. No
@@ -559,6 +583,12 @@ fn run_remote_native_capture(
         };
         app.current_mic_name = recorder.mic_name().to_owned();
         app.current_mic_uid = recorder.mic_uid().map(str::to_owned);
+        if pending_selection {
+            if let Some(selected) = selected_device.as_ref() {
+                audio_preferences::remember_selection(&mut app, selected);
+            }
+            pending_selection = false;
+        }
         app.mic_silent = false;
         app.suggested_mic_name = None;
         app.devices = crate::recorder::list_input_devices()
@@ -698,8 +728,9 @@ fn run_remote_native_capture(
                                 &app.device_uids,
                                 index,
                             )?;
-                            audio_preferences::remember_selection(&mut app, &selected);
                             selected_device = Some(selected);
+                            saved_choice_active = false;
+                            pending_selection = true;
                         }
                         crate::tui::TuiAction::Pause => {}
                     }
@@ -709,8 +740,9 @@ fn run_remote_native_capture(
                 transfer.close_segment(SegmentCloseReasonV1::Rollover)?;
                 let selected =
                     crate::recorder::selected_input_device(&app.devices, &app.device_uids, index)?;
-                audio_preferences::remember_selection(&mut app, &selected);
                 selected_device = Some(selected);
+                saved_choice_active = false;
+                pending_selection = true;
             }
             crate::tui::TuiAction::Quit => {
                 transfer.close_segment(SegmentCloseReasonV1::Stop)?;

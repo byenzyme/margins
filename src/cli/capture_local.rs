@@ -118,20 +118,28 @@ fn create_native_session(work_dir: &Path, title: Option<&str>) -> Result<()> {
         live_status.clone(),
     );
 
-    std::fs::create_dir_all(&margins_dir).context("failed to create .margins directory")?;
-    let owner = capture_local_runtime::SessionOwnerLock::acquire(&margins_dir, &name)?;
-    // Silent bookkeeping so desktop and `recent --all` can enumerate this folder.
-    margins_workflows::project::register_vault_silently(work_dir);
-    let mut meeting = capture_local_runtime::LocalMeetingProducer::reserve(
-        &margins_dir,
-        &name,
-        title,
-        started_at,
-    )?;
-    margins_cli::commands::sessions::write_current_session(
-        &margins_cli::standalone_services(),
-        &margins_dir,
-        &name,
+    // A failed first device open must not reserve an empty meeting or move the
+    // current-session pointer. The recorder can be bound after reservation.
+    let (initial_input, (owner, mut meeting)) = open_before_reserving_session(
+        || prepare_initial_native_input(live.as_ref().map(|worker| worker.sink_for_offset(0))),
+        || {
+            std::fs::create_dir_all(&margins_dir).context("failed to create .margins directory")?;
+            let owner = capture_local_runtime::SessionOwnerLock::acquire(&margins_dir, &name)?;
+            // Silent bookkeeping so desktop and `recent --all` can enumerate this folder.
+            margins_workflows::project::register_vault_silently(work_dir);
+            let meeting = capture_local_runtime::LocalMeetingProducer::reserve(
+                &margins_dir,
+                &name,
+                title,
+                started_at,
+            )?;
+            margins_cli::commands::sessions::write_current_session(
+                &margins_cli::standalone_services(),
+                &margins_dir,
+                &name,
+            )?;
+            Ok((owner, meeting))
+        },
     )?;
 
     let mic_name = crate::recorder::default_input_device_name().unwrap_or_else(|| "Unknown".into());
@@ -154,6 +162,7 @@ fn create_native_session(work_dir: &Path, title: Option<&str>) -> Result<()> {
         started_at,
         initial_offset_ms,
         &mut meeting,
+        Some(initial_input),
     )?;
     drop(owner);
     complete_post_capture(outcome, Some(&name))
@@ -227,6 +236,7 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
         started_at,
         initial_offset_ms,
         &mut meeting,
+        None,
     )?;
     drop(owner);
     complete_post_capture(outcome, None)
@@ -265,19 +275,92 @@ struct StartedNativeSegment {
 }
 
 #[cfg(feature = "audio-capture")]
-fn start_native_segment(
+struct InitialNativeInput {
+    recorder: crate::recorder::RecorderHandle,
+    stop: Arc<AtomicBool>,
+    selected: Option<crate::recorder::SelectedInputDevice>,
+    preference: Option<audio_preferences::InputPreference>,
+    note: Option<String>,
+}
+
+#[cfg(feature = "audio-capture")]
+fn open_before_reserving_session<T, U>(
+    open: impl FnOnce() -> Result<T>,
+    reserve: impl FnOnce() -> Result<U>,
+) -> Result<(T, U)> {
+    let opened = open()?;
+    Ok((opened, reserve()?))
+}
+
+#[cfg(feature = "audio-capture")]
+fn resolve_native_input() -> Result<(
+    Option<audio_preferences::InputPreference>,
+    Option<crate::recorder::SelectedInputDevice>,
+    Option<String>,
+)> {
+    let (preference, load_note) = match audio_preferences::load() {
+        Ok(preference) => (preference, None),
+        Err(error) => (
+            None,
+            Some(format!(
+                "Could not read saved mic choice ({error}); using system default"
+            )),
+        ),
+    };
+    let (selected, note) = audio_preferences::resolve(preference.as_ref())?;
+    Ok((preference, selected, note.or(load_note)))
+}
+
+#[cfg(feature = "audio-capture")]
+fn open_native_recorder(
+    selected: Option<&crate::recorder::SelectedInputDevice>,
+    saved: Option<&audio_preferences::InputPreference>,
+    live_sink: Option<crate::recorder::LiveAudioSink>,
+) -> Result<(
+    crate::recorder::RecorderHandle,
+    Arc<AtomicBool>,
+    bool,
+    Option<String>,
+)> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let (recorder, fell_back, note) =
+        audio_preferences::open_with_saved_fallback(saved, selected, |choice| {
+            crate::recorder::RecorderHandle::start_with_selected_audio(
+                stop.clone(),
+                choice,
+                live_sink.clone(),
+            )
+        })?;
+    Ok((recorder, stop, fell_back, note))
+}
+
+#[cfg(feature = "audio-capture")]
+fn prepare_initial_native_input(
+    live_sink: Option<crate::recorder::LiveAudioSink>,
+) -> Result<InitialNativeInput> {
+    let (preference, mut selected, resolve_note) = resolve_native_input()?;
+    let (recorder, stop, fell_back, open_note) =
+        open_native_recorder(selected.as_ref(), preference.as_ref(), live_sink)?;
+    if fell_back {
+        selected = None;
+    }
+    Ok(InitialNativeInput {
+        recorder,
+        stop,
+        selected,
+        preference,
+        note: open_note.or(resolve_note),
+    })
+}
+
+#[cfg(feature = "audio-capture")]
+fn bind_native_segment(
     meeting: &mut capture_local_runtime::LocalMeetingProducer,
     ordinal: i64,
     offset_ms: u64,
-    selected_device: Option<&crate::recorder::SelectedInputDevice>,
-    live_sink: Option<crate::recorder::LiveAudioSink>,
+    recorder: crate::recorder::RecorderHandle,
+    stop: Arc<AtomicBool>,
 ) -> Result<StartedNativeSegment> {
-    let stop = Arc::new(AtomicBool::new(false));
-    let recorder = crate::recorder::RecorderHandle::start_with_selected_audio(
-        stop.clone(),
-        selected_device,
-        live_sink,
-    )?;
     let overflow = match recorder.bound_native_spool() {
         Ok(overflow) => overflow,
         Err(error) => {
@@ -318,23 +401,28 @@ fn run_segment(
     started_at: chrono::DateTime<Local>,
     initial_offset_ms: i64,
     meeting: &mut capture_local_runtime::LocalMeetingProducer,
+    initial_input: Option<InitialNativeInput>,
 ) -> Result<SegmentOutcome> {
     let mut ordinal = initial_ordinal;
-    let preference = match audio_preferences::load() {
-        Ok(preference) => preference,
-        Err(error) => {
-            app.message = Some(format!(
-                "Could not read saved mic choice ({error}); using system default"
-            ));
-            None
-        }
-    };
+    let (mut preopened, preference, mut selected_device, fallback_note) =
+        if let Some(initial) = initial_input {
+            (
+                Some((initial.recorder, initial.stop)),
+                initial.preference,
+                initial.selected,
+                initial.note,
+            )
+        } else {
+            let (preference, selected, note) = resolve_native_input()?;
+            (None, preference, selected, note)
+        };
     app.preferred_mic_name = preference.as_ref().map(|choice| choice.name.clone());
     app.preferred_mic_uid = preference.as_ref().and_then(|choice| choice.uid.clone());
-    let (mut selected_device, fallback_note) = audio_preferences::resolve(preference.as_ref())?;
     if let Some(note) = fallback_note {
         app.message = Some(note);
     }
+    let mut saved_choice_active = selected_device.is_some();
+    let mut pending_selection = false;
     let mut live_timeline_duration_ms: u64 = 0;
     let mut first_segment = true;
     // Memo durability must not depend on the optional transcription path.
@@ -354,13 +442,31 @@ fn run_segment(
             let live_sink = live
                 .as_ref()
                 .map(|worker| worker.sink_for_offset(segment_offset_ms as u64));
-            let started = start_native_segment(
-                meeting,
-                ordinal,
-                segment_offset_ms as u64,
-                selected_device.as_ref(),
-                live_sink,
-            )?;
+            let (recorder, stop) = if let Some(initial) = preopened.take() {
+                initial
+            } else {
+                let (recorder, stop, fell_back, note) = open_native_recorder(
+                    selected_device.as_ref(),
+                    saved_choice_active.then_some(preference.as_ref()).flatten(),
+                    live_sink,
+                )?;
+                if fell_back {
+                    selected_device = None;
+                    saved_choice_active = false;
+                }
+                if let Some(note) = note {
+                    app.message = Some(note);
+                }
+                (recorder, stop)
+            };
+            let started =
+                bind_native_segment(meeting, ordinal, segment_offset_ms as u64, recorder, stop)?;
+            if pending_selection {
+                if let Some(selected) = selected_device.as_ref() {
+                    audio_preferences::remember_selection(app, selected);
+                }
+                pending_selection = false;
+            }
             let recorder = started.recorder;
             let stop = started.stop;
             app.current_mic_name = recorder.mic_name().to_owned();
@@ -465,8 +571,9 @@ fn run_segment(
                                     &app.device_uids,
                                     index,
                                 )?;
-                                audio_preferences::remember_selection(app, &selected);
                                 selected_device = Some(selected);
+                                saved_choice_active = false;
+                                pending_selection = true;
                             }
                             crate::tui::TuiAction::Pause => {}
                         }
@@ -486,8 +593,9 @@ fn run_segment(
                         &app.device_uids,
                         index,
                     )?;
-                    audio_preferences::remember_selection(app, &selected);
                     selected_device = Some(selected);
+                    saved_choice_active = false;
+                    pending_selection = true;
                     ordinal = meeting.next_ordinal()?;
                 }
             }
@@ -508,6 +616,33 @@ fn run_segment(
         tui_error,
         flush_failed,
     )
+}
+
+#[cfg(all(test, feature = "audio-capture"))]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn failed_first_device_open_leaves_no_session_or_current_pointer() {
+        let root = tempfile::tempdir().unwrap();
+        let margins_dir = root.path().join(".margins");
+        let result: Result<((), ())> = open_before_reserving_session(
+            || anyhow::bail!("input device failed to open"),
+            || {
+                std::fs::create_dir_all(&margins_dir)?;
+                margins_store::canonical::create_session(
+                    &margins_dir,
+                    "would-be-session",
+                    &Local::now(),
+                    "would-be-session.md",
+                )?;
+                std::fs::write(margins_dir.join("current"), "would-be-session")?;
+                Ok(())
+            },
+        );
+        assert!(result.unwrap_err().to_string().contains("device failed"));
+        assert!(!margins_dir.exists());
+    }
 }
 
 #[cfg(all(test, target_os = "macos", feature = "audio-capture"))]
@@ -546,10 +681,19 @@ mod native_smoke_tests {
                 "requested smoke mic UID unavailable: {note:?}"
             );
         }
+        let (recorder, stop, _, _) =
+            open_native_recorder(selected.as_ref(), preference.as_ref(), None).unwrap();
         let StartedNativeSegment { recorder, stop, .. } =
-            start_native_segment(&mut meeting, 0, 0, selected.as_ref(), None).unwrap();
+            bind_native_segment(&mut meeting, 0, 0, recorder, stop).unwrap();
         let opened_name = recorder.mic_name().to_owned();
         let opened_uid = recorder.mic_uid().map(str::to_owned);
+        if let Some(requested_uid) = smoke_uid.as_deref() {
+            assert_eq!(
+                opened_uid.as_deref(),
+                Some(requested_uid),
+                "smoke test opened {opened_name:?} instead of requested UID"
+            );
+        }
         std::thread::sleep(std::time::Duration::from_secs(3));
         stop.store(true, Ordering::SeqCst);
         recorder

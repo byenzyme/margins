@@ -80,6 +80,11 @@ fn save_at(home: &Path, preference: &InputPreference) -> Result<()> {
         .open(home.join("config.lock"))?;
     lock.lock_exclusive()?;
     let path = home.join("config.toml");
+    let existing_permissions = match fs::metadata(&path) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
     let raw = match fs::read_to_string(&path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
@@ -104,6 +109,17 @@ fn save_at(home: &Path, preference: &InputPreference) -> Result<()> {
         audio.remove("input_uid");
     }
     let mut temporary = tempfile::NamedTempFile::new_in(home)?;
+    if let Some(permissions) = existing_permissions {
+        temporary.as_file().set_permissions(permissions)?;
+    } else {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            temporary
+                .as_file()
+                .set_permissions(fs::Permissions::from_mode(0o644))?;
+        }
+    }
     temporary.write_all(document.to_string().as_bytes())?;
     temporary.as_file().sync_all()?;
     temporary
@@ -111,6 +127,29 @@ fn save_at(home: &Path, preference: &InputPreference) -> Result<()> {
         .map_err(|error| error.error)
         .with_context(|| format!("writing {}", path.display()))?;
     Ok(())
+}
+
+/// A saved device may still appear in the device list while refusing an open.
+/// Only that automatic choice falls back; an explicit picker choice reports its
+/// failure so the user can choose another input.
+pub(super) fn open_with_saved_fallback<S, T>(
+    saved: Option<&InputPreference>,
+    selected: Option<&S>,
+    mut open: impl FnMut(Option<&S>) -> Result<T>,
+) -> Result<(T, bool, Option<String>)> {
+    match open(selected) {
+        Ok(value) => Ok((value, false, None)),
+        Err(error) if saved.is_some() && selected.is_some() => {
+            let name = &saved.expect("checked above").name;
+            let note = format!(
+                "Saved mic '{name}' failed to open ({error:#}); using system default. ^D to choose input"
+            );
+            crate::cli_log::event("capture_saved_mic_fallback", note.clone());
+            let value = open(None).with_context(|| format!("{note}; default input also failed"))?;
+            Ok((value, true, Some(note)))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub(super) fn preferred_index(
@@ -177,10 +216,61 @@ mod tests {
             uid: Some("Yeti-uid".into()),
         };
         save_at(home.path(), &choice).unwrap();
-        assert_eq!(load_at(home.path()).unwrap(), Some(choice));
+        assert_eq!(load_at(home.path()).unwrap(), Some(choice.clone()));
         let raw = fs::read_to_string(home.path().join("config.toml")).unwrap();
         assert!(raw.contains("# keep me"));
         assert!(raw.contains("mode = 'local'"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(home.path().join("config.toml"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o644
+            );
+            fs::set_permissions(
+                home.path().join("config.toml"),
+                fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+            save_at(home.path(), &choice).unwrap();
+            assert_eq!(
+                fs::metadata(home.path().join("config.toml"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn listed_saved_device_that_fails_to_open_uses_default_without_persisting() {
+        let home = tempfile::tempdir().unwrap();
+        let saved = InputPreference {
+            name: "Busy mic".into(),
+            uid: Some("busy-uid".into()),
+        };
+        let mut attempts = Vec::new();
+        let (opened, fell_back, note) =
+            open_with_saved_fallback(Some(&saved), Some(&"busy-uid"), |uid| {
+                attempts.push(uid.copied());
+                if uid.is_some() {
+                    anyhow::bail!("device busy")
+                } else {
+                    Ok("default")
+                }
+            })
+            .unwrap();
+        assert_eq!(opened, "default");
+        assert!(fell_back);
+        assert!(note.unwrap().contains("device busy"));
+        assert_eq!(attempts, vec![Some("busy-uid"), None]);
+        assert_eq!(load_at(home.path()).unwrap(), None);
     }
 
     #[test]

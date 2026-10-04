@@ -108,6 +108,10 @@ fn production_capture_preflights_and_uses_one_native_start_path() {
         create.find("LocalMeetingProducer::reserve").unwrap()
             < create.find("run_segment(").unwrap()
     );
+    assert!(
+        create.find("prepare_initial_native_input").unwrap()
+            < create.find("LocalMeetingProducer::reserve").unwrap()
+    );
     assert!(create.find("write_current_session(").unwrap() < create.find("run_segment(").unwrap());
 
     let attach = local
@@ -124,20 +128,27 @@ fn production_capture_preflights_and_uses_one_native_start_path() {
             < attach.find("run_segment(").unwrap()
     );
 
-    let start = local
-        .split("fn start_native_segment")
+    let open = local
+        .split("fn open_native_recorder")
+        .nth(1)
+        .unwrap()
+        .split("fn prepare_initial_native_input")
+        .next()
+        .unwrap();
+    assert!(open.contains("RecorderHandle::start_with_selected_audio"));
+    let bind = local
+        .split("fn bind_native_segment")
         .nth(1)
         .unwrap()
         .split("fn run_segment")
         .next()
         .unwrap();
-    assert!(start.contains("RecorderHandle::start_with_selected_audio"));
-    assert!(start.contains("meeting.start_stream"));
+    assert!(bind.contains("meeting.start_stream"));
     assert!(local
         .split("fn run_segment")
         .nth(1)
         .unwrap()
-        .contains("start_native_segment("));
+        .contains("bind_native_segment("));
 }
 
 #[test]

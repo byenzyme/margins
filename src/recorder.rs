@@ -995,6 +995,11 @@ impl RecorderHandle {
             silence: Arc::new(AtomicU64::new(0)),
             frames: Arc::new(AtomicU64::new(0)),
         };
+        let default_uid = if selected.is_none() && device.is_none() {
+            default_input_device_uid()
+        } else {
+            None
+        };
         let raw_mic = start_mic_raw(device, &mic_telemetry)?;
         let raw_system = start_speaker_raw(&system_telemetry)?;
         let sample_rate = raw_mic.native_rate;
@@ -1004,7 +1009,13 @@ impl RecorderHandle {
             .or_else(default_input_device_name)
             .unwrap_or_else(|| "unknown".into());
         let occurrence = selected.map_or(0, |selection| selection.occurrence);
-        let opened_uid = input_device_uid_at(&opened_name, occurrence);
+        let opened_uid = if selected.is_none() && device.is_none() {
+            default_uid
+        } else {
+            selected
+                .and_then(|selection| selection.uid.clone())
+                .or_else(|| input_device_uid_at(&opened_name, occurrence))
+        };
         let opened_uid_label = opened_uid.as_deref().unwrap_or("unknown");
         let requested_name = selected.map_or("system default", |selection| selection.name.as_str());
         let requested_uid = selected
@@ -1290,6 +1301,20 @@ fn selected_name_occurrence(names: &[String], index: usize) -> Option<(String, u
 pub fn default_input_device_name() -> Option<String> {
     let host = cpal::default_host();
     host.default_input_device().and_then(|d| d.name().ok())
+}
+
+#[cfg(target_os = "macos")]
+fn default_input_device_uid() -> Option<String> {
+    ca::System::default_input_device()
+        .ok()?
+        .uid()
+        .ok()
+        .map(|uid| uid.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn default_input_device_uid() -> Option<String> {
+    None
 }
 
 /// Resolve the stable Core Audio UID corresponding to a cpal device name.

@@ -131,7 +131,8 @@ fn update_no_audio_guard(
     .enumerate()
     {
         let real_frames = spooled.load(Ordering::Acquire);
-        let missing = progress[index].missing(elapsed, real_frames, threshold);
+        let missing = progress[index].missing(elapsed, real_frames, threshold)
+            && (index == 0 || callbacks.load(Ordering::Acquire) > 0);
         if missing && !warning.swap(true, Ordering::AcqRel) {
             crate::cli_log::event(
                 "capture_no_audio_received",
@@ -830,6 +831,18 @@ mod tests {
         assert!(!app.mic_no_audio_received.load(Ordering::Acquire));
         update_no_audio_guard(&mut app, &mut progress, Duration::from_secs(7));
         assert!(app.mic_no_audio_received.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn system_no_playback_keeps_silent_marker_without_no_audio_alarm() {
+        let mut app = App::new("meeting.md".into(), chrono::Local::now(), "mic".into());
+        app.spk_rate = RATE;
+        app.spk_silence.store(12 * RATE as u64, Ordering::Release);
+        let mut progress = [SpoolProgress::default(), SpoolProgress::default()];
+        update_no_audio_guard(&mut app, &mut progress, Duration::from_secs(12));
+        assert!(!app.spk_no_audio_received.load(Ordering::Acquire));
+        let status = rendered_status(&mut app, 80);
+        assert!(status.contains("spk ░░░░░░░░ silent"), "{status}");
     }
 
     #[test]
