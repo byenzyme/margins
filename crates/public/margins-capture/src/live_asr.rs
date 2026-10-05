@@ -25,9 +25,9 @@ mod decode;
 /// durable. Frame positions count from the start of one native segment lane,
 /// on the same axis as the live chunks of that segment's recorder.
 pub trait DurableLiveAudio: Send {
-    /// Session offset of the segment's first durable frame; `None` when the
-    /// segment has no durable audio.
-    fn segment_start_ms(&mut self, ordinal: i64) -> Result<Option<u64>>;
+    /// Every segment with durable audio as `(ordinal, session offset of its
+    /// first frame)`, in ordinal order.
+    fn segments(&mut self) -> Result<Vec<(i64, u64)>>;
 
     /// Committed frames from `from_frame`, at most `max_frames`. An empty
     /// result means nothing at `from_frame` is durable (yet).

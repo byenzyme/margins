@@ -37,10 +37,13 @@ fn live_queue_dropped_samples(app: &App) -> u64 {
 
 /// Live audio the transcript will lack. Queue drops are recoverable when the
 /// worker can read durable runtime audio; only what it could not recover is.
+/// A degraded worker recovers nothing, so its queue drops stay final.
 fn live_dropped_samples(app: &App) -> u64 {
+    let degraded = app.live_transcription_status.load(Ordering::Acquire)
+        == crate::app::LIVE_TRANSCRIPTION_DEGRADED;
     match &app.live_unrecovered_frames {
-        Some(unrecovered) => unrecovered.load(Ordering::Relaxed),
-        None => live_queue_dropped_samples(app),
+        Some(unrecovered) if !degraded => unrecovered.load(Ordering::Relaxed),
+        _ => live_queue_dropped_samples(app),
     }
 }
 
@@ -1226,6 +1229,14 @@ mod tests {
 
             unrecovered.store(1, Ordering::Release);
             assert!(rendered_status(&mut app, width).contains("LIVE DROPS"));
+
+            // Warmup failed after the queue overflowed: nothing will recover it.
+            unrecovered.store(0, Ordering::Release);
+            app.live_transcription_status
+                .store(crate::app::LIVE_TRANSCRIPTION_DEGRADED, Ordering::Release);
+            let status = rendered_status(&mut app, width);
+            assert!(status.contains("LIVE DROPS"), "{width}: {status}");
+            assert!(!status.contains("catching up"), "{width}: {status}");
         }
     }
 

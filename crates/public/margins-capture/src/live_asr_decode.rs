@@ -32,10 +32,11 @@ const TAIL_BLOCK_FRAMES: usize = 5 * RATE_16K as usize;
 pub(super) const LIVE_LAG_STATUS_SAMPLES: u64 = 48_000 * 2 * 3;
 /// How long to wait for the runtime to commit a missed span. The runtime
 /// commits five-second batches, so the newest part of a span is briefly not
-/// durable yet.
+/// durable yet. The budget is spent once: after one expiry the runtime is
+/// treated as stalled and later spans are read without waiting.
 #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
 pub(super) const DURABLE_WAIT: Duration = Duration::from_secs(30);
-const DURABLE_POLL: Duration = Duration::from_millis(20);
+const DURABLE_POLL: Duration = Duration::from_millis(200);
 
 pub(super) struct LiveWorkerIo {
     pub rx: mpsc::Receiver<LiveAudioChunk>,
@@ -100,6 +101,8 @@ struct Decode<'a, D: AsrStreamDecoder> {
     last_update_local_ms: u64,
     recovered_frames: u64,
     durable_error_logged: bool,
+    /// A wait for durable audio expired; never wait again.
+    durable_stalled: bool,
 }
 
 pub(super) fn run_live_worker<D: AsrStreamDecoder>(
@@ -144,6 +147,7 @@ pub(super) fn run_live_worker<D: AsrStreamDecoder>(
         last_update_local_ms: 0,
         recovered_frames: 0,
         durable_error_logged: false,
+        durable_stalled: false,
     };
     let dropped = || {
         mic_dropped_samples.load(Ordering::Acquire) + system_dropped_samples.load(Ordering::Acquire)
@@ -278,6 +282,7 @@ impl<D: AsrStreamDecoder> Decode<'_, D> {
         let channel = self.lanes[index].channel;
         let ordinal = self.active.as_ref().and_then(|active| active.ordinal);
         let mut out = Vec::with_capacity(count);
+        let wait = wait && !self.durable_stalled;
         let mut source = self.durable.take();
         if let (Some(durable), Some(ordinal)) = (source.as_mut(), ordinal) {
             let deadline = Instant::now() + self.durable_wait;
@@ -286,9 +291,22 @@ impl<D: AsrStreamDecoder> Decode<'_, D> {
                     Ok(frames) if !frames.is_empty() => out.extend(frames),
                     Ok(_) if wait && Instant::now() < deadline => {
                         self.set_lagging(true);
-                        std::thread::sleep(DURABLE_POLL);
+                        std::thread::sleep(DURABLE_POLL.min(self.durable_wait));
                     }
-                    Ok(_) => break,
+                    Ok(_) => {
+                        if wait && !self.durable_stalled {
+                            self.durable_stalled = true;
+                            crate::cli_log::event(
+                                "live_catch_up_stalled",
+                                format!(
+                                    "lane={channel:?} ordinal={ordinal} from_frame={} wait_ms={}",
+                                    from + out.len() as u64,
+                                    self.durable_wait.as_millis()
+                                ),
+                            );
+                        }
+                        break;
+                    }
                     Err(error) => {
                         if !self.durable_error_logged {
                             self.durable_error_logged = true;
@@ -395,36 +413,35 @@ impl<D: AsrStreamDecoder> Decode<'_, D> {
 
     /// Decode durable segments the queue never delivered a chunk for, in
     /// ordinal order, up to (not including) `until`; `None` means through the
-    /// last durable segment.
+    /// last durable segment. Ordinals without durable audio are skipped.
     fn catch_up_unseen_segments(&mut self, until: Option<i64>) -> Result<()> {
-        if self.durable.is_none() {
+        let (Some(durable), Some(next)) = (self.durable.as_mut(), self.next_ordinal) else {
             return Ok(());
-        }
-        while let Some(ordinal) = self.next_ordinal {
+        };
+        let segments = match durable.segments() {
+            Ok(segments) => segments,
+            Err(error) => {
+                self.unrecovered_frames.fetch_add(1, Ordering::AcqRel);
+                crate::cli_log::event(
+                    "live_catch_up_segment_failed",
+                    crate::cli_log::error_summary(&error),
+                );
+                return Ok(());
+            }
+        };
+        for (ordinal, start_ms) in segments {
+            if ordinal < next {
+                continue;
+            }
             if until.is_some_and(|until| ordinal >= until) {
                 break;
             }
-            let durable = self.durable.as_mut().expect("durable source present");
-            match durable.segment_start_ms(ordinal) {
-                Ok(Some(start_ms)) => {
-                    crate::cli_log::event(
-                        "live_catch_up_segment",
-                        format!("ordinal={ordinal} start_ms={start_ms}"),
-                    );
-                    self.begin_segment(None, Some(ordinal), start_ms)?;
-                    self.end_segment()?;
-                }
-                Ok(None) if until.is_some() => self.next_ordinal = Some(ordinal + 1),
-                Ok(None) => break,
-                Err(error) => {
-                    self.unrecovered_frames.fetch_add(1, Ordering::AcqRel);
-                    crate::cli_log::event(
-                        "live_catch_up_segment_failed",
-                        crate::cli_log::error_summary(&error),
-                    );
-                    break;
-                }
-            }
+            crate::cli_log::event(
+                "live_catch_up_segment",
+                format!("ordinal={ordinal} start_ms={start_ms}"),
+            );
+            self.begin_segment(None, Some(ordinal), start_ms)?;
+            self.end_segment()?;
         }
         Ok(())
     }

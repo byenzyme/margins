@@ -463,11 +463,12 @@ impl RuntimeStreamWorker {
 }
 
 /// Reads a local session's durable 16 kHz runtime audio for the live worker.
-/// Opens no writer connection and creates nothing; a session that does not
-/// exist yet simply has no durable audio.
+/// Creates nothing. One read-only connection is opened on first use (the
+/// session may not be reserved when the worker starts) and then reused.
 #[cfg(any(test, feature = "audio-capture"))]
 pub struct RuntimeLiveAudioReader {
     storage: SqliteMeetingRuntimeStorage,
+    reader: Option<margins_store::RuntimeChunkReader>,
     session_id: SessionId,
     cursors: BTreeMap<(i64, &'static str), DurableLaneCursor>,
 }
@@ -487,25 +488,43 @@ impl RuntimeLiveAudioReader {
     pub fn new(margins_dir: &Path, session: &str) -> Self {
         Self {
             storage: SqliteMeetingRuntimeStorage::open_read_only(margins_dir),
+            reader: None,
             session_id: SessionId::from(session.to_owned()),
             cursors: BTreeMap::new(),
         }
+    }
+
+    fn reader(&mut self) -> Result<&margins_store::RuntimeChunkReader> {
+        if self.reader.is_none() {
+            self.reader = Some(self.storage.chunk_reader()?);
+        }
+        Ok(self.reader.as_ref().expect("reader opened"))
     }
 }
 
 #[cfg(any(test, feature = "audio-capture"))]
 impl crate::live_asr::DurableLiveAudio for RuntimeLiveAudioReader {
-    fn segment_start_ms(&mut self, ordinal: i64) -> Result<Option<u64>> {
-        let segment = segment_id(self.session_id.as_ref(), ordinal);
-        for lane in ["mic", "system"] {
-            if let Some(chunk) =
-                self.storage
-                    .load_audio_chunk(&self.session_id, &segment, &lane.into(), 0)?
-            {
-                return Ok(Some(chunk.starts_at_ms.0));
+    fn segments(&mut self) -> Result<Vec<(i64, u64)>> {
+        let session_id = self.session_id.clone();
+        let prefix = format!("{}-seg-", session_id.as_ref());
+        let reader = self.reader()?;
+        let mut segments = Vec::new();
+        for id in reader.segment_ids(&session_id)? {
+            let Some(ordinal) = id
+                .strip_prefix(&prefix)
+                .and_then(|ordinal| ordinal.parse::<i64>().ok())
+            else {
+                continue;
+            };
+            for lane in ["mic", "system"] {
+                if let Some(chunk) = reader.load_audio_chunk(&session_id, &id, &lane.into(), 0)? {
+                    segments.push((ordinal, chunk.starts_at_ms.0));
+                    break;
+                }
             }
         }
-        Ok(None)
+        segments.sort_unstable();
+        Ok(segments)
     }
 
     fn read(
@@ -520,6 +539,9 @@ impl crate::live_asr::DurableLiveAudio for RuntimeLiveAudioReader {
             crate::recorder::LiveAudioChannel::System => "system",
         };
         let segment = segment_id(self.session_id.as_ref(), ordinal);
+        let session_id = self.session_id.clone();
+        self.reader()?;
+        let reader = self.reader.as_ref().expect("reader opened");
         let cursor = self.cursors.entry((ordinal, lane)).or_default();
         let window_start = cursor
             .cached
@@ -540,8 +562,8 @@ impl crate::live_asr::DurableLiveAudio for RuntimeLiveAudioReader {
                     continue;
                 }
             }
-            let Some(chunk) = self.storage.load_audio_chunk(
-                &self.session_id,
+            let Some(chunk) = reader.load_audio_chunk(
+                &session_id,
                 &segment,
                 &lane.into(),
                 cursor.next_sequence,

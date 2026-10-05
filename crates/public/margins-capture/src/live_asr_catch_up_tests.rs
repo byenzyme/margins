@@ -61,8 +61,15 @@
     }
 
     impl DurableLiveAudio for FakeDurable {
-        fn segment_start_ms(&mut self, ordinal: i64) -> Result<Option<u64>> {
-            Ok(self.0.lock().unwrap().starts.get(&ordinal).copied())
+        fn segments(&mut self) -> Result<Vec<(i64, u64)>> {
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .starts
+                .iter()
+                .map(|(ordinal, start)| (*ordinal, *start))
+                .collect())
         }
 
         fn read(
@@ -389,6 +396,27 @@
     }
 
     #[test]
+    fn stopped_runtime_writes_spend_one_wait_budget_then_finish_incomplete() {
+        let mut harness = DecodeHarness::new();
+        let durable = FakeDurable::default();
+        // The runtime stopped committing after three seconds. Dozens of
+        // synthesized spans per lane must not each wait the full budget.
+        durable.0.lock().unwrap().available_limit = Some(3 * 16_000);
+        let wait = Duration::from_millis(500);
+        let started = std::time::Instant::now();
+        let run = long_warmup_capture(&mut harness, &durable, Some(durable.clone()), wait);
+        let elapsed = started.elapsed();
+
+        assert!(run.result.unwrap_err().to_string().contains("incomplete"));
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "worker took {elapsed:?} with a {wait:?} durable wait"
+        );
+        assert!(harness.unrecovered.load(Ordering::Acquire) > 0);
+        assert_eq!(harness.checkpoint_value()["terminal"], false);
+    }
+
+    #[test]
     fn queue_drops_without_durable_audio_stay_incomplete() {
         let mut harness = DecodeHarness::new();
         let durable = FakeDurable::default();
@@ -412,7 +440,10 @@
         };
         {
             let mut state = durable.0.lock().unwrap();
-            for (ordinal, start_ms, seconds) in [(0, 0, 2), (1, 5_000, 1), (2, 8_000, 1)] {
+            // Ordinal 3 has no durable audio; ordinal 4 follows that hole.
+            for (ordinal, start_ms, seconds) in
+                [(0, 0, 2), (1, 5_000, 1), (2, 8_000, 1), (4, 10_000, 1)]
+            {
                 state.starts.insert(ordinal, start_ms);
                 for index in 0..2 {
                     state
@@ -421,8 +452,8 @@
                 }
             }
         }
-        // Generation 2 (segment 1) never delivered a chunk; segment 0
-        // delivered only its first second.
+        // Generation 2 (segment 1) and segment 4 never delivered a chunk;
+        // segment 0 delivered only its first second.
         harness.segments.lock().unwrap().insert(3, 2);
         let tx = harness.tx.clone().unwrap();
         for (generation, ordinal, offset_ms) in [(1, 0, 0), (3, 2, 8_000)] {
@@ -444,7 +475,7 @@
         }
         drop(tx);
         let worker = harness.start_worker(Some(durable.clone()), Duration::from_millis(2));
-        harness.finish(9_000);
+        harness.finish(11_000);
         let run = worker.join().unwrap();
 
         run.result.unwrap();
@@ -454,11 +485,13 @@
             expected.extend(durable.lane(1, index));
             expected.extend(vec![0.0; 2 * 16_000]);
             expected.extend(durable.lane(2, index));
+            expected.extend(vec![0.0; 16_000]);
+            expected.extend(durable.lane(4, index));
             assert!(*audio == expected, "lane {index} timeline differs");
         }
         let value = harness.checkpoint_value();
         assert_eq!(value["terminal"], true);
-        assert_eq!(value["decoded_until_ms"], 9_000);
+        assert_eq!(value["decoded_until_ms"], 11_000);
     }
 
     #[test]
@@ -500,8 +533,7 @@
             .unwrap();
 
         let mut reader = crate::local_runtime::RuntimeLiveAudioReader::new(root.path(), "meeting");
-        assert_eq!(reader.segment_start_ms(0).unwrap(), Some(1_500));
-        assert_eq!(reader.segment_start_ms(1).unwrap(), None);
+        assert_eq!(reader.segments().unwrap(), vec![(0, 1_500)]);
         let mut mic = Vec::new();
         loop {
             let block = reader

@@ -38,6 +38,51 @@ pub struct MeetingRuntimeStorageStats {
     pub blob_bytes: u64,
 }
 
+/// Read-only access to committed runtime chunks over one cached connection.
+/// Autocommit reads hold no lock between statements.
+pub struct RuntimeChunkReader {
+    connection: Connection,
+    blob_dir: PathBuf,
+}
+
+impl RuntimeChunkReader {
+    pub fn load_audio_chunk(
+        &self,
+        session_id: &SessionId,
+        segment_id: &str,
+        lane_id: &LaneId,
+        sequence: u64,
+    ) -> Result<Option<AudioChunkV1>> {
+        let row: Option<(String, String)> = self
+            .connection
+            .prepare_cached(
+                "SELECT metadata_json, blob_path FROM meeting_chunks WHERE session_id = ?1 AND segment_id = ?2 AND lane_id = ?3 AND sequence = ?4",
+            )?
+            .query_row(
+                params![session_id.as_ref(), segment_id, lane_id.as_ref(), i64::try_from(sequence)?],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        row.map(|(metadata, blob)| {
+            let mut chunk: AudioChunkV1 = serde_json::from_str(&metadata)?;
+            chunk.payload = std::fs::read(self.blob_dir.join(blob))?;
+            Ok(chunk)
+        })
+        .transpose()
+    }
+
+    /// Segment IDs with at least one committed chunk in the session.
+    pub fn segment_ids(&self, session_id: &SessionId) -> Result<Vec<String>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT DISTINCT segment_id FROM meeting_chunks WHERE session_id = ?1",
+        )?;
+        let ids = statement
+            .query_map([session_id.as_ref()], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ids)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SqliteMeetingRuntimeStorage {
     directory: PathBuf,
@@ -616,6 +661,20 @@ impl SqliteMeetingRuntimeStorage {
     }
     fn blob_dir(&self) -> PathBuf {
         self.directory.join("meeting-blobs")
+    }
+
+    /// One read-only connection for a long-lived chunk consumer that polls
+    /// (the live transcript catch-up), instead of a connection per read.
+    pub fn chunk_reader(&self) -> Result<RuntimeChunkReader> {
+        let connection = Connection::open_with_flags(
+            canonical::database_path(&self.directory),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        connection.busy_timeout(Duration::from_secs(5))?;
+        Ok(RuntimeChunkReader {
+            connection,
+            blob_dir: self.blob_dir(),
+        })
     }
 
     /// Remove immutable chunks for one discarded session while its DB rows
