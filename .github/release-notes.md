@@ -11,6 +11,9 @@ The release archives contain `margins` and `margins-server`.
   down, so Stop reaches *saved* in about a second. The server then starts the
   final transcript automatically. Before this fix, a Menu recording could stay
   untranscribed until the next job came in.
+- The bb recording timer for Menu recordings now keeps real time. It used
+  to run about three times too fast with 48 kHz microphones. The *Saved*
+  label shows the length of the saved recording.
 - When live transcription finishes warming up, it catches up on the audio
   recorded so far. It no longer starts partway into the meeting.
 - BB browser recordings keep audio the server has not yet acknowledged in the
