@@ -21,28 +21,6 @@ const MAX_TRACKS: usize = 16;
 const MAX_CODEC_PRIVATE_BYTES: usize = 1024;
 const STREAM_CHUNK_FRAMES: usize = 4096;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HostedWebmFinalizer {
-    Native,
-    FfmpegCompatibility,
-}
-
-impl HostedWebmFinalizer {
-    pub fn from_env() -> Self {
-        match std::env::var("MARGINS_HOSTED_WEBM_FINALIZER") {
-            Ok(value) if value.eq_ignore_ascii_case("ffmpeg") => Self::FfmpegCompatibility,
-            _ => Self::Native,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Native => "native",
-            Self::FfmpegCompatibility => "ffmpeg",
-        }
-    }
-}
-
 #[derive(Debug)]
 struct OpusHead {
     channels: u8,
@@ -534,28 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn finalizer_env_is_native_unless_ffmpeg_is_explicitly_opted_in() {
-        let _guard = env_lock().lock().unwrap();
-        let _env = EnvGuard::restore_after();
-
-        std::env::remove_var("MARGINS_HOSTED_WEBM_FINALIZER");
-        assert_eq!(HostedWebmFinalizer::from_env(), HostedWebmFinalizer::Native);
-
-        std::env::set_var("MARGINS_HOSTED_WEBM_FINALIZER", "native");
-        assert_eq!(HostedWebmFinalizer::from_env(), HostedWebmFinalizer::Native);
-
-        std::env::set_var("MARGINS_HOSTED_WEBM_FINALIZER", "ffmpeg");
-        assert_eq!(
-            HostedWebmFinalizer::from_env(),
-            HostedWebmFinalizer::FfmpegCompatibility
-        );
-    }
-
-    #[test]
-    fn finalizes_chrome_style_webm_without_ffmpeg() {
-        let _guard = env_lock().lock().unwrap();
-        let _env = EnvGuard::set_invalid_ffmpeg();
-
+    fn finalizes_chrome_style_webm_natively() {
         let fixture = make_chrome_unknown_size_webm_fixture(20, 20, 1, true);
         assert_contains_one_unknown_size_segment(&fixture.webm);
         assert_contains_at_least_unknown_size_clusters(&fixture.webm, 2);
@@ -997,45 +954,6 @@ mod tests {
             ]
         } else {
             panic!("test EBML element too large");
-        }
-    }
-
-    fn env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
-    struct EnvGuard {
-        ffmpeg_bin: Option<std::ffi::OsString>,
-        finalizer: Option<std::ffi::OsString>,
-    }
-
-    impl EnvGuard {
-        fn restore_after() -> Self {
-            Self {
-                ffmpeg_bin: std::env::var_os("FFMPEG_BIN"),
-                finalizer: std::env::var_os("MARGINS_HOSTED_WEBM_FINALIZER"),
-            }
-        }
-
-        fn set_invalid_ffmpeg() -> Self {
-            let guard = Self::restore_after();
-            std::env::set_var("FFMPEG_BIN", "/definitely/not/ffmpeg");
-            std::env::remove_var("MARGINS_HOSTED_WEBM_FINALIZER");
-            guard
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.ffmpeg_bin {
-                Some(value) => std::env::set_var("FFMPEG_BIN", value),
-                None => std::env::remove_var("FFMPEG_BIN"),
-            }
-            match &self.finalizer {
-                Some(value) => std::env::set_var("MARGINS_HOSTED_WEBM_FINALIZER", value),
-                None => std::env::remove_var("MARGINS_HOSTED_WEBM_FINALIZER"),
-            }
         }
     }
 }

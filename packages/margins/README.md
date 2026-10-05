@@ -1,7 +1,7 @@
 # margins
 
-Local web/mobile launcher for Margins. It starts `margins-server`, waits for the
-health check, and prints the URL for the browser app.
+Local service launcher for Margins. It starts `margins-server`, waits for the
+health check, and prints the service URL.
 
 This package is currently intended to be run from the local checkout with `npx`.
 It is not relying on a published npm package yet.
@@ -11,18 +11,11 @@ It is not relying on a published npm package yet.
 From the repo root:
 
 ```bash
-# Build the frontend that the server embeds.
-cd desktop
-npm install
-npm run build
-cd ..
-
 # Build the server binary.
-scripts/cargo-lane shared -- cargo build --manifest-path desktop/src-tauri/Cargo.toml \
-  --bin margins-server \
-  --no-default-features --features hosted-web
+scripts/cargo-lane shared -- cargo build -p margins-server --bin margins-server \
+  --no-default-features --features parakeet-asr
 
-# Start the web app.
+# Start the local service.
 npx --yes ./packages/margins
 ```
 
@@ -71,12 +64,8 @@ localhost.
 
 Web recording finalization is self-contained in `margins-server`: browser
 WebM/Opus uploads are decoded natively and streamed as mono 16 kHz WAV files.
-`ffmpeg` is optional and only used when the server is started with
-`MARGINS_HOSTED_WEBM_FINALIZER=ffmpeg` as a migration compatibility fallback.
-
-The browser UI is embedded into the Rust binary at compile time from
-`desktop/dist`, so rerun `npm run build` before rebuilding `margins-server` when
-frontend files change.
+The server has no ffmpeg or desktop frontend dependency. The BB plugin provides
+the browser UI.
 
 ## Startup
 
@@ -92,4 +81,4 @@ On startup, the launcher:
 - Downloading server binaries from GitHub Releases is wired in but not the primary local workflow yet.
 - The auth token is automatically printed on startup if one exists
 - Use `Ctrl+C` to gracefully shut down the server
-- This launcher serves the browser app and does not provide native system-audio capture or Mac app controls.
+- This launcher starts the service and does not provide native system-audio capture or Mac app controls.

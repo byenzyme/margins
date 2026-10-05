@@ -16,9 +16,9 @@ allocation before Margins can inspect and reject an individual packet; the file
 limit is therefore the honest pre-packet allocation ceiling. A separate 256 KiB
 post-demux Opus packet cap remains in place for malformed blocks.
 
-Set `MARGINS_HOSTED_WEBM_FINALIZER=ffmpeg` only to use the legacy compatibility
-fallback during migration. In that mode `FFMPEG_BIN` is strict when set; without
-the opt-in, an invalid or absent `FFMPEG_BIN` cannot break ordinary hosted Finish.
+The legacy ffmpeg compatibility finalizer and its environment switches were
+retired at the one-repository cutover. Hosted Finish always uses the native
+finalizer.
 
 Every server allocation receives a random 128-bit `recordingId`. This non-secret ID is the
 registry key across project workdirs and is carried in JSON command bodies or the

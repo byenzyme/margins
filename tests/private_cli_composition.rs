@@ -64,9 +64,6 @@ fn standalone_connection_routes_pin_file_credentials_without_indirect_keychain_f
     assert!(integrations.contains("GoogleCredentialBackendKind::File0600"));
     assert!(!integrations.contains("GoogleTokenProvider::new("));
 
-    let desktop = source("desktop/src-tauri/src/granola_mcp.rs");
-    assert!(desktop.contains("GranolaCredentialBackendKind::OsKeyring"));
-    assert!(!desktop.contains("GranolaAccountStore::new("));
 }
 
 #[test]

@@ -99,8 +99,8 @@ a publication order. The original export described this partial order:
 4. `margins-cli`
 
 The public workspace now also contains `margins-meeting-protocol`,
-`margins-meeting-runtime`, `margins-capture`, and the root CLI. The standalone
-public server will join it after extraction. Their dependencies must be
+`margins-meeting-runtime`, `margins-capture`, `margins-server`, and the root CLI.
+Their dependencies must be
 included in any future publication plan.
 
 The package names are not asserted to be reserved or available on crates.io.

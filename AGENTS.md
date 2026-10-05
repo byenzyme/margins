@@ -8,7 +8,8 @@ As of 2026-10-02, the shipped product is the `margins` CLI/TUI and the bb
 plugin's `margins-server`. The Tauri desktop app and `margins-live` are parked.
 The desktop commands below remain as historical development instructions; do
 not use app reinstall, desktop release, or live-runtime flows for core work.
-`desktop/src-tauri` still contains the hosted-web server until extraction.
+The hosted-web server now lives in `crates/public/margins-server`;
+`desktop/src-tauri` has been retired.
 The Codex plugin is parked outside core; see
 `integrations/margins-codex/README.md` for its retained source.
 
@@ -142,13 +143,13 @@ The default agent lane is portable and must run inside the managed sandbox with
 no permission escalation. `recall` includes lookup, indexing, hosted-generator
 policy, and orchestration; it deliberately does not link llama.cpp. Use the
 root workspace command below. The `margins-desktop` test is parked with the
-desktop app. For the shipped project server, check `desktop/src-tauri` with
-`--no-default-features --features hosted-web --bin margins-server` through
+desktop app. For the shipped project server, check `margins-server` with
+`--no-default-features --features parakeet-asr --bin margins-server` through
 `scripts/cargo-lane shared`.
 
 ```bash
 scripts/with-private-recall scripts/cargo-lane disposable -- cargo test --workspace --no-default-features --features recall
-# Parked desktop-only test:
+# Historical desktop-only test (cannot run after desktop/src-tauri retirement):
 cargo test -p margins-desktop \
   --manifest-path desktop/src-tauri/Cargo.toml \
   --no-default-features --features recall -- --test-threads=1
@@ -173,7 +174,7 @@ portable test configuration:
 scripts/cargo-lane disposable -- cargo test -p margins --no-default-features --features audio-capture \
   --test private_cli_composition packaged_binary_reports_private_native_composition
 
-# Full native desktop composition (Tauri, CoreML, audio capture, llama.cpp).
+# Historical full native desktop composition (retired Tauri backend).
 scripts/cargo-lane disposable -- cargo test -p margins-desktop \
   --manifest-path desktop/src-tauri/Cargo.toml -- --test-threads=1
 
