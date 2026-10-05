@@ -166,6 +166,9 @@ fn paced_two_lane_delivery_batches_requests_without_serializing_the_producer() {
                 }
                 Err(error) => panic!("paced HTTP fixture failed: {error}"),
             };
+            // BSD/macOS accepted sockets inherit the listener's non-blocking
+            // mode (Linux does not); the request reader below expects blocking.
+            stream.set_nonblocking(false).unwrap();
             let (line, headers, body) = read_request(&mut stream);
             if line.starts_with("GET /v1/capabilities ") {
                 server_capabilities.fetch_add(1, Ordering::AcqRel);
@@ -485,6 +488,8 @@ fn durable_spool_recovers_frames_and_retries_without_changing_identity() {
         while stop_rx.try_recv().is_err() {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    // Accepted sockets inherit non-blocking mode on macOS.
+                    stream.set_nonblocking(false).unwrap();
                     server_requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let mut request = [0_u8; 4096];
                     let _ = stream.read(&mut request);
