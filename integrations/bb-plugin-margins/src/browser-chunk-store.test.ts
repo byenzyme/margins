@@ -137,4 +137,22 @@ describe("browser chunk store", () => {
     // The upgraded entry counts toward its recording's budget.
     expect(await store.persist("kept", 1, new Blob(["1234"]), timing(1))).toBe(false);
   });
+
+  it("retries opening after an older tab stops blocking the upgrade", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const factory = new IDBFactory();
+    // An older tab holds a v1 connection and ignores versionchange.
+    const older = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = factory.open("margins.bb.browser-chunks", 1);
+      request.onupgradeneeded = () => { request.result.createObjectStore("chunks", { keyPath: ["sessionId", "sequence"] }); };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const store = new BrowserChunkStore(() => factory, { reopenAfterMs: 0 });
+    expect(await store.persist("rec-1", 0, new Blob(["a"]), timing(0))).toBe(false);
+    expect(warn).toHaveBeenCalledOnce();
+    older.close();
+    await vi.waitFor(async () => expect(await store.persist("rec-1", 1, new Blob(["b"]), timing(1))).toBe(true));
+    expect(await store.sequences("rec-1")).toEqual([1]);
+  });
 });

@@ -20,6 +20,9 @@ export const PERSISTED_CHUNK_BUDGET_BYTES = 64 * 1024 * 1024;
  * for nothing. */
 export const PERSISTED_CHUNK_MAX_AGE_MS = (30 + 120) * 60 * 1_000;
 const OPEN_DEADLINE_MS = 3_000;
+/** A failed open (for example an older tab blocking the upgrade) is retried
+ * after this long instead of disabling persistence for the page's lifetime. */
+const REOPEN_AFTER_MS = 60_000;
 
 export interface PersistedChunk {
   sessionId: string;
@@ -33,6 +36,7 @@ export interface BrowserChunkStoreOptions {
   maxBytes?: number;
   maxAgeMs?: number;
   now?: () => number;
+  reopenAfterMs?: number;
 }
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
@@ -71,6 +75,9 @@ function isPersistedChunk(value: unknown): value is PersistedChunk {
  * never be overtaken by the write it deletes. */
 export class BrowserChunkStore {
   private database: Promise<IDBDatabase | null> | null = null;
+  private unavailableUntil = 0;
+  private warned = false;
+  private readonly reopenAfterMs: number;
   private tail: Promise<unknown> = Promise.resolve();
   // Bytes per recording. Each tab records one recording, so another tab's
   // entries never shrink this page's budget; the age sweep bounds the rest.
@@ -87,6 +94,7 @@ export class BrowserChunkStore {
     this.maxBytes = Math.max(0, options.maxBytes ?? PERSISTED_CHUNK_BUDGET_BYTES);
     this.maxAgeMs = Math.max(0, options.maxAgeMs ?? PERSISTED_CHUNK_MAX_AGE_MS);
     this.now = options.now ?? Date.now;
+    this.reopenAfterMs = Math.max(0, options.reopenAfterMs ?? REOPEN_AFTER_MS);
   }
 
   /** True after a write failed (quota, eviction) for this recording; it then
@@ -210,11 +218,20 @@ export class BrowserChunkStore {
   }
 
   private open(): Promise<IDBDatabase | null> {
-    this.database ??= this.openDatabase().then(async (db) => {
+    if (!this.database && Date.now() < this.unavailableUntil) return Promise.resolve(null);
+    const opening = this.database ??= this.openDatabase().then(async (db) => {
       if (db) await this.sweepDatabase(db).catch(() => undefined);
+      else {
+        if (this.database === opening) this.database = null;
+        this.unavailableUntil = Date.now() + this.reopenAfterMs;
+        if (!this.warned) {
+          this.warned = true;
+          console.warn("Margins: browser audio is kept in memory only until IndexedDB becomes available; a reload may lose unsent audio.");
+        }
+      }
       return db;
     });
-    return this.database;
+    return opening;
   }
 
   /** A newer page version or the browser closed the connection; reopen on

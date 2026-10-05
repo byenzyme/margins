@@ -48,9 +48,14 @@ const MAX_PERSISTED_STOP_ATTEMPTS = 3;
 
 /** The server refused this exact chunk; resending identical bytes cannot help. */
 class ChunkRejectedError extends Error {}
-/** The server answered but did not accept this chunk now. Other chunks may
- * still land, unlike a transport failure where the server is unreachable. */
+/** The server answered about this chunk alone without accepting it now.
+ * Other chunks may still land, unlike a session-wide or transport failure. */
 class ChunkDeferredError extends Error {}
+/** Retryable verdicts margins-server gives about one chunk. Every other
+ * failure (bb route strings such as ownership or host/relay unavailable,
+ * auth, generic service errors) affects the whole session, so the flush stops
+ * and keeps every retained chunk rather than retrying each in turn. */
+const CHUNK_SPECIFIC_RETRYABLE_CODES = new Set(["browser_chunk_gap", "chunk_not_acknowledged"]);
 
 interface PersistedFlush {
   delivered: Set<number>;
@@ -58,15 +63,15 @@ interface PersistedFlush {
   retained: Set<number>;
 }
 
-function chunkFailure(text: string): { refused: boolean; message: string } | null {
+function chunkFailure(text: string): { kind: "refused" | "deferred"; message: string } | null {
   try {
     const body = JSON.parse(text) as { error?: unknown } | null;
     const error = body?.error as { code?: unknown; message?: unknown; retryable?: unknown } | string | undefined;
-    if (typeof error === "string") return { refused: false, message: error };
     if (!error || typeof error !== "object") return null;
+    const message = typeof error.message === "string" ? error.message : typeof error.code === "string" ? error.code : "Audio chunk refused";
     // The host has already reduced the server verdict to `retryable`.
-    return { refused: error.retryable === false,
-      message: typeof error.message === "string" ? error.message : typeof error.code === "string" ? error.code : "Audio chunk refused" };
+    if (error.retryable === false) return { kind: "refused", message };
+    return typeof error.code === "string" && CHUNK_SPECIFIC_RETRYABLE_CODES.has(error.code) ? { kind: "deferred", message } : null;
   } catch { return null; }
 }
 
@@ -450,7 +455,7 @@ export class BrowserCaptureOwner {
 
   private async postChunk(sessionId: string, bytes: Uint8Array, sequence: number, timing: WebChunkTiming, signal?: AbortSignal) {
     if (!this.pluginId) throw new Error("Margins is still loading");
-    const failure: { answer?: { refused: boolean; message: string } } = {};
+    const failure: { answer?: { kind: "refused" | "deferred"; message: string } } = {};
     let value: { ok: boolean; error?: string | { message?: string } };
     try {
       value = await fetchJsonWithDeadline<{ ok: boolean; error?: string | { message?: string } }>(
@@ -475,8 +480,8 @@ export class BrowserCaptureOwner {
         } },
       );
     } catch (cause) {
-      if (failure.answer?.refused) throw new ChunkRejectedError(failure.answer.message);
-      if (failure.answer) throw new ChunkDeferredError(failure.answer.message);
+      if (failure.answer?.kind === "refused") throw new ChunkRejectedError(failure.answer.message);
+      if (failure.answer?.kind === "deferred") throw new ChunkDeferredError(failure.answer.message);
       throw cause;
     }
     if (!value.ok) throw new Error(typeof value.error === "string" ? value.error : value.error?.message || "Audio upload failed");
@@ -487,9 +492,9 @@ export class BrowserCaptureOwner {
    * independent of microphone access. Identical bytes for an already-durable
    * sequence are accepted idempotently by the server. A chunk the server
    * refuses for good (conflict, expired lease, already saved) is deleted. A
-   * chunk the server answers with any other error is retained and the flush
-   * moves on; when the server cannot be reached at all, that chunk and every
-   * later one are retained for another attempt. */
+   * chunk-specific retryable verdict retains that chunk and the flush moves
+   * on; any session-wide or transport failure stops the flush after the first
+   * chunk's retries and retains it and every later one. */
   private async flushPersisted(sessionId: string): Promise<PersistedFlush> {
     const flush: PersistedFlush = { delivered: new Set(), rejected: new Set(), retained: new Set() };
     const store = this.dependencies.chunkStore;

@@ -337,6 +337,31 @@ describe("browser capture chunk persistence", () => {
     expect(await store.sequences("rec-1")).toEqual([3, 4]);
   });
 
+  it.each([
+    ["the bb route's ownership error", () => new Response(JSON.stringify({ ok: false, error: "This bb window does not own the recording" }), { status: 409 })],
+    ["the bb route's host error", () => new Response(JSON.stringify({ ok: false, error: "Capture host unavailable" }), { status: 502 })],
+    ["a generic service error", () => new Response(JSON.stringify({ ok: false, error: {
+      code: "invalid_request", message: "audio upload failed (422): database is locked", retryable: true } }), { status: 502 })],
+    ["an auth failure", () => new Response(JSON.stringify({ ok: false, error: {
+      code: "unauthorized", message: "audio upload failed (401): Unauthorized", retryable: true } }), { status: 502 })],
+  ])("stops the flush after one chunk's retries on %s and keeps every chunk", async (_label, failure) => {
+    const factory = new IDBFactory();
+    const sequences = Array.from({ length: 20 }, (_, index) => index + 3);
+    await seed(new BrowserChunkStore(() => factory), "rec-1", sequences);
+    pendingStop({ expectedNextSequence: 23 });
+    const uploads: number[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, options: RequestInit) => {
+      uploads.push(uploadedBody(options).sequence);
+      return failure();
+    }));
+    const store = new BrowserChunkStore(() => factory);
+    const { recorder, stream } = media();
+    const page = owner(vi.fn(async () => state({}) as never) as unknown as BrowserCaptureDependencies["rpc"], store, recorder, stream);
+    await vi.waitFor(() => expect(page.owner.panel()).toMatchObject({ primaryAction: "retry" }));
+    expect(uploads).toEqual([3, 3]);
+    expect(await store.sequences("rec-1")).toEqual(sequences);
+  });
+
   it("bounds user Stop retries while persisted audio cannot be uploaded, then offers Finish", async () => {
     const factory = new IDBFactory();
     await seed(new BrowserChunkStore(() => factory), "rec-1", [3]);
