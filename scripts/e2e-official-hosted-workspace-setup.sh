@@ -33,6 +33,7 @@ unset ENZYME_FREE_CONFIG_URL ENZYME_API_CACHE_PATH ENZYME_HOME
 
 WORKSPACE_ID="${MARGINS_E2E_WORKSPACE:-official-hosted-e2e}"
 WORKSPACE_STATE="$MARGINS_HOME/workspaces/$WORKSPACE_ID"
+WORKSPACE_PROGRAM="$MARGINS_HOME/configs/$WORKSPACE_ID.enzyme"
 NOTES="$RUN_ROOT/notes"
 mkdir -p "$HOME" "$MARGINS_HOME" "$NOTES/projects" "$NOTES/people" "$NOTES/templates"
 
@@ -82,7 +83,7 @@ BEFORE="$RUN_ROOT/notes-before.sha256"
 AFTER="$RUN_ROOT/notes-after.sha256"
 STATUS="$RUN_ROOT/status.json"
 SCAN="$RUN_ROOT/scan.json"
-DESIRED="$RUN_ROOT/desired.toml"
+DESIRED="$RUN_ROOT/desired.enzyme"
 PLAN="$RUN_ROOT/plan.json"
 STALE_PLAN="$RUN_ROOT/stale-plan.json"
 APPLY="$RUN_ROOT/apply.json"
@@ -121,48 +122,52 @@ assert any(item["spec"] == "folder:people" for item in scan["coverage_entities"]
 assert any(item["spec"] == "folder:people" for item in scan["entity_curation_candidates"]), scan
 PY
 
-cp "$WORKSPACE_STATE/config.toml" "$DESIRED"
+test -f "$WORKSPACE_PROGRAM"
+test ! -e "$WORKSPACE_STATE/config.toml"
+cp "$WORKSPACE_PROGRAM" "$DESIRED"
 python3 - "$DESIRED" <<'PY'
 from pathlib import Path
-import re, sys
+import sys
 path = Path(sys.argv[1])
 text = path.read_text()
-text, count = re.subn(
-    r'excluded_folders\s*=\s*\[[^]]*\]',
-    'excluded_folders = [".git", "node_modules", "templates"]',
-    text,
-    count=1,
-    flags=re.S,
+# A fresh Workspace has no attention policy yet; Enzyme's implicit folder
+# exclusions (.git, node_modules, ...) are never written into the program.
+assert "leave out" not in text and "learn questions" not in text, text
+end = text.rstrip().rfind("}")
+assert end > 0, text
+path.write_text(
+    text[:end]
+    + '  leave out folders ["templates"]\n'
+    + '  learn questions from folder "people" about relational\n'
+    + text[end:]
 )
-assert count == 1, text
-text, count = re.subn(
-    r'entities\s*=\s*\[\]',
-    'entities = [{ "folder:people" = { profile = "relational" } }]',
-    text,
-    count=1,
-)
-assert count == 1, text
-path.write_text(text)
 PY
-run_workspace workspace plan --desired "$WORKSPACE_STATE/config.toml" --json > "$STALE_PLAN"
+run_workspace workspace plan --desired "$WORKSPACE_PROGRAM" --json > "$STALE_PLAN"
 run_workspace workspace plan --desired "$DESIRED" --json > "$PLAN"
 python3 - "$PLAN" "$WORKSPACE_ID" "$REVISION" <<'PY'
-import json, sys
+import hashlib, json, re, sys
 plan = json.load(open(sys.argv[1]))
-assert plan["schema_version"] == "margins.workspace.plan.v1", plan
+assert plan["schema_version"] == "margins.workspace.plan.v2", plan
 assert plan["workspace_id"] == sys.argv[2], plan
 assert plan["base_revision"] == sys.argv[3], plan
 assert isinstance(plan.get("actions"), list) and plan["actions"], plan
-assert plan["desired"]["policy"]["excluded_folders"] == [".git", "node_modules", "templates"], plan
-assert plan["desired"]["policy"]["entities"] == [{"folder:people": {"profile": "relational", "expandable": False}}], plan
-assert plan["desired"]["policy"]["excluded_entities"] == [], plan
+assert all(action.get("summary") for action in plan["actions"]), plan
+program = plan["desired_program"]
+assert plan["desired_sha256"] == hashlib.sha256(program.encode()).hexdigest(), plan
+assert re.search(r'leave out folders \["templates"\]', program), program
+assert re.search(r'learn questions from folder "people" about relational', program), program
+assert plan["diff"], plan
+policy = next(action for action in plan["actions"] if action["action"] == "set_policy")["after"]
+assert policy["excluded_folders"] == ["templates"], policy
+assert policy["entities"] == [{"folder:people": {"profile": "relational", "expandable": False}}], policy
+assert policy["excluded_entities"] == [], policy
 PY
 run_workspace workspace apply --plan "$PLAN" --json > "$APPLY"
 python3 - "$PLAN" "$APPLY" "$REVISION" <<'PY'
 import json, sys
 plan = json.load(open(sys.argv[1]))
 receipt = json.load(open(sys.argv[2]))
-assert receipt["schema_version"] == "margins.workspace.apply.v1", receipt
+assert receipt["schema_version"] == "margins.workspace.apply.v2", receipt
 assert receipt["ok"] is True and receipt["replayed"] is False, receipt
 assert receipt["plan_id"] == plan["plan_id"], receipt
 assert receipt["before_revision"] == sys.argv[3], receipt
@@ -217,7 +222,9 @@ PY
 
 snapshot_markdown "$NOTES" "$AFTER"
 cmp "$BEFORE" "$AFTER"
-test -f "$WORKSPACE_STATE/config.toml"
+test -f "$WORKSPACE_PROGRAM"
+test ! -e "$WORKSPACE_STATE/config.toml"
+grep -Fq 'leave out folders ["templates"]' "$WORKSPACE_PROGRAM"
 test -f "$WORKSPACE_STATE/index.db"
 test ! -e "$NOTES/.margins"
 test ! -e "$NOTES/.enzyme"

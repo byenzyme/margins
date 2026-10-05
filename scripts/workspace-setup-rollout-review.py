@@ -373,7 +373,55 @@ def filtered_global_config(
     return filtered, evidence
 
 
+ENZYME_SOURCE_BLOCK = re.compile(
+    r'\bsource\s+[A-Za-z][A-Za-z0-9_-]*\s+"(?:[^"\\]|\\.)*"\s*\{([^{}]*)\}'
+)
+ENZYME_PATH_FIELD = re.compile(r'\bpath\s+"((?:[^"\\]|\\.)*)"')
+
+
+def strip_enzyme_comments(text: str) -> str:
+    """Drop `//` line comments outside string literals."""
+    lines = []
+    for line in text.splitlines():
+        in_string = False
+        escaped = False
+        for index, char in enumerate(line):
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = in_string
+            elif char == '"':
+                in_string = not in_string
+            elif char == "/" and not in_string and line[index : index + 2] == "//":
+                line = line[:index]
+                break
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def program_binding_paths(program_path: Path) -> list[Path]:
+    """Local paths declared by sources in one `configs/<id>.enzyme` program."""
+    try:
+        text = strip_enzyme_comments(program_path.read_text())
+    except (OSError, UnicodeDecodeError) as error:
+        raise SystemExit(f"cannot inspect workspace program {program_path}: {error}")
+    if not re.search(r'\bworkspace\s+"', text):
+        raise SystemExit(f"workspace program has no workspace block: {program_path}")
+    paths: list[Path] = []
+    for block in ENZYME_SOURCE_BLOCK.finditer(text):
+        for match in ENZYME_PATH_FIELD.finditer(block.group(1)):
+            value = json.loads(f'"{match.group(1)}"')
+            path = Path(os.path.expanduser(value))
+            if not path.is_absolute():
+                raise SystemExit(
+                    f"workspace program contains a relative local source: {program_path}"
+                )
+            paths.append(path.resolve())
+    return paths
+
+
 def local_binding_paths(config_path: Path) -> list[Path]:
+    """Local paths in a legacy `workspaces/<id>/config.toml` (pre-migration input)."""
     try:
         config = tomllib.loads(config_path.read_text())
     except (OSError, tomllib.TOMLDecodeError) as error:
@@ -394,25 +442,52 @@ def local_binding_paths(config_path: Path) -> list[Path]:
     return paths
 
 
+SHARED_PROFILES_PROGRAM = "profiles.enzyme"
+
+
 def workspace_inventory(
     margins_home: Path, vault: Path, *, strict: bool = True
 ) -> tuple[list[str], list[dict[str, object]]]:
+    """Workspaces known to MARGINS_HOME and those whose sources overlap `vault`.
+
+    A Workspace is declared by `configs/<id>.enzyme`; `workspaces/<id>/` holds
+    state only. A legacy `workspaces/<id>/config.toml` without a program is
+    still an input (Margins migrates it on first resolution), so it is read as
+    a fallback declaration.
+    """
+    configs_root = margins_home / "configs"
     workspaces_root = margins_home / "workspaces"
-    if not workspaces_root.exists():
-        return [], []
-    all_ids: list[str] = []
+    programs: dict[str, Path] = {}
+    if configs_root.is_dir():
+        for program in sorted(configs_root.glob("*.enzyme")):
+            if program.name == SHARED_PROFILES_PROGRAM or not program.is_file():
+                continue
+            programs[program.stem] = program
+    state_dirs: dict[str, Path] = {}
+    if workspaces_root.is_dir():
+        for state_dir in sorted(workspaces_root.iterdir()):
+            if state_dir.is_dir():
+                state_dirs[state_dir.name] = state_dir
+    all_ids = sorted(set(programs) | set(state_dirs))
     affected: list[dict[str, object]] = []
-    for state_dir in sorted(workspaces_root.iterdir()):
-        if not state_dir.is_dir():
-            continue
-        all_ids.append(state_dir.name)
-        config_path = state_dir / "config.toml"
-        if not config_path.is_file():
-            if strict:
-                raise SystemExit(f"workspace state has no config.toml: {state_dir}")
-            continue
+    for workspace_id in all_ids:
+        state_dir = state_dirs.get(workspace_id, workspaces_root / workspace_id)
+        program = programs.get(workspace_id)
+        legacy = state_dir / "config.toml"
         try:
-            bindings = local_binding_paths(config_path)
+            if program is not None:
+                config_path, config_format = program, "enzyme"
+                bindings = program_binding_paths(program)
+            elif legacy.is_file():
+                config_path, config_format = legacy, "legacy-toml"
+                bindings = local_binding_paths(legacy)
+            else:
+                if strict:
+                    raise SystemExit(
+                        f"workspace {workspace_id!r} has no configs/{workspace_id}.enzyme "
+                        f"program or legacy config.toml: {state_dir}"
+                    )
+                continue
         except SystemExit:
             if strict:
                 raise
@@ -421,9 +496,10 @@ def workspace_inventory(
         if overlapping:
             affected.append(
                 {
-                    "id": state_dir.name,
+                    "id": workspace_id,
                     "state_dir": str(state_dir.absolute()),
                     "config": str(config_path.absolute()),
+                    "config_format": config_format,
                     "overlapping_bindings": overlapping,
                 }
             )
@@ -484,6 +560,9 @@ def prepare(args: argparse.Namespace) -> int:
     workspaces_root = margins_home / "workspaces"
     workspace_registry_existed = workspaces_root.exists() or workspaces_root.is_symlink()
     workspace_registry_state = state_snapshot(workspaces_root)
+    configs_root = margins_home / "configs"
+    config_registry_existed = configs_root.exists() or configs_root.is_symlink()
+    config_registry_state = state_snapshot(configs_root)
 
     (run_dir / "user-prompt.txt").write_text(USER_PROMPT)
     (run_dir / "judge-prompt.md").write_text(JUDGE_PROMPT)
@@ -494,19 +573,21 @@ def prepare(args: argparse.Namespace) -> int:
     )
     write_json(run_dir / "preexisting-workspaces.json", affected)
     write_json(run_dir / "preexisting-workspace-state.json", workspace_registry_state)
+    write_json(run_dir / "preexisting-config-state.json", config_registry_state)
     write_json(run_dir / "preexisting-global-setup.json", preexisting_global_setup)
     write_json(run_dir / "global-config-before.json", global_config_before)
 
     local_state = vault / ".margins"
     local_state_exists = local_state.exists() or local_state.is_symlink()
     manifest = {
-        "schema": "margins.workspace-setup-rollout-review.v3",
+        "schema": "margins.workspace-setup-rollout-review.v4",
         "prepared_at": datetime.now(timezone.utc).isoformat(),
         "vault": str(vault),
         "margins_home": str(margins_home),
         "workspace_ids_before": all_workspace_ids,
         "preexisting_workspaces": affected,
         "workspace_registry_backed_up": workspace_registry_existed,
+        "config_registry_backed_up": config_registry_existed,
         "vault_local_state_backed_up": local_state_exists,
         "global_config_backed_up": global_config_before.get("exists") is True,
     }
@@ -533,6 +614,10 @@ def prepare(args: argparse.Namespace) -> int:
             destination = backup_root / "workspaces"
             move_path(workspaces_root, destination)
             moved.append((workspaces_root, destination))
+        if config_registry_existed:
+            destination = backup_root / "configs"
+            move_path(configs_root, destination)
+            moved.append((configs_root, destination))
         if global_config_before.get("exists") is True:
             destination = backup_root / "global-config.toml"
             move_path(global_config, destination)
@@ -646,6 +731,42 @@ def restore_preexisting_state(run_dir: Path, manifest: dict[str, object]) -> dic
         move_path(workspaces_root, destination)
         moved_generated.append(str(destination))
 
+    # Workspace programs (configs/<id>.enzyme). Runs prepared before the
+    # Workspace-language layout did not snapshot configs/ and do not track it.
+    configs_root = margins_home / "configs"
+    config_snapshot_path = run_dir / "preexisting-config-state.json"
+    tracks_config_registry = config_snapshot_path.is_file()
+    expected_config_state = (
+        read_json(config_snapshot_path) if tracks_config_registry else None
+    )
+    if tracks_config_registry and not isinstance(expected_config_state, dict):
+        raise SystemExit("invalid preexisting-config-state.json")
+    if tracks_config_registry:
+        config_backup = backup_root / "configs"
+        config_backup_exists = config_backup.exists() or config_backup.is_symlink()
+        config_registry_exists = configs_root.exists() or configs_root.is_symlink()
+        had_config_registry = manifest.get("config_registry_backed_up") is True
+        if config_backup_exists:
+            if config_registry_exists:
+                destination = unused_destination(generated_root / "configs")
+                move_path(configs_root, destination)
+                moved_generated.append(str(destination))
+            move_path(config_backup, configs_root)
+            restored.append(str(configs_root))
+        elif had_config_registry:
+            if not config_registry_exists:
+                raise SystemExit("Workspace program registry and its backup are both missing")
+            if state_snapshot(configs_root) != expected_config_state:
+                raise SystemExit(
+                    "Workspace program backup is missing and the active configs/ does "
+                    "not match the pre-run state"
+                )
+            restored.append(str(configs_root))
+        elif config_registry_exists:
+            destination = unused_destination(generated_root / "configs")
+            move_path(configs_root, destination)
+            moved_generated.append(str(destination))
+
     local_state = vault / ".margins"
     local_backup = backup_root / "vault-dot-margins"
     local_backup_exists = local_backup.exists() or local_backup.is_symlink()
@@ -703,6 +824,11 @@ def restore_preexisting_state(run_dir: Path, manifest: dict[str, object]) -> dic
     if not isinstance(expected_ids, list):
         raise SystemExit("invalid workspace_ids_before in run.json")
     registry_exact = state_snapshot(workspaces_root) == expected_workspace_state
+    config_registry_exact = (
+        state_snapshot(configs_root) == expected_config_state
+        if tracks_config_registry
+        else True
+    )
     local_state_exact = state_snapshot(local_state) == expected_local_state
     global_config_exact = (
         path_entry_snapshot(global_config) == expected_global_config
@@ -714,10 +840,13 @@ def restore_preexisting_state(run_dir: Path, manifest: dict[str, object]) -> dic
         "restored": (
             sorted(final_ids) == sorted(str(value) for value in expected_ids)
             and registry_exact
+            and config_registry_exact
             and local_state_exact
             and global_config_exact
         ),
         "workspace_registry_exact": registry_exact,
+        "config_registry_exact": config_registry_exact,
+        "config_registry_tracked": tracks_config_registry,
         "vault_local_state_exact": local_state_exact,
         "global_config_exact": global_config_exact,
         "global_config_tracked": tracks_global_config,
@@ -765,11 +894,16 @@ def finalize(args: argparse.Namespace) -> int:
     write_json(run_dir / "generated-workspaces.json", generated_workspaces)
     generated_state = state_snapshot(margins_home / "workspaces")
     write_json(run_dir / "generated-workspace-state.json", generated_state)
+    write_json(
+        run_dir / "generated-config-state.json",
+        state_snapshot(margins_home / "configs"),
+    )
     configs_after = run_dir / "workspace-configs-after"
     configs_after.mkdir(exist_ok=True)
     for row in generated_workspaces:
         config_bytes = Path(str(row["config"])).read_bytes()
-        config_name = f"{row['id']}.toml"
+        suffix = "enzyme" if row.get("config_format") == "enzyme" else "toml"
+        config_name = f"{row['id']}.{suffix}"
         observer_leaks.extend(
             {**finding, "source": f"workspace-configs-after/{config_name}"}
             for finding in secret_findings(config_bytes)
@@ -799,6 +933,13 @@ def finalize(args: argparse.Namespace) -> int:
         raise SystemExit("invalid preexisting-workspace-state.json")
     restored_state = state_snapshot(margins_home / "workspaces")
     write_json(run_dir / "restored-workspace-state.json", restored_state)
+    config_state_path = run_dir / "preexisting-config-state.json"
+    if config_state_path.is_file():
+        restored_config_state = state_snapshot(margins_home / "configs")
+        write_json(run_dir / "restored-config-state.json", restored_config_state)
+        config_registry_restored = read_json(config_state_path) == restored_config_state
+    else:
+        config_registry_restored = True
     local_state_before = read_json(run_dir / "vault-local-state-before.json")
     local_state_after = state_snapshot(vault / ".margins")
     write_json(run_dir / "vault-local-state-restored.json", local_state_after)
@@ -812,6 +953,7 @@ def finalize(args: argparse.Namespace) -> int:
         global_config_restored = True
     workspace_restored = (
         before_state == restored_state
+        and config_registry_restored
         and local_state_before == local_state_after
         and global_config_restored
         and restoration.get("restored") is True

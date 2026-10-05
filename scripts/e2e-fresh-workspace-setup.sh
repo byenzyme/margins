@@ -23,6 +23,7 @@ export XDG_DATA_HOME="$RUNROOT/xdg-data"
 export XDG_CACHE_HOME="$RUNROOT/xdg-cache"
 mkdir -p "$HOME" "$MARGINS_HOME"
 WORKSPACE_STATE="$MARGINS_HOME/workspaces/$WORKSPACE_ID"
+WORKSPACE_PROGRAM="$MARGINS_HOME/configs/$WORKSPACE_ID.enzyme"
 
 run_workspace() {
   "$MARGINS_BIN" --workspace "$WORKSPACE_ID" "$@"
@@ -43,7 +44,9 @@ PY
 }
 
 assert_state_layout() {
-  test -f "$WORKSPACE_STATE/config.toml"
+  # One Enzyme program declares the Workspace; workspaces/<id>/ is state only.
+  test -f "$WORKSPACE_PROGRAM"
+  test ! -e "$WORKSPACE_STATE/config.toml"
   test ! -e "$NOTES/.margins"
   test ! -e "$MARGINS_HOME/integrations"
   test ! -e "$MARGINS_HOME/recall"
@@ -100,6 +103,7 @@ PY
   assert_state_layout
   printf '%s_e2e=ok\n' "$MODE"
   printf 'workspace_state=%s\n' "$WORKSPACE_STATE"
+  printf 'workspace_program=%s\n' "$WORKSPACE_PROGRAM"
 }
 
 synthetic() {

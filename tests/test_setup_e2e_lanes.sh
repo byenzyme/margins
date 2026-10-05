@@ -21,9 +21,10 @@ error() {
   exit 1
 }
 state_dir() { printf '%s/workspaces/%s' "$MARGINS_HOME" "$1"; }
+program_path() { printf '%s/configs/%s.enzyme' "$MARGINS_HOME" "$1"; }
 revision() { sed -n '1p' "$(state_dir "$workspace")/revision"; }
 notes_home() {
-  sed -n 's/^path = "\(.*\)"/\1/p' "$(state_dir "$workspace")/config.toml" | head -1
+  sed -n 's/^ *source markdown "home" { path "\(.*\)" }$/\1/p' "$(program_path "$workspace")" | head -1
 }
 
 workspace=""
@@ -39,18 +40,19 @@ case "$command" in
         [ "${1:-}" = "--home" ] || error usage
         notes="$2"
         dir="$(state_dir "$workspace")"
-        mkdir -p "$dir/captures"
-        cat > "$dir/config.toml" <<EOF
-id = "$workspace"
-[policy]
-excluded_folders = [".git", "node_modules"]
-excluded_tags = []
-entities = []
-excluded_entities = []
-[bindings.home]
-kind = "notes"
-role = "home"
-path = "$notes"
+        mkdir -p "$dir/captures" "$MARGINS_HOME/configs"
+        cat > "$(program_path "$workspace")" <<EOF
+// Enzyme reading configuration
+
+workspace "$workspace" {
+  source margins-captures "captures" {
+    path "$dir/captures"
+  }
+
+  source markdown "home" { path "$notes" }
+
+  remember in folder "." create note
+}
 EOF
         printf 'rev1\n' > "$dir/revision"
         bundle_mode=none
@@ -67,29 +69,51 @@ PY
       status)
         dir="$(state_dir "$workspace")"; notes="$(notes_home)"
         log "$workspace workspace status"
-        printf '{"id":"%s","revision":"%s","home":"%s","config":"%s/config.toml","index":"%s/index.db","recall":{"available":true}}\n' \
-          "$workspace" "$(revision)" "$notes" "$dir" "$dir"
+        printf '{"id":"%s","revision":"%s","home":"%s","config":"%s","index":"%s/index.db","recall":{"available":true}}\n' \
+          "$workspace" "$(revision)" "$notes" "$(program_path "$workspace")" "$dir"
         ;;
       plan)
         [ "${1:-}" = "--desired" ] || error usage; desired="$2"; shift 2
         [ "${1:-}" = "--json" ] || error usage
-        if grep -Fq '"templates"' "$desired"; then
+        case "$desired" in *.enzyme) ;; *) error usage ;; esac
+        if grep -Fq 'leave out folders ["templates"]' "$desired"; then
           plan_id=fixture-plan
-          actions='[{"action":"set_policy"}]'
-          excluded='[".git","node_modules","templates"]'
         else
           plan_id=fixture-stale
-          actions='[]'
-          excluded='[".git","node_modules"]'
-        fi
-        if grep -Fq 'folder:people' "$desired"; then
-          entities='[{"folder:people":{"profile":"relational","expandable":false}}]'
-        else
-          entities='[]'
         fi
         log "$workspace workspace plan id=$plan_id revision=$(revision)"
-        printf '{"schema_version":"margins.workspace.plan.v1","workspace_id":"%s","base_revision":"%s","plan_id":"%s","actions":%s,"desired":{"id":"%s","policy":{"excluded_folders":%s,"excluded_tags":[],"entities":%s,"excluded_entities":[]},"retention":{},"bindings":{}}}\n' \
-          "$workspace" "$(revision)" "$plan_id" "$actions" "$workspace" "$excluded" "$entities"
+        python3 - "$desired" "$workspace" "$(revision)" "$plan_id" "$(program_path "$workspace")" <<'PY'
+import difflib, hashlib, json, sys
+desired, workspace, base, plan_id, current = sys.argv[1:]
+program = open(desired).read()
+before = open(current).read()
+excluded = ["templates"] if 'leave out folders ["templates"]' in program else []
+entities = (
+    [{"folder:people": {"profile": "relational", "expandable": False}}]
+    if 'learn questions from folder "people"' in program
+    else []
+)
+empty = {"excluded_folders": [], "excluded_tags": [], "entities": [], "excluded_entities": []}
+after = {**empty, "excluded_folders": excluded, "entities": entities}
+actions = (
+    [{"action": "set_policy", "summary": "Attention policy: fixture", "before": empty, "after": after}]
+    if program != before
+    else []
+)
+print(json.dumps({
+    "schema_version": "margins.workspace.plan.v2",
+    "workspace_id": workspace,
+    "base_revision": base,
+    "plan_id": plan_id,
+    "actions": actions,
+    "desired_program": program,
+    "desired_sha256": hashlib.sha256(program.encode()).hexdigest(),
+    "diff": "".join(difflib.unified_diff(
+        before.splitlines(True), program.splitlines(True),
+        f"a/configs/{workspace}.enzyme", f"b/configs/{workspace}.enzyme",
+    )),
+}))
+PY
         ;;
       apply)
         [ "${1:-}" = "--plan" ] || error usage; plan="$2"; shift 2
@@ -102,12 +126,14 @@ print(plan["base_revision"])
 PY
 )
         plan_id="${plan_fields[0]}"; expected="${plan_fields[1]}"
+        [ "$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["schema_version"])' "$plan")" = margins.workspace.plan.v2 ] \
+          || error workspace_plan_invalid
         request_hash="fixturehash-${plan_id}"
         request="workspace-apply-${request_hash}"
         receipt="$(state_dir "$workspace")/receipt-${plan_id}"
         if [ -f "$receipt" ]; then
           log "$workspace workspace apply replay plan=$plan_id request=$request"
-          printf '{"schema_version":"margins.workspace.apply.v1","ok":true,"workspace_id":"%s","request_id":"%s","request_hash":"%s","plan_id":"%s","before_revision":"rev1","after_revision":"rev2","replayed":true,"actions":[{"position":0,"status":"applied","action":"set_policy"}]}\n' \
+          printf '{"schema_version":"margins.workspace.apply.v2","ok":true,"workspace_id":"%s","request_id":"%s","request_hash":"%s","plan_id":"%s","before_revision":"rev1","after_revision":"rev2","replayed":true,"actions":[{"position":0,"status":"applied","action":"set_policy"}]}\n' \
             "$workspace" "$request" "$request_hash" "$plan_id"
           exit 0
         fi
@@ -117,9 +143,11 @@ PY
           error workspace_revision_conflict
         fi
         printf 'rev2\n' > "$(state_dir "$workspace")/revision"
+        python3 -c 'import json, sys; open(sys.argv[2], "w").write(json.load(open(sys.argv[1]))["desired_program"])' \
+          "$plan" "$(program_path "$workspace")"
         touch "$receipt"
         log "$workspace workspace apply direct-plan=$(basename "$plan") request=$request revision=$expected"
-        printf '{"schema_version":"margins.workspace.apply.v1","ok":true,"workspace_id":"%s","request_id":"%s","request_hash":"%s","plan_id":"%s","before_revision":"%s","after_revision":"rev2","replayed":false,"actions":[{"position":0,"status":"applied","action":"set_policy"}]}\n' \
+        printf '{"schema_version":"margins.workspace.apply.v2","ok":true,"workspace_id":"%s","request_id":"%s","request_hash":"%s","plan_id":"%s","before_revision":"%s","after_revision":"rev2","replayed":false,"actions":[{"position":0,"status":"applied","action":"set_policy"}]}\n' \
           "$workspace" "$request" "$request_hash" "$plan_id" "$expected"
         ;;
       *) error usage ;;
