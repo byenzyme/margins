@@ -417,6 +417,74 @@
     }
 
     #[test]
+    fn resumed_commits_after_an_early_stall_wait_again_at_the_live_edge() {
+        let mut harness = DecodeHarness::new();
+        let durable = FakeDurable::default();
+        let audio = |index: usize| {
+            (0..6 * 16_000)
+                .map(|frame| ((frame * 7 + index * 3) % 101) as f32 / 101.0 - 0.5)
+                .collect::<Vec<f32>>()
+        };
+        {
+            let mut state = durable.0.lock().unwrap();
+            state.starts.insert(0, 0);
+            state.lanes.insert((0, 0), audio(0));
+            state.lanes.insert((0, 1), audio(1));
+            // A commit hiccup: only the first second is durable.
+            state.available_limit = Some(16_000);
+        }
+        let tx = harness.tx.clone().unwrap();
+        let send_synthesized = |from_s: usize, to_s: usize| {
+            for channel in [LiveAudioChannel::Mic, LiveAudioChannel::System] {
+                tx.send(LiveAudioChunk {
+                    channel,
+                    generation: 1,
+                    session_offset_ms: 0,
+                    sample_rate: 16_000,
+                    start_frame: (from_s * 16_000) as u64,
+                    synthesized: true,
+                    samples: vec![0.0; (to_s - from_s) * 16_000],
+                })
+                .unwrap();
+            }
+        };
+        let wait = Duration::from_millis(1_000);
+        send_synthesized(0, 2);
+        let worker = harness.start_worker(Some(durable.clone()), wait);
+        // The mic wait expires; the stalled system lane does not wait.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while harness.unrecovered.load(Ordering::Acquire) < 2 * 16_000 {
+            assert!(std::time::Instant::now() < deadline, "stall was not recorded");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Commits resume.
+        durable.0.lock().unwrap().available_limit = Some(4 * 16_000);
+        send_synthesized(2, 4);
+        // The newest batch commits shortly after the worker reaches it. A
+        // still-stalled worker would not wait and would lose these frames.
+        send_synthesized(4, 6);
+        std::thread::sleep(Duration::from_millis(300));
+        durable.0.lock().unwrap().available_limit = None;
+        drop(tx);
+        harness.finish(6_000);
+        let run = worker.join().unwrap();
+
+        // Only the hiccup itself (one second per lane) is missing.
+        assert!(run.result.unwrap_err().to_string().contains("incomplete"));
+        assert_eq!(harness.unrecovered.load(Ordering::Acquire), 2 * 16_000);
+        for (index, decoded) in [(0, &run.mic.audio), (1, &run.system.audio)] {
+            let captured = audio(index);
+            assert_eq!(decoded.len(), captured.len());
+            assert!(decoded[..16_000] == captured[..16_000]);
+            assert!(decoded[16_000..32_000].iter().all(|sample| *sample == 0.0));
+            assert!(decoded[32_000..] == captured[32_000..], "lane {index}");
+        }
+        let value = harness.checkpoint_value();
+        assert_eq!(value["live_dropped_samples"], 2 * 16_000);
+        assert_eq!(value["live_recovered_frames"], 2 * 5 * 16_000);
+    }
+
+    #[test]
     fn queue_drops_without_durable_audio_stay_incomplete() {
         let mut harness = DecodeHarness::new();
         let durable = FakeDurable::default();

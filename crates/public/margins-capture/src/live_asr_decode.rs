@@ -32,8 +32,8 @@ const TAIL_BLOCK_FRAMES: usize = 5 * RATE_16K as usize;
 pub(super) const LIVE_LAG_STATUS_SAMPLES: u64 = 48_000 * 2 * 3;
 /// How long to wait for the runtime to commit a missed span. The runtime
 /// commits five-second batches, so the newest part of a span is briefly not
-/// durable yet. The budget is spent once: after one expiry the runtime is
-/// treated as stalled and later spans are read without waiting.
+/// durable yet. After one expiry the runtime is treated as stalled and later
+/// spans are read without waiting until a read returns durable frames again.
 #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
 pub(super) const DURABLE_WAIT: Duration = Duration::from_secs(30);
 const DURABLE_POLL: Duration = Duration::from_millis(200);
@@ -101,7 +101,8 @@ struct Decode<'a, D: AsrStreamDecoder> {
     last_update_local_ms: u64,
     recovered_frames: u64,
     durable_error_logged: bool,
-    /// A wait for durable audio expired; never wait again.
+    /// A wait for durable audio expired and no durable frame has been read
+    /// since; don't wait again until commits resume.
     durable_stalled: bool,
 }
 
@@ -288,7 +289,12 @@ impl<D: AsrStreamDecoder> Decode<'_, D> {
             let deadline = Instant::now() + self.durable_wait;
             while out.len() < count {
                 match durable.read(ordinal, channel, from + out.len() as u64, count - out.len()) {
-                    Ok(frames) if !frames.is_empty() => out.extend(frames),
+                    Ok(frames) if !frames.is_empty() => {
+                        // Commits resumed: later spans may wait again. Each
+                        // new wait therefore needs real progress in between.
+                        self.durable_stalled = false;
+                        out.extend(frames);
+                    }
                     Ok(_) if wait && Instant::now() < deadline => {
                         self.set_lagging(true);
                         std::thread::sleep(DURABLE_POLL.min(self.durable_wait));

@@ -505,6 +505,34 @@ impl RuntimeLiveAudioReader {
 #[cfg(any(test, feature = "audio-capture"))]
 impl crate::live_asr::DurableLiveAudio for RuntimeLiveAudioReader {
     fn segments(&mut self) -> Result<Vec<(i64, u64)>> {
+        let result = self.list_segments();
+        self.reopen_after(result)
+    }
+
+    fn read(
+        &mut self,
+        ordinal: i64,
+        channel: crate::recorder::LiveAudioChannel,
+        from_frame: u64,
+        max_frames: usize,
+    ) -> Result<Vec<f32>> {
+        let result = self.read_frames(ordinal, channel, from_frame, max_frames);
+        self.reopen_after(result)
+    }
+}
+
+#[cfg(any(test, feature = "audio-capture"))]
+impl RuntimeLiveAudioReader {
+    /// Drop the cached connection after a failed read so the next read
+    /// reopens it, following a database file that was replaced.
+    fn reopen_after<T>(&mut self, result: Result<T>) -> Result<T> {
+        if result.is_err() {
+            self.reader = None;
+        }
+        result
+    }
+
+    fn list_segments(&mut self) -> Result<Vec<(i64, u64)>> {
         let session_id = self.session_id.clone();
         let prefix = format!("{}-seg-", session_id.as_ref());
         let reader = self.reader()?;
@@ -527,7 +555,7 @@ impl crate::live_asr::DurableLiveAudio for RuntimeLiveAudioReader {
         Ok(segments)
     }
 
-    fn read(
+    fn read_frames(
         &mut self,
         ordinal: i64,
         channel: crate::recorder::LiveAudioChannel,
