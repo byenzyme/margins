@@ -13,6 +13,9 @@ use margins_server::{
 };
 use margins_store::canonical;
 use margins_workflows::{
+    remote_workspace::{
+        native_create_session_command, DurableTransferSpool, NativeRemoteLane, NativeRemoteTransfer,
+    },
     workspace::ensure_service_workspace,
     workspace_service::{ScopedCredentialStore, ServicePrincipal, WorkspaceService},
 };
@@ -290,6 +293,71 @@ fn prepare_native_pcm(
     )
 }
 
+fn prepare_native_opus(
+    root: &Path,
+    service: &WorkspaceService,
+    principal: &ServicePrincipal,
+) -> (String, ClientMessageV1) {
+    let reservation = service
+        .reserve_session(
+            principal,
+            native_create_session_command(
+                SESSION,
+                "native-asr-http-opus",
+                Some("Native ASR HTTP fixture".into()),
+                "native-bridge",
+            ),
+        )
+        .unwrap();
+    let spool = DurableTransferSpool::create(
+        root,
+        "native-asr-http-transfer",
+        "test-instance",
+        "https://example.test",
+        "practice",
+        SESSION,
+        &reservation.producer_token,
+        0,
+    )
+    .unwrap();
+    let mut transfer = NativeRemoteTransfer::new(spool);
+    transfer.begin_segment("segment-opus".into(), 0).unwrap();
+    let mic = (0..9_600)
+        .map(|index| ((index * 271) % 30_000) as i16 - 15_000)
+        .flat_map(i16::to_le_bytes)
+        .collect::<Vec<_>>();
+    let system = vec![0_u8; 19_200];
+    transfer
+        .append_s16le(NativeRemoteLane::Microphone, 16_000, &mic)
+        .unwrap();
+    transfer
+        .append_s16le(NativeRemoteLane::System, 16_000, &system)
+        .unwrap();
+    let close = transfer.close_segment(SegmentCloseReasonV1::Stop).unwrap();
+    let finalize = transfer
+        .seal_session(600, SessionFinalizeReasonV1::Completed)
+        .unwrap();
+    let chunks = transfer
+        .spool()
+        .pending_chunks()
+        .unwrap()
+        .into_iter()
+        .map(|chunk| chunk.command)
+        .collect();
+    service
+        .execute_audio_batch(
+            principal,
+            &reservation.producer_token,
+            &SessionId(SESSION.into()),
+            chunks,
+        )
+        .unwrap();
+    service
+        .execute_capture(principal, &reservation.producer_token, close)
+        .unwrap();
+    (reservation.producer_token, finalize)
+}
+
 fn finalize_native_pcm(service: &WorkspaceService, principal: &ServicePrincipal) {
     let (token, finalize) = prepare_native_pcm(service, principal);
     service
@@ -379,7 +447,7 @@ async fn typed_transcribe_route_runs_durable_job_against_runtime_audio() {
 async fn native_finalize_after_ready_wakes_durable_asr_job() {
     let temp = tempfile::tempdir().unwrap();
     let (app, service, principal) = fixture(temp.path());
-    let (token, finalize) = prepare_native_pcm(&service, &principal);
+    let (token, finalize) = prepare_native_opus(temp.path(), &service, &principal);
     assert!(service
         .latest_job(&principal, &SessionId(SESSION.into()))
         .unwrap()
