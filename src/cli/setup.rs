@@ -131,6 +131,7 @@ fn run_setup_with(
 ) -> Result<bool> {
     let mut hosted_ready = false;
     let mut local_model_failed = false;
+    let mut selected_step_failed = false;
 
     if selection.catalyst {
         match margins_home {
@@ -172,10 +173,12 @@ fn run_setup_with(
                     "installed embedded margins and watermark skills",
                 )?,
                 Err(error) => {
+                    selected_step_failed = true;
                     setup_status(stderr, "skills", false, &format!("{error:#}"))?;
                 }
             },
             None => {
+                selected_step_failed = true;
                 setup_status(
                     stderr,
                     "skills",
@@ -205,6 +208,7 @@ fn run_setup_with(
                 "no local speech model is required by this build",
             )?,
             Err(error) => {
+                selected_step_failed = true;
                 setup_status(stderr, "speech", false, &format!("{error:#}"))?;
             }
         }
@@ -246,11 +250,19 @@ fn run_setup_with(
         }
     }
 
+    // The catalyst line is always reported, but it only decides the exit code
+    // when the catalyst step was selected. `--only skills|speech` succeeds or
+    // fails on its own steps; an unconfigured catalyst is just a note there.
+    let catalyst_note = if selection.catalyst {
+        ""
+    } else {
+        " (not part of this setup; run margins setup --only catalyst)"
+    };
     let usable_generator = if let Some(home) = margins_home {
         let catalyst = margins_workflows::catalyst::selected_status(home);
         writeln!(
             stderr,
-            "catalyst mode: {} — {}",
+            "catalyst mode: {} — {}{catalyst_note}",
             catalyst.mode.as_str(),
             catalyst.reason
         )?;
@@ -260,13 +272,22 @@ fn run_setup_with(
             margins_workflows::catalyst::CatalystMode::None => false,
         }
     } else {
-        writeln!(stderr, "catalyst mode: none — config_unreadable")?;
+        writeln!(
+            stderr,
+            "catalyst mode: none — config_unreadable{catalyst_note}"
+        )?;
         false
     };
 
     margins_cli::commands::guide::setup_handoff(workspace, stdout)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    Ok(!usable_generator)
+    // With the catalyst selected (including full setup), a usable generator is
+    // the success criterion, as before; other step failures are reported only.
+    if selection.catalyst {
+        Ok(!usable_generator)
+    } else {
+        Ok(selected_step_failed)
+    }
 }
 
 fn setup_status(report: &mut dyn Write, step: &str, ok: bool, reason: &str) -> Result<()> {

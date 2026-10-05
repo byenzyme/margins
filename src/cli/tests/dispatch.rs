@@ -13,6 +13,32 @@
     }
 
     #[test]
+    fn version_flags_do_not_invoke_interactive_composition() {
+        let spy = SpyInteractive(AtomicUsize::new(0));
+        for flag in ["--version", "-V"] {
+            assert_eq!(main_entry_with(["margins", flag], &spy), 0, "{flag}");
+        }
+        assert_eq!(spy.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn official_version_line_matches_release_smoke_build_and_composition() {
+        let _guard = PROCESS_ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _restore =
+            EnvRestore::capture(&["MARGINS_HOME", "OPENAI_API_KEY", "OPENROUTER_API_KEY"]);
+        std::env::set_var("MARGINS_HOME", temp.path().join("margins-home"));
+        let smoke = official_capabilities_json();
+        let line = official_version_line();
+        assert!(line.starts_with(&format!("margins {} (", env!("CARGO_PKG_VERSION"))));
+        assert!(line.contains(smoke["build"]["short"].as_str().unwrap()));
+        assert!(line.ends_with(&format!(
+            ", {})",
+            smoke["composition"].as_str().unwrap()
+        )));
+    }
+
+    #[test]
     fn official_capabilities_report_recall_composition() {
         let _guard = PROCESS_ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
