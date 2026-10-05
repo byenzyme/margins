@@ -53,6 +53,8 @@
             generation: 1,
             session_offset_ms: 4_250,
             sample_rate: 48_000,
+            start_frame: 0,
+            synthesized: false,
             samples: vec![0.2, 0.3],
         };
         enqueue_remote_live_chunk(&sink, &chunk);

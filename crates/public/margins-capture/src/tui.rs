@@ -25,12 +25,33 @@ const SYSTEM_AUDIO_SILENCE_MARKER_SECS: u64 = 3;
 const MIC_NO_AUDIO_THRESHOLD_SECS: u64 = 3;
 const SYSTEM_NO_AUDIO_THRESHOLD_SECS: u64 = 10;
 const WATERMARK_HINT: &str = "  |  agent /watermark: live read";
-// Any dropped live sample makes the checkpoint non-terminal.
+// Any live sample missing from the decoded audio makes the checkpoint
+// non-terminal.
 const LIVE_DROP_WARNING_SAMPLES: u64 = 1;
+const LIVE_CATCHING_UP_NOTICE: &str = "transcription warming up — catching up";
 
-fn live_dropped_samples(app: &App) -> u64 {
+fn live_queue_dropped_samples(app: &App) -> u64 {
     app.live_mic_dropped_samples.load(Ordering::Relaxed)
         + app.live_system_dropped_samples.load(Ordering::Relaxed)
+}
+
+/// Live audio the transcript will lack. Queue drops are recoverable when the
+/// worker can read durable runtime audio; only what it could not recover is.
+fn live_dropped_samples(app: &App) -> u64 {
+    match &app.live_unrecovered_frames {
+        Some(unrecovered) => unrecovered.load(Ordering::Relaxed),
+        None => live_queue_dropped_samples(app),
+    }
+}
+
+fn live_catching_up(app: &App) -> bool {
+    match app.live_transcription_status.load(Ordering::Acquire) {
+        crate::app::LIVE_TRANSCRIPTION_CATCHING_UP => true,
+        crate::app::LIVE_TRANSCRIPTION_WARMING => {
+            app.live_unrecovered_frames.is_some() && live_queue_dropped_samples(app) > 0
+        }
+        _ => false,
+    }
 }
 
 fn watermark_hint(available_width: u16, status_width: usize) -> Option<&'static str> {
@@ -404,14 +425,15 @@ fn event_loop(
         clear_system_audio_warning_after_recovery(&mut app.message, frame_count, silent_samples);
 
         update_no_audio_guard(app, &mut spool_progress, capture_started_at.elapsed());
-        if !live_drop_warned && live_dropped_samples(app) >= LIVE_DROP_WARNING_SAMPLES {
+        if !live_drop_warned && live_queue_dropped_samples(app) >= LIVE_DROP_WARNING_SAMPLES {
             live_drop_warned = true;
             crate::cli_log::event(
                 "live_audio_dropped",
                 format!(
-                    "mic_samples={} system_samples={} live_transcript_incomplete=true",
+                    "mic_samples={} system_samples={} durable_catch_up={}",
                     app.live_mic_dropped_samples.load(Ordering::Relaxed),
                     app.live_system_dropped_samples.load(Ordering::Relaxed),
+                    app.live_unrecovered_frames.is_some(),
                 ),
             );
             if app.live_transcription_status.load(Ordering::Acquire)
@@ -760,6 +782,8 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
     detail = format!("input: {} | {detail}", app.current_mic_name);
     if live_dropped_samples(app) >= LIVE_DROP_WARNING_SAMPLES {
         detail = format!("LIVE DROPS; run margins process | {detail}");
+    } else if live_catching_up(app) {
+        detail = format!("{LIVE_CATCHING_UP_NOTICE} | {detail}");
     }
 
     // The terminal clips only the trailing detail when a notice is long.
@@ -1170,6 +1194,38 @@ mod tests {
             assert!(status.contains("mic █"), "{width}: {status}");
             assert!(status.contains("spk ░░░░░░░░"), "{width}: {status}");
             assert!(status.contains("LIVE DROPS"), "{width}: {status}");
+        }
+    }
+
+    #[test]
+    fn recoverable_live_drops_show_catch_up_instead_of_incomplete_warning() {
+        for width in [80, 120] {
+            let mut app = App::new("meeting.md".into(), chrono::Local::now(), "Yeti".into());
+            let unrecovered = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            app.live_unrecovered_frames = Some(unrecovered.clone());
+            app.live_mic_dropped_samples
+                .store(48_000, Ordering::Release);
+            app.live_transcription_status
+                .store(crate::app::LIVE_TRANSCRIPTION_WARMING, Ordering::Release);
+            let status = rendered_status(&mut app, width);
+            assert!(status.contains("catching up"), "{width}: {status}");
+            assert!(!status.contains("LIVE DROPS"), "{width}: {status}");
+            assert!(status.contains("mic █"), "{width}: {status}");
+
+            app.live_transcription_status.store(
+                crate::app::LIVE_TRANSCRIPTION_CATCHING_UP,
+                Ordering::Release,
+            );
+            assert!(rendered_status(&mut app, width).contains("catching up"));
+
+            app.live_transcription_status
+                .store(crate::app::LIVE_TRANSCRIPTION_READY, Ordering::Release);
+            let status = rendered_status(&mut app, width);
+            assert!(!status.contains("catching up"), "{width}: {status}");
+            assert!(!status.contains("LIVE DROPS"), "{width}: {status}");
+
+            unrecovered.store(1, Ordering::Release);
+            assert!(rendered_status(&mut app, width).contains("LIVE DROPS"));
         }
     }
 

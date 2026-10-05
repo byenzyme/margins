@@ -462,6 +462,111 @@ impl RuntimeStreamWorker {
     }
 }
 
+/// Reads a local session's durable 16 kHz runtime audio for the live worker.
+/// Opens no writer connection and creates nothing; a session that does not
+/// exist yet simply has no durable audio.
+#[cfg(any(test, feature = "audio-capture"))]
+pub struct RuntimeLiveAudioReader {
+    storage: SqliteMeetingRuntimeStorage,
+    session_id: SessionId,
+    cursors: BTreeMap<(i64, &'static str), DurableLaneCursor>,
+}
+
+/// Sequential position in one segment lane. Chunk lengths vary, so frame
+/// positions are found by walking sequences; one decoded chunk is cached.
+#[cfg(any(test, feature = "audio-capture"))]
+#[derive(Default)]
+struct DurableLaneCursor {
+    next_sequence: u64,
+    next_start_frame: u64,
+    cached: Option<(u64, Vec<f32>)>,
+}
+
+#[cfg(any(test, feature = "audio-capture"))]
+impl RuntimeLiveAudioReader {
+    pub fn new(margins_dir: &Path, session: &str) -> Self {
+        Self {
+            storage: SqliteMeetingRuntimeStorage::open_read_only(margins_dir),
+            session_id: SessionId::from(session.to_owned()),
+            cursors: BTreeMap::new(),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "audio-capture"))]
+impl crate::live_asr::DurableLiveAudio for RuntimeLiveAudioReader {
+    fn segment_start_ms(&mut self, ordinal: i64) -> Result<Option<u64>> {
+        let segment = segment_id(self.session_id.as_ref(), ordinal);
+        for lane in ["mic", "system"] {
+            if let Some(chunk) =
+                self.storage
+                    .load_audio_chunk(&self.session_id, &segment, &lane.into(), 0)?
+            {
+                return Ok(Some(chunk.starts_at_ms.0));
+            }
+        }
+        Ok(None)
+    }
+
+    fn read(
+        &mut self,
+        ordinal: i64,
+        channel: crate::recorder::LiveAudioChannel,
+        from_frame: u64,
+        max_frames: usize,
+    ) -> Result<Vec<f32>> {
+        let lane = match channel {
+            crate::recorder::LiveAudioChannel::Mic => "mic",
+            crate::recorder::LiveAudioChannel::System => "system",
+        };
+        let segment = segment_id(self.session_id.as_ref(), ordinal);
+        let cursor = self.cursors.entry((ordinal, lane)).or_default();
+        let window_start = cursor
+            .cached
+            .as_ref()
+            .map_or(cursor.next_start_frame, |(start, _)| *start);
+        if from_frame < window_start {
+            *cursor = DurableLaneCursor::default();
+        }
+        let mut out = Vec::new();
+        while out.len() < max_frames {
+            let position = from_frame + out.len() as u64;
+            if let Some((start, samples)) = &cursor.cached {
+                let end = start + samples.len() as u64;
+                if position >= *start && position < end {
+                    let offset = (position - start) as usize;
+                    let take = (samples.len() - offset).min(max_frames - out.len());
+                    out.extend_from_slice(&samples[offset..offset + take]);
+                    continue;
+                }
+            }
+            let Some(chunk) = self.storage.load_audio_chunk(
+                &self.session_id,
+                &segment,
+                &lane.into(),
+                cursor.next_sequence,
+            )?
+            else {
+                break;
+            };
+            anyhow::ensure!(
+                chunk.payload.len() % 2 == 0,
+                "durable PCM chunk has a partial sample"
+            );
+            let samples = chunk
+                .payload
+                .chunks_exact(2)
+                .map(|bytes| f32::from(i16::from_le_bytes([bytes[0], bytes[1]])) / 32_767.0)
+                .collect::<Vec<_>>();
+            let start = cursor.next_start_frame;
+            cursor.next_sequence += 1;
+            cursor.next_start_frame += samples.len() as u64;
+            cursor.cached = Some((start, samples));
+        }
+        Ok(out)
+    }
+}
+
 impl LocalMeetingProducer {
     pub fn reserve(
         margins_dir: &Path,
