@@ -34633,9 +34633,17 @@ var ProjectMarginsTransport = class {
         },
         body: Buffer.from(bytesBase64, "base64")
       });
-      if (!response.ok) throw new Error(`audio upload failed (${response.status})`);
-      const value = await response.json();
-      if (!value.ok) throw new Error(value.error || "audio upload failed");
+      const value = await response.json().catch(() => null);
+      if (!response.ok || !value?.ok) {
+        const structured = typeof value?.error === "object" ? value.error : void 0;
+        const detail = typeof value?.error === "string" ? value.error : structured?.message;
+        const permanent = response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429;
+        return { ok: false, error: hostError(
+          structured?.code || "audio_upload_failed",
+          detail ? `audio upload failed (${response.status}): ${detail}` : `audio upload failed (${response.status})`,
+          !permanent
+        ) };
+      }
       return { ok: true };
     } catch (cause) {
       return { ok: false, error: hostError("audio_upload_failed", cause instanceof Error ? cause.message : String(cause)) };

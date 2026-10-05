@@ -82,4 +82,38 @@ describe("browser chunk store", () => {
     expect(await reloaded.pending("abandoned")).toEqual([]);
     expect((await reloaded.pending("fresh")).map((chunk) => text(chunk.bytes))).toEqual(["c"]);
   });
+
+  it("budgets per recording so another tab's entries do not shrink this one", async () => {
+    const factory = new IDBFactory();
+    await new BrowserChunkStore(() => factory, { maxBytes: 8 }).persist("other-tab", 0, new Blob(["1234567"]), timing(0));
+    const store = new BrowserChunkStore(() => factory, { maxBytes: 8 });
+    expect(await store.persist("rec-1", 0, new Blob(["1234567"]), timing(0))).toBe(true);
+    expect(await store.persist("rec-1", 1, new Blob(["89"]), timing(1))).toBe(false);
+  });
+
+  it("looks up and forgets entries by key without listing audio", async () => {
+    const store = new BrowserChunkStore(() => new IDBFactory());
+    for (const sequence of [1, 2, 3, 5]) await store.persist("rec-1", sequence, new Blob([`c${sequence}`]), timing(sequence));
+    expect(await store.has("rec-1", 2)).toBe(true);
+    expect(await store.has("rec-1", 4)).toBe(false);
+    expect(text((await store.get("rec-1", 3))!.bytes)).toBe("c3");
+    expect(await store.get("rec-1", 4)).toBeNull();
+    await store.forgetBelow("rec-1", 3);
+    expect(await store.sequences("rec-1")).toEqual([3, 5]);
+  });
+
+  it("falls back to memory-only instead of failing silently after another page upgrades the schema", async () => {
+    const factory = new IDBFactory();
+    const store = new BrowserChunkStore(() => factory);
+    expect(await store.persist("rec-1", 0, new Blob(["a"]), timing(0))).toBe(true);
+    // A newer page version bumps the schema; this page must not hang or
+    // silently lose writes against a closed connection.
+    await new Promise<void>((resolve, reject) => {
+      const request = factory.open("margins.bb.browser-chunks", 2);
+      request.onsuccess = () => { request.result.close(); resolve(); };
+      request.onerror = () => reject(request.error);
+    });
+    expect(await store.persist("rec-1", 1, new Blob(["b"]), timing(1))).toBe(false);
+    expect(await store.sequences("rec-1")).toEqual([]);
+  });
 });

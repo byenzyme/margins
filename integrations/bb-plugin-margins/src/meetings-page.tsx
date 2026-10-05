@@ -610,6 +610,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
       await saveMemo();
       const result = await rpc.call("discardWorkspaceMeeting", { projectId, sessionId: selectedId });
       if (!result.ok) throw new Error(result.error.message);
+      browserCaptureOwner.discardRetainedAudio(selectedId);
       openedMeetings.delete(`${projectId}/${selectedId}`);
       openedSummaries.delete(`${projectId}/${selectedId}`);
       setMoreOpen(false);

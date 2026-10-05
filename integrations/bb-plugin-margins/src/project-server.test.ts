@@ -166,6 +166,27 @@ describe("ProjectServerManager remote adapter", () => {
       ["https://margins.example.test/v1/workspaces/practice/sessions/meeting-1", "DELETE"],
     ]);
   });
+  it("marks a chunk the server refused as non-retryable and transport failures as retryable", async () => {
+    const manager = { ensure: vi.fn(async () => ({ baseUrl: "http://127.0.0.1:8787", token: "service-token",
+      workspaceId: "practice", instanceId: "instance-1" })) } as unknown as ProjectServerManager;
+    const responses = [
+      new Response(JSON.stringify({ ok: false, error: { code: "browser_chunk_conflict", retryable: false,
+        message: "Browser audio sequence is already durable with different content" } }), { status: 409 }),
+      new Response(JSON.stringify({ ok: false, error: { code: "browser_chunk_gap", retryable: true,
+        message: "Missing browser audio sequence 0; retry the chunk before Stop." } }), { status: 409 }),
+      new Response("upstream down", { status: 503 }),
+    ];
+    vi.stubGlobal("fetch", vi.fn(async () => responses.shift()!));
+    const transport = new ProjectMarginsTransport(manager);
+    const target = { projectId: "project", projectRoot: "/tmp/project", hostId: "host", workspaceId: "practice" };
+    const upload = () => transport.upload(target, "/tmp/data", "recording", "owner", 2, "YQ==", 8_000, 9_000);
+    await expect(upload()).resolves.toEqual({ ok: false, error: { code: "browser_chunk_conflict", retryable: false,
+      message: "audio upload failed (409): Browser audio sequence is already durable with different content" } });
+    // A chunk below a closed boundary can never land, whatever the code says.
+    await expect(upload()).resolves.toMatchObject({ ok: false, error: { code: "browser_chunk_gap", retryable: false } });
+    await expect(upload()).resolves.toEqual({ ok: false, error: { code: "audio_upload_failed", retryable: true,
+      message: "audio upload failed (503)" } });
+  });
   it("forwards capture upload through the selected Workspace service only", async () => {
     const manager = { ensure: vi.fn(async () => ({ baseUrl: "http://127.0.0.1:8787", token: "service-token",
       workspaceId: "practice", instanceId: "instance-1" })) } as unknown as ProjectServerManager;

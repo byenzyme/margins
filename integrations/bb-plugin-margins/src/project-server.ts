@@ -725,9 +725,17 @@ export class ProjectMarginsTransport {
         },
         body: Buffer.from(bytesBase64, "base64"),
       });
-      if (!response.ok) throw new Error(`audio upload failed (${response.status})`);
-      const value = await response.json() as { ok: boolean; error?: string };
-      if (!value.ok) throw new Error(value.error || "audio upload failed");
+      const value = await response.json().catch(() => null) as { ok?: boolean; error?: string | { code?: string; message?: string } } | null;
+      if (!response.ok || !value?.ok) {
+        const structured = typeof value?.error === "object" ? value.error : undefined;
+        const detail = typeof value?.error === "string" ? value.error : structured?.message;
+        // A 4xx is the server's verdict on this exact chunk (conflict, declared
+        // gap, closed segment, expired lease): resending it can never succeed.
+        // Transport failures and 5xx stay retryable.
+        const permanent = response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429;
+        return { ok: false as const, error: hostError(structured?.code || "audio_upload_failed",
+          detail ? `audio upload failed (${response.status}): ${detail}` : `audio upload failed (${response.status})`, !permanent) };
+      }
       return { ok: true as const };
     } catch (cause) {
       return { ok: false as const, error: hostError("audio_upload_failed", cause instanceof Error ? cause.message : String(cause)) };

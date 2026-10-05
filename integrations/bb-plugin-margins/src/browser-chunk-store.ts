@@ -3,16 +3,21 @@ import type { WebChunkTiming } from "../../../desktop/src/lib/web-durable-upload
 const DB_NAME = "margins.bb.browser-chunks";
 const DB_VERSION = 1;
 const STORE = "chunks";
+/** [storedAtMs, size] lets the sweep and budget accounting walk keys only,
+ * without reading retained audio into memory. */
+const META_INDEX = "meta";
 
-/** Same ceiling as the in-memory upload queue. Past it a chunk stays
- * memory-only, exactly as before persistence existed: it still uploads
- * normally, but a reload before its acknowledgement loses it and the server
- * records that sequence as a gap. */
+/** Per recording, the same ceiling as the in-memory upload queue. Past it a
+ * chunk stays memory-only, exactly as before persistence existed: it still
+ * uploads normally, but a reload before its acknowledgement loses it and the
+ * server records that sequence as a gap. */
 export const PERSISTED_CHUNK_BUDGET_BYTES = 64 * 1024 * 1024;
-/** The server's owner lease is 30 minutes; after it expires the session is
- * finished as incomplete and retained bytes can no longer be appended. Keep a
- * wide margin so a long pause plus a slow reload is never swept early. */
-export const PERSISTED_CHUNK_MAX_AGE_MS = 6 * 60 * 60 * 1_000;
+/** A chunk only needs to outlive its acknowledgement. Once the server's
+ * 30-minute owner lease lapses the session is finished as incomplete and no
+ * longer accepts audio, so anything older than the lease plus two hours (for
+ * clock skew and a Stop left pending in a background tab) is raw audio kept
+ * for nothing. */
+export const PERSISTED_CHUNK_MAX_AGE_MS = (30 + 120) * 60 * 1_000;
 const OPEN_DEADLINE_MS = 3_000;
 
 export interface PersistedChunk {
@@ -49,7 +54,6 @@ function sessionRange(sessionId: string) {
   return IDBKeyRange.bound([sessionId, 0], [sessionId, Number.MAX_SAFE_INTEGER]);
 }
 
-function sizeKey(sessionId: string, sequence: number) { return `${sessionId}\u0000${sequence}`; }
 
 function isPersistedChunk(value: unknown): value is PersistedChunk {
   const chunk = value as Partial<PersistedChunk> | null;
@@ -67,10 +71,9 @@ function isPersistedChunk(value: unknown): value is PersistedChunk {
 export class BrowserChunkStore {
   private database: Promise<IDBDatabase | null> | null = null;
   private tail: Promise<unknown> = Promise.resolve();
-  // Approximate per-page accounting; another tab on the same origin can
-  // briefly exceed the budget until its own acknowledgements delete entries.
-  private readonly sizes = new Map<string, number>();
-  private usedBytes = 0;
+  // Bytes per recording. Each tab records one recording, so another tab's
+  // entries never shrink this page's budget; the age sweep bounds the rest.
+  private readonly sizes = new Map<string, Map<number, number>>();
   private readonly degraded = new Set<string>();
   private readonly maxBytes: number;
   private readonly maxAgeMs: number;
@@ -93,11 +96,11 @@ export class BrowserChunkStore {
   persist(sessionId: string, sequence: number, chunk: Blob, timing: WebChunkTiming): Promise<boolean> {
     return this.run(false, async (db) => {
       if (this.degraded.has(sessionId)) return false;
-      if (this.usedBytes + chunk.size > this.maxBytes) return false;
+      if (this.usedBytes(sessionId) + chunk.size > this.maxBytes) return false;
       try {
         const bytes = await chunk.arrayBuffer();
         const transaction = db.transaction(STORE, "readwrite");
-        const entry: PersistedChunk = { sessionId, sequence, bytes, timing: { ...timing }, storedAtMs: this.now() };
+        const entry = { sessionId, sequence, bytes, timing: { ...timing }, storedAtMs: this.now(), size: bytes.byteLength };
         transaction.objectStore(STORE).put(entry);
         await transactionDone(transaction);
         this.track(sessionId, sequence, bytes.byteLength);
@@ -114,8 +117,52 @@ export class BrowserChunkStore {
       const transaction = db.transaction(STORE, "readwrite");
       transaction.objectStore(STORE).delete([sessionId, sequence]);
       await transactionDone(transaction);
-      this.untrack(sizeKey(sessionId, sequence));
+      this.sizes.get(sessionId)?.delete(sequence);
     });
+  }
+
+  /** Drop entries the server has settled: after a segment rotation every
+   * sequence below its boundary is either durable or declared missing. */
+  forgetBelow(sessionId: string, boundary: number): Promise<void> {
+    return this.run(undefined, async (db) => {
+      if (boundary <= 0) return;
+      const transaction = db.transaction(STORE, "readwrite");
+      transaction.objectStore(STORE).delete(IDBKeyRange.bound([sessionId, 0], [sessionId, boundary], false, true));
+      await transactionDone(transaction);
+      const sizes = this.sizes.get(sessionId);
+      for (const sequence of [...sizes?.keys() ?? []]) if (sequence < boundary) sizes!.delete(sequence);
+    });
+  }
+
+  /** Retained sequences for one recording, ascending, without reading audio. */
+  sequences(sessionId: string): Promise<number[]> {
+    return this.run([], async (db) => {
+      const transaction = db.transaction(STORE, "readonly");
+      const keys = await requestResult(transaction.objectStore(STORE).getAllKeys(sessionRange(sessionId)));
+      return keys.map((key) => (key as [string, number])[1]).filter(Number.isSafeInteger);
+    });
+  }
+
+  /** One retained chunk by key, without reading any other audio. */
+  get(sessionId: string, sequence: number): Promise<PersistedChunk | null> {
+    return this.run(null, async (db) => {
+      const transaction = db.transaction(STORE, "readonly");
+      const value = await requestResult(transaction.objectStore(STORE).get([sessionId, sequence]));
+      return isPersistedChunk(value) ? value : null;
+    });
+  }
+
+  has(sessionId: string, sequence: number): Promise<boolean> {
+    return this.run(false, async (db) => {
+      const transaction = db.transaction(STORE, "readonly");
+      return await requestResult(transaction.objectStore(STORE).count([sessionId, sequence])) > 0;
+    });
+  }
+
+  /** Remove abandoned entries. Runs on every plugin page load, not only when
+   * a recording starts, so closed tabs do not keep raw audio around. */
+  sweep(): Promise<void> {
+    return this.run(undefined, (db) => this.sweepDatabase(db));
   }
 
   /** Unacknowledged chunks for one recording in ascending sequence order. */
@@ -134,23 +181,20 @@ export class BrowserChunkStore {
       const transaction = db.transaction(STORE, "readwrite");
       transaction.objectStore(STORE).delete(sessionRange(sessionId));
       await transactionDone(transaction);
-      const prefix = sizeKey(sessionId, 0).slice(0, -1);
-      for (const key of [...this.sizes.keys()]) if (key.startsWith(prefix)) this.untrack(key);
+      this.sizes.delete(sessionId);
     });
   }
 
-  private track(sessionId: string, sequence: number, size: number) {
-    const key = sizeKey(sessionId, sequence);
-    this.untrack(key);
-    this.sizes.set(key, size);
-    this.usedBytes += size;
+  private usedBytes(sessionId: string) {
+    let total = 0;
+    for (const size of this.sizes.get(sessionId)?.values() ?? []) total += size;
+    return total;
   }
 
-  private untrack(key: string) {
-    const prior = this.sizes.get(key);
-    if (prior === undefined) return;
-    this.sizes.delete(key);
-    this.usedBytes -= prior;
+  private track(sessionId: string, sequence: number, size: number) {
+    let sizes = this.sizes.get(sessionId);
+    if (!sizes) this.sizes.set(sessionId, sizes = new Map());
+    sizes.set(sequence, size);
   }
 
   private run<T>(fallback: T, operation: (db: IDBDatabase) => Promise<T>): Promise<T> {
@@ -166,10 +210,17 @@ export class BrowserChunkStore {
 
   private open(): Promise<IDBDatabase | null> {
     this.database ??= this.openDatabase().then(async (db) => {
-      if (db) await this.sweep(db).catch(() => undefined);
+      if (db) await this.sweepDatabase(db).catch(() => undefined);
       return db;
     });
     return this.database;
+  }
+
+  /** A newer page version or the browser closed the connection; reopen on
+   * the next operation instead of failing every later write silently. */
+  private closed(db: IDBDatabase) {
+    db.close();
+    void this.database?.then((current) => { if (current === db) this.database = null; });
   }
 
   private openDatabase(): Promise<IDBDatabase | null> {
@@ -188,13 +239,15 @@ export class BrowserChunkStore {
         if (!factory) { finish(null); return; }
         const request = factory.open(DB_NAME, DB_VERSION);
         request.onupgradeneeded = () => {
-          if (!request.result.objectStoreNames.contains(STORE)) {
-            request.result.createObjectStore(STORE, { keyPath: ["sessionId", "sequence"] });
-          }
+          const store = request.result.objectStoreNames.contains(STORE)
+            ? request.transaction!.objectStore(STORE)
+            : request.result.createObjectStore(STORE, { keyPath: ["sessionId", "sequence"] });
+          if (!store.indexNames.contains(META_INDEX)) store.createIndex(META_INDEX, ["storedAtMs", "size"]);
         };
         request.onsuccess = () => {
           const db = request.result;
-          db.onversionchange = () => db.close();
+          db.onversionchange = () => this.closed(db);
+          db.onclose = () => this.closed(db);
           finish(db);
         };
         request.onerror = () => finish(null);
@@ -206,19 +259,28 @@ export class BrowserChunkStore {
     });
   }
 
-  /** Delete abandoned entries and rebuild the byte accounting. */
-  private async sweep(db: IDBDatabase) {
+  /** Delete abandoned entries and rebuild the byte accounting from keys. */
+  private async sweepDatabase(db: IDBDatabase) {
     const cutoff = this.now() - this.maxAgeMs;
     const transaction = db.transaction(STORE, "readwrite");
-    const cursorRequest = transaction.objectStore(STORE).openCursor();
+    const store = transaction.objectStore(STORE);
+    const sizes = new Map<string, Map<number, number>>();
+    const cursorRequest = store.index(META_INDEX).openKeyCursor();
     cursorRequest.onsuccess = () => {
       const cursor = cursorRequest.result;
       if (!cursor) return;
-      const value = cursor.value as unknown;
-      if (!isPersistedChunk(value) || value.storedAtMs < cutoff) cursor.delete();
-      else this.track(value.sessionId, value.sequence, value.bytes.byteLength);
+      const [storedAtMs, size] = cursor.key as [number, number];
+      const [sessionId, sequence] = cursor.primaryKey as [string, number];
+      if (storedAtMs < cutoff) store.delete(cursor.primaryKey);
+      else {
+        let session = sizes.get(sessionId);
+        if (!session) sizes.set(sessionId, session = new Map());
+        session.set(sequence, size);
+      }
       cursor.continue();
     };
     await transactionDone(transaction);
+    this.sizes.clear();
+    for (const [sessionId, session] of sizes) this.sizes.set(sessionId, session);
   }
 }
