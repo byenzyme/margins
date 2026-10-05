@@ -52,6 +52,9 @@ jobs:
           host-arch: ${{ matrix.host_arch }}
           features: ${{ matrix.features }}
           version: ${{ steps.version.outputs.version }}
+          # Runs on main: a saved cache would hold private enzyme-rust source
+          # restorable by any run, including fork pull requests. Never cache.
+          cache: "false"
           enzyme-rust-read-token: ${{ secrets.ENZYME_RUST_READ_TOKEN }}
           google-oauth-client-json: ${{ secrets.MARGINS_GOOGLE_OAUTH_CLIENT_JSON }}
           apple-certificate-base64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}

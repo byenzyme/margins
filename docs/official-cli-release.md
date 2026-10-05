@@ -31,10 +31,22 @@ Each native runner creates its archive, extracts it, and executes that exact
 packaged binary's `__release-smoke` contract. A separate publish job verifies
 that both archives and checksums are present, then creates the release in
 `byenzyme/margins` and updates `byenzyme/homebrew-margins`. Build jobs receive
-no publishing credential. The validate, build and publish jobs all run in the
+no publishing credential. The build and publish jobs run in the
 `official-cli-release` GitHub Environment, which holds every release secret
 (see below). The build steps live in the composite action
 `.github/actions/build-official-cli`, shared with the no-publish dry run.
+
+The Rust cache in that action contains private `enzyme-rust` source and build
+artifacts. Only a tag-push release run saves it, because tag-scoped caches are
+unreadable from other refs, and it uses a distinct `v0-official-private` key
+prefix. A cache saved on `main` would be restorable by any run, including fork
+pull requests in `public-ci.yml`. So a `workflow_dispatch` of `cli-release.yml`
+and the dry run never restore or save a cache.
+
+Re-dispatching `cli-release.yml` for a tag created before the
+environment-secrets change (v0.4.15 and earlier) does not work. The workflow
+checks out the tag, and those tags do not contain
+`.github/actions/build-official-cli`. Cut a new patch tag instead.
 
 The publish job uploads archives to the release for that same public source
 tag. It does not transform, rsync, commit, or tag a second source tree. Tags
@@ -79,8 +91,9 @@ Release in this order:
 
 All release secrets are **environment secrets on the `official-cli-release`
 GitHub Environment** of `byenzyme/margins`, not repository secrets. Only jobs
-that declare `environment: official-cli-release` can read them: `validate`,
-`build` and `publish` in `cli-release.yml`, `bump` in `version-bump.yml`, and
+that declare `environment: official-cli-release` can read them: `build` and
+`publish` in `cli-release.yml` (`validate` reads no secrets and stays outside
+the environment), `bump` in `version-bump.yml`, and
 `build` in `cli-release-validation.yml`.
 
 | Secret | Used by | Purpose |
@@ -106,7 +119,7 @@ Environment and tag policy:
   update or delete `v*` tags. GitHub Actions cannot be exempted, which is why
   the Version Bump workflow prints tag commands instead of tagging.
 - If required reviewers are configured on the environment, every job that
-  declares it (including `validate` and `build`) waits for approval; approve
+  declares it (including `build`) waits for approval; approve
   `publish` only after the real-Mac verification below.
 - Prefer short-lived GitHub App tokens where available.
 

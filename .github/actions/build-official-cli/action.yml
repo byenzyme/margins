@@ -17,6 +17,13 @@ inputs:
   version:
     description: Package version used in the archive name
     required: true
+  cache:
+    description: >-
+      "true" to restore and save the Rust cache. The cache contains the private
+      enzyme-rust source and artifacts, so pass "true" only from a tag ref:
+      tag-scoped caches are unreadable from other refs, while a cache saved on
+      main is restorable by any run, including fork pull requests.
+    required: true
   enzyme-rust-read-token:
     description: ENZYME_RUST_READ_TOKEN secret (read-only Contents on byenzyme/enzyme-rust)
     required: true
@@ -56,7 +63,11 @@ runs:
       with:
         targets: ${{ inputs.target }}
 
-    - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+    - if: inputs.cache == 'true'
+      uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      with:
+        # Distinct prefix so public-ci.yml's restore keys can never match.
+        prefix-key: v0-official-private
 
     - name: Assert native runner architecture
       shell: bash
