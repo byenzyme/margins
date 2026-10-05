@@ -49,6 +49,9 @@ struct CaptureStatus {
     opened_mic_name: Option<String>,
     local_audio_paths: Vec<String>,
     unsent_audio_path: Option<String>,
+    /// Stop arrived for this capture. Checked before the devices open, so a
+    /// Stop sent during the permission step records nothing.
+    stop_requested: bool,
     completed: Counters,
     live: LiveCounters,
 }
@@ -658,6 +661,11 @@ fn handle_stream(mut stream: TcpStream, bridge: &mut Bridge) -> Result<()> {
                             .context("microphone permission request did not complete")
                             .and_then(|result| result.map_err(anyhow::Error::msg))
                             .and_then(|()| {
+                                if bridge_status.lock().unwrap().stop_requested {
+                                    // Later Stops are queued and handled once
+                                    // the devices are open.
+                                    return Ok(false);
+                                }
                                 super::run_remote_native_capture(
                                     &remote,
                                     &workspace,
@@ -668,11 +676,14 @@ fn handle_stream(mut stream: TcpStream, bridge: &mut Bridge) -> Result<()> {
                                     prepared_connection,
                                     true,
                                 )
+                                .map(|()| true)
                             });
                         let mut state = bridge_status.lock().unwrap();
                         state.opened_mic_name = None;
                         match result {
-                            Ok(()) => state.state = "saved",
+                            Ok(true) => state.state = "saved",
+                            // Stopped before anything was recorded.
+                            Ok(false) => state.state = "ready",
                             Err(error) => {
                                 state.state = "needs_attention";
                                 state.error = Some(match &state.unsent_audio_path {
@@ -690,10 +701,12 @@ fn handle_stream(mut stream: TcpStream, bridge: &mut Bridge) -> Result<()> {
         ("POST", "/v1/pause") => control(bridge, "recording", CaptureAction::Pause),
         ("POST", "/v1/resume") => control(bridge, "paused", CaptureAction::Resume),
         ("POST", "/v1/stop") => {
-            let state = bridge.status.lock().unwrap().state;
-            if !matches!(state, "recording" | "paused" | "getting_ready") {
+            let mut status = bridge.status.lock().unwrap();
+            if !matches!(status.state, "recording" | "paused" | "getting_ready") {
                 (409, json!({"error":"capture_not_active"}))
             } else {
+                status.stop_requested = true;
+                drop(status);
                 control_unchecked(bridge, CaptureAction::Stop)
             }
         }
@@ -1179,6 +1192,44 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("capture worker did not publish the permission error");
+    }
+
+    #[test]
+    fn stop_during_the_permission_step_records_nothing() {
+        let mut bridge = bridge();
+        bridge.token = Some("paired-token".into());
+        let (permission_request, permission_receiver) = mpsc::channel();
+        bridge.permission_request = permission_request;
+        let request = |method: &str, path: &str, body: &str| {
+            format!(
+                "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:18765\r\nOrigin: https://example.test\r\nAuthorization: Bearer paired-token\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+        };
+        assert!(
+            exchange(&mut bridge, &request("POST", "/v1/start", "{}")).starts_with("HTTP/1.1 202")
+        );
+        let reply = permission_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        // Stop while macOS still shows the permission alert.
+        assert!(
+            exchange(&mut bridge, &request("POST", "/v1/stop", "{}")).starts_with("HTTP/1.1 202")
+        );
+        reply.send(Ok(())).unwrap();
+        for _ in 0..200 {
+            let status = exchange(&mut bridge, &request("GET", "/v1/status", ""));
+            // Opening devices or reserving against this fake remote would
+            // fail and report needs_attention instead.
+            if status.contains("\"state\":\"ready\"") {
+                assert!(status.contains("\"sessionId\":null"));
+                assert!(status.contains("\"error\":null"));
+                return;
+            }
+            assert!(!status.contains("needs_attention"), "{status}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("Stop during the permission step did not cancel the start");
     }
 
     #[test]

@@ -164,19 +164,39 @@
         (spool, worker.join().unwrap())
     }
 
+    /// Wait for a handshake from another thread. The deadline only bounds a
+    /// broken implementation; passing never depends on how fast a host is.
+    fn wait_for(what: &str, mut ready: impl FnMut() -> Option<String>) -> Result<()> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            match ready() {
+                None => return Ok(()),
+                Some(state) if std::time::Instant::now() >= deadline => {
+                    bail!("timed out waiting for {what} ({state})")
+                }
+                Some(_) => std::thread::sleep(std::time::Duration::from_millis(2)),
+            }
+        }
+    }
+
     #[test]
     fn remote_start_opens_devices_before_reserving_and_uploads_audio_captured_meanwhile() {
         let unsent = tempfile::tempdir().unwrap();
         let reported = Mutex::new(Vec::new());
         let devices = FakeDevices::new();
-        let start = std::time::Instant::now();
-        let reserve_started = Mutex::new(None);
+        let emitted_when_reserving = Mutex::new(None);
         let (mut preopened, setup, early) = start_remote_capture(
             || Ok(fake_preopened(open_fake_segment(&devices)?, unsent.path(), &reported)),
             || {
-                *reserve_started.lock().unwrap() = Some(std::time::Instant::now());
-                // Fake relay: the session reservation takes 300 ms.
-                std::thread::sleep(std::time::Duration::from_millis(300));
+                // The relay replies only once audio has been captured while
+                // the reservation is in flight. Reserving before opening the
+                // devices would never see a sample and time out.
+                *emitted_when_reserving.lock().unwrap() =
+                    Some(devices.emitted.load(Ordering::SeqCst));
+                wait_for("audio captured during the reservation", || {
+                    let emitted = devices.emitted.load(Ordering::SeqCst);
+                    (emitted < 5).then(|| format!("{emitted} chunks captured"))
+                })?;
                 Ok("session")
             },
             |timeout| {
@@ -188,26 +208,26 @@
         .unwrap();
         assert_eq!(setup.unwrap(), "session");
         assert_eq!(early, None);
-        let first_sample = devices.first_sample.lock().unwrap().unwrap();
-        let reserve_started = reserve_started.lock().unwrap().unwrap();
-        // Reserving first would put the first sample 300 ms after Start.
         assert!(
-            first_sample.duration_since(start) < std::time::Duration::from_millis(100),
-            "first captured sample arrived {:?} after Start",
-            first_sample.duration_since(start)
+            devices.first_sample.lock().unwrap().is_some(),
+            "devices captured before the session existed"
         );
-        assert!(first_sample <= reserve_started + std::time::Duration::from_millis(20));
-        assert!(devices.emitted.load(Ordering::SeqCst) >= 20, "audio flowed during reservation");
+        let emitted_when_reserving = emitted_when_reserving.lock().unwrap().unwrap();
 
         let segment = preopened.segment.take().unwrap();
         let queued = segment.sink.queued_samples.clone();
         let (spool, (returned, result)) = finish_fake_segment(segment, unsent.path());
         result.unwrap();
         assert!(returned.is_some());
+        let emitted = devices.emitted.load(Ordering::SeqCst);
+        assert!(
+            emitted >= 5 && emitted >= emitted_when_reserving,
+            "captured {emitted} chunks ({emitted_when_reserving} when reserving began)"
+        );
         assert_eq!(
             *spool.appended.lock().unwrap(),
-            expected_interleaved(devices.emitted.load(Ordering::SeqCst)),
-            "both lanes from Start onward, interleaved in capture order"
+            expected_interleaved(emitted),
+            "both lanes from Start onward, interleaved in capture order ({emitted} chunks)"
         );
         assert_eq!(queued.load(Ordering::Relaxed), 0);
         drop(preopened);
@@ -218,16 +238,24 @@
         let unsent = tempfile::tempdir().unwrap();
         let reported = Mutex::new(Vec::new());
         let devices = FakeDevices::new();
-        let start = std::time::Instant::now();
-        let reserve_done = Mutex::new(None);
+        let reserve_saw_retirement = AtomicBool::new(false);
         let mut polls_after_control = 0;
         let mut sent = false;
         let (mut preopened, setup, early) = start_remote_capture(
             || Ok(fake_preopened(open_fake_segment(&devices)?, unsent.path(), &reported)),
             || {
-                // A stalled relay: reservation takes 600 ms.
-                std::thread::sleep(std::time::Duration::from_millis(600));
-                *reserve_done.lock().unwrap() = Some(std::time::Instant::now());
+                // A stalled relay: the reservation cannot finish until the
+                // control has already retired the devices. Queuing the control
+                // until after the reservation would time out here.
+                wait_for("the control to retire the devices", || {
+                    devices
+                        .retired_at
+                        .lock()
+                        .unwrap()
+                        .is_none()
+                        .then(|| format!("{} chunks captured", devices.emitted.load(Ordering::SeqCst)))
+                })?;
+                reserve_saw_retirement.store(true, Ordering::SeqCst);
                 Ok(())
             },
             |timeout| {
@@ -236,7 +264,8 @@
                     polls_after_control += 1;
                     return None;
                 }
-                (start.elapsed() >= std::time::Duration::from_millis(100)).then(|| {
+                // Send the control once some audio has been captured.
+                (devices.emitted.load(Ordering::SeqCst) >= 3).then(|| {
                     sent = true;
                     control
                 })
@@ -248,17 +277,11 @@
         )
         .unwrap();
         setup.unwrap();
+        assert!(reserve_saw_retirement.load(Ordering::SeqCst));
         assert_eq!(early, Some(control));
         assert_eq!(polls_after_control, 0, "later controls stay queued for the capture loop");
-        let retired_at = devices.retired_at.lock().unwrap().unwrap();
-        let reserve_done = reserve_done.lock().unwrap().unwrap();
-        assert!(
-            retired_at.duration_since(start) < std::time::Duration::from_millis(250),
-            "{control:?} took {:?} to stop the devices",
-            retired_at.duration_since(start)
-        );
-        assert!(retired_at < reserve_done, "devices stopped before the session existed");
         let emitted_at_retire = devices.emitted.load(Ordering::SeqCst);
+        assert!(emitted_at_retire >= 3, "captured {emitted_at_retire} chunks");
 
         let wav = preopened.unsent_wav.take().expect("early audio kept as a WAV");
         assert_eq!(
@@ -269,11 +292,15 @@
         assert!(segment.recorder.is_none());
         let (spool, (_, result)) = finish_fake_segment(segment, unsent.path());
         result.unwrap();
-        assert_eq!(devices.emitted.load(Ordering::SeqCst), emitted_at_retire);
+        assert_eq!(
+            devices.emitted.load(Ordering::SeqCst),
+            emitted_at_retire,
+            "devices stopped at {control:?}"
+        );
         assert_eq!(
             *spool.appended.lock().unwrap(),
             expected_interleaved(emitted_at_retire),
-            "what was captured before {control:?} reaches the session"
+            "what was captured before {control:?} reaches the session ({emitted_at_retire} chunks)"
         );
     }
 
@@ -296,7 +323,10 @@
         let (preopened, setup, _) = start_remote_capture(
             || Ok(fake_preopened(open_fake_segment(&devices)?, &unsent, &reported)),
             || -> Result<()> {
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                // Fail only once some audio exists to keep.
+                wait_for("audio captured before the failure", || {
+                    (devices.emitted.load(Ordering::SeqCst) == 0).then(|| "0 chunks".into())
+                })?;
                 bail!("capture relay rejected request (502 Bad Gateway)")
             },
             |timeout| {
@@ -306,7 +336,8 @@
             |_, _| {},
         )
         .unwrap();
-        assert!(setup.is_err());
+        let error = setup.unwrap_err();
+        assert!(error.to_string().contains("502"), "{error:#}");
         drop(preopened);
 
         let reported = reported.lock().unwrap().clone();
@@ -346,11 +377,11 @@
             }
         }
         // The recorder's bounded queue is debited while the session is pending.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while queued.load(Ordering::Relaxed) != 0 {
-            assert!(std::time::Instant::now() < deadline, "pending audio was not drained");
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        wait_for("pending audio to leave the recorder queue", || {
+            let queued = queued.load(Ordering::Relaxed);
+            (queued != 0).then(|| format!("{queued} samples queued"))
+        })
+        .unwrap();
         let spool = FakeRemoteSpool::default();
         handoff
             .send(RemoteSpoolHandoff {
@@ -405,6 +436,41 @@
         // Even a clock that undercounts cannot move a segment backwards.
         assert_eq!(remote_segment_offset_ms(0, 900, Some(1_000)), 1_000);
         assert_eq!(remote_segment_offset_ms(5_000, 200, None), 5_200);
+    }
+
+    #[test]
+    fn a_retried_start_reuses_only_a_recent_unfinished_reservation() {
+        use margins_workflows::remote_workspace::{
+            native_create_session_command_at, CaptureReservationIntentV1,
+            CaptureReservationRequestV1,
+        };
+        let start = 1_700_000_600_000u64;
+        let intent = |started_at: u64| CaptureReservationIntentV1 {
+            schema: "margins.capture-reservation.v1".into(),
+            transfer_id: "transfer".into(),
+            instance_id: "instance".into(),
+            remote_url: "https://example.test".into(),
+            workspace_id: "workspace".into(),
+            session_id: "session".into(),
+            request: CaptureReservationRequestV1::Create {
+                command: native_create_session_command_at(
+                    "session",
+                    "key",
+                    Some("Meeting".into()),
+                    "test",
+                    started_at,
+                ),
+            },
+        };
+        // A retry seconds later continues the same session.
+        assert!(remote_reservation_reusable(&intent(start - 30_000), start));
+        assert_eq!(remote_reservation_started_at_ms(&intent(start - 30_000)), Some(start - 30_000));
+        // Ten minutes later it would open with a ten-minute empty stretch.
+        assert!(!remote_reservation_reusable(&intent(start - 10 * 60_000), start));
+        assert!(remote_reservation_reusable(
+            &intent(start - REMOTE_RESERVATION_REUSE_MS),
+            start
+        ));
     }
 
     #[test]

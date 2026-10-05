@@ -316,6 +316,38 @@ fn run_remote_spool_worker<T: RemoteAudioSpool>(
     (target.map(|target| target.transfer), result)
 }
 
+/// A retried start reuses an unfinished reservation only this soon after it
+/// was made: the session is dated from the first attempt, so the gap between
+/// attempts becomes an empty stretch at the start of the recording.
+#[cfg(any(test, feature = "audio-capture"))]
+const REMOTE_RESERVATION_REUSE_MS: u64 = 2 * 60 * 1_000;
+
+#[cfg(any(test, feature = "audio-capture"))]
+fn remote_reservation_started_at_ms(
+    intent: &margins_workflows::remote_workspace::CaptureReservationIntentV1,
+) -> Option<u64> {
+    match &intent.request {
+        margins_workflows::remote_workspace::CaptureReservationRequestV1::Create { command } => {
+            match &command.body {
+                margins_meeting_protocol::ClientMessageBodyV1::CreateSession(create) => {
+                    Some(create.started_at_unix_ms.0)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+#[cfg(any(test, feature = "audio-capture"))]
+fn remote_reservation_reusable(
+    intent: &margins_workflows::remote_workspace::CaptureReservationIntentV1,
+    start_unix_ms: u64,
+) -> bool {
+    remote_reservation_started_at_ms(intent)
+        .is_some_and(|started| start_unix_ms.saturating_sub(started) <= REMOTE_RESERVATION_REUSE_MS)
+}
+
 /// A control the user sent before the remote session existed.
 #[cfg(any(test, feature = "audio-capture"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -566,6 +598,12 @@ impl<R: RemoteSegmentRecorder, T> PreopenedRemoteSegment<'_, R, T> {
 impl<R: RemoteSegmentRecorder, T> Drop for PreopenedRemoteSegment<'_, R, T> {
     fn drop(&mut self) {
         let Some(segment) = self.segment.take() else {
+            // The capture loop owns the devices; an early WAV still waiting
+            // for its transfer is reported if that never happened.
+            if let Some(path) = self.unsent_wav.take() {
+                crate::cli_log::event("remote_capture_aborted_before_upload", "audio=kept");
+                (self.report_unsent)(&path);
+            }
             return;
         };
         let OpenedRemoteSegment {
@@ -754,6 +792,19 @@ fn run_remote_native_capture(
                             && matches!(&intent.request, CaptureReservationRequestV1::Create { command }
                                 if matches!(&command.body, margins_meeting_protocol::ClientMessageBodyV1::CreateSession(create) if &create.title == title))
                     })
+                    .filter(|intent| {
+                        // An old attempt's session is dated from that attempt;
+                        // reusing it would open this recording with a long
+                        // empty stretch. Leave it on disk for inspection.
+                        let reusable = remote_reservation_reusable(intent, start_unix_ms);
+                        if !reusable {
+                            crate::cli_log::event(
+                                "remote_reservation_not_reused",
+                                format!("transfer={} reason=stale", intent.transfer_id),
+                            );
+                        }
+                        reusable
+                    })
                     .collect::<Vec<_>>();
                 if pending.len() > 1 {
                     bail!("multiple unfinished remote session reservations match this command; inspect the transfer directory before retrying");
@@ -796,15 +847,8 @@ fn run_remote_native_capture(
                 let session_id = intent.session_id.clone();
                 // A reused intent keeps the start time it was created with;
                 // place this audio where it falls on that session clock.
-                let anchor_offset_ms = match &intent.request {
-                    CaptureReservationRequestV1::Create { command } => match &command.body {
-                        margins_meeting_protocol::ClientMessageBodyV1::CreateSession(create) => {
-                            start_unix_ms.saturating_sub(create.started_at_unix_ms.0)
-                        }
-                        _ => 0,
-                    },
-                    _ => 0,
-                };
+                let anchor_offset_ms = remote_reservation_started_at_ms(&intent)
+                    .map_or(0, |started| start_unix_ms.saturating_sub(started));
                 reservation_intent = Some(intent);
                 (spool, session_id, anchor_offset_ms)
             }
@@ -1217,7 +1261,9 @@ fn run_remote_native_capture(
         let segment_id = format!("native-{}", uuid::Uuid::new_v4().simple());
         // The first segment's audio began at the start request.
         let first = preopened.segment.take();
-        let early_wav = preopened.unsent_wav.take();
+        // Stays with the guard, which reports it on any error, until the
+        // transfer holds this audio.
+        let early_wav = preopened.unsent_wav.clone();
         let (opened, offset_ms) = match first {
             Some(opened) => (opened, initial_offset_ms),
             None => match open_remote_segment(
@@ -1407,7 +1453,7 @@ fn run_remote_native_capture(
             .map_err(|_| anyhow::anyhow!("remote spool worker panicked"))?;
         transfer = returned.context("remote spool worker lost the transfer")?;
         spool_result.context("remote audio spool failed; local recovery WAV was retained")?;
-        if let Some(path) = early_wav {
+        if let Some(path) = preopened.unsent_wav.take() {
             // The transfer now holds this audio durably.
             let _ = std::fs::remove_file(path);
         }
