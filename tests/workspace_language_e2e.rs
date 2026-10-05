@@ -758,3 +758,58 @@ workspace "edits" {{
     );
     env.assert_enzyme_untouched();
 }
+
+/// One Markdown source indexes root-relative identities; adding a second
+/// changes Home identities to `<source>/…`. The next index must leave no
+/// stale root-relative documents or chunks, recall must return the prefixed
+/// refs, and nothing may be indexed twice.
+#[test]
+fn adding_a_second_markdown_source_reindexes_home_identities() {
+    let env = Hermetic::new();
+    let notes = notes_fixture(&env);
+    let library = env.path("library");
+    write(
+        &library.join("book.md"),
+        "# Book\n\nThe vermilion orchard almanac lists every graft.\n",
+    );
+    env.ok(&["workspace", "new", "grow", "--home", notes.to_str().unwrap(), "--json"]);
+    let desired = format!(
+        "workspace \"grow\" {{\n  source markdown \"notes\" {{ path \"{}\" }}\n  remember in folder \"inbox\" create note\n  leave out folders [\"archive\"]\n}}\n",
+        notes.display()
+    );
+    env.plan_and_apply("grow", &desired);
+    let _generator = fixture_generator::FixtureGenerator::start(&env.margins_home);
+    env.ok(&["--workspace", "grow", "init"]);
+    let state = env.margins_home.join("workspaces/grow");
+    assert_eq!(indexed_refs(&state), ["projects/harbor.md"]);
+
+    env.ok(&[
+        "--workspace", "grow", "source", "add", "notes", "--name", "library", "--path",
+        library.to_str().unwrap(), "--role", "reference",
+    ]);
+    env.ok(&["--workspace", "grow", "init"]);
+
+    let refs = indexed_refs(&state);
+    assert_eq!(refs, ["library/book.md", "notes/projects/harbor.md"], "{refs:?}");
+    let index = rusqlite::Connection::open(state.join("index.db")).unwrap();
+    let orphan_chunks: i64 = index
+        .query_row(
+            "SELECT count(*) FROM chunks WHERE doc_id NOT IN (SELECT id FROM docs)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(orphan_chunks, 0);
+
+    let recalled = recall(&env, "grow", "The quartz harbor ledger records every crossing", None);
+    let hits = result_refs(&recalled);
+    assert!(hits.contains(&"notes/projects/harbor.md".to_string()), "{recalled}");
+    assert!(!hits.contains(&"projects/harbor.md".to_string()), "{recalled}");
+    let mut unique = hits.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), hits.len(), "duplicate hits: {recalled}");
+    let book = recall(&env, "grow", "The vermilion orchard almanac lists every graft", None);
+    assert!(result_refs(&book).contains(&"library/book.md".to_string()), "{book}");
+    env.assert_enzyme_untouched();
+}
