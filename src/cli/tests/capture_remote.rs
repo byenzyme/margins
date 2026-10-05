@@ -19,43 +19,13 @@
         }
     }
 
-    struct FakeCapture {
-        sender: mpsc::Sender<crate::recorder::LiveAudioChunk>,
-        queued: Arc<std::sync::atomic::AtomicU64>,
-        mic_dropped: Arc<std::sync::atomic::AtomicU64>,
-        system_dropped: Arc<std::sync::atomic::AtomicU64>,
-        handoff: mpsc::Sender<RemoteSpoolHandoff<FakeRemoteSpool>>,
-        worker: std::thread::JoinHandle<(Option<FakeRemoteSpool>, Result<()>)>,
-    }
-
-    fn fake_capture(pending_max_samples: u64) -> FakeCapture {
-        let (sender, receiver) = mpsc::channel();
-        let (handoff, handoff_receiver) = mpsc::channel();
-        let queued = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let mic_dropped = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let system_dropped = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let io = RemoteSpoolWorkerIo {
-            receiver,
-            handoff: handoff_receiver,
-            queued_samples: queued.clone(),
-            mic_dropped_samples: mic_dropped.clone(),
-            system_dropped_samples: system_dropped.clone(),
-            pending_max_samples,
-        };
-        FakeCapture {
-            sender,
-            queued,
-            mic_dropped,
-            system_dropped,
-            handoff,
-            worker: std::thread::spawn(move || run_remote_spool_worker(io)),
-        }
-    }
-
-    /// One 10 ms mic chunk whose samples carry its sequence number.
-    fn fake_chunk(sequence: u64) -> crate::recorder::LiveAudioChunk {
+    /// One 10 ms chunk whose samples carry its sequence number.
+    fn fake_chunk(
+        channel: crate::recorder::LiveAudioChannel,
+        sequence: u64,
+    ) -> crate::recorder::LiveAudioChunk {
         crate::recorder::LiveAudioChunk {
-            channel: crate::recorder::LiveAudioChannel::Mic,
+            channel,
             generation: 1,
             session_offset_ms: 0,
             sample_rate: 48_000,
@@ -65,132 +35,393 @@
         }
     }
 
-    fn capture_chunk(capture: &FakeCapture, sequence: u64) {
-        capture.queued.fetch_add(480, Ordering::Relaxed);
-        capture.sender.send(fake_chunk(sequence)).unwrap();
+    /// Fake devices: from open, a mic and a system chunk every 10 ms through
+    /// the real sink, until retired.
+    struct FakeRecorder {
+        retired: Arc<AtomicBool>,
+        emitted: Arc<std::sync::atomic::AtomicU64>,
+        thread: std::thread::JoinHandle<()>,
     }
 
-    #[test]
-    fn remote_start_captures_immediately_and_uploads_audio_buffered_during_reservation() {
-        use margins_workflows::remote_workspace::NativeRemoteLane;
+    struct FakeDevices {
+        emitted: Arc<std::sync::atomic::AtomicU64>,
+        first_sample: Arc<Mutex<Option<std::time::Instant>>>,
+        retired_at: Arc<Mutex<Option<std::time::Instant>>>,
+    }
 
-        let start = std::time::Instant::now();
-        let capture = fake_capture(REMOTE_PENDING_MAX_SAMPLES);
-        // Fake recorder: devices open on Start and deliver a chunk every 10 ms.
-        let recorder = {
-            let sender = capture.sender.clone();
-            let queued = capture.queued.clone();
-            std::thread::spawn(move || {
-                let mut first_sample_at = None;
-                for sequence in 0..60u64 {
-                    queued.fetch_add(480, Ordering::Relaxed);
-                    sender.send(fake_chunk(sequence)).unwrap();
-                    first_sample_at.get_or_insert_with(|| start.elapsed());
+    impl FakeDevices {
+        fn new() -> Self {
+            Self {
+                emitted: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                first_sample: Arc::new(Mutex::new(None)),
+                retired_at: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        fn open(
+            &self,
+            sink: crate::recorder::LiveAudioSink,
+        ) -> FakeRecorder {
+            use crate::recorder::LiveAudioChannel;
+            let retired = Arc::new(AtomicBool::new(false));
+            let emitted = self.emitted.clone();
+            let first_sample = self.first_sample.clone();
+            let thread_retired = retired.clone();
+            let thread_emitted = emitted.clone();
+            let thread = std::thread::spawn(move || {
+                let mut sequence = 0;
+                while !thread_retired.load(Ordering::SeqCst) {
+                    for channel in [LiveAudioChannel::Mic, LiveAudioChannel::System] {
+                        sink.queued_samples.fetch_add(480, Ordering::Relaxed);
+                        sink.sender.send(fake_chunk(channel, sequence)).unwrap();
+                    }
+                    sink.mic_accepted_samples.fetch_add(480, Ordering::Relaxed);
+                    first_sample
+                        .lock()
+                        .unwrap()
+                        .get_or_insert_with(std::time::Instant::now);
+                    sequence += 1;
+                    thread_emitted.store(sequence, Ordering::SeqCst);
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                first_sample_at.unwrap()
+            });
+            FakeRecorder {
+                retired,
+                emitted,
+                thread,
+            }
+        }
+    }
+
+    impl RemoteSegmentRecorder for FakeRecorder {
+        fn retire_to(self, path: &Path) -> Result<()> {
+            self.retired.store(true, Ordering::SeqCst);
+            self.thread.join().unwrap();
+            std::fs::write(path, format!("{} chunks", self.emitted.load(Ordering::SeqCst)))?;
+            Ok(())
+        }
+    }
+
+    type FakeSegment = OpenedRemoteSegment<FakeRecorder, FakeRemoteSpool>;
+
+    fn open_fake_segment(devices: &FakeDevices) -> Result<FakeSegment> {
+        spawn_remote_segment(480 * 2 * 4, |_stop, sink| Ok(devices.open(sink)))
+    }
+
+    fn fake_preopened<'a>(
+        segment: FakeSegment,
+        unsent_dir: &Path,
+        reported: &'a Mutex<Vec<std::path::PathBuf>>,
+    ) -> PreopenedRemoteSegment<'a, FakeRecorder, FakeRemoteSpool> {
+        PreopenedRemoteSegment {
+            segment: Some(segment),
+            unsent_dir: unsent_dir.to_path_buf(),
+            unsent_wav: None,
+            report_unsent: Box::new(move |path| reported.lock().unwrap().push(path.to_path_buf())),
+        }
+    }
+
+    /// Every chunk the fake devices emitted, in capture order, both lanes.
+    fn expected_interleaved(
+        emitted: u64,
+    ) -> Vec<(margins_workflows::remote_workspace::NativeRemoteLane, f32, usize)> {
+        use margins_workflows::remote_workspace::NativeRemoteLane;
+        (0..emitted)
+            .flat_map(|sequence| {
+                [
+                    (NativeRemoteLane::Microphone, sequence as f32, 480),
+                    (NativeRemoteLane::System, sequence as f32, 480),
+                ]
             })
-        };
-        // Fake relay: the session reservation takes 300 ms.
-        std::thread::sleep(std::time::Duration::from_millis(300));
+            .collect()
+    }
+
+    /// Hand the transfer over, retire the devices normally, and join.
+    fn finish_fake_segment(
+        segment: FakeSegment,
+        unsent_dir: &Path,
+    ) -> (FakeRemoteSpool, (Option<FakeRemoteSpool>, Result<()>)) {
         let spool = FakeRemoteSpool::default();
-        let live = Arc::new(Mutex::new(Vec::new()));
-        let live_seen = live.clone();
-        capture
-            .handoff
+        let OpenedRemoteSegment {
+            recorder,
+            sink,
+            handoff,
+            worker,
+            ..
+        } = segment;
+        handoff
             .send(RemoteSpoolHandoff {
                 transfer: spool.clone(),
-                live: Some(Box::new(move |chunk: &crate::recorder::LiveAudioChunk| {
-                    live_seen.lock().unwrap().push(chunk.samples[0]);
-                })),
+                live: None,
             })
             .unwrap();
-        let first_sample_at = recorder.join().unwrap();
-        drop(capture.sender);
-        let (returned, result) = capture.worker.join().unwrap();
-        result.unwrap();
-        assert!(returned.is_some());
-
-        assert!(
-            first_sample_at < std::time::Duration::from_millis(100),
-            "first captured sample arrived {first_sample_at:?} after Start"
-        );
-        let appended = spool.appended.lock().unwrap().clone();
-        let expected: Vec<_> = (0..60u64)
-            .map(|sequence| (NativeRemoteLane::Microphone, sequence as f32, 480))
-            .collect();
-        assert_eq!(appended, expected, "every chunk from Start onward, in order");
-        assert_eq!(
-            *live.lock().unwrap(),
-            (0..60).map(|sequence| sequence as f32).collect::<Vec<_>>()
-        );
-        assert_eq!(capture.queued.load(Ordering::Relaxed), 0);
-        assert_eq!(capture.mic_dropped.load(Ordering::Relaxed), 0);
+        drop(handoff);
+        if let Some(recorder) = recorder {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            recorder.retire_to(&unsent_dir.join("segment.wav")).unwrap();
+        }
+        drop(sink);
+        (spool, worker.join().unwrap())
     }
 
     #[test]
-    fn remote_pending_audio_drains_the_recorder_queue_and_is_bounded() {
-        let capture = fake_capture(480 * 3);
-        for sequence in 0..5 {
-            capture_chunk(&capture, sequence);
+    fn remote_start_opens_devices_before_reserving_and_uploads_audio_captured_meanwhile() {
+        let unsent = tempfile::tempdir().unwrap();
+        let reported = Mutex::new(Vec::new());
+        let devices = FakeDevices::new();
+        let start = std::time::Instant::now();
+        let reserve_started = Mutex::new(None);
+        let (mut preopened, setup, early) = start_remote_capture(
+            || Ok(fake_preopened(open_fake_segment(&devices)?, unsent.path(), &reported)),
+            || {
+                *reserve_started.lock().unwrap() = Some(std::time::Instant::now());
+                // Fake relay: the session reservation takes 300 ms.
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                Ok("session")
+            },
+            |timeout| {
+                std::thread::sleep(timeout);
+                None
+            },
+            |_, _| panic!("no control was sent"),
+        )
+        .unwrap();
+        assert_eq!(setup.unwrap(), "session");
+        assert_eq!(early, None);
+        let first_sample = devices.first_sample.lock().unwrap().unwrap();
+        let reserve_started = reserve_started.lock().unwrap().unwrap();
+        // Reserving first would put the first sample 300 ms after Start.
+        assert!(
+            first_sample.duration_since(start) < std::time::Duration::from_millis(100),
+            "first captured sample arrived {:?} after Start",
+            first_sample.duration_since(start)
+        );
+        assert!(first_sample <= reserve_started + std::time::Duration::from_millis(20));
+        assert!(devices.emitted.load(Ordering::SeqCst) >= 20, "audio flowed during reservation");
+
+        let segment = preopened.segment.take().unwrap();
+        let queued = segment.sink.queued_samples.clone();
+        let (spool, (returned, result)) = finish_fake_segment(segment, unsent.path());
+        result.unwrap();
+        assert!(returned.is_some());
+        assert_eq!(
+            *spool.appended.lock().unwrap(),
+            expected_interleaved(devices.emitted.load(Ordering::SeqCst)),
+            "both lanes from Start onward, interleaved in capture order"
+        );
+        assert_eq!(queued.load(Ordering::Relaxed), 0);
+        drop(preopened);
+        assert!(reported.lock().unwrap().is_empty());
+    }
+
+    fn control_before_session(control: PreSessionControl) {
+        let unsent = tempfile::tempdir().unwrap();
+        let reported = Mutex::new(Vec::new());
+        let devices = FakeDevices::new();
+        let start = std::time::Instant::now();
+        let reserve_done = Mutex::new(None);
+        let mut polls_after_control = 0;
+        let mut sent = false;
+        let (mut preopened, setup, early) = start_remote_capture(
+            || Ok(fake_preopened(open_fake_segment(&devices)?, unsent.path(), &reported)),
+            || {
+                // A stalled relay: reservation takes 600 ms.
+                std::thread::sleep(std::time::Duration::from_millis(600));
+                *reserve_done.lock().unwrap() = Some(std::time::Instant::now());
+                Ok(())
+            },
+            |timeout| {
+                std::thread::sleep(timeout);
+                if sent {
+                    polls_after_control += 1;
+                    return None;
+                }
+                (start.elapsed() >= std::time::Duration::from_millis(100)).then(|| {
+                    sent = true;
+                    control
+                })
+            },
+            |preopened, _| {
+                preopened.retire_early();
+                *devices.retired_at.lock().unwrap() = Some(std::time::Instant::now());
+            },
+        )
+        .unwrap();
+        setup.unwrap();
+        assert_eq!(early, Some(control));
+        assert_eq!(polls_after_control, 0, "later controls stay queued for the capture loop");
+        let retired_at = devices.retired_at.lock().unwrap().unwrap();
+        let reserve_done = reserve_done.lock().unwrap().unwrap();
+        assert!(
+            retired_at.duration_since(start) < std::time::Duration::from_millis(250),
+            "{control:?} took {:?} to stop the devices",
+            retired_at.duration_since(start)
+        );
+        assert!(retired_at < reserve_done, "devices stopped before the session existed");
+        let emitted_at_retire = devices.emitted.load(Ordering::SeqCst);
+
+        let wav = preopened.unsent_wav.take().expect("early audio kept as a WAV");
+        assert_eq!(
+            std::fs::read_to_string(&wav).unwrap(),
+            format!("{emitted_at_retire} chunks")
+        );
+        let segment = preopened.segment.take().unwrap();
+        assert!(segment.recorder.is_none());
+        let (spool, (_, result)) = finish_fake_segment(segment, unsent.path());
+        result.unwrap();
+        assert_eq!(devices.emitted.load(Ordering::SeqCst), emitted_at_retire);
+        assert_eq!(
+            *spool.appended.lock().unwrap(),
+            expected_interleaved(emitted_at_retire),
+            "what was captured before {control:?} reaches the session"
+        );
+    }
+
+    #[test]
+    fn remote_stop_before_the_session_exists_retires_devices_at_once() {
+        control_before_session(PreSessionControl::Stop);
+    }
+
+    #[test]
+    fn remote_pause_before_the_session_exists_stops_capturing_at_once() {
+        control_before_session(PreSessionControl::Pause);
+    }
+
+    #[test]
+    fn failed_remote_setup_keeps_captured_audio_as_a_private_unsent_wav() {
+        let root = tempfile::tempdir().unwrap();
+        let unsent = root.path().join("unsent");
+        let reported = Mutex::new(Vec::new());
+        let devices = FakeDevices::new();
+        let (preopened, setup, _) = start_remote_capture(
+            || Ok(fake_preopened(open_fake_segment(&devices)?, &unsent, &reported)),
+            || -> Result<()> {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                bail!("capture relay rejected request (502 Bad Gateway)")
+            },
+            |timeout| {
+                std::thread::sleep(timeout);
+                None
+            },
+            |_, _| {},
+        )
+        .unwrap();
+        assert!(setup.is_err());
+        drop(preopened);
+
+        let reported = reported.lock().unwrap().clone();
+        assert_eq!(reported.len(), 1);
+        let wav = &reported[0];
+        assert!(wav.starts_with(&unsent));
+        let emitted = devices.emitted.load(Ordering::SeqCst);
+        assert!(emitted > 0);
+        assert_eq!(std::fs::read_to_string(wav).unwrap(), format!("{emitted} chunks"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(wav), 0o600);
+            assert_eq!(mode(&unsent), 0o700);
         }
-        // The recorder's bounded queue is debited while the session is still
-        // pending, so the recorder itself never drops for want of a session.
+    }
+
+    #[test]
+    fn remote_pending_audio_spills_to_disk_without_dropping_or_reordering() {
+        use crate::recorder::LiveAudioChannel;
+        let (sender, receiver) = mpsc::channel();
+        let (handoff, handoff_receiver) = mpsc::channel();
+        let queued = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let io = RemoteSpoolWorkerIo {
+            receiver,
+            handoff: handoff_receiver,
+            queued_samples: queued.clone(),
+            // Two chunks fit in memory; the rest spill.
+            memory_max_samples: 480 * 2,
+        };
+        let worker = std::thread::spawn(move || run_remote_spool_worker(io));
+        for sequence in 0..6 {
+            for channel in [LiveAudioChannel::Mic, LiveAudioChannel::System] {
+                queued.fetch_add(480, Ordering::Relaxed);
+                sender.send(fake_chunk(channel, sequence)).unwrap();
+            }
+        }
+        // The recorder's bounded queue is debited while the session is pending.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while capture.queued.load(Ordering::Relaxed) != 0 {
+        while queued.load(Ordering::Relaxed) != 0 {
             assert!(std::time::Instant::now() < deadline, "pending audio was not drained");
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let spool = FakeRemoteSpool::default();
-        capture
-            .handoff
+        handoff
             .send(RemoteSpoolHandoff {
                 transfer: spool.clone(),
                 live: None,
             })
             .unwrap();
-        drop(capture.sender);
-        capture.worker.join().unwrap().1.unwrap();
-        let firsts: Vec<f32> = spool.appended.lock().unwrap().iter().map(|entry| entry.1).collect();
-        assert_eq!(firsts, vec![0.0, 1.0, 2.0]);
-        assert_eq!(capture.mic_dropped.load(Ordering::Relaxed), 480 * 2);
-        assert_eq!(capture.system_dropped.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn remote_capture_stopped_before_the_session_exists_still_delivers_its_audio() {
-        let capture = fake_capture(REMOTE_PENDING_MAX_SAMPLES);
-        capture_chunk(&capture, 0);
-        capture_chunk(&capture, 1);
-        drop(capture.sender);
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        let spool = FakeRemoteSpool::default();
-        capture
-            .handoff
-            .send(RemoteSpoolHandoff {
-                transfer: spool.clone(),
-                live: None,
-            })
-            .unwrap();
-        let (returned, result) = capture.worker.join().unwrap();
-        result.unwrap();
-        assert!(returned.is_some());
-        assert_eq!(spool.appended.lock().unwrap().len(), 2);
+        drop(sender);
+        worker.join().unwrap().1.unwrap();
+        assert_eq!(*spool.appended.lock().unwrap(), expected_interleaved(6));
     }
 
     #[test]
     fn remote_capture_without_a_session_ends_when_the_recorder_stops() {
-        let capture = fake_capture(REMOTE_PENDING_MAX_SAMPLES);
-        capture_chunk(&capture, 0);
+        let (sender, receiver) = mpsc::channel();
+        let (handoff, handoff_receiver) = mpsc::channel::<RemoteSpoolHandoff<FakeRemoteSpool>>();
+        let queued = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let worker = std::thread::spawn({
+            let queued = queued.clone();
+            move || {
+                run_remote_spool_worker(RemoteSpoolWorkerIo {
+                    receiver,
+                    handoff: handoff_receiver,
+                    queued_samples: queued,
+                    memory_max_samples: REMOTE_PENDING_MEMORY_SAMPLES,
+                })
+            }
+        });
+        queued.fetch_add(480, Ordering::Relaxed);
+        sender
+            .send(fake_chunk(crate::recorder::LiveAudioChannel::Mic, 0))
+            .unwrap();
         // Reservation failed: no transfer will ever arrive.
-        drop(capture.handoff);
-        capture.queued.fetch_add(480, Ordering::Relaxed);
-        capture.sender.send(fake_chunk(1)).unwrap();
-        drop(capture.sender);
-        let (returned, result) = capture.worker.join().unwrap();
+        drop(handoff);
+        queued.fetch_add(480, Ordering::Relaxed);
+        sender
+            .send(fake_chunk(crate::recorder::LiveAudioChannel::Mic, 1))
+            .unwrap();
+        drop(sender);
+        let (returned, result) = worker.join().unwrap();
         result.unwrap();
         assert!(returned.is_none());
-        assert_eq!(capture.queued.load(Ordering::Relaxed), 0);
+        assert_eq!(queued.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn remote_segment_offsets_never_overlap_after_a_slow_device_open() {
+        // Start at 0; a fallback open took 400 ms, then the segment captured
+        // 1 000 ms of audio and closed at 1 000 ms. The next segment is placed
+        // by time since the start request (1 400 ms), never before that close.
+        assert_eq!(remote_segment_offset_ms(0, 1_400, Some(1_000)), 1_400);
+        // Even a clock that undercounts cannot move a segment backwards.
+        assert_eq!(remote_segment_offset_ms(0, 900, Some(1_000)), 1_000);
+        assert_eq!(remote_segment_offset_ms(5_000, 200, None), 5_200);
+    }
+
+    #[test]
+    fn remote_session_is_dated_from_the_capture_start() {
+        use margins_workflows::remote_workspace::native_create_session_command_at;
+        let command = native_create_session_command_at(
+            "session",
+            "key",
+            None,
+            "test",
+            1_700_000_000_000,
+        );
+        let margins_meeting_protocol::ClientMessageBodyV1::CreateSession(create) = &command.body
+        else {
+            panic!("expected a create command");
+        };
+        assert_eq!(create.started_at_unix_ms.0, 1_700_000_000_000);
     }
 
     #[cfg(feature = "audio-capture")]

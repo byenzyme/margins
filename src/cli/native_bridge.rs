@@ -48,6 +48,7 @@ struct CaptureStatus {
     error: Option<String>,
     opened_mic_name: Option<String>,
     local_audio_paths: Vec<String>,
+    unsent_audio_path: Option<String>,
     completed: Counters,
     live: LiveCounters,
 }
@@ -82,6 +83,7 @@ impl CaptureStatus {
             "micPeak": self.live.mic_peak.as_ref().map(|peak| f32::from_bits(peak.load(Ordering::Relaxed))).unwrap_or(0.0),
             "error": self.error,
             "localAudioPaths": self.local_audio_paths,
+            "unsentAudioPath": self.unsent_audio_path,
         })
     }
 
@@ -166,6 +168,33 @@ impl CaptureController {
         state.transfer_id = Some(transfer.into());
         state.opened_mic_name = Some(recorder.mic_name().to_owned());
         state.live = LiveCounters::for_segment(sink, recorder);
+    }
+
+    /// Pause or Stop sent while the session is still being reserved. Resume
+    /// cannot arrive first: the bridge accepts it only when paused.
+    pub(super) fn pre_session_control(
+        &self,
+        timeout: Duration,
+    ) -> Option<super::PreSessionControl> {
+        match self.receiver.recv_timeout(timeout) {
+            Ok(CaptureAction::Pause) => Some(super::PreSessionControl::Pause),
+            Ok(CaptureAction::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Some(super::PreSessionControl::Stop)
+            }
+            Ok(CaptureAction::Resume) | Err(mpsc::RecvTimeoutError::Timeout) => None,
+        }
+    }
+
+    /// The session exists for capture that was paused or stopped before it
+    /// did; the state the user chose stands.
+    pub(super) fn session_ready(&self, session: &str, transfer: &str) {
+        let mut state = self.status.lock().unwrap();
+        state.session_id = Some(session.into());
+        state.transfer_id = Some(transfer.into());
+    }
+
+    pub(super) fn unsent_audio_saved(&self, path: &std::path::Path) {
+        self.status.lock().unwrap().unsent_audio_path = Some(path.to_string_lossy().into_owned());
     }
 
     pub(super) fn wait_action(&self, stop: &Arc<AtomicBool>) -> Result<crate::tui::TuiAction> {
@@ -646,7 +675,12 @@ fn handle_stream(mut stream: TcpStream, bridge: &mut Bridge) -> Result<()> {
                             Ok(()) => state.state = "saved",
                             Err(error) => {
                                 state.state = "needs_attention";
-                                state.error = Some(format!("{error:#}"));
+                                state.error = Some(match &state.unsent_audio_path {
+                                    Some(path) => format!(
+                                        "{error:#}. Recording saved locally: {path}. Import it with `margins transcribe {path:?}`."
+                                    ),
+                                    None => format!("{error:#}"),
+                                });
                             }
                         }
                     })?;
@@ -921,6 +955,43 @@ mod tests {
         bridge.sender = Some(sender);
         assert_eq!(control(&bridge, "recording", CaptureAction::Pause).0, 202);
         assert!(receiver.try_recv() == Ok(CaptureAction::Pause));
+    }
+
+    #[test]
+    fn pause_and_stop_act_before_the_session_exists() {
+        let (sender, receiver) = mpsc::channel();
+        let controller = CaptureController {
+            receiver,
+            status: Arc::new(Mutex::new(CaptureStatus::default())),
+        };
+        let wait = Duration::from_millis(1);
+        assert_eq!(controller.pre_session_control(wait), None);
+        sender.send(CaptureAction::Pause).unwrap();
+        assert_eq!(
+            controller.pre_session_control(wait),
+            Some(super::super::PreSessionControl::Pause)
+        );
+        sender.send(CaptureAction::Stop).unwrap();
+        assert_eq!(
+            controller.pre_session_control(wait),
+            Some(super::super::PreSessionControl::Stop)
+        );
+        controller.paused();
+        controller.session_ready("session", "transfer");
+        controller.unsent_audio_saved(std::path::Path::new("/tmp/unsent.wav"));
+        let snapshot = controller.status.lock().unwrap().snapshot("i", "w", None);
+        assert_eq!(
+            snapshot["state"], "paused",
+            "the user's Pause stands once the session exists"
+        );
+        assert_eq!(snapshot["sessionId"], "session");
+        assert_eq!(snapshot["unsentAudioPath"], "/tmp/unsent.wav");
+        drop(sender);
+        assert_eq!(
+            controller.pre_session_control(wait),
+            Some(super::super::PreSessionControl::Stop),
+            "a vanished bridge stops capture"
+        );
     }
 
     #[test]

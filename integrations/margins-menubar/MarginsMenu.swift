@@ -202,7 +202,8 @@ final class MenuRecorder: ObservableObject {
 
     func refresh() async {
         if microphoneBusy { return }
-        refreshMicrophones()
+        // The picker is locked during a meeting; don't rescan devices on the fast start poll.
+        if !active { refreshMicrophones() }
         if !setupComplete {
             state = "ready"
             status = "Choose where meetings live"
@@ -445,7 +446,7 @@ private struct RecorderControls: View {
                         else { await recorder.start() }
                     }
                 }
-                .disabled(recorder.microphoneBusy || ["starting", "getting_ready", "saving", "finalizing"].contains(recorder.state))
+                .disabled(recorder.microphoneBusy || ["starting", "saving", "finalizing"].contains(recorder.state))
                 Menu("More") {
                     if recorder.state == "recording" {
                         Button("Pause") { Task { await recorder.control("pause") } }
