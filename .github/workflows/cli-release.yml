@@ -12,6 +12,8 @@ on:
 
 # The public repository's token publishes its own release. A separate token
 # updates the Homebrew tap; official builds use a read-only Enzyme token.
+# Every release secret is an environment secret on `official-cli-release`
+# (deployable only from v* tags and main), so each job declares it.
 permissions:
   contents: read
 
@@ -25,6 +27,7 @@ env:
 jobs:
   validate:
     runs-on: ubuntu-24.04
+    environment: official-cli-release
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
@@ -56,9 +59,7 @@ jobs:
 
   build:
     needs: validate
-    env:
-      GH_TOKEN: ${{ secrets.ENZYME_RUST_READ_TOKEN }}
-      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    environment: official-cli-release
     strategy:
       fail-fast: false
       matrix:
@@ -82,206 +83,21 @@ jobs:
           ref: ${{ needs.validate.outputs.tag }}
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      # Shared with cli-release-validation.yml so the dry run is the same build.
+      - name: Build, sign, package and smoke
+        uses: ./.github/actions/build-official-cli
         with:
-          targets: ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-
-      - name: Assert native runner architecture
-        run: test "$(uname -m)" = "${{ matrix.host_arch }}"
-
-      - name: Install Linux capture build dependencies
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
-
-      - name: Authenticate private recall source
-        run: |
-          if [[ -z "$GH_TOKEN" ]]; then
-            echo "::error::Missing required secret: ENZYME_RUST_READ_TOKEN"
-            exit 1
-          fi
-          gh auth setup-git
-
-      - name: Build the private root distributable
-        env:
-          MARGINS_GOOGLE_OAUTH_CLIENT_JSON: ${{ secrets.MARGINS_GOOGLE_OAUTH_CLIENT_JSON }}
-        run: |
-          if [[ -z "$MARGINS_GOOGLE_OAUTH_CLIENT_JSON" ]]; then
-            echo "::error::Missing required secret: MARGINS_GOOGLE_OAUTH_CLIENT_JSON"
-            exit 1
-          fi
-          scripts/with-private-recall cargo build --release --locked --package margins --bin margins-private \
-            --no-default-features --features "${{ matrix.features }}" \
-            --target "${{ matrix.target }}"
-
-      - name: Compile the project recording service
-        run: >-
-          cargo build --release --locked --package margins-server
-          --no-default-features --features "${{ runner.os == 'macOS' && 'coreml-asr' || 'parakeet-asr' }}"
-          --bin margins-server
-          --target "${{ matrix.target }}"
-
-      - name: Sign and notarize the macOS CLI
-        if: runner.os == 'macOS'
-        shell: bash
-        env:
-          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          BINARY_PATHS: target/${{ matrix.target }}/release/margins-private target/${{ matrix.target }}/release/margins-server
-        run: |
-          set -euo pipefail
-
-          CERTIFICATE_PATH="$RUNNER_TEMP/margins-developer-id.p12"
-          KEYCHAIN_PATH="$RUNNER_TEMP/margins-signing.keychain-db"
-          NOTARIZATION_ZIP="$RUNNER_TEMP/margins-cli-notarization.zip"
-          NOTARIZATION_RESULT="$RUNNER_TEMP/margins-cli-notarization.json"
-          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
-
-          cleanup() {
-            security delete-keychain "$KEYCHAIN_PATH" >/dev/null 2>&1 || true
-            rm -f "$CERTIFICATE_PATH" "$KEYCHAIN_PATH" "$NOTARIZATION_ZIP" "$NOTARIZATION_RESULT"
-            rm -rf "$RUNNER_TEMP/margins-cli-notarization"
-          }
-          trap cleanup EXIT
-
-          for credential in \
-            APPLE_CERTIFICATE_BASE64 \
-            APPLE_CERTIFICATE_PASSWORD \
-            APPLE_ID \
-            APPLE_PASSWORD \
-            APPLE_TEAM_ID
-          do
-            if [[ -z "${!credential:-}" ]]; then
-              echo "::error::Missing required signing secret: $credential"
-              exit 1
-            fi
-          done
-
-          printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 -D > "$CERTIFICATE_PATH"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security import "$CERTIFICATE_PATH" \
-            -k "$KEYCHAIN_PATH" \
-            -P "$APPLE_CERTIFICATE_PASSWORD" \
-            -f pkcs12 \
-            -t cert \
-            -T /usr/bin/codesign \
-            -T /usr/bin/security
-          security set-key-partition-list \
-            -S apple-tool:,apple:,codesign: \
-            -s \
-            -k "$KEYCHAIN_PASSWORD" \
-            "$KEYCHAIN_PATH"
-
-          # Add the temporary keychain to the user search list (preserving the
-          # existing ones for the certificate chain) so codesign can resolve the
-          # signing identity's private key. Without this, codesign fails with
-          # "The specified item could not be found in the keychain" even though
-          # find-identity locates the identity via the direct keychain path.
-          EXISTING_KEYCHAINS="$(security list-keychains -d user | sed -e 's/^[[:space:]]*//' -e 's/"//g')"
-          security list-keychains -d user -s "$KEYCHAIN_PATH" $EXISTING_KEYCHAINS
-
-          SIGNING_IDENTITY="$(
-            security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
-              | awk -F\" '/Developer ID Application/ { print $2; exit }'
-          )"
-          if [[ -z "$SIGNING_IDENTITY" ]]; then
-            echo "::error::Imported certificate does not contain a Developer ID Application identity"
-            security find-identity -v -p codesigning "$KEYCHAIN_PATH" || true
-            exit 1
-          fi
-
-          echo "Signing with $SIGNING_IDENTITY"
-          NOTARIZATION_DIR="$RUNNER_TEMP/margins-cli-notarization"
-          mkdir "$NOTARIZATION_DIR"
-          SIGNING_ARGS=(
-            --force
-            --sign "$SIGNING_IDENTITY"
-            --keychain "$KEYCHAIN_PATH"
-            --options runtime
-            --timestamp
-          )
-          for BINARY_PATH in $BINARY_PATHS; do
-            codesign "${SIGNING_ARGS[@]}" "$BINARY_PATH"
-            codesign --verify --deep --strict --verbose=2 "$BINARY_PATH"
-            cp "$BINARY_PATH" "$NOTARIZATION_DIR/"
-          done
-
-          ditto -c -k --keepParent "$NOTARIZATION_DIR" "$NOTARIZATION_ZIP"
-          xcrun notarytool submit "$NOTARIZATION_ZIP" \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait \
-            --output-format json > "$NOTARIZATION_RESULT"
-          test -s "$NOTARIZATION_RESULT"
-          cat "$NOTARIZATION_RESULT"
-
-          NOTARIZATION_STATUS="$(plutil -extract status raw -o - "$NOTARIZATION_RESULT")"
-          if [[ "$NOTARIZATION_STATUS" != "Accepted" ]]; then
-            echo "::error::Apple notarization status was $NOTARIZATION_STATUS, expected Accepted"
-            exit 1
-          fi
-
-          # Apple creates an online ticket for standalone binaries, but stapler
-          # cannot attach that ticket to a bare Mach-O. The tarball below ships
-          # this signed binary unchanged; Gatekeeper retrieves its ticket online.
-          echo "::notice::Notarization accepted. Bare Mach-O tickets are served online and cannot be stapled."
-          for BINARY_PATH in $BINARY_PATHS; do
-            codesign --verify --deep --strict --verbose=2 "$BINARY_PATH"
-          done
-          # spctl execute-assessment is app-bundle oriented and can reject a valid
-          # bare Mach-O whose notarization ticket is served online. Keep it
-          # informational so it never blocks a release; codesign --verify above and
-          # notarytool "Accepted" are the authoritative gates.
-          for BINARY_PATH in $BINARY_PATHS; do
-            spctl --assess --type execute --verbose=4 "$BINARY_PATH" || \
-              echo "::notice::spctl execute-assessment is non-authoritative for a bare Mach-O; relying on codesign --verify and notarization status"
-          done
-
-          {
-            echo "### macOS CLI signing"
-            echo "- Developer ID Application signature: verified"
-            echo "- Hardened runtime and secure timestamp: enabled"
-            echo "- Apple notarization status: Accepted"
-            echo "- Stapling: unsupported for bare Mach-O; ticket is served online"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Package archive and checksum
-        env:
-          VERSION: ${{ needs.validate.outputs.version }}
-          TARGET: ${{ matrix.target }}
-        run: |
-          set -euo pipefail
-          ARCHIVE="margins-${VERSION}-${TARGET}.tar.gz"
-          mkdir packaged-cli
-          install -m 0755 "target/${TARGET}/release/margins-private" packaged-cli/margins
-          install -m 0755 "target/${TARGET}/release/margins-server" packaged-cli/margins-server
-          if [[ "$TARGET" == "aarch64-apple-darwin" ]]; then
-            codesign --verify --deep --strict --verbose=2 packaged-cli/margins
-          fi
-          tar -czf "$ARCHIVE" -C packaged-cli .
-          if command -v shasum >/dev/null; then
-            shasum -a 256 "$ARCHIVE" > "${ARCHIVE}.sha256"
-          else
-            sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
-          fi
-
-      - name: Smoke the binary from the packaged archive
-        env:
-          VERSION: ${{ needs.validate.outputs.version }}
-          TARGET: ${{ matrix.target }}
-        run: |
-          set -euo pipefail
-          ARCHIVE="margins-${VERSION}-${TARGET}.tar.gz"
-          mkdir packaged-smoke
-          tar -xzf "$ARCHIVE" -C packaged-smoke
-          scripts/smoke-official-cli.sh packaged-smoke/margins
+          target: ${{ matrix.target }}
+          host-arch: ${{ matrix.host_arch }}
+          features: ${{ matrix.features }}
+          version: ${{ needs.validate.outputs.version }}
+          enzyme-rust-read-token: ${{ secrets.ENZYME_RUST_READ_TOKEN }}
+          google-oauth-client-json: ${{ secrets.MARGINS_GOOGLE_OAUTH_CLIENT_JSON }}
+          apple-certificate-base64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          apple-certificate-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          apple-id: ${{ secrets.APPLE_ID }}
+          apple-password: ${{ secrets.APPLE_PASSWORD }}
+          apple-team-id: ${{ secrets.APPLE_TEAM_ID }}
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

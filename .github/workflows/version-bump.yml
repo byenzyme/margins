@@ -8,12 +8,18 @@ on:
         required: true
         type: string
 
+# This workflow only bumps versions and pushes the release commit to main. The
+# "release tags v*" ruleset lets only repository admins create v* tags, so it
+# never tags or dispatches cli-release; it prints the tag commands instead.
 jobs:
   bump:
     runs-on: ubuntu-latest
+    # ENZYME_RUST_READ_TOKEN is an environment secret on official-cli-release.
+    environment: official-cli-release
     permissions:
-      actions: write
       contents: write
+    env:
+      VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -21,14 +27,13 @@ jobs:
 
       - name: Validate semver
         run: |
-          if ! echo "${{ inputs.version }}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::Invalid semver: ${{ inputs.version }}"
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid semver: $VERSION"
             exit 1
           fi
 
       - name: Bump CLI versions
         run: |
-          export VERSION="${{ inputs.version }}"
           perl -0pi -e 's/^(name = "margins"\nversion = ")[^"]+/${1}'"$VERSION"'/m' Cargo.toml
           perl -0pi -e 's/^(name = "margins-cli"\nversion = ")[^"]+/${1}'"$VERSION"'/m' crates/public/margins-cli/Cargo.toml
           perl -0pi -e 's/^(name = "margins-server"\nversion = ")[^"]+/${1}'"$VERSION"'/m' crates/public/margins-server/Cargo.toml
@@ -50,21 +55,34 @@ jobs:
              cp Cargo.lock Cargo.private-recall.lock
            '
 
-      - name: Commit and tag
+      - name: Commit and push release commit
+        id: commit
         run: |
-          VERSION="${{ inputs.version }}"
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Cargo.toml Cargo.lock Cargo.private-recall.lock \
             crates/public/margins-cli/Cargo.toml crates/public/margins-server/Cargo.toml \
             crates/public/margins-capture/Cargo.toml
           git commit -m "Release v${VERSION}"
-          git tag "v${VERSION}"
-          git push origin main --tags
+          git push origin HEAD:main
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Dispatch CLI release
+      - name: Print tag commands for a repository admin
         env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
+          SHA: ${{ steps.commit.outputs.sha }}
         run: |
-          gh workflow run cli-release.yml --ref main -f tag="v${VERSION}"
+          set -euo pipefail
+          TAG_COMMANDS="git tag -a v${VERSION} ${SHA} -m \"Margins ${VERSION}\" && git push origin v${VERSION}"
+          echo "::notice title=Tag v${VERSION}::${TAG_COMMANDS}"
+          {
+            echo "### Release commit pushed to main"
+            echo
+            echo "Commit: \`${SHA}\`"
+            echo
+            echo "Only a repository admin can create the release tag. After \`git fetch origin main\`, run the command below; pushing the tag starts cli-release.yml:"
+            echo
+            echo '```bash'
+            echo "${TAG_COMMANDS}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
