@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MeetingsPage } from "./meetings-page.js";
+import { MeetingsPage, rememberStopAck } from "./meetings-page.js";
 
 const mocks = vi.hoisted(() => ({
   connectMenu: vi.fn(),
@@ -78,6 +78,13 @@ afterEach(() => {
 });
 
 describe("Meetings Mac recorder choice", () => {
+  it("shows the saved duration in the stop acknowledgment", async () => {
+    mocks.meetings = [{ sessionId: "native-saved", title: "Call", startedAt: "2026-09-28T00:00:00Z",
+      inputFinalized: true, durationMs: 11_000, notePath: null, threadIds: [], distilledMemoRevision: null }] as never;
+    rememberStopAck("native-saved", "0:27");
+    render(<MeetingsPage subPath="proj-mac/native-saved" />);
+    expect(await screen.findByText("Saved · 0:11 recorded")).toBeTruthy();
+  });
   it("labels a saved recording and its transcript when audio ranges are missing", async () => {
     mocks.meetings = [{ sessionId: "partial", title: "Partial call", startedAt: "2026-09-28T00:00:00Z",
       inputFinalized: true, captureIncomplete: true, captureGaps: [{ segmentId: "browser-000000",

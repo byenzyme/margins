@@ -22,6 +22,7 @@ enum CaptureAction {
 #[derive(Default)]
 struct Counters {
     mic: u64,
+    mic_duration_us: u64,
     system: u64,
     mic_dropped: u64,
     system_dropped: u64,
@@ -32,6 +33,7 @@ struct Counters {
 #[derive(Default)]
 struct LiveCounters {
     mic: Option<Arc<AtomicU64>>,
+    mic_duration_us: Option<Arc<AtomicU64>>,
     system: Option<Arc<AtomicU64>>,
     mic_dropped: Option<Arc<AtomicU64>>,
     system_dropped: Option<Arc<AtomicU64>>,
@@ -78,6 +80,7 @@ impl CaptureStatus {
             "sessionId": self.session_id,
             "transferId": self.transfer_id,
             "microphoneSamples": self.completed.mic + load(&self.live.mic),
+            "microphoneDurationMs": (self.completed.mic_duration_us + load(&self.live.mic_duration_us)) / 1_000,
             "systemSamples": self.completed.system + load(&self.live.system),
             "microphoneDroppedSamples": self.completed.mic_dropped + load(&self.live.mic_dropped),
             "systemDroppedSamples": self.completed.system_dropped + load(&self.live.system_dropped),
@@ -95,10 +98,10 @@ impl CaptureStatus {
     /// the microphone has actually delivered samples, so nobody speaks into a
     /// recorder that is still opening.
     fn visible_state(&self) -> &'static str {
-        let mic = self.completed.mic
+        let mic = self.completed.mic_duration_us
             + self
                 .live
-                .mic
+                .mic_duration_us
                 .as_ref()
                 .map_or(0, |v| v.load(Ordering::Relaxed));
         match self.state {
@@ -113,6 +116,7 @@ impl CaptureStatus {
             counter.as_ref().map_or(0, |v| v.load(Ordering::Relaxed))
         };
         self.completed.mic += load(&self.live.mic);
+        self.completed.mic_duration_us += load(&self.live.mic_duration_us);
         self.completed.system += load(&self.live.system);
         self.completed.mic_dropped += load(&self.live.mic_dropped);
         self.completed.system_dropped += load(&self.live.system_dropped);
@@ -130,10 +134,12 @@ pub(super) struct CaptureController {
 impl LiveCounters {
     fn for_segment(
         sink: &crate::recorder::LiveAudioSink,
+        mic_duration_us: &Arc<AtomicU64>,
         recorder: &crate::recorder::RecorderHandle,
     ) -> Self {
         LiveCounters {
             mic: Some(sink.mic_accepted_samples.clone()),
+            mic_duration_us: Some(mic_duration_us.clone()),
             system: Some(sink.system_accepted_samples.clone()),
             mic_dropped: Some(sink.mic_dropped_samples.clone()),
             system_dropped: Some(sink.system_dropped_samples.clone()),
@@ -150,11 +156,12 @@ impl CaptureController {
     pub(super) fn capturing(
         &self,
         sink: &crate::recorder::LiveAudioSink,
+        mic_duration_us: &Arc<AtomicU64>,
         recorder: &crate::recorder::RecorderHandle,
     ) {
         let mut state = self.status.lock().unwrap();
         state.opened_mic_name = Some(recorder.mic_name().to_owned());
-        state.live = LiveCounters::for_segment(sink, recorder);
+        state.live = LiveCounters::for_segment(sink, mic_duration_us, recorder);
     }
 
     pub(super) fn recording(
@@ -162,6 +169,7 @@ impl CaptureController {
         session: &str,
         transfer: &str,
         sink: &crate::recorder::LiveAudioSink,
+        mic_duration_us: &Arc<AtomicU64>,
         recorder: &crate::recorder::RecorderHandle,
     ) {
         recorder.mic_peak().store(0, Ordering::Relaxed);
@@ -170,7 +178,7 @@ impl CaptureController {
         state.session_id = Some(session.into());
         state.transfer_id = Some(transfer.into());
         state.opened_mic_name = Some(recorder.mic_name().to_owned());
-        state.live = LiveCounters::for_segment(sink, recorder);
+        state.live = LiveCounters::for_segment(sink, mic_duration_us, recorder);
     }
 
     /// Pause or Stop sent while the session is still being reserved. Resume
@@ -937,10 +945,12 @@ mod tests {
     #[test]
     fn status_reports_recording_only_once_the_microphone_delivers_audio() {
         let mic = Arc::new(AtomicU64::new(0));
+        let mic_duration_us = Arc::new(AtomicU64::new(0));
         let status = Arc::new(Mutex::new(CaptureStatus {
             state: "getting_ready",
             live: LiveCounters {
                 mic: Some(mic.clone()),
+                mic_duration_us: Some(mic_duration_us.clone()),
                 ..Default::default()
             },
             ..Default::default()
@@ -954,12 +964,14 @@ mod tests {
 
         // Devices are open and buffering before the session exists.
         mic.store(480, Ordering::Relaxed);
+        mic_duration_us.store(10_000, Ordering::Relaxed);
         let snapshot = status
             .lock()
             .unwrap()
             .snapshot("instance", "workspace", None);
         assert_eq!(snapshot["state"], "recording");
         assert_eq!(snapshot["microphoneSamples"], 480);
+        assert_eq!(snapshot["microphoneDurationMs"], 10);
 
         // Pause is accepted and queued until the first segment begins.
         let (sender, receiver) = mpsc::channel();
@@ -968,6 +980,31 @@ mod tests {
         bridge.sender = Some(sender);
         assert_eq!(control(&bridge, "recording", CaptureAction::Pause).0, 202);
         assert!(receiver.try_recv() == Ok(CaptureAction::Pause));
+    }
+
+    #[test]
+    fn snapshot_uses_captured_48khz_duration_even_if_live_asr_replays_or_drops_audio() {
+        let samples = Arc::new(AtomicU64::new(0));
+        let duration = Arc::new(AtomicU64::new(0));
+        let mut status = CaptureStatus {
+            state: "recording",
+            live: LiveCounters {
+                mic: Some(samples.clone()),
+                mic_duration_us: Some(duration.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // One second at the native device rate; live ASR has accepted none.
+        duration.store(1_000_000, Ordering::Relaxed);
+        assert_eq!(status.snapshot("i", "w", None)["microphoneDurationMs"], 1_000);
+        // Buffered audio reaching the live tee later changes the legacy sample
+        // diagnostic but cannot change elapsed time.
+        samples.store(48_000, Ordering::Relaxed);
+        assert_eq!(status.snapshot("i", "w", None)["microphoneSamples"], 48_000);
+        assert_eq!(status.snapshot("i", "w", None)["microphoneDurationMs"], 1_000);
+        status.fold_live();
+        assert_eq!(status.snapshot("i", "w", None)["microphoneDurationMs"], 1_000);
     }
 
     #[test]
