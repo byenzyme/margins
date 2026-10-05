@@ -76,11 +76,12 @@ surface:
    no-`audio-capture` stubs. Public contracts must be real, feature-independent
    definitions; unavailable providers report capabilities or a typed error.
 
-Baseline validation also exposes two existing feature-isolation gaps that
-Phase 0 must close: `examples/tap_probe.rs` imports optional `cidre` during an
-all-targets no-default build, and a `#[tauri::command]` in desktop `lib.rs` is
-not gated out of the `server`-only build. These are evidence for the proposed
-boundaries, not changes made by this document.
+Baseline validation exposed two feature-isolation gaps that Phase 0 had to
+close. The first probe now lives at
+`crates/public/margins-capture/examples/tap_probe.rs`, beside its optional
+`cidre` dependency and `audio-capture` feature gate. The other was a
+`#[tauri::command]` in desktop `lib.rs` that was not gated out of the
+`server`-only build. These were evidence for the proposed boundaries.
 
 The desktop also depends on concrete root modules throughout recording,
 transcription, model management, session queries, note helpers, and imports.

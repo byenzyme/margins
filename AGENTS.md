@@ -179,6 +179,12 @@ portable test configuration:
 scripts/cargo-lane disposable -- cargo test -p margins --no-default-features --features audio-capture \
   --test private_cli_composition packaged_binary_reports_private_native_composition
 
+# Scoped Core Audio tap probes; play known audio while either command runs.
+scripts/cargo-lane disposable -- cargo run -p margins-capture --example tap_probe \
+  --no-default-features --features audio-capture -- --duration 20 --mode current --out /tmp/current.wav
+scripts/cargo-lane disposable -- cargo run -p margins-capture --example system_audio_tap_probe \
+  --no-default-features --features audio-capture
+
 # Historical full native desktop composition (retired Tauri backend).
 scripts/cargo-lane disposable -- cargo test -p margins-desktop \
   --manifest-path desktop/src-tauri/Cargo.toml -- --test-threads=1

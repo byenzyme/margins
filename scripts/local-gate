@@ -249,6 +249,11 @@ def macos(gate: Gate) -> None:
         "--no-default-features", "--features", OFFICIAL_MACOS_FEATURES,
     )
     gate.cargo(
+        "native capture package targets and probes",
+        "test", "-p", "margins-capture", "--all-targets", "--locked",
+        "--no-default-features", "--features", "audio-capture,coreml-asr,polyvoice-coreml",
+    )
+    gate.cargo(
         "public workspace tests",
         "test", "--workspace", "--exclude", "margins", "--all-targets", "--locked",
     )

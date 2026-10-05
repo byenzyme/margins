@@ -1,8 +1,8 @@
 //! Diagnostic harness for macOS system-audio process taps.
 //!
 //! Usage:
-//!   cargo run --example tap_probe -- --duration 20 --mode current --out /tmp/current.wav
-//!   cargo run --example tap_probe -- --duration 20 --mode stereo-unmuted --out /tmp/stereo.wav
+//!   cargo run -p margins-capture --example tap_probe --features audio-capture -- --duration 20 --mode current --out /tmp/current.wav
+//!   cargo run -p margins-capture --example tap_probe --features audio-capture -- --duration 20 --mode stereo-unmuted --out /tmp/stereo.wav
 //!
 //! Play known audio (music, a tone, or meeting audio) while this runs. The report
 //! prints tap format, callback jitter, drop counts, and captured-vs-wall duration.

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 fn main() {
-    match margins::recorder::test_system_audio_tap_level(Duration::from_millis(1_800)) {
+    match margins_capture::recorder::test_system_audio_tap_level(Duration::from_millis(1_800)) {
         Ok(probe) => {
             println!(
                 "tap_opened=true peak={:.8} drop_count={} silent_secs={:.3} frame_count={} test_tone_played={}",
