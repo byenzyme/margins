@@ -161,17 +161,15 @@ fn sync_external_sources(
             &native,
         );
     }
-    let credential = include_bytes!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/crates/private/margins-google/resources/google-oauth-client.json"
-    ))
-    .as_slice();
+    let credential = crate::google_oauth_client::load().map_err(|error| {
+        margins_cli::CliError::new("google_credential_unavailable", error.to_string())
+    })?;
     margins_cli::commands::integrations::sync_declared_with_google_credential(
         &workspace.state_dir,
         source_filter,
         revision,
         request_id,
-        Some(credential),
+        credential.as_deref(),
     )
 }
 

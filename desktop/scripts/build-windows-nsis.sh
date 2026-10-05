@@ -2,7 +2,7 @@
 set -euo pipefail
 
 TARGET="${MARGINS_WINDOWS_TARGET:-x86_64-pc-windows-msvc}"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/Users/example/Hacks/margins-cargo-target}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${HOME}/.cache/margins-cargo-target}"
 export CARGO_NET_GIT_FETCH_WITH_CLI="${CARGO_NET_GIT_FETCH_WITH_CLI:-true}"
 
 if ! command -v cargo-xwin >/dev/null 2>&1; then

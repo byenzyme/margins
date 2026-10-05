@@ -64,9 +64,6 @@ fn standalone_connection_routes_pin_file_credentials_without_indirect_keychain_f
     assert!(integrations.contains("GoogleCredentialBackendKind::File0600"));
     assert!(!integrations.contains("GoogleTokenProvider::new("));
 
-    let desktop = source("desktop/src-tauri/src/granola_mcp.rs");
-    assert!(desktop.contains("GranolaCredentialBackendKind::OsKeyring"));
-    assert!(!desktop.contains("GranolaAccountStore::new("));
 }
 
 #[test]
@@ -710,6 +707,13 @@ fn connection_commands_do_not_implicitly_create_a_workspace() {
         .env_clear()
         .env("HOME", &machine_home)
         .env("MARGINS_HOME", &margins_home)
+        .env(
+            "MARGINS_GOOGLE_OAUTH_CLIENT_FILE",
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/crates/public/margins-cli/tests/fixtures/google-oauth-client.json"
+            ),
+        )
         .env("MARGINS_CONNECT_NO_BROWSER", "1")
         // A failed suppression guard must still be unable to find open/xdg-open.
         .env("PATH", temp.path())
@@ -1205,6 +1209,7 @@ fn packaged_binary_reports_private_native_composition() {
     assert_eq!(contract["product"], "margins");
     assert_eq!(contract["composition"], "official");
     assert_eq!(contract["official"], true);
+    assert!(contract["oauth_client"].is_string());
     assert_eq!(contract["capture_available"], true);
     assert_eq!(contract["capture_provider"], "native-recorder");
     assert_eq!(contract["tui_available"], true);

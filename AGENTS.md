@@ -8,7 +8,8 @@ As of 2026-10-02, the shipped product is the `margins` CLI/TUI and the bb
 plugin's `margins-server`. The Tauri desktop app and `margins-live` are parked.
 The desktop commands below remain as historical development instructions; do
 not use app reinstall, desktop release, or live-runtime flows for core work.
-`desktop/src-tauri` still contains the hosted-web server until extraction.
+The hosted-web server now lives in `crates/public/margins-server`;
+`desktop/src-tauri` has been retired.
 The Codex plugin is parked outside core; see
 `integrations/margins-codex/README.md` for its retained source.
 
@@ -107,8 +108,9 @@ The Codex plugin is parked outside core; see
 - These are seams over existing contracts, not new surfaces. Do not introduce a
   second setup protocol, a new anchor schema, or a write/update mode for `scan`,
   and do not conflate setup with distillation.
-- Preserve both verification lanes in `docs/setup-e2e-lanes.md`: the exact
-  credential-free public export and the separate hosted grounded-review lane.
+- Preserve both verification lanes in `docs/setup-e2e-lanes.md`: the
+  credential-free public source lane and the separate hosted grounded-review
+  lane.
 
 ## Portable and macOS Platform Test Lanes
 
@@ -120,17 +122,22 @@ mode is required.
 scripts/local-gate quick src/cli.rs crates/public/margins-workflows
 scripts/local-gate quick integrations/bb-plugin-margins/src
 scripts/local-gate public
-scripts/local-gate linux
+scripts/with-private-recall scripts/local-gate linux
 # On the attached Mac host:
-scripts/local-gate macos
+scripts/with-private-recall scripts/local-gate macos
 ```
+
+`scripts/with-private-recall` defaults `CARGO_NET_GIT_FETCH_WITH_CLI=true`, so
+private enzyme-rust fetches use credentials already available to the git CLI.
+An explicitly supplied value is preserved. Release CI sets the variable
+directly before invoking the wrapper.
 
 `quick` accepts changed paths or Cargo package names. It tests affected root
 workspace crates and their reverse dependents, then checks shipped binaries.
 BB plugin paths also run its typecheck, tests, build, and committed `dist/`
 check; `desktop/` paths are reported as parked. `public` builds and tests the
-root workspace with default features disabled and the private recall engine
-and its nested `ese` crate excluded.
+root workspace with default features disabled and no private git source in its
+manifest or lockfile.
 `linux` runs the full portable recall suite, the isolated
 Google onboarding fixture, setup rollout contracts, BB plugin checks, and shipped
 Linux binary checks. `macos` runs the native private and public composition suites and checks
@@ -141,13 +148,13 @@ The default agent lane is portable and must run inside the managed sandbox with
 no permission escalation. `recall` includes lookup, indexing, hosted-generator
 policy, and orchestration; it deliberately does not link llama.cpp. Use the
 root workspace command below. The `margins-desktop` test is parked with the
-desktop app. For the shipped project server, check `desktop/src-tauri` with
-`--no-default-features --features hosted-web --bin margins-server` through
+desktop app. For the shipped project server, check `margins-server` with
+`--no-default-features --features parakeet-asr --bin margins-server` through
 `scripts/cargo-lane shared`.
 
 ```bash
-scripts/cargo-lane disposable -- cargo test --workspace --no-default-features --features recall
-# Parked desktop-only test:
+scripts/with-private-recall scripts/cargo-lane disposable -- cargo test --workspace --no-default-features --features recall
+# Historical desktop-only test (cannot run after desktop/src-tauri retirement):
 cargo test -p margins-desktop \
   --manifest-path desktop/src-tauri/Cargo.toml \
   --no-default-features --features recall -- --test-threads=1
@@ -172,7 +179,13 @@ portable test configuration:
 scripts/cargo-lane disposable -- cargo test -p margins --no-default-features --features audio-capture \
   --test private_cli_composition packaged_binary_reports_private_native_composition
 
-# Full native desktop composition (Tauri, CoreML, audio capture, llama.cpp).
+# Scoped Core Audio tap probes; play known audio while either command runs.
+scripts/cargo-lane disposable -- cargo run -p margins-capture --example tap_probe \
+  --no-default-features --features audio-capture -- --duration 20 --mode current --out /tmp/current.wav
+scripts/cargo-lane disposable -- cargo run -p margins-capture --example system_audio_tap_probe \
+  --no-default-features --features audio-capture
+
+# Historical full native desktop composition (retired Tauri backend).
 scripts/cargo-lane disposable -- cargo test -p margins-desktop \
   --manifest-path desktop/src-tauri/Cargo.toml -- --test-threads=1
 
@@ -540,8 +553,9 @@ The CI regression verifies only the harness's capture and hard-gate mechanics;
 it does not replace the real agent rollout against the release-candidate binary.
 
 For native CLI core-product verification, use
-`scripts/core-product-smoke.sh`; the full and zero-compile iteration commands
-are documented in `docs/official-cli-release.md`.
+`scripts/with-private-recall scripts/core-product-smoke.sh`; the full and
+zero-compile iteration commands are documented in
+`docs/official-cli-release.md`.
 
 See `docs/official-cli-release.md` for the release order, including BB plugin
 runtime pairing. `CLAUDE.md` holds older release, Homebrew tap, and legacy

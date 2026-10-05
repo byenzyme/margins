@@ -26,7 +26,7 @@ const distillFixtureDir = process.env.MARGINS_UX_E2E_FULL_REAL_FIXTURE === "1"
 
 const env = {
   ...process.env,
-  CARGO_TARGET_DIR: process.env.CARGO_TARGET_DIR || "/Users/example/Hacks/margins-cargo-target",
+  CARGO_TARGET_DIR: process.env.CARGO_TARGET_DIR || resolve(process.env.HOME || "/tmp", ".cache/margins-cargo-target"),
   PI_CODING_AGENT_DIR: piAgentDir,
   MARGINS_UX_FIXTURE_WORK_DIR: workDir,
   MARGINS_UX_FIXTURE_VAULT_PATH: runtime.vault_path,

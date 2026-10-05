@@ -13,7 +13,7 @@ APP_EXE="${INSTALL_PATH}/Contents/MacOS/margins-desktop"
 # case-insensitive volumes this is the same inode and the rm below covers it;
 # on case-sensitive volumes it would otherwise linger as a stale copy.
 LEGACY_INSTALL_PATH="/Applications/margins.app"
-CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/Users/example/Hacks/margins-cargo-target}"
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${HOME}/.cache/margins-cargo-target}"
 BUILT_APP="${CARGO_TARGET_DIR}/release/bundle/macos/${BUILT_APP_NAME}.app"
 
 export CARGO_TARGET_DIR

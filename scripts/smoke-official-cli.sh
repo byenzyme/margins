@@ -38,6 +38,10 @@ if report.get("tui_available") is not True:
     raise SystemExit("packaged binary does not contain the recording TUI composition")
 if report.get("official") is not True:
     raise SystemExit("packaged binary is not the official Margins composition")
+if report.get("oauth_client") != "valid":
+    raise SystemExit(
+        "packaged binary does not contain a valid MARGINS_GOOGLE_OAUTH_CLIENT_JSON credential"
+    )
 recall = report.get("recall") or {}
 if recall.get("scan") is not True or recall.get("indexing") is not True or recall.get("lookup") is not True:
     raise SystemExit("packaged binary does not contain recall scan, indexing, and lookup")

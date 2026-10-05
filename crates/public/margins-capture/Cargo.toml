@@ -1,0 +1,61 @@
+[package]
+name = "margins-capture"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Terminal, recorder, and local speech adapters for Margins"
+repository = "https://github.com/byenzyme/margins"
+readme = "README.md"
+
+[[example]]
+name = "tap_probe"
+path = "examples/tap_probe.rs"
+required-features = ["audio-capture"]
+
+[[example]]
+name = "system_audio_tap_probe"
+path = "examples/system_audio_tap_probe.rs"
+required-features = ["audio-capture"]
+
+[features]
+default = []
+audio-capture = ["dep:cpal", "dep:cidre"]
+coreml-asr = ["margins-media/coreml-asr", "margins-media/model-download", "dep:tempfile"]
+parakeet-asr = ["margins-media/parakeet-onnx", "margins-media/model-download"]
+polyvoice-diarization = ["margins-media/polyvoice-diarization"]
+polyvoice-coreml = ["polyvoice-diarization", "margins-media/polyvoice-coreml"]
+test-support = []
+
+[dependencies]
+anyhow = "1"
+chrono = "0.4"
+cpal = { version = "0.15", optional = true }
+crossterm = "0.28"
+dasp = "0.11"
+dirs = "6"
+fs4 = { version = "0.13", features = ["sync"] }
+hound = "3.5"
+margins-cli = { version = "0.4.15", path = "../margins-cli" }
+margins-core = { version = "0.1.0", path = "../margins-core" }
+margins-media = { version = "0.1.0", path = "../margins-media" }
+margins-meeting-protocol = { version = "0.1.0", path = "../margins-meeting-protocol" }
+margins-meeting-runtime = { version = "0.1.0", path = "../margins-meeting-runtime" }
+margins-store = { version = "0.1.0", path = "../margins-store" }
+ratatui = "0.30"
+rtrb = "0.3"
+rusqlite.workspace = true
+serde_json = "1"
+similar = "2.7"
+tempfile = { version = "3", optional = true }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+clap = { version = "4", features = ["derive"] }
+margins-meeting-runtime = { version = "0.1.0", path = "../margins-meeting-runtime", features = ["test-support"] }
+tempfile = "3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cidre = { version = "0.14", features = ["av"], optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_Media_Multimedia", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant"] }

@@ -236,7 +236,7 @@
    },
    {
     "name": "Org double-counting: explicit company field + email-domain inference both fire",
-    "description": "When an attendee had both an explicit company_name field (e.g. 'Analytical Engines') and an email with a recognizable domain (e.g. ada@analytical.co), the import created two separate organization entries: one from the explicit field and one inferred from the email domain ('Analytical'). This produced spurious org notes and incorrect people frontmatter in the vault.",
+    "description": "When an attendee had both an explicit company_name field (e.g. 'Analytical Engines') and an email with a recognizable domain (e.g. person@example.com), the import created two separate organization entries: one from the explicit field and one inferred from the email domain ('Analytical'). This produced spurious org notes and incorrect people frontmatter in the vault.",
     "vaultContext": "Any vault import where attendees have both explicit company fields and email addresses \u2014 common in real Granola exports.",
     "discovery": "Live e2e verification in the second follow-up round, reported by the parent verification thread.",
     "fixAttempted": "When a person has any explicit company/organization field, email-domain inference is now suppressed for that person in both meeting-level org aggregation and person_markdown. Explicit fields always win. Unit test added covering this case. Validated: cargo test 103 passed.",

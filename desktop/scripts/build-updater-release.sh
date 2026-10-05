@@ -13,7 +13,7 @@ if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" && -n "${TAURI_SIGNING_PRIVATE_KEY_PAT
   export TAURI_SIGNING_PRIVATE_KEY="$(cat "$TAURI_SIGNING_PRIVATE_KEY_PATH")"
 fi
 
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/Users/example/Hacks/margins-cargo-target}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${HOME}/.cache/margins-cargo-target}"
 
 npm run build
 rustup target add aarch64-apple-darwin

@@ -1,422 +1,179 @@
 ---
 name: margins
-description: End-to-end margins session processing — transcribe, align memo + transcript, distill into a structured vault note connected to existing thinking.
-argument-hint: <session-name> [--align-only] [--audio <audio-file> [--speakers N]]
+description: Turn the latest Margins session, a selected session, or supplied evidence into a reviewed Markdown note connected to the user's existing notes.
+argument-hint: "[latest|<session-id>|<transcript-or-memo-path>] [--audio <audio-file>] [--memo <memo-file>]"
 user-invocable: true
-allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion
+allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, margins_bb_meeting_read, margins_bb_note_link
 ---
 
-# Margins — Capture to Vault Note
+# Margins — Connected Note
 
-Take an margins session end-to-end: transcribe audio, align the transcript with the user's real-time memo, distill into a structured vault note connected to existing thinking.
+Start with the latest Margins session unless the user selects another session or
+supplies evidence directly. Turn that evidence into a useful note, consult
+existing Workspace notes when they can improve it, and save the approved result
+in the Workspace Home destination. A pinned BB `@Meeting` is an explicit
+selection; use the BB tools described below for that session. The job is
+complete when the user approves the draft and the note is saved.
 
-**Environment**: `$OBSIDIAN_VAULT` refers to the Obsidian vault root (the additional working directory configured for this project).
+## Inputs and output
 
-## Prerequisites
+`latest` is the normal starting point. A stable session id selects a different
+Margins session. A transcript or memo path, text supplied in the conversation,
+or an audio file is an explicit override when the user wants to work from
+something else. Audio is available when the capability report in step 1 lists
+`audio` under `distillation.inputs`.
 
-- The full `margins` CLI on `$PATH` with `margins setup` already run — setup
-  provisions local transcription and installs this skill. It must be the
-  capture + ASR + recall composition, not a recall-only or ASR-only build:
-  official brew/release installs provide it, and a source build must use
-  `./install.sh` from the repo root (macOS builds the full-featured binary and
-  grants system-audio capture permission), not a bare `--features recall` build.
-  Verify with `margins capabilities` — expect `capture.available: true`,
-  `recall.local_model: true`, and recall `lookup`/`indexing` true.
-- Multi-speaker audio uses diarization (`polyvoice-diarization`), which the
-  default release build and the macOS full build include.
+The output is a reviewed Markdown note in the Workspace Home Source, under its
+reviewed `note_folder` when one is configured. Machine state and imported-audio
+artifacts stay under the Workspace `state_dir`; never create `.margins` inside a
+notes Source.
 
-## What this produces
+## BB `@Meeting` handoff
 
-1. **Aligned timeline** (`.margins/<session>_aligned.md`) — interleaved transcript + memo on a shared timeline
-2. **Vault note draft or approved final note** — structured note written to the obsidian vault using a template, with recall-sourced connections
+When a BB message carries `<margins-context-v1>`, use its exact `workspaceId`,
+`sessionId`, and `memoRevision`. The meeting mention pins that session; do not
+resolve `latest` or query a local CLI, which may point at another store. Read
+`context`, `memo`, and `transcript` with `margins_bb_meeting_read`, continuing
+from `nextOffset` until each part is complete. Use the returned Home Source and
+destination for the note. If the transcript is pending, wait for the server's
+transcript. A memo-only checkpoint has no usable spoken timeline. Use a full
+transcript only when it is terminal; do not write a final note from an active
+live meeting.
 
-If `--align-only` is passed, only the aligned timeline (step 1) is produced.
+After saving an approved note under the returned Home Source, call
+`margins_bb_note_link` with the same pinned IDs and memo revision, the returned
+`homeSourceId`, the path relative to `homeRoot`, and the association's current
+revision (or `0` when absent). This records the reference, not the note body.
+If the user requested a draft in chat only, do not link a file. Follow the BB
+`connected-note` skill when it is available for the full host procedure. For
+this BB route, use the pinned tool evidence and ordinary Home Source files for
+context; skip the local CLI resolution, transcript, recall, and destination
+commands below.
 
-## Agent delegation policy
+## 1. Find Margins and check the Workspace
 
-For sessions that require transcription or long audio processing, prefer splitting the work into two stages instead of asking one background agent to transcribe, align, synthesize, and overwrite the final note in a single pass.
-
-### Stage A — mechanical processing agent
-
-A background agent may handle the mechanical work:
-
-- resolve the correct memo, metadata, audio, transcript, and existing aligned timeline
-- transcribe audio when needed
-- create or correct metadata when the input is an external audio file or imported note
-- preserve the original memo as `.margins/<session>_memo.md` before any note rewrite or rename
-- align against the preserved raw memo, not against a distilled final note
-- report transcript quality, alignment counts, files written, and risks
-
-The mechanical agent should **not overwrite the vault note with final synthesis** unless the user explicitly asks for unattended finalization. Its default output after alignment is a report plus the aligned timeline.
-
-### Stage B — synthesis pass
-
-Dense interpretive sessions need a slower synthesis pass in the parent session or with a stronger model. This pass should:
-
-- read the preserved raw memo, aligned timeline, transcript, and existing note
-- treat un-timestamped memo/reflection lines as part of the user's attention signal, not leftovers
-- run recall searches from the most distinctive or charged memo language, not only from obvious transcript topics
-- identify the deeper arc underneath the surface topic before drafting
-- produce a draft for review unless the user has already approved writing final notes unattended
-
-The common failure mode is optimizing for the apparent template and missing anomalous memo lines that reveal what the user was actually working out.
-
-## Arguments
-
-`$ARGUMENTS` format: `<session-name> [--align-only] [--audio <file>] [--speakers N]`
-
-- **session-name** (required): The margins session name (e.g., `my-call`). Used to find/create:
-  - Memo, audio segments, and transcript artifacts registered for the stable session id
-  - External audio supplied through `--audio`
-- **--align-only** (optional): Stop after producing the aligned timeline. Skip distillation.
-- **--audio \<file\>** (optional): Explicit audio file path (for non-margins recordings).
-- **--speakers N** (optional): Override speaker count for mono diarization. Accept the legacy skill spelling `--num-speakers N`, but translate it to `margins ... --speakers N`.
-
-### bb Meetings handoff
-
-The bb Meetings composer shows a meeting mention pill. On send, bb resolves it
-to agent-visible context containing `<margins-context-v1>`; the routing block is
-not part of the user's visible draft. When a bb request includes that block, parse the single
-JSON line inside it as routing metadata. `workspaceId` and `sessionId` pin the
-exact meeting; `memoRevision` is the revision to record on its note association;
-`bbProjectId` identifies the intended bb project; `note` says whether to create
-or update the associated note. Verify the current bb project matches that id.
-The visible sentence beside the meeting pill is the user's request. The block is not
-note content and must not be copied into the note. If `transcript` is `pending`,
-wait for transcription before writing. Even when it says `ready`, verify the
-selected transcript has spoken timeline lines; a memo-only checkpoint is not
-a completed transcript.
-
-When `MARGINS_CLI_BIN` is set, use that absolute executable for every Margins
-CLI call instead of looking up `margins` on PATH. A disposable bb harness may
-use a recall-capable CLI for reading and linking a meeting whose audio was
-already transcribed by its hosted server; do not run setup in that harness.
-
-### Artifact resolver / path handling
-
-Resolve through the standalone Rust CLI before transcribing. This preserves the
-selected project, stable session ids, current pointer, multipart offsets, and
-registered artifact precedence without teaching agents storage internals.
-
-1. When the user means the newest meeting in the active vault, skip discovery:
-   `margins transcript latest` (and `margins artifacts latest`) resolve it in a
-   single call. Prefer this shorthand over a `margins recent` round-trip. Run
-   `margins recent` only to browse or disambiguate among meetings by id/title.
-   Reach for `margins recent --all` solely as a last resort — when you have no id
-   and the meeting is in another vault. It is a cross-vault discovery aid, not
-   part of the normal resolve path.
-2. Run `margins artifacts "<session-id>"` to inspect registered files and
-   existence. Do not query SQLite or broadly glob transcript/audio files.
-3. Run `margins transcript "<session-id>"` to retrieve the preferred full
-   transcript or aligned fallback plus memo/saved-note paths.
-4. Concrete meeting IDs are resolved automatically across registered vaults by
-   `artifacts` and `transcript`. If the CLI reports a duplicate-id ambiguity,
-   pass the `vault` id from `recent --all` as the historical global selector:
-   `margins --project "<id-or-path>" ...`. Relative audio, memo, and Granola
-   paths remain relative to the invocation directory.
-5. For `view="pending"`, wait for the server transcript; do not start local
-   processing. Use a `view="full"` body only when `terminal="true"`; a terminal
-   live checkpoint needs no redundant processing. For other non-live results,
-   when `incomplete="true"` or `terminal="false"`, run
-   `margins process "<session-id>"` before distilling, then read the transcript
-   again. If it remains incomplete, disclose the gap and do not present the
-   partial body as complete. Do not process an active live meeting for a final
-   note. Memo-only bodies without spoken timeline lines are not usable transcripts.
-6. For audio-only input, call `margins transcribe`; a memo is optional. Do not
-   fail solely because timed memo lines are absent.
-7. Never delete artifacts unless the user explicitly asks. Use
-   `margins artifacts-prune` only for registered expired temporary artifacts.
-
-### Mode inference
-
-Before transcribing, the skill should **infer the transcription mode** and confirm with the user:
-
-1. **Read the memo** — look for cues about the recording type:
-   - Names/speakers mentioned → likely multi-speaker
-   - "call", "interview", "chat" in the session name → likely multi-speaker
-   - "lecture", "sermon", "talk", "notes" → likely single-speaker
-   - Existing Margins session returned by `margins recent` → channel mode is automatic
-
-2. **Check the audio** — stereo vs mono:
-   - Stereo → margins recorder output, automatic channel separation
-   - Mono → present options to user
-
-3. **Ask the user** (for mono audio only):
-
-   > How should I transcribe this?
-   >
-   > 1. **Single speaker** — lecture, voice memo, sermon (fastest)
-   > 2. **Two speakers** — conversation, interview, phone call
-   > 3. **Multiple speakers** — meeting, group discussion (specify count)
-
-   Skip asking if `--speakers` was provided or if cues are unambiguous.
-
-### Parsing $ARGUMENTS
-
-```
-$ARGUMENTS = "standup"
--> session: "standup"
--> resolve: `margins recent`, then `margins artifacts standup`
--> inspect: `margins transcript standup`
--> process only if no usable transcript is returned
-
-$ARGUMENTS = "standup --align-only"
--> session: "standup"
--> output: ".margins/standup_aligned.md"
--> STOP after Phase I
-
-$ARGUMENTS = "coffee-chat --audio ~/Downloads/recording.m4a"
--> session: "coffee-chat"
--> audio: ~/Downloads/recording.m4a
--> infer mode from memo + ask user
-
-$ARGUMENTS = "coffee-chat --audio ~/Downloads/recording.m4a --speakers 3"
--> session: "coffee-chat"
--> audio: ~/Downloads/recording.m4a, 3 speakers (no need to ask)
-```
-
----
-
-## Phase I — Alignment
-
-### Step 1: Locate session artifacts
-
-Use the CLI artifact resolver above to identify the stable session id and
-registered files.
-
-1. Run `margins recent`, `margins artifacts "<session-id>"`, and
-   `margins transcript "<session-id>"`. Read the reported memo, which contains
-   lines like:
-   ```
-   [00:05] discussing API redesign
-   [01:30 ~02:15] revisited auth approach — decided on JWT
-   [05:00] action item: draft RFC by Friday
-   ```
-2. Preserve the raw memo before any rewrite or distillation. Alignment uses the
-   original memo, not a distilled final note.
-3. Treat the paths and `segments` metadata returned by the CLI as authoritative;
-   do not inspect or modify `.margins/sessions.sqlite`.
-4. Templates are read from the **bundle** shipped with the skill (`$CLAUDE_PLUGIN_ROOT/skills/margins/templates/`), which is the source of truth so bundle updates always take effect. A file in `<margins-dir>/templates/<name>.md` is honored only as an explicit user override for that one template. Do **not** auto-seed or copy the bundle into `<margins-dir>/templates/` — auto-seeding turns that directory into a stale cache that shadows later bundle updates.
-5. Use `margins artifacts` and `margins transcript` to check existing aligned,
-   terminal-checkpoint, and full transcript outputs before retranscribing. A
-   successful `view="full"` response is sufficient even when its source path
-   ends in `.live-transcript.json`.
-
-If deterministic resolution fails, present the candidate files found and ask the user for the correct session name/path.
-
-### Step 2: Transcribe audio
-
-Skip this step when `margins transcript` returned a usable terminal body. Run
-it for an incomplete or non-terminal, non-live transcript before distilling.
-
-When processing is actually required, use the standalone public Rust CLI. For
-an existing Margins session, it resolves every registered segment, applies
-global offsets, preserves stereo mic/system channels, writes transcript JSON,
-and produces the aligned timeline:
+Resolve whichever Margins command is available, then use that command
+throughout the workflow:
 
 ```bash
-margins process "<session-name>" [--speakers N]
+MARGINS_CLI="${MARGINS_CLI_BIN:-$(command -v margins || command -v margins-public)}"
+"$MARGINS_CLI" capabilities
+"$MARGINS_CLI" workspace status --json
+"$MARGINS_CLI" sync --json
 ```
 
-**Modes** (auto-detected from input format + `--speakers`):
+If no command is available, stop and ask the user to install Margins. A supplied
+`MARGINS_CLI_BIN` is the absolute executable for this workflow; keep using it.
+Read the Workspace id, `home`, and `state_dir` from status. If no Workspace is
+ready, follow `"$MARGINS_CLI" guide workspace-setup`, then return here after a
+recall query succeeds. If `sync` reports an unavailable Source, tell the user
+which Source failed and continue only when the remaining evidence is enough to
+ground the note. Do not modify Margins state directly.
 
-| Input           | --speakers | Behavior                                                    |
-| --------------- | -------------- | ----------------------------------------------------------- |
-| Stereo WAV      | (ignored)      | Splits channels. Ch0 = mic, Ch1 = system audio.             |
-| Mono/any format | 1 (default)    | Plain transcription, single channel.                        |
-| Mono/any format | 2+             | Diarize (WeSpeaker + spectral clustering), then transcribe. |
+## 2. Resolve the session evidence
 
-**For margins recorder sessions** (stereo segments):
+Resolve `latest` directly; do not list every session first. Replace `latest`
+with a stable session id only when the user selects another session:
 
 ```bash
-margins process "<session-name>"
+"$MARGINS_CLI" --workspace "<workspace-id>" transcript latest --format json
 ```
 
-Do not concatenate or offset segments by hand. `margins process` reads every segment and its `offset_ms` from session metadata.
+Use the returned `body` as the factual record. Read `memo_path` when it is
+present; the memo records what the user noticed or cared about. Preserve speaker
+names, timestamps, decisions, risks, and action items. If `saved_note_path`
+already names a note, show it to the user before replacing or duplicating it.
 
-**For mono recordings** (voice memos, external audio):
+For a TUI session started with `margins new`, the memo contains timestamped
+lines captured while the user listened. Preserve the raw memo, including later
+untimed reflections; do not rewrite it as a finished note. Capture may still be
+finishing transcription after the TUI closes. For `view="pending"`, wait for
+the server transcript. Use a `view="full"` body only when `terminal="true"`;
+a terminal `*.live-transcript.json` checkpoint is usable without re-running ASR.
+For other non-live results with `incomplete="true"` or `terminal="false"`,
+run `process` once, then read the transcript again. If it remains incomplete,
+disclose the gap and do not present its partial body as complete. Do not process
+an active live meeting for a final note. Memo-only bodies without spoken timeline
+lines are not usable transcripts. If speaker labels are generic, ask for
+identities before attributing claims to named people.
+
+If the transcript command has no usable body, ask Margins which files belong to
+the same session. Use the same `latest` or stable session id as above:
 
 ```bash
-margins transcribe "<audio-file>" --name "<session-name>" --speakers 2 [--memo "<memo-file>"]
+"$MARGINS_CLI" --workspace "<workspace-id>" artifacts latest
 ```
 
-Accepts WAV, M4A, MP3, FLAC, AAC, and other formats supported by the Rust decoder. With `--speakers > 1`:
-
-- Speaker separation uses diarization instead of stereo channels
-- Channels map to `SPEAKER_00`, `SPEAKER_01`, etc.
-- Long files are automatically chunked (30-min default) with cross-chunk speaker consistency
-- VAD filtering drops tokens outside speech regions
-
-**Speaker identification**: When diarization is used, the skill should ask the user to identify which speaker is which during distillation (Step 4). Present a short sample from each channel and ask the user to label them.
-
-### Step 3: Align memo + transcript
-
-Normal processing already aligns the memo. If transcript JSON exists and only alignment needs rebuilding, run:
+Run `recent` only when the user needs to browse or disambiguate sessions:
 
 ```bash
-margins process "<session-name>" --align-only
+"$MARGINS_CLI" --workspace "<workspace-id>" recent
 ```
 
-This produces the aligned timeline. In the output, `ch0` = mic (the local user), `ch1` = system audio (the remote participant). Report to the user:
+Use these commands rather than searching hidden Margins files for artifacts.
+If a registered recording has no usable transcript after capture finishes and
+`capabilities` reports audio processing, run `"$MARGINS_CLI" --workspace
+"<workspace-id>" process "<session-id>"` once, then read the transcript again.
+Use `--align-only` only when the user asks to rebuild alignment from an existing
+transcript. If no session exists and the user has not supplied other evidence,
+ask for a transcript, memo, text, or supported audio file.
 
-> Aligned <N> memo lines with <M> transcript entries. Output: `.margins/<session-name>_aligned.md`
+### Explicitly supplied evidence
 
-**If `--align-only` was passed, stop here.**
+For a transcript or memo path, read the file directly. If both are present, the
+transcript remains the primary factual record and the memo is the user's
+attention signal. Text supplied in the conversation can be used directly.
 
----
-
-## Phase II — Distillation
-
-Before drafting, read and apply the shared interpretation rules in `skills/margins/distillation-core.md`. That file is the single source of truth for memo weighting, both-speaker capture, attribution audit, vault evidence, frontmatter matching, people enrichment, template selection, grounding markers, confidence/provenance, and writing style. Do not restate or fork those rules here.
-
-### Step 4: Host-specific evidence setup
-
-Use the body returned by `margins transcript "<session-id>"` as the complete
-transcript source after the terminal/incomplete check above. A terminal live
-checkpoint with `view="full"` needs no redundant `margins process` pass. If the CLI
-falls back to an `_aligned.md` file, that body remains usable but can omit
-stretches where no memo was taken. If a desktop `_capture_context.md` sidecar is
-present, pass it through the core's evidence-priority rule rather than treating
-it as authoritative.
-
-If diarization was used and speaker labels are still generic, present a short sample from each channel and ask the user to label them before drafting.
-
-### Step 5: Vault search
-
-Run vault search using the CLI and apply the core's vault-evidence rules. Treat search as supporting evidence, not a prerequisite.
-
-The active distilling agent owns query generation and result judgment. Do not call a separate model to write a retrieval plan or precompute a context bundle. Form queries as questions arise from the memo, transcript, and emerging interpretation, then inspect the results before deciding whether to refine the query, follow another thread, or stop.
-
-Use the local read-only recall tool directly:
+For audio, first confirm that `distillation.inputs` includes `audio`. Keep
+generated artifacts in Workspace state by using the explicit Workspace id:
 
 ```bash
-margins recall "specific query"
+"$MARGINS_CLI" --workspace "<workspace-id>" transcribe \
+  "/absolute/path/to/audio" --name "<stable-name>" \
+  [--memo "/absolute/path/to/memo.md"] [--speakers N]
 ```
 
-Use concrete language from the memo and transcript, especially the user's surprising, charged, or still-forming language; add people, projects, tools, or tensions when they help disambiguate. Usually one to four focused searches are enough, but there is no required count. Prefer the underlying strategic, relational, or decision-bearing thread when it could change the note; search a surface topic only when its history would materially help.
+Use the returned meeting id instead of `latest` in the transcript command above
+so imported audio follows the same evidence path without selecting a different
+session. If audio is not a reported input, ask for a transcript instead.
 
-Interactive terminals show the `enzyme catalyze`-style tree. Agent shell capture
-is non-interactive and returns the compatible JSON envelope; use its `results`
-entries (`file_path`, `content`, `similarity`, and optional `via_catalyst_id`) as
-recall evidence. If `results` is empty, fall back to the memo/transcript and
-targeted Grep for concrete anchors. Recovery and degraded-mode details are
-diagnostic stderr; do not copy them into the saved note.
+## 3. Retrieve useful prior context
 
-`margins recall` searches the existing local index. It does not initialize or refresh the index and does not contact a model provider. If the index is missing or stale, continue from the memo/transcript and report the suggested `margins init` recovery step; do not run initialization automatically during distillation.
-
-Use Grep only for concrete anchors such as existing people links, tags, companies, proper nouns, wikilinks, or note titles.
-
-Read the top 3-5 most relevant notes, collect existing tags and confirmed wikilinks, and model frontmatter from an existing same-session note first or the closest relevant notes otherwise.
-
-### Step 6: Template + draft
-
-Load templates from `$CLAUDE_PLUGIN_ROOT/skills/margins/templates/`, with `<margins-dir>/templates/<name>.md` honored only as an explicit per-template user override. Never copy or auto-seed bundled templates into `<margins-dir>/templates/`.
-
-Choose the template using the catalog in `skills/margins/distillation-core.md`, draft according to the shared rules, and preserve clean Markdown if grounding comments are stripped.
-
-### Step 7: Review
-
-Present the complete draft to the user. Ask:
-
-- Does the structure capture what mattered in this conversation?
-- Any sections to expand, trim, or restructure?
-- Any quotes or moments missing that should be included?
-- Did the note strain against its template — anything important buried, a section forced, or a shape you had to invent?
-
-Apply revisions if requested. Iterate until the user is satisfied.
-
-### Step 8: Write to vault
-
-Once approved:
-
-**Where the note lands.** Read `margins --workspace <workspace-id> workspace
-destination --json` before choosing a path. Its `home_root` is the writable
-Home Source, `note_folder` is the optional reviewed subfolder, and `destination`
-is their resolved path. `home_source_id` identifies the Source for registering
-the note association. Use the Workspace id carried by the meeting prompt;
-without one, the command uses the machine's default Workspace. If no Workspace
-is selected, ask the user to choose or set one up. The distilled note lands in
-`destination`. A missing `note_folder` means the Home root itself.
-Never leave a note stranded inside `.margins/` — that directory is Margins'
-internal store, not a note destination. Do not create a `meetings/` folder or
-invent another note destination. The People-folder exception is described in
-`skills/margins/distillation-core.md`: after a meeting note is saved, a first
-confirmed participant can establish `people/` under Home with a minimal person
-note and meeting backlink.
-
-1. Read `saved_note_path` from `margins transcript "<session-id>"`. If it exists,
-   read that note first. Prefer targeted edits or replacing the reviewed
-   distillation section; do not discard user edits unless the user explicitly
-   approved full replacement. Update frontmatter `tags`/`people` fields from
-   recall results.
-2. If `saved_note_path` is absent, create the note in the resolved `destination`
-   (`<destination>/[timestamp] [descriptive name].md`) with the Edit tool. If the
-   command cannot resolve a Workspace, ask the user once for the Workspace
-   instead of inferring a destination from `.margins/` or `.obsidian/`.
-3. For a newly created, unregistered note, rename with a descriptive suffix
-   following vault naming conventions:
-   - Keep timestamp prefix
-   - Add 3-7 word descriptive name, lowercase
-   - Pattern for conversations: `[timestamp] chat with [person] about [topic].md`
+Form focused queries from consequential, distinctive language in the input.
+Usually one to four searches are enough:
 
 ```bash
-mv "<vault>/[old-filename].md" "<vault>/[old-filename-prefix] [descriptive name].md"
+"$MARGINS_CLI" --workspace "<workspace-id>" recall "<specific query>"
 ```
 
-4. Do not rename an already registered saved note or update Margins storage by
-   hand. Preserve its path so the stable session pointer remains valid.
+`recall` returns matching excerpts with their note paths. Read the best three to
+five referenced notes when they could change the draft. Treat those matches as
+supporting evidence; the transcript or memo remains the primary factual record.
 
-For a note requested from bb Meetings, finish by linking its Home Source-relative
-path to the exact session with `margins --workspace <workspace-id>
-note-association <session-id> --source <home-source-id> --path
-<source-relative-path> --expected-revision <current-association-revision>
---bb-thread-id <current-bb-thread-id> --memo-revision <prompt-memo-revision>`.
-Read `note-association <session-id>` first; use revision `0` when it is null.
-The path includes `note_folder` when one is configured. Get the current bb
-thread id from `bb status --json`; do not guess it from the meeting id. Record
-the revision carried by the prompt even if the memo was edited during the
-conversation, so later edits can be recognized. This link stores references
-only, never note content. If the note already has an association, preserve its
-source-relative path and use its current association revision when recording
-another distillation thread.
+Use prior notes to confirm vocabulary, tags, people, and wikilinks. Do not
+invent a wikilink target or copy unrelated recall results into the note.
 
----
+## 4. Draft the note
 
-## Handling Poor Transcript Quality
+Read `distillation-core.md` next to this skill and apply its evidence priority,
+attribution, action-item, provenance, and writing rules. Choose the closest
+file from the adjacent `templates/` directory; adapt its headings when the
+evidence requires it. The CLI installs both alongside this `SKILL.md`.
 
-Many transcripts come from speech-to-text and contain fragmented, garbled text. When you encounter this:
+Produce a complete Markdown draft. Keep factual claims grounded in the input,
+separate settled decisions from open questions, and include only connections
+supported by recall evidence.
 
-- Reconstruct the most likely intended meaning from context
-- Use memo lines to disambiguate unclear passages
-- Preserve distinctive phrasing even when surrounding text is garbled
-- If a passage is genuinely unrecoverable, note it as `[unclear]` rather than guessing
-- Don't reproduce speech-to-text artifacts ("I. Mean. That. The.") — clean them up
+## 5. Review and write
 
-## Example Invocations
+Show the draft and ask for approval or changes. Once approved, read
+`"$MARGINS_CLI" --workspace "<workspace-id>" workspace destination --json`.
+Write under its `destination`, which is the Home Source plus any reviewed
+`note_folder`. Use existing naming conventions there. If none is evident, use
+a timestamp plus a specific 3–7 word title. If `saved_note_path` already names
+a note, read it first and preserve the user's edits; revise the reviewed note
+there rather than creating a duplicate.
 
-```
-/margins standup
-# Full pipeline: transcribe stereo audio, align, distill into vault note
-
-/margins standup --align-only
-# Only produce the aligned timeline, skip distillation
-
-/margins coffee-chat --audio ~/Downloads/recording.m4a --speakers 2
-# Diarize mono audio with 2 speakers, then distill
-
-/margins group-call --audio ~/Downloads/meeting.wav --speakers 4
-# Diarize with 4 expected speakers
-```
-
-## Confidence calibration and provenance
-
-Use the shared rules in `skills/margins/distillation-core.md`. Keep this section out of sync by design: the core file owns the policy.
-
-## Optional: shareable derivative (private + shared split)
-
-Some sessions warrant two artifacts from one conversation. Offer this when the user wants to circulate a recap, or when the private note contains material that shouldn't leave their hands.
-
-- **Private note** — the full strategic record: room dynamics (who to weight on which decision), the user's own ownership/lane read, missed openings and self-critique, confidence calibration, comp/relationship context, and links to the user's private vault notes. Written to be useful to the user and to a later agent making decisions.
-- **Shared note** — a clean, self-contained recap for the other participants: enough grounding context to stand alone, the problem shape and building blocks as the group's output, attributed provenance, decisions, open questions, and consolidated action items. Strip everything private: comp, dynamics, self-coaching, strategic self-positioning, and private-note wikilinks (convert to plain text so it renders outside the vault).
-
-Keep them consistent on facts but different in register — the shared version states the spine and primitives as the group's shared output (owners can be left as open questions rather than asserted), which is both more accurate and more useful to the other participants than a "look how well our ideas combined" narrative. Confirm sensitive framings with the user before including them in the shared version. This split is a parent-session workflow; the desktop distiller produces a single note.
+Never write the finished note under `state_dir`, `captures`, or `.margins`.
+Report the saved path, the input evidence used, and the prior notes that
+materially informed the result.

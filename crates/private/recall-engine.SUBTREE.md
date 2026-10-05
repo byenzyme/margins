@@ -1,5 +1,12 @@
 # Enzyme search-core subtree
 
+> Cutover note (2026-10-02): this is historical import documentation. The
+> vendored subtree was retired in favor of the private `enzyme-core` git
+> dependency pinned at `d92f9e52ffddbe318ed2d6797cde2d821985c61a`.
+> That commit's `crates/enzyme-core` tree is exactly the last vendored tree,
+> `5c09d802abf73326a8c67110b308adb8b08e4c22`. Its documentation, model
+> card, examples, and benchmarks remain in that private git source.
+
 `crates/private/recall-engine/` is a pristine git subtree of
 `crates/enzyme-core/` from the local enzyme-rust repository. Do not edit files
 inside the subtree from Margins and do not apply downstream transforms. Margins

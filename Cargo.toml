@@ -9,18 +9,19 @@ members = [
     ".",
     "crates/public/margins-core",
     "crates/public/margins-media",
+    "crates/public/margins-capture",
     "crates/public/margins-cli",
     "crates/public/margins-store",
     "crates/public/margins-workflows",
     "crates/public/margins-meeting-protocol",
     "crates/public/margins-meeting-runtime",
     "crates/public/margins-server",
-    "crates/private/recall-engine",
 ]
 default-members = [
     ".",
     "crates/public/margins-core",
     "crates/public/margins-media",
+    "crates/public/margins-capture",
     "crates/public/margins-cli",
     "crates/public/margins-store",
     "crates/public/margins-workflows",
@@ -28,7 +29,7 @@ default-members = [
     "crates/public/margins-meeting-runtime",
     "crates/public/margins-server",
 ]
-exclude = ["desktop/src-tauri", "crates/public/margins-server/vendor/matroska-demuxer"]
+exclude = ["crates/public/margins-server/vendor/matroska-demuxer"]
 resolver = "2"
 [workspace.dependencies]
 rusqlite = { package = "libsql-rusqlite", version = "=0.9.30" }
@@ -44,50 +45,48 @@ path = "src/lib.rs"
 name = "margins-private"
 path = "src/main.rs"
 
+[[test]]
+name = "recall_index_process"
+path = "tests/recall_index_process.rs"
+required-features = ["recall"]
+
 [features]
-default = ["coreml-asr", "audio-capture", "polyvoice-coreml", "recall-local-model"]
-audio-capture = ["dep:cpal", "dep:cidre"]
-# Associative vault search backing `margins recall`. Composes the subtree-linked
-# private recall engine's portable orchestration and lookup into the binary. The
-# public CLI keeps the command present and degrades gracefully when this port is
-# absent.
-recall = ["dep:recall-engine", "dep:reqwest", "dep:tokio"]
+default = ["audio-capture"]
+audio-capture = ["margins-capture/audio-capture"]
+# The public manifest and lockfile contain no private git source. Official
+# builds use scripts/with-private-recall to inject the pinned optional engine.
+recall = ["dep:reqwest", "dep:tokio"]
 # In-process llama.cpp generation for offline thematic bridges. Kept separate
 # so recall policy and lookup tests need no native C/C++ inference toolchain.
-recall-local-model = ["recall", "recall-engine/local-llm"]
-parakeet-asr = ["margins-cli/parakeet-onnx", "margins-media/parakeet-onnx", "margins-media/model-download"]
+recall-local-model = ["recall"]
+parakeet-asr = ["margins-cli/parakeet-onnx", "margins-media/parakeet-onnx", "margins-media/model-download", "margins-capture/parakeet-asr"]
 parakeet-asr-dynamic = ["parakeet-asr", "margins-media/parakeet-onnx-dynamic"]
-coreml-asr = ["margins-cli/coreml-asr", "margins-media/coreml-asr", "margins-media/model-download"]
+coreml-asr = ["margins-cli/coreml-asr", "margins-media/coreml-asr", "margins-media/model-download", "margins-capture/coreml-asr"]
 polyvoice-diarization = [
     "margins-cli/polyvoice-diarization",
     "margins-media/polyvoice-diarization",
+    "margins-capture/polyvoice-diarization",
 ]
-polyvoice-coreml = ["polyvoice-diarization", "margins-media/polyvoice-coreml"]
+polyvoice-coreml = ["polyvoice-diarization", "margins-media/polyvoice-coreml", "margins-capture/polyvoice-coreml"]
 
 [dependencies]
 anyhow = "1"
 margins-core = { path = "crates/public/margins-core" }
 margins-media = { path = "crates/public/margins-media" }
+margins-capture = { path = "crates/public/margins-capture" }
 margins-cli = { path = "crates/public/margins-cli" }
 margins-store = { path = "crates/public/margins-store" }
 margins-workflows = { path = "crates/public/margins-workflows" }
 margins-meeting-protocol = { path = "crates/public/margins-meeting-protocol" }
 margins-meeting-runtime = { path = "crates/public/margins-meeting-runtime" }
 rusqlite.workspace = true
-recall-engine = { path = "crates/private/recall-engine", package = "enzyme-core", features = ["embedder-compat"], optional = true }
 tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
-cpal = { version = "0.15", optional = true }
 crossterm = "0.28"
-dasp = "0.11"
-hound = "3.5"
-similar = "2.7"
-fs4 = { version = "0.13", features = ["sync"] }
 dirs = "6"
+fs4 = { version = "0.13", features = ["sync"] }
 include_dir = "0.7"
-rtrb = "0.3"
-ratatui = "0.30"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -99,11 +98,7 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 ctor = "0.2.9"
+hound = "3.5"
+margins-capture = { path = "crates/public/margins-capture", features = ["test-support"] }
 margins-workflows = { path = "crates/public/margins-workflows", features = ["test-support"] }
 margins-meeting-runtime = { path = "crates/public/margins-meeting-runtime", features = ["test-support"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-cidre = { version = "0.14", features = ["av"], optional = true }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_Media_Multimedia", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant"] }

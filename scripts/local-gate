@@ -12,10 +12,12 @@ import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 LANE = ROOT / "scripts" / "cargo-lane"
+PRIVATE_RECALL_WRAPPER = ROOT / "scripts" / "with-private-recall"
 BB_PLUGIN = ROOT / "integrations/bb-plugin-margins"
 BB_PLUGIN_DIST = "integrations/bb-plugin-margins/dist"
 ROOT_PACKAGES = {
     "margins",
+    "margins-capture",
     "margins-cli",
     "margins-core",
     "margins-media",
@@ -23,9 +25,9 @@ ROOT_PACKAGES = {
     "margins-meeting-runtime",
     "margins-store",
     "margins-workflows",
-    "enzyme-core",
 }
 SERVER_MANIFEST = ROOT / "crates/public/margins-server/Cargo.toml"
+OFFICIAL_MACOS_FEATURES = "audio-capture,coreml-asr,polyvoice-coreml,recall,recall-local-model"
 if SERVER_MANIFEST.exists():
     ROOT_PACKAGES.add("margins-server")
 # Direct workspace dependency edges, reversed from the Cargo manifests. Quick
@@ -33,21 +35,22 @@ if SERVER_MANIFEST.exists():
 # Keep this map in sync when a root workspace crate adds a local dependency.
 REVERSE_DEPENDENTS = {
     "enzyme-core": {"margins"},
-    "margins-cli": {"margins"},
+    "margins-capture": {"margins"},
+    "margins-cli": {"margins", "margins-capture"},
     "margins-core": {
-        "margins", "margins-cli", "margins-media", "margins-server",
+        "margins", "margins-capture", "margins-cli", "margins-media", "margins-server",
         "margins-store", "margins-workflows",
     },
-    "margins-media": {"margins", "margins-cli", "margins-server", "margins-workflows"},
+    "margins-media": {"margins", "margins-capture", "margins-cli", "margins-server", "margins-workflows"},
     "margins-meeting-protocol": {
-        "margins", "margins-cli", "margins-meeting-runtime",
+        "margins", "margins-capture", "margins-cli", "margins-meeting-runtime",
         "margins-server", "margins-store", "margins-workflows",
     },
-    "margins-meeting-runtime": {"margins", "margins-server", "margins-store", "margins-workflows"},
-    "margins-store": {"margins", "margins-cli", "margins-server", "margins-workflows"},
+    "margins-meeting-runtime": {"margins", "margins-capture", "margins-server", "margins-store", "margins-workflows"},
+    "margins-store": {"margins", "margins-capture", "margins-cli", "margins-server", "margins-workflows"},
     "margins-workflows": {"margins", "margins-cli", "margins-server"},
 }
-USAGE = "usage: scripts/local-gate quick <paths-or-crates>... | public | linux | macos"
+USAGE = "usage: scripts/local-gate quick <paths-or-crates>... | public | linux | macos | scan [git-range]"
 
 
 class GateFailure(Exception):
@@ -62,10 +65,24 @@ class Gate:
         self.passed: list[str] = []
         self.skipped: list[str] = []
 
-    def run(self, label: str, command: list[str], *, cwd: Path = ROOT, env=None) -> None:
+    def run(
+        self,
+        label: str,
+        command: list[str],
+        *,
+        cwd: Path = ROOT,
+        env=None,
+        quiet_stdout: bool = False,
+    ) -> None:
         print(f"\n==> {label}", flush=True)
         try:
-            result = subprocess.run(command, cwd=cwd, env=env, check=False)
+            result = subprocess.run(
+                command,
+                cwd=cwd,
+                env=env,
+                check=False,
+                stdout=subprocess.DEVNULL if quiet_stdout else None,
+            )
         except OSError as exc:
             print(f"local-gate: {exc}", file=sys.stderr)
             raise GateFailure(label, 127) from exc
@@ -101,6 +118,24 @@ def normalize_input(raw: str) -> str:
     return path.as_posix().removeprefix("./").rstrip("/")
 
 
+def cargo_graph_changed(inputs: list[str]) -> bool:
+    return any(
+        Path(normalize_input(raw)).name in {"Cargo.toml", "Cargo.lock", "Cargo.private-recall.lock"}
+        for raw in inputs
+    )
+
+
+def check_private_composition_lock(gate: Gate) -> None:
+    command = ["cargo", "metadata", "--locked", "--format-version", "1"]
+    if os.environ.get("MARGINS_PRIVATE_RECALL_ACTIVE") != "1":
+        command.insert(0, str(PRIVATE_RECALL_WRAPPER))
+    gate.run(
+        "verify private recall manifest and lock",
+        command,
+        quiet_stdout=True,
+    )
+
+
 def quick_selection(inputs: list[str]) -> tuple[list[str], bool, bool]:
     packages: set[str] = set()
     parked_desktop = False
@@ -122,8 +157,6 @@ def quick_selection(inputs: list[str]) -> tuple[list[str], bool, bool]:
             parts = item.split("/")
             if len(parts) >= 3 and parts[2] in ROOT_PACKAGES:
                 packages.add(parts[2])
-        elif item == "crates/private/recall-engine" or item.startswith("crates/private/recall-engine/"):
-            packages.add("enzyme-core")
         elif item == "desktop" or item.startswith("desktop/"):
             parked_desktop = True
         elif item == "integrations/bb-plugin-margins" or item.startswith("integrations/bb-plugin-margins/"):
@@ -153,10 +186,11 @@ def check_bb_plugin(gate: Gate) -> None:
 
 def check_shipped_linux(gate: Gate, *, cli_already_built: bool = False) -> None:
     if not cli_already_built:
+        private_recall = os.environ.get("MARGINS_PRIVATE_RECALL_ACTIVE") == "1"
         gate.cargo(
-            "check portable private CLI",
+            "check portable CLI",
             "check", "-p", "margins", "--bin", "margins-private",
-            "--no-default-features", "--features", "recall", "--locked",
+            "--no-default-features", *(["--features", "recall"] if private_recall else []), "--locked",
         )
     if SERVER_MANIFEST.exists():
         gate.cargo(
@@ -167,12 +201,14 @@ def check_shipped_linux(gate: Gate, *, cli_already_built: bool = False) -> None:
 
 
 def quick(gate: Gate, inputs: list[str]) -> None:
+    if cargo_graph_changed(inputs):
+        check_private_composition_lock(gate)
     packages, parked_desktop, bb_plugin = quick_selection(inputs)
     if packages:
         args = ["test", "--locked", "--no-default-features"]
         for package in packages:
             args.extend(["-p", package])
-        if "margins" in packages:
+        if "margins" in packages and os.environ.get("MARGINS_PRIVATE_RECALL_ACTIVE") == "1":
             args.extend(["--features", "recall"])
         gate.cargo("affected root workspace tests", *args)
     if parked_desktop:
@@ -183,6 +219,9 @@ def quick(gate: Gate, inputs: list[str]) -> None:
 
 
 def linux(gate: Gate) -> None:
+    if os.environ.get("MARGINS_PRIVATE_RECALL_ACTIVE") != "1":
+        raise ValueError("linux recall gate requires scripts/with-private-recall")
+    check_private_composition_lock(gate)
     check_bb_plugin(gate)
     gate.cargo(
         "portable workspace and private composition tests",
@@ -207,26 +246,29 @@ def linux(gate: Gate) -> None:
 
 
 def public(gate: Gate) -> None:
-    # --all-targets compiles the binaries, libraries, and test targets before
-    # running tests. The vendored engine and its nested ese crate are both
-    # workspace members today; omit their excludes after cutover removes them.
-    excludes = []
-    for package, manifest in (
-        ("enzyme-core", ROOT / "crates/private/recall-engine/Cargo.toml"),
-        ("ese", ROOT / "crates/private/recall-engine/vendor/ese/Cargo.toml"),
-    ):
-        if manifest.exists():
-            excludes.extend(("--exclude", package))
+    gate.run(
+        "scan public tree for secrets and personal data",
+        [
+            sys.executable,
+            "scripts/scan-public-history.py",
+            "--fail-on-secret",
+            "--fail-on-personal",
+        ],
+    )
     gate.cargo(
         "build and test workspace without private recall engine",
-        "test", "--workspace", *excludes, "--all-targets", "--no-default-features", "--locked",
+        "test", "--workspace", "--all-targets", "--no-default-features", "--locked",
     )
 
 
 def macos(gate: Gate) -> None:
+    if os.environ.get("MARGINS_PRIVATE_RECALL_ACTIVE") != "1":
+        raise ValueError("macos recall gate requires scripts/with-private-recall")
     gate.cargo(
         "build private release CLI",
         "build", "--release", "-p", "margins", "--bin", "margins-private", "--locked",
+        "--no-default-features", "--features",
+        OFFICIAL_MACOS_FEATURES,
     )
     gate.cargo(
         "build public workspace targets",
@@ -234,7 +276,18 @@ def macos(gate: Gate) -> None:
     )
     gate.cargo(
         "private composition, audio capture, CoreML, and recall integration",
-        "test", "-p", "margins", "--locked",
+        "test", "-p", "margins", "--locked", "--no-default-features", "--features",
+        OFFICIAL_MACOS_FEATURES,
+    )
+    gate.cargo(
+        "assert recall integration tests execute",
+        "test", "-p", "margins", "--test", "recall_index_process", "--locked",
+        "--no-default-features", "--features", OFFICIAL_MACOS_FEATURES,
+    )
+    gate.cargo(
+        "native capture package targets and probes",
+        "test", "-p", "margins-capture", "--all-targets", "--locked",
+        "--no-default-features", "--features", "audio-capture,coreml-asr,polyvoice-coreml",
     )
     gate.cargo(
         "public workspace tests",
@@ -250,16 +303,21 @@ def macos(gate: Gate) -> None:
 
 def main() -> int:
     args = sys.argv[1:]
-    if not args or args[0] not in {"quick", "public", "linux", "macos"}:
+    if not args or args[0] not in {"quick", "public", "linux", "macos", "scan"}:
         print(USAGE, file=sys.stderr)
         return 2
     mode, inputs = args[0], args[1:]
-    if (mode == "quick" and not inputs) or (mode != "quick" and inputs):
+    if (mode == "quick" and not inputs) or (mode not in {"quick", "scan"} and inputs) or (mode == "scan" and len(inputs) > 1):
         print(USAGE, file=sys.stderr)
         return 2
     if mode == "macos" and platform.system() != "Darwin":
         print("local-gate macos requires a Mac host", file=sys.stderr)
         return 2
+    if mode == "scan":
+        command = [sys.executable, "scripts/scan-public-history.py"]
+        if inputs:
+            command.extend(["--range", inputs[0]])
+        return subprocess.run(command, cwd=ROOT, check=False).returncode
     if os.environ.get("MARGINS_LOCAL_GATE_INSIDE") != "1":
         env = {**os.environ, "MARGINS_LOCAL_GATE_INSIDE": "1"}
         return subprocess.run(

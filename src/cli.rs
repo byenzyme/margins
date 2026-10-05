@@ -1,8 +1,8 @@
 //! Private composition for the distributable `margins` binary.
 //!
 //! Parsing and non-interactive workflows remain in the public CLI crate. The
-//! native recorder and memo TUI intentionally stay here, on the private side of
-//! the open-core boundary.
+//! public capture crate owns the native recorder and memo TUI; this module
+//! wires them to CLI commands and private recall when enabled.
 
 use crate::note::AGENT_SKILL_DIRS;
 use anyhow::Context;
@@ -24,13 +24,9 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 #[cfg(feature = "audio-capture")]
 use std::sync::atomic::AtomicU32;
-#[cfg(any(
-    test,
-    feature = "audio-capture",
-    all(feature = "coreml-asr", target_os = "macos")
-))]
+#[cfg(feature = "audio-capture")]
 use std::sync::atomic::AtomicU64;
-#[cfg(any(test, feature = "audio-capture"))]
+#[cfg(feature = "audio-capture")]
 use std::sync::atomic::AtomicU8;
 #[cfg(any(
     test,
@@ -51,8 +47,8 @@ use std::sync::{mpsc, Arc};
 #[path = "cli/native_bridge.rs"]
 mod native_bridge;
 
-#[path = "cli/capture_local_runtime.rs"]
-mod capture_local_runtime;
+#[cfg(feature = "audio-capture")]
+use margins_capture::local_runtime as capture_local_runtime;
 
 #[cfg(feature = "audio-capture")]
 #[path = "cli/audio_preferences.rs"]
@@ -149,6 +145,9 @@ include!("cli/recall_cmds.rs");
 include!("cli/setup.rs");
 include!("cli/capture_local.rs");
 include!("cli/capture_remote.rs");
-include!("cli/live_asr.rs");
+#[cfg(feature = "audio-capture")]
+use margins_capture::live_asr::{
+    start_live_transcript_worker, LiveTranscriptWorker, LIVE_QUEUE_MAX_SAMPLES,
+};
 #[cfg(test)]
 include!("cli/tests.rs");

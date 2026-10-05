@@ -67,14 +67,10 @@ every `invoke()` through HTTP instead of Tauri IPC.
   on PATH). Idempotent; on "shared library" errors use `--with-deps`.
 - Browser WebM/Opus finalization is native in `margins-server`: the server
   demuxes WebM, decodes Opus directly to 16 kHz, and streams mono WAV output
-  through a synced temporary file. The normal hosted capture path does not
-  resolve or spawn `ffmpeg`, even when `FFMPEG_BIN` is unset or invalid.
-  `ffmpeg` remains optional for agent-browser video and as an explicit migration fallback
-  for hosted capture when
-  `MARGINS_HOSTED_WEBM_FINALIZER=ffmpeg` is set; in that fallback mode
-  `margins-server` discovers it from `FFMPEG_BIN`, beside the server executable,
-  `~/.local/bin`, common system locations, or `PATH`. A browser client never
-  needs a local ffmpeg installation.
+  through a synced temporary file. Hosted capture never resolves or spawns
+  `ffmpeg`; the compatibility finalizer and its environment switches were
+  retired. `ffmpeg` remains optional for agent-browser video conversion. A
+  browser client never needs a local ffmpeg installation.
 
 ## Spin up
 

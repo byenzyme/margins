@@ -4,15 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-if [ -z "${CARGO_TARGET_DIR:-}" ]; then
-  repo_common="$(cd "$REPO_ROOT" && git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
-  if [ -n "$repo_common" ]; then
-    repo_root="$(dirname "$repo_common")"
-    export CARGO_TARGET_DIR="$(dirname "$repo_root")/margins-cargo-target"
-  else
-    export CARGO_TARGET_DIR="$REPO_ROOT/target"
-  fi
-fi
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$("$REPO_ROOT/scripts/cargo-lane" target-dir)}"
+export CARGO_TARGET_DIR
 
 BIN_DIR="${MARGINS_BIN_DIR:-${HOME:?HOME is required}/.local/bin}"
 DEST="$BIN_DIR/margins"
@@ -20,14 +13,19 @@ DEST="$BIN_DIR/margins"
 # Build profile selects the compiled feature set:
 #   recall (default) — portable lookup only (`--features recall`), no native
 #     capture/ASR/inference toolchain. The honest maximum on Linux/CI.
-#   full — the default feature set (audio-capture + recall + recall-local-model
-#     + coreml-asr + polyvoice-coreml). macOS source installs use this so a
+#   full — audio-capture + recall + recall-local-model + coreml-asr +
+#     polyvoice-coreml. macOS source installs use this so a
 #     single `margins` records, transcribes, and generates catalyst bridges.
 PROFILE="${MARGINS_CLI_PROFILE:-recall}"
 BUILD_ARGS=(build --release --locked)
 case "$PROFILE" in
   recall) BUILD_ARGS+=(--no-default-features --features recall) ;;
-  full) ;;
+  full)
+    BUILD_ARGS+=(
+      --no-default-features
+      --features audio-capture,coreml-asr,polyvoice-coreml,recall,recall-local-model
+    )
+    ;;
   *) echo "Unknown MARGINS_CLI_PROFILE '$PROFILE' (expected 'recall' or 'full')" >&2; exit 1 ;;
 esac
 BUILD_ARGS+=(--bin margins-private)
@@ -35,7 +33,7 @@ BUILD_ARGS+=(--bin margins-private)
 echo "Building official Margins CLI (profile: $PROFILE)..."
 (
   cd "$REPO_ROOT"
-  cargo "${BUILD_ARGS[@]}"
+  scripts/with-private-recall scripts/cargo-lane shared -- cargo "${BUILD_ARGS[@]}"
 )
 
 SOURCE="$CARGO_TARGET_DIR/release/margins-private"

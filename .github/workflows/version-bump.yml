@@ -32,33 +32,32 @@ jobs:
           perl -0pi -e 's/^(name = "margins"\nversion = ")[^"]+/${1}'"$VERSION"'/m' Cargo.toml
           perl -0pi -e 's/^(name = "margins-cli"\nversion = ")[^"]+/${1}'"$VERSION"'/m' crates/public/margins-cli/Cargo.toml
           perl -0pi -e 's/^(name = "margins-server"\nversion = ")[^"]+/${1}'"$VERSION"'/m' crates/public/margins-server/Cargo.toml
+          perl -0pi -e 's/(margins-cli = \{ version = ")[^"]+/${1}'"$VERSION"'/' crates/public/margins-capture/Cargo.toml
           scripts/cargo-lane shared -- cargo update -p margins -p margins-cli -p margins-server
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-          import re
 
-          path = Path("public-repository/Cargo.lock")
-          text = path.read_text()
-          for name in ("margins-cli", "margins-server"):
-              pattern = rf'(\[\[package\]\]\nname = "{name}"\nversion = ")[^"]+("\n)'
-              text, count = re.subn(
-                  pattern,
-                  rf'\g<1>{os.environ["VERSION"]}\g<2>',
-                  text,
-              )
-              if count != 1:
-                  raise SystemExit(f"expected one {name} lock package, found {count}")
-          path.write_text(text)
-          PY
+      - name: Refresh private recall composition lockfile
+        env:
+          GH_TOKEN: ${{ secrets.ENZYME_RUST_READ_TOKEN }}
+          CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::error::Missing required secret: ENZYME_RUST_READ_TOKEN"
+            exit 1
+          fi
+          gh auth setup-git
+          scripts/with-private-recall bash -c '
+             scripts/cargo-lane shared -- cargo update -p margins -p margins-cli -p margins-server
+             cp Cargo.lock Cargo.private-recall.lock
+           '
 
       - name: Commit and tag
         run: |
           VERSION="${{ inputs.version }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock crates/public/margins-cli/Cargo.toml \
-            crates/public/margins-server/Cargo.toml public-repository/Cargo.lock
+          git add Cargo.toml Cargo.lock Cargo.private-recall.lock \
+            crates/public/margins-cli/Cargo.toml crates/public/margins-server/Cargo.toml \
+            crates/public/margins-capture/Cargo.toml
           git commit -m "Release v${VERSION}"
           git tag "v${VERSION}"
           git push origin main --tags
