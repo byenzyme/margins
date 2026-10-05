@@ -14,7 +14,7 @@ on:
 jobs:
   bump:
     runs-on: ubuntu-latest
-    # ENZYME_RUST_READ_TOKEN is an environment secret on official-cli-release.
+    # ENZYME_RUST_DEPLOY_KEY is an environment secret on official-cli-release.
     environment: official-cli-release
     permissions:
       contents: write
@@ -40,20 +40,26 @@ jobs:
           perl -0pi -e 's/(margins-cli = \{ version = ")[^"]+/${1}'"$VERSION"'/' crates/public/margins-capture/Cargo.toml
           scripts/cargo-lane shared -- cargo update -p margins -p margins-cli -p margins-server
 
+      - name: Authenticate private recall source
+        uses: ./.github/actions/private-recall-ssh
+        with:
+          mode: setup
+          deploy-key: ${{ secrets.ENZYME_RUST_DEPLOY_KEY }}
+
       - name: Refresh private recall composition lockfile
         env:
-          GH_TOKEN: ${{ secrets.ENZYME_RUST_READ_TOKEN }}
           CARGO_NET_GIT_FETCH_WITH_CLI: "true"
         run: |
-          if [[ -z "$GH_TOKEN" ]]; then
-            echo "::error::Missing required secret: ENZYME_RUST_READ_TOKEN"
-            exit 1
-          fi
-          gh auth setup-git
           scripts/with-private-recall bash -c '
              scripts/cargo-lane shared -- cargo update -p margins -p margins-cli -p margins-server
              cp Cargo.lock Cargo.private-recall.lock
            '
+
+      - name: Remove private recall credentials
+        if: always()
+        uses: ./.github/actions/private-recall-ssh
+        with:
+          mode: cleanup
 
       - name: Commit and push release commit
         id: commit

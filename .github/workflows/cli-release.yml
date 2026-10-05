@@ -96,7 +96,7 @@ jobs:
           # tag-scoped (unreadable from other refs); a workflow_dispatch runs on
           # its dispatching ref, usually main, so it must never save a cache.
           cache: ${{ startsWith(github.ref, 'refs/tags/') }}
-          enzyme-rust-read-token: ${{ secrets.ENZYME_RUST_READ_TOKEN }}
+          enzyme-rust-deploy-key: ${{ secrets.ENZYME_RUST_DEPLOY_KEY }}
           google-oauth-client-json: ${{ secrets.MARGINS_GOOGLE_OAUTH_CLIENT_JSON }}
           apple-certificate-base64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           apple-certificate-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}

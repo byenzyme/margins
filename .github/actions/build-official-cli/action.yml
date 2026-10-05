@@ -24,8 +24,8 @@ inputs:
       tag-scoped caches are unreadable from other refs, while a cache saved on
       main is restorable by any run, including fork pull requests.
     required: true
-  enzyme-rust-read-token:
-    description: ENZYME_RUST_READ_TOKEN secret (read-only Contents on byenzyme/enzyme-rust)
+  enzyme-rust-deploy-key:
+    description: ENZYME_RUST_DEPLOY_KEY secret (read-only deploy key on byenzyme/enzyme-rust)
     required: true
   google-oauth-client-json:
     description: MARGINS_GOOGLE_OAUTH_CLIENT_JSON secret
@@ -81,20 +81,14 @@ runs:
       run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
 
     - name: Authenticate private recall source
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.enzyme-rust-read-token }}
-      run: |
-        if [[ -z "$GH_TOKEN" ]]; then
-          echo "::error::Missing required secret: ENZYME_RUST_READ_TOKEN"
-          exit 1
-        fi
-        gh auth setup-git
+      uses: ./.github/actions/private-recall-ssh
+      with:
+        mode: setup
+        deploy-key: ${{ inputs.enzyme-rust-deploy-key }}
 
     - name: Build the private root distributable
       shell: bash
       env:
-        GH_TOKEN: ${{ inputs.enzyme-rust-read-token }}
         CARGO_NET_GIT_FETCH_WITH_CLI: "true"
         MARGINS_GOOGLE_OAUTH_CLIENT_JSON: ${{ inputs.google-oauth-client-json }}
         FEATURES: ${{ inputs.features }}
@@ -108,6 +102,13 @@ runs:
         scripts/with-private-recall cargo build --release --locked --package margins --bin margins-private \
           --no-default-features --features "$FEATURES" \
           --target "$TARGET"
+
+    # The private engine is only fetched above; drop the key before signing.
+    - name: Remove private recall credentials
+      if: always()
+      uses: ./.github/actions/private-recall-ssh
+      with:
+        mode: cleanup
 
     - name: Compile the project recording service
       shell: bash

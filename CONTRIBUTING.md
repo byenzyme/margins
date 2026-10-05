@@ -44,7 +44,10 @@ git source. Official builds use `scripts/with-private-recall` and the pinned
 `byenzyme/enzyme-rust` repository. The wrapper defaults
 `CARGO_NET_GIT_FETCH_WITH_CLI=true` so Cargo uses the git CLI's configured SSH,
 deploy key, or token credentials; an explicitly supplied value is preserved.
-See the [official CLI release](docs/official-cli-release.md).
+Local developers use their own git credentials. Release CI instead uses the
+read-only `ENZYME_RUST_DEPLOY_KEY` environment secret over SSH. See the
+[official CLI release](docs/official-cli-release.md) for the secret table and
+key rotation.
 
 Format Rust changes with `scripts/cargo-lane shared -- cargo fmt --all`.
 Test the smallest affected crate while iterating, then run the affected crate

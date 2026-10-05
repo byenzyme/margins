@@ -98,7 +98,7 @@ the environment), `bump` in `version-bump.yml`, and
 
 | Secret | Used by | Purpose |
 | --- | --- | --- |
-| `ENZYME_RUST_READ_TOKEN` | build, bump, dry run | Fine-grained token with read-only **Contents** on private `byenzyme/enzyme-rust`. The build sets `CARGO_NET_GIT_FETCH_WITH_CLI=true` and runs `gh auth setup-git` before Cargo resolves the pinned dependency. |
+| `ENZYME_RUST_DEPLOY_KEY` | build, bump, dry run | Private key of a **read-only deploy key** on private `byenzyme/enzyme-rust` (org deploy keys are enabled). `.github/actions/private-recall-ssh` loads it into an `ssh-agent`, pins GitHub's published host keys, and rewrites `https://github.com/byenzyme/enzyme-rust` to `ssh://git@github.com/byenzyme/enzyme-rust` with `url.insteadOf`. Manifests and lockfiles keep the https URL. With `CARGO_NET_GIT_FETCH_WITH_CLI=true`, Cargo fetches through that SSH path. The agent, key file and rewrite are removed right after the private fetch, even on failure. |
 | `MARGINS_GOOGLE_OAUTH_CLIENT_JSON` | build, dry run | The downloaded Desktop OAuth client JSON. The CLI build embeds it through `option_env!`; source and lockfiles contain no client credential. A public source build may instead set a runtime file or JSON environment variable. |
 | `APPLE_CERTIFICATE_BASE64` | macOS build, dry run | Base64 Developer ID Application `.p12`. |
 | `APPLE_CERTIFICATE_PASSWORD` | macOS build, dry run | Password for that `.p12`. |
@@ -107,8 +107,26 @@ the environment), `bump` in `version-bump.yml`, and
 | `APPLE_PASSWORD` | macOS build, dry run | App-specific password for `notarytool`. |
 | `HOMEBREW_TAP_TOKEN` | publish | Separate fine-grained PAT limited to `byenzyme/homebrew-margins`, with **Contents: read and write**. It needs no access to releases or private source. |
 
-`MARGINS_RELEASE_TOKEN` and the `TAURI_*` secrets are no longer used and can be
-deleted. A missing secret fails its step with an `::error::` naming it.
+`ENZYME_RUST_READ_TOKEN`, `MARGINS_RELEASE_TOKEN` and the `TAURI_*` secrets are
+no longer used and can be deleted.
+
+To rotate `ENZYME_RUST_DEPLOY_KEY`:
+
+1. Generate a new key pair, for example
+   `ssh-keygen -t ed25519 -N '' -C margins-release -f enzyme-rust-deploy`.
+2. Add `enzyme-rust-deploy.pub` as a deploy key on `byenzyme/enzyme-rust` with
+   **Allow write access** left unchecked.
+3. Replace the `ENZYME_RUST_DEPLOY_KEY` environment secret on
+   `official-cli-release` with the private key file's contents, then delete the
+   old deploy key and the local key files.
+
+If GitHub rotates its SSH host keys, update the pinned `known_hosts` entries
+and fingerprints in `.github/actions/private-recall-ssh/action.yml` from
+<https://api.github.com/meta> and GitHub's published fingerprints.
+
+Local developers do not use the deploy key. `scripts/with-private-recall` keeps
+using their own git credentials (SSH key, credential helper or token) with
+read access to `byenzyme/enzyme-rust`. A missing secret fails its step with an `::error::` naming it.
 
 Environment and tag policy:
 
@@ -134,7 +152,7 @@ scoped to its publish step.
 `.github/workflows/cli-release-validation.yml` (**Validate official CLI
 packages**) is a manual rehearsal of the release build. It uses the same
 `.github/actions/build-official-cli` composite action as `cli-release.yml`: it
-fetches the private engine with `ENZYME_RUST_READ_TOKEN` and the official
+fetches the private engine over SSH with `ENZYME_RUST_DEPLOY_KEY` and the official
 feature composition, embeds `MARGINS_GOOGLE_OAUTH_CLIENT_JSON`, and on macOS
 imports the Apple certificate, codesigns and submits to `notarytool --wait`.
 It then smokes the packaged archive (`oauth_client` valid, recall present) and
