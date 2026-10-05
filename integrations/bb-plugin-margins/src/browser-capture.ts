@@ -1,7 +1,8 @@
 import type { PluginContentScriptContext } from "@get-bb/plugin-sdk/app";
 import { fetchJsonWithDeadline } from "../../../desktop/src/lib/bounded-fetch.js";
-import { IrrecoverableAudioLossError, WebDurableUploadQueue, bindDurableMediaRecorder, stopMediaRecorderWithDeadline } from "../../../desktop/src/lib/web-durable-upload.js";
+import { IrrecoverableAudioLossError, WebDurableUploadQueue, bindDurableMediaRecorder, stopMediaRecorderWithDeadline, type DurableChunkUpload, type WebChunkTiming, type WebDurableUploadOptions } from "../../../desktop/src/lib/web-durable-upload.js";
 import { acquireWebMicrophone, selectWebRecorderMimeType, webMicrophoneSupported } from "../../../desktop/src/lib/web-microphone-permission.js";
+import { BrowserChunkStore, type PersistedChunk } from "./browser-chunk-store.js";
 import { CAPTURE_DISCONNECT_GRACE_MS, type ClientCapabilities, type HostError, type PanelState } from "./contracts.js";
 
 const CLIENT_KEY = "margins.bb.client.v1";
@@ -19,6 +20,7 @@ interface StoredCapture {
   stopGapError?: HostError;
   stopGapSequence?: number;
   finishIncompleteRequested?: boolean;
+  persistedDeliveryFailures?: number;
 }
 
 interface LocalCapture extends StoredCapture {
@@ -37,6 +39,64 @@ interface LocalCapture extends StoredCapture {
 }
 
 type Subscriber = () => void;
+
+/** Backoff between attempts to deliver one persisted chunk after a reload. */
+const PERSISTED_RETRY_DELAYS_MS = [250, 1_000];
+/** Stop retries that may end with persisted bytes still undelivered before
+ * the bytes are treated as lost and Finish is offered instead. */
+const MAX_PERSISTED_STOP_ATTEMPTS = 3;
+
+/** The server refused this exact chunk; resending identical bytes cannot help. */
+class ChunkRejectedError extends Error {}
+/** The server answered about this chunk alone without accepting it now.
+ * Other chunks may still land, unlike a session-wide or transport failure. */
+class ChunkDeferredError extends Error {}
+/** Retryable verdicts margins-server gives about one chunk. Every other
+ * failure (bb route strings such as ownership or host/relay unavailable,
+ * auth, generic service errors) affects the whole session, so the flush stops
+ * and keeps every retained chunk rather than retrying each in turn. */
+const CHUNK_SPECIFIC_RETRYABLE_CODES = new Set(["browser_chunk_gap", "chunk_not_acknowledged"]);
+
+interface PersistedFlush {
+  delivered: Set<number>;
+  rejected: Set<number>;
+  retained: Set<number>;
+}
+
+function chunkFailure(text: string): { kind: "refused" | "deferred"; message: string } | null {
+  try {
+    const body = JSON.parse(text) as { error?: unknown } | null;
+    const error = body?.error as { code?: unknown; message?: unknown; retryable?: unknown } | string | undefined;
+    if (!error || typeof error !== "object") return null;
+    const message = typeof error.message === "string" ? error.message : typeof error.code === "string" ? error.code : "Audio chunk refused";
+    // The host has already reduced the server verdict to `retryable`.
+    if (error.retryable === false) return { kind: "refused", message };
+    return typeof error.code === "string" && CHUNK_SPECIFIC_RETRYABLE_CODES.has(error.code) ? { kind: "deferred", message } : null;
+  } catch { return null; }
+}
+
+/** Copies each admitted chunk into reload-durable storage at the moment its
+ * sequence is assigned. Chunks the queue refuses (backpressure) are not
+ * persisted: their sequence is already counted as lost. */
+class PersistentUploadQueue extends WebDurableUploadQueue {
+  constructor(
+    upload: DurableChunkUpload,
+    onFailure: (error: Error) => void,
+    options: WebDurableUploadOptions,
+    private readonly persist: (sequence: number, chunk: Blob, timing: WebChunkTiming) => void,
+  ) {
+    super(upload, onFailure, options);
+  }
+
+  override enqueue(chunk: Blob, timing?: WebChunkTiming): void {
+    const sequence = this.expectedNextSequence;
+    const queued = this.pendingCount;
+    super.enqueue(chunk, timing);
+    // enqueue() is synchronous and the worker cannot shift before its first
+    // await, so growth means this exact Blob was admitted at `sequence`.
+    if (timing && this.pendingCount > queued) this.persist(sequence, chunk, timing);
+  }
+}
 
 export class ReachabilityDeadline {
   private lastAcknowledgedAt = Date.now();
@@ -145,6 +205,7 @@ function writeStored(value: StoredCapture | null) {
         ...(value.stopGapError ? { stopGapError: value.stopGapError } : {}),
         ...(value.stopGapSequence !== undefined ? { stopGapSequence: value.stopGapSequence } : {}),
         ...(value.finishIncompleteRequested ? { finishIncompleteRequested: true } : {}),
+        ...(value.persistedDeliveryFailures ? { persistedDeliveryFailures: value.persistedDeliveryFailures } : {}),
       };
       sessionStorage.setItem(CAPTURE_KEY, JSON.stringify(stored));
     }
@@ -210,6 +271,10 @@ export interface BrowserCaptureDependencies {
   supportsMime(candidate: string): boolean;
   heartbeatMs: number;
   disconnectGraceMs: number;
+  /** Reload-durable retention for unacknowledged chunks. Absent or null keeps
+   * memory-only retention. */
+  chunkStore?: BrowserChunkStore | null;
+  persistedRetryDelaysMs?: number[];
 }
 
 const defaultDependencies: BrowserCaptureDependencies = {
@@ -221,6 +286,7 @@ const defaultDependencies: BrowserCaptureDependencies = {
   supportsMime: candidate => MediaRecorder.isTypeSupported(candidate),
   heartbeatMs: 2_000,
   disconnectGraceMs: CAPTURE_DISCONNECT_GRACE_MS,
+  chunkStore: new BrowserChunkStore(),
 };
 
 export class BrowserCaptureOwner {
@@ -243,6 +309,7 @@ export class BrowserCaptureOwner {
 
   install(context: PluginContentScriptContext) {
     this.pluginId = context.pluginId;
+    void this.dependencies.chunkStore?.sweep();
     const stored = readStored();
     if (stored) void this.recover(stored);
     return () => this.disconnect();
@@ -314,22 +381,11 @@ export class BrowserCaptureOwner {
     const mime = selectWebRecorderMimeType(this.dependencies.supportsMime);
     const recorder = this.dependencies.createRecorder(stream, mime);
     const uploadErrors: Error[] = [];
-    const uploads = new WebDurableUploadQueue(async (chunk, sequence, signal, timing) => {
+    const chunkStore = this.dependencies.chunkStore;
+    const uploads = new PersistentUploadQueue(async (chunk, sequence, signal, timing) => {
       if (!timing) throw new Error("Browser audio capture timestamps are missing");
-      const bytes = new Uint8Array(await chunk.arrayBuffer());
-      const value = await fetchJsonWithDeadline<{ ok: boolean; error?: string | { message?: string } }>(
-        `/api/v1/plugins/${encodeURIComponent(this.pluginId!)}/http/capture/chunk`,
-        {
-        method: "POST", signal, headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          sessionId: stored.sessionId, client: detectClientCapabilities(),
-          sequence, bytesBase64: base64(bytes),
-          capturedStartUnixMs: timing.capturedStartUnixMs,
-          capturedEndUnixMs: timing.capturedEndUnixMs,
-        }),
-        },
-      );
-      if (!value.ok) throw new Error(typeof value.error === "string" ? value.error : value.error?.message || "Audio upload failed");
+      await this.postChunk(stored.sessionId, new Uint8Array(await chunk.arrayBuffer()), sequence, timing, signal);
+      void chunkStore?.acknowledge(stored.sessionId, sequence);
       const nextSequence = Math.max(stored.nextSequence, sequence + 1);
       stored.nextSequence = nextSequence;
       const current = this.capture;
@@ -354,7 +410,9 @@ export class BrowserCaptureOwner {
       writeStored(persisted?.sessionId === stored.sessionId
         ? { ...persisted, expectedNextSequence: nextSequence }
         : stored);
-    } });
+    } }, (sequence, chunk, timing) => {
+      void chunkStore?.persist(stored.sessionId, sequence, chunk, timing);
+    });
     bindDurableMediaRecorder(recorder, uploads, segmentStartedUnixMs);
     const generation = ++this.generation;
     const reachability = new ReachabilityDeadline(this.dependencies.disconnectGraceMs, () => {
@@ -395,6 +453,111 @@ export class BrowserCaptureOwner {
     this.emit();
   }
 
+  private async postChunk(sessionId: string, bytes: Uint8Array, sequence: number, timing: WebChunkTiming, signal?: AbortSignal) {
+    if (!this.pluginId) throw new Error("Margins is still loading");
+    const failure: { answer?: { kind: "refused" | "deferred"; message: string } } = {};
+    let value: { ok: boolean; error?: string | { message?: string } };
+    try {
+      value = await fetchJsonWithDeadline<{ ok: boolean; error?: string | { message?: string } }>(
+        `/api/v1/plugins/${encodeURIComponent(this.pluginId)}/http/capture/chunk`,
+        {
+        method: "POST", signal, headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sessionId, client: detectClientCapabilities(),
+          sequence, bytesBase64: base64(bytes),
+          capturedStartUnixMs: timing.capturedStartUnixMs,
+          capturedEndUnixMs: timing.capturedEndUnixMs,
+        }),
+        },
+        { fetchImpl: async (input, init) => {
+          // Keep the failure body: it says whether the server refused this
+          // exact chunk for good or the transport merely failed.
+          const response = await fetch(input, init);
+          if (response.ok) return response;
+          const text = await response.text();
+          failure.answer = chunkFailure(text) ?? undefined;
+          return new Response(text, { status: response.status, statusText: response.statusText, headers: response.headers });
+        } },
+      );
+    } catch (cause) {
+      if (failure.answer?.kind === "refused") throw new ChunkRejectedError(failure.answer.message);
+      if (failure.answer?.kind === "deferred") throw new ChunkDeferredError(failure.answer.message);
+      throw cause;
+    }
+    if (!value.ok) throw new Error(typeof value.error === "string" ? value.error : value.error?.message || "Audio upload failed");
+  }
+
+  /** After a reload the in-memory queue is gone, but chunks persisted before
+   * their acknowledgement can still be delivered, in sequence order and
+   * independent of microphone access. Identical bytes for an already-durable
+   * sequence are accepted idempotently by the server. A chunk the server
+   * refuses for good (conflict, expired lease, already saved) is deleted. A
+   * chunk-specific retryable verdict retains that chunk and the flush moves
+   * on; any session-wide or transport failure stops the flush after the first
+   * chunk's retries and retains it and every later one. */
+  private async flushPersisted(sessionId: string): Promise<PersistedFlush> {
+    const flush: PersistedFlush = { delivered: new Set(), rejected: new Set(), retained: new Set() };
+    const store = this.dependencies.chunkStore;
+    if (!store) return flush;
+    let unreachable = false;
+    for (const sequence of await store.sequences(sessionId)) {
+      if (unreachable) { flush.retained.add(sequence); continue; }
+      const chunk = await store.get(sessionId, sequence);
+      if (!chunk) continue;
+      const outcome = await this.uploadPersisted(chunk);
+      flush[outcome === "unreachable" ? "retained" : outcome].add(sequence);
+      unreachable = outcome === "unreachable";
+    }
+    return flush;
+  }
+
+  private async uploadPersisted(chunk: PersistedChunk): Promise<"delivered" | "rejected" | "retained" | "unreachable"> {
+    const store = this.dependencies.chunkStore;
+    const delays = this.dependencies.persistedRetryDelaysMs ?? PERSISTED_RETRY_DELAYS_MS;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await this.postChunk(chunk.sessionId, new Uint8Array(chunk.bytes), chunk.sequence, chunk.timing);
+        await store?.acknowledge(chunk.sessionId, chunk.sequence);
+        return "delivered";
+      } catch (cause) {
+        if (cause instanceof ChunkRejectedError) {
+          await store?.acknowledge(chunk.sessionId, chunk.sequence);
+          return "rejected";
+        }
+        if (attempt >= delays.length) return cause instanceof ChunkDeferredError ? "retained" : "unreachable";
+        await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+      }
+    }
+  }
+
+  /** Replay one server-reported missing sequence from memory or, failing
+   * that, from persisted storage. */
+  private async resendGap(sessionId: string, sequence: number, pending: LocalCapture) {
+    if (pending.uploads.canReplay(sequence)) return pending.uploads.resend(sequence);
+    const persisted = await this.dependencies.chunkStore?.get(sessionId, sequence);
+    if (!persisted) return pending.uploads.resend(sequence);
+    const outcome = await this.uploadPersisted(persisted);
+    if (outcome === "rejected") throw new IrrecoverableAudioLossError(`Browser audio sequence ${sequence} was refused by Margins; recording is incomplete.`);
+    if (outcome !== "delivered") throw new Error(`Browser audio sequence ${sequence} could not be retried`);
+  }
+
+  /** Persisted bytes count as replayable only while retrying them is still
+   * bounded; past the cap the user is offered "Finish with what was saved". */
+  private async persistedReplayable(stored: StoredCapture, sequence: number) {
+    if ((stored.persistedDeliveryFailures ?? 0) >= MAX_PERSISTED_STOP_ATTEMPTS) return false;
+    return await this.dependencies.chunkStore?.has(stored.sessionId, sequence) ?? false;
+  }
+
+  /** The Meetings UI discarded this recording: drop any audio still retained. */
+  discardRetainedAudio(sessionId: string) {
+    this.forgetPersisted(sessionId);
+  }
+
+  /** A finalized recording no longer needs any retained bytes. */
+  private forgetPersisted(sessionId: string) {
+    void this.dependencies.chunkStore?.forgetSession(sessionId);
+  }
+
   /** MediaRecorder emits a complete, independently decodable WebM stream only
    * after stop. Keep the stop promise so Pause and Stop cannot stop it twice. */
   private stopSegment(current: LocalCapture): Promise<Error | null> {
@@ -415,6 +578,7 @@ export class BrowserCaptureOwner {
     current.stream.getTracks().forEach((track) => track.stop());
     void current.uploads.close().catch(() => undefined);
     current.uploads.releaseRetained();
+    this.forgetPersisted(current.sessionId);
     this.endedRecordingId = current.sessionId;
     writeStored(null);
     this.acceptPanel(current.sessionId, state);
@@ -427,7 +591,7 @@ export class BrowserCaptureOwner {
     try {
       if (stored.pendingControl?.kind === "stop" && this.pluginId) {
         if (stored.finishIncompleteRequested) await this.finishIncomplete();
-        else await this.retryPendingStop();
+        else await this.retryPendingStop({ automatic: true });
       } else {
         if (!this.pluginId) return;
         const client = detectClientCapabilities();
@@ -435,6 +599,7 @@ export class BrowserCaptureOwner {
           sessionId: stored.sessionId, client, operationId: id(),
         });
         if (snapshot.state === "saving" || snapshot.state === "saved") {
+          this.forgetPersisted(stored.sessionId);
           this.endedRecordingId = stored.sessionId;
           writeStored(null);
           this.acceptPanel(stored.sessionId, snapshot);
@@ -450,6 +615,10 @@ export class BrowserCaptureOwner {
         stored.nextSequence = resumedSequence;
         stored.expectedNextSequence = resumedSequence;
         const shouldRecord = stored.pendingControl?.kind === "resume" || !stored.paused;
+        // Deliver bytes retained across the reload into the segment they
+        // belong to before rotating it, and before asking for the microphone:
+        // only what is still missing after this becomes a declared gap.
+        await this.flushPersisted(stored.sessionId);
         const stream = await this.dependencies.acquireMicrophone();
         try {
           if (snapshot.state === "recording") {
@@ -461,6 +630,9 @@ export class BrowserCaptureOwner {
               throw new Error(paused.error?.message || "Could not rotate the browser audio segment after reload");
             }
           }
+          // Below the closed boundary every sequence is durable or declared
+          // missing; retained copies could only be refused on a later reload.
+          void this.dependencies.chunkStore?.forgetBelow(stored.sessionId, resumedSequence);
           let segmentStartedUnixMs = Date.now();
           if (shouldRecord) {
             segmentStartedUnixMs = Date.now();
@@ -673,35 +845,73 @@ export class BrowserCaptureOwner {
     }
   }
 
-  async retryPendingStop() {
+  /** `automatic` marks recovery after a reload: only retries the user asked
+   * for count toward offering Finish over undeliverable retained audio. */
+  async retryPendingStop(options: { automatic?: boolean } = {}) {
     const stored = readStored();
     if (!stored || stored.pendingControl?.kind !== "stop") return;
     const pending = this.pendingCapture?.sessionId === stored.sessionId ? this.pendingCapture : null;
-    if (stored.stopDrainError) {
-      if (!stored.stopDrainError.retryable) return this.incompleteStopPanel(stored, stored.stopDrainError);
-      if (!pending || pending.uploads.recoverablePendingCount === 0) {
-        const error = { ...stored.stopDrainError, retryable: false,
-          message: `${stored.stopDrainError.message} The missing audio is unavailable in this browser.`,
-        };
-        stored.stopDrainError = error;
-        writeStored(stored);
-        return this.incompleteStopPanel(stored, error);
+    // Without this page's queue (after a reload), deliver what IndexedDB kept.
+    const persisted = pending ? null : await this.flushPersisted(stored.sessionId);
+    if (persisted && (persisted.delivered.size > 0 || persisted.retained.size > 0 && !options.automatic)) {
+      // Any delivery shows retained audio can still land: start counting again.
+      if (persisted.delivered.size > 0) stored.persistedDeliveryFailures = undefined;
+      if (persisted.retained.size > 0 && !options.automatic) {
+        stored.persistedDeliveryFailures = (stored.persistedDeliveryFailures ?? 0) + 1;
       }
-      try {
-        await pending.uploads.retryPending();
-      } catch (cause) {
-        const error = { code: "browser_audio_drain_incomplete", message: cause instanceof Error ? cause.message : String(cause),
-          retryable: !(cause instanceof IrrecoverableAudioLossError) && !pending.uploads.hasIrrecoverableLoss };
-        stored.stopDrainError = error;
-        writeStored(stored);
-        return this.incompleteStopPanel(stored, error);
-      }
-      stored.nextSequence = Math.max(stored.nextSequence, pending.nextSequence);
-      stored.stopDrainError = undefined;
       writeStored(stored);
     }
+    const retainedError = (code: string): HostError => {
+      const retryable = (stored.persistedDeliveryFailures ?? 0) < MAX_PERSISTED_STOP_ATTEMPTS;
+      return { code, retryable, message: retryable
+        ? "Audio saved in this browser could not be uploaded yet. Try again."
+        : "Audio saved in this browser could not be uploaded after several attempts; recording is incomplete." };
+    };
+    if (stored.stopDrainError) {
+      if (!stored.stopDrainError.retryable) return this.incompleteStopPanel(stored, stored.stopDrainError);
+      if (persisted && persisted.retained.size > 0) {
+        const error = retainedError("browser_audio_drain_incomplete");
+        stored.stopDrainError = error;
+        writeStored(stored);
+        return this.incompleteStopPanel(stored, error);
+      }
+      if (persisted && persisted.delivered.size > 0) {
+        // Everything retained was delivered. The server's sequence fence in
+        // Stop decides whether anything else is still missing.
+        stored.stopDrainError = undefined;
+        writeStored(stored);
+      } else {
+        if (!pending || pending.uploads.recoverablePendingCount === 0) {
+          const error = { ...stored.stopDrainError, retryable: false,
+            message: `${stored.stopDrainError.message} The missing audio is unavailable in this browser.`,
+          };
+          stored.stopDrainError = error;
+          writeStored(stored);
+          return this.incompleteStopPanel(stored, error);
+        }
+        try {
+          await pending.uploads.retryPending();
+        } catch (cause) {
+          const error = { code: "browser_audio_drain_incomplete", message: cause instanceof Error ? cause.message : String(cause),
+            retryable: !(cause instanceof IrrecoverableAudioLossError) && !pending.uploads.hasIrrecoverableLoss };
+          stored.stopDrainError = error;
+          writeStored(stored);
+          return this.incompleteStopPanel(stored, error);
+        }
+        stored.nextSequence = Math.max(stored.nextSequence, pending.nextSequence);
+        stored.stopDrainError = undefined;
+        writeStored(stored);
+      }
+    }
     if (stored.stopGapError) {
-      if (!pending || stored.stopGapSequence === undefined) {
+      const gap = stored.stopGapSequence;
+      if (gap !== undefined && persisted?.retained.has(gap)) {
+        const error = retainedError("browser_chunk_gap");
+        stored.stopGapError = error;
+        writeStored(stored);
+        return this.incompleteStopPanel(stored, error);
+      }
+      if (gap === undefined || !pending && !persisted?.delivered.has(gap)) {
         const error = {
           ...stored.stopGapError,
           message: `${stored.stopGapError.message} The missing chunk is unavailable in this browser; recording is incomplete.`,
@@ -711,16 +921,18 @@ export class BrowserCaptureOwner {
         writeStored(stored);
         return this.incompleteStopPanel(stored, error);
       }
-      try {
-        await pending.uploads.resend(stored.stopGapSequence);
-      } catch (cause) {
-        const message = cause instanceof Error ? cause.message : String(cause);
-        const error = { code: "browser_chunk_gap", message,
-          retryable: !(cause instanceof IrrecoverableAudioLossError),
-        };
-        stored.stopGapError = error;
-        writeStored(stored);
-        return this.incompleteStopPanel(stored, error);
+      if (pending) {
+        try {
+          await this.resendGap(stored.sessionId, gap, pending);
+        } catch (cause) {
+          const message = cause instanceof Error ? cause.message : String(cause);
+          const error = { code: "browser_chunk_gap", message,
+            retryable: !(cause instanceof IrrecoverableAudioLossError),
+          };
+          stored.stopGapError = error;
+          writeStored(stored);
+          return this.incompleteStopPanel(stored, error);
+        }
       }
       stored.stopGapError = undefined;
       stored.stopGapSequence = undefined;
@@ -752,6 +964,7 @@ export class BrowserCaptureOwner {
           retryable: true,
         });
       }
+      this.forgetPersisted(stored.sessionId);
       this.endedRecordingId = stored.sessionId;
       writeStored(null);
       if (this.pendingCapture?.sessionId === stored.sessionId) {
@@ -796,6 +1009,7 @@ export class BrowserCaptureOwner {
       projectId: stored.projectId, client: detectClientCapabilities(),
     });
     if (state.state !== "saved" || state.lastSessionId !== stored.sessionId) return null;
+    this.forgetPersisted(stored.sessionId);
     this.endedRecordingId = stored.sessionId;
     writeStored(null);
     if (this.pendingCapture?.sessionId === stored.sessionId) {
@@ -831,9 +1045,11 @@ export class BrowserCaptureOwner {
           stopDrainError: stored.stopDrainError ?? latest.stopDrainError,
           stopGapError: stored.stopGapError ?? latest.stopGapError,
           stopGapSequence: stored.stopGapSequence ?? latest.stopGapSequence,
+          persistedDeliveryFailures: Math.max(stored.persistedDeliveryFailures ?? 0, latest.persistedDeliveryFailures ?? 0) || undefined,
         }
       : stored;
     if (state.error === null && state.state === "saved" && !recovery.stopDrainError && !recovery.stopGapError) {
+      this.forgetPersisted(recovery.sessionId);
       this.endedRecordingId = recovery.sessionId;
       writeStored(null);
       if (this.pendingCapture?.sessionId === recovery.sessionId) {
@@ -852,9 +1068,10 @@ export class BrowserCaptureOwner {
       message: "Margins did not confirm that the recording finished. Try again with the retained Stop operation.",
       retryable: true,
     };
-    const error: HostError = state.error?.code === "browser_audio_empty"
-      || recovery.stopGapSequence !== undefined
-        && !this.pendingCapture?.uploads.canReplay(recovery.stopGapSequence)
+    const gapReplayable = recovery.stopGapSequence === undefined
+      || this.pendingCapture?.uploads.canReplay(recovery.stopGapSequence)
+      || await this.persistedReplayable(recovery, recovery.stopGapSequence);
+    const error: HostError = state.error?.code === "browser_audio_empty" || !gapReplayable
       ? { ...rawError, retryable: false } : rawError;
     if (state.error?.code === "browser_audio_empty") recovery.stopDrainError = error;
     if (recovery.stopGapError) recovery.stopGapError = { ...recovery.stopGapError, retryable: error.retryable };

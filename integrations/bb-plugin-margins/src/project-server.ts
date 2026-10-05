@@ -143,6 +143,23 @@ function hostError(code: string, message: string, retryable = true): HostError {
   return { code, message, retryable };
 }
 
+/** Chunk verdicts that mean these exact bytes can never be accepted. */
+const PERMANENT_CHUNK_CODES = new Set(["browser_chunk_conflict", "browser_lease_expired", "browser_already_saved"]);
+/** margins-server's catch-all service errors are marked non-retryable whatever
+ * the cause (including a transient "database is locked"), so they do not
+ * describe the chunk itself. */
+const GENERIC_SERVICE_CODES = new Set(["invalid_request", "conflict", "forbidden", "unauthorized", "not_found",
+  "too_large", "capability_unavailable", "owner_required"]);
+
+/** The browser deletes retained audio on a permanent refusal, so only an
+ * explicit, chunk-specific verdict counts. Auth failures, generic service
+ * errors, unknown codes and transport failures keep the bytes. */
+export function chunkPermanentlyRefused(status: number, code: string, retryable: unknown) {
+  if (PERMANENT_CHUNK_CODES.has(code)) return true;
+  if (status === 401 || status === 403 || GENERIC_SERVICE_CODES.has(code)) return false;
+  return retryable === false;
+}
+
 class WorkspaceRequestError extends Error {
   constructor(readonly code: string, message: string, readonly retryable: boolean) {
     super(message);
@@ -725,9 +742,15 @@ export class ProjectMarginsTransport {
         },
         body: Buffer.from(bytesBase64, "base64"),
       });
-      if (!response.ok) throw new Error(`audio upload failed (${response.status})`);
-      const value = await response.json() as { ok: boolean; error?: string };
-      if (!value.ok) throw new Error(value.error || "audio upload failed");
+      const value = await response.json().catch(() => null) as { ok?: boolean; error?: string | { code?: string; message?: string } } | null;
+      if (!response.ok || !value?.ok) {
+        const structured = typeof value?.error === "object" ? value.error as { code?: string; message?: string; retryable?: unknown } : undefined;
+        const detail = typeof value?.error === "string" ? value.error : structured?.message;
+        const code = structured?.code || "audio_upload_failed";
+        return { ok: false as const, error: hostError(code,
+          detail ? `audio upload failed (${response.status}): ${detail}` : `audio upload failed (${response.status})`,
+          !chunkPermanentlyRefused(response.status, code, structured?.retryable)) };
+      }
       return { ok: true as const };
     } catch (cause) {
       return { ok: false as const, error: hostError("audio_upload_failed", cause instanceof Error ? cause.message : String(cause)) };

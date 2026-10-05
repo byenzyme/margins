@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
     microphoneSamples: number; micPeak: number } | null, connectionError: null as string | null },
   probeMenu: vi.fn(async () => false),
   startBrowser: vi.fn(),
+  discardRetainedAudio: vi.fn(),
   call: vi.fn(async (method: string, input?: { sessionId?: string; text?: string }) => {
     if (method === "availableProjects") return { projects: [{ id: "proj-mac", name: "Mac" }] };
     if (method === "availableWorkspaces") return { workspaces: [{ id: "obsidian", name: "Obsidian" }], autoSelected: false };
@@ -53,7 +54,7 @@ vi.mock("@get-bb/plugin-sdk/app", () => ({
   useRpc: () => mocks.rpc,
 }));
 vi.mock("./browser-capture.js", () => ({
-  browserCaptureOwner: { startFromProject: mocks.startBrowser, panel: () => null,
+  browserCaptureOwner: { startFromProject: mocks.startBrowser, discardRetainedAudio: mocks.discardRetainedAudio, panel: () => null,
     subscribe: () => () => undefined, hasPendingStop: false, recordingId: null },
   detectClientCapabilities: () => ({ clientId: "mac", platform: "macos", secureContext: true,
     browserMicrophone: true, nativeMacCapture: false }),
@@ -175,6 +176,7 @@ describe("Meetings Mac recorder choice", () => {
     fireEvent.click(screen.getByRole("button", { name: "Discard permanently…" }));
     await screen.findByRole("heading", { name: "No meetings yet" });
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Any linked note and bb thread remain"));
+    expect(mocks.discardRetainedAudio).toHaveBeenCalledWith("complete");
     confirm.mockRestore();
     mocks.call.mockImplementation(originalCall);
   });
