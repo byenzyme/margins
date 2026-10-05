@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MeetingsPage } from "./meetings-page.js";
 
 const mocks = vi.hoisted(() => ({
@@ -273,6 +273,31 @@ describe("Meetings Mac recorder choice", () => {
     expect(screen.getByRole("textbox", { name: "Meeting memo pad" })).toHaveProperty("value", "Remember the decision");
     expect(mocks.navigate).toHaveBeenCalledWith("meetings", { subPath: "proj-mac/new" });
     view.unmount();
+  });
+
+  it("tells the user not to speak until the Mac recorder has captured audio", async () => {
+    const native = mocks.native as typeof mocks.native & { subscribe: (listener: () => void) => () => void };
+    const subscribe = native.subscribe;
+    const listeners: Array<() => void> = [];
+    native.subscribe = (listener) => { listeners.push(listener); return () => undefined; };
+    const publish = (status: NonNullable<typeof mocks.native.status>) => {
+      mocks.native.status = status;
+      act(() => listeners.forEach((listener) => listener()));
+    };
+    try {
+      mocks.native.paired = true;
+      mocks.native.status = { state: "ready", sessionId: null, microphoneSamples: 0, micPeak: 0 };
+      mocks.refreshNative.mockImplementation(async () => mocks.native.status);
+      const view = render(<MeetingsPage subPath="proj-mac" />);
+      fireEvent.click(await screen.findByRole("button", { name: "Start meeting" }));
+      await waitFor(() => expect(mocks.control).toHaveBeenCalledWith("start"));
+      publish({ state: "getting_ready", sessionId: null, microphoneSamples: 0, micPeak: 0 });
+      expect(screen.getByRole("status").textContent).toBe("Starting… don't speak yet");
+      // Devices are open and buffering while the session is still being reserved.
+      publish({ state: "recording", sessionId: null, microphoneSamples: 480, micPeak: 0.1 });
+      expect(screen.getByRole("status").textContent).toBe("Recording");
+      view.unmount();
+    } finally { native.subscribe = subscribe; }
   });
 
   it("keeps the unsent memo visible when native Start fails", async () => {

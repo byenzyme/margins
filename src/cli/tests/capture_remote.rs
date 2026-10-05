@@ -1,3 +1,198 @@
+    /// In-memory stand-in for the durable remote transfer.
+    #[derive(Clone, Default)]
+    struct FakeRemoteSpool {
+        appended: Arc<Mutex<Vec<(margins_workflows::remote_workspace::NativeRemoteLane, f32, usize)>>>,
+    }
+
+    impl RemoteAudioSpool for FakeRemoteSpool {
+        fn append_lane(
+            &mut self,
+            lane: margins_workflows::remote_workspace::NativeRemoteLane,
+            _sample_rate: u32,
+            samples: &[f32],
+        ) -> Result<()> {
+            self.appended
+                .lock()
+                .unwrap()
+                .push((lane, samples[0], samples.len()));
+            Ok(())
+        }
+    }
+
+    struct FakeCapture {
+        sender: mpsc::Sender<crate::recorder::LiveAudioChunk>,
+        queued: Arc<std::sync::atomic::AtomicU64>,
+        mic_dropped: Arc<std::sync::atomic::AtomicU64>,
+        system_dropped: Arc<std::sync::atomic::AtomicU64>,
+        handoff: mpsc::Sender<RemoteSpoolHandoff<FakeRemoteSpool>>,
+        worker: std::thread::JoinHandle<(Option<FakeRemoteSpool>, Result<()>)>,
+    }
+
+    fn fake_capture(pending_max_samples: u64) -> FakeCapture {
+        let (sender, receiver) = mpsc::channel();
+        let (handoff, handoff_receiver) = mpsc::channel();
+        let queued = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mic_dropped = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let system_dropped = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let io = RemoteSpoolWorkerIo {
+            receiver,
+            handoff: handoff_receiver,
+            queued_samples: queued.clone(),
+            mic_dropped_samples: mic_dropped.clone(),
+            system_dropped_samples: system_dropped.clone(),
+            pending_max_samples,
+        };
+        FakeCapture {
+            sender,
+            queued,
+            mic_dropped,
+            system_dropped,
+            handoff,
+            worker: std::thread::spawn(move || run_remote_spool_worker(io)),
+        }
+    }
+
+    /// One 10 ms mic chunk whose samples carry its sequence number.
+    fn fake_chunk(sequence: u64) -> crate::recorder::LiveAudioChunk {
+        crate::recorder::LiveAudioChunk {
+            channel: crate::recorder::LiveAudioChannel::Mic,
+            generation: 1,
+            session_offset_ms: 0,
+            sample_rate: 48_000,
+            start_frame: sequence * 480,
+            synthesized: false,
+            samples: vec![sequence as f32; 480],
+        }
+    }
+
+    fn capture_chunk(capture: &FakeCapture, sequence: u64) {
+        capture.queued.fetch_add(480, Ordering::Relaxed);
+        capture.sender.send(fake_chunk(sequence)).unwrap();
+    }
+
+    #[test]
+    fn remote_start_captures_immediately_and_uploads_audio_buffered_during_reservation() {
+        use margins_workflows::remote_workspace::NativeRemoteLane;
+
+        let start = std::time::Instant::now();
+        let capture = fake_capture(REMOTE_PENDING_MAX_SAMPLES);
+        // Fake recorder: devices open on Start and deliver a chunk every 10 ms.
+        let recorder = {
+            let sender = capture.sender.clone();
+            let queued = capture.queued.clone();
+            std::thread::spawn(move || {
+                let mut first_sample_at = None;
+                for sequence in 0..60u64 {
+                    queued.fetch_add(480, Ordering::Relaxed);
+                    sender.send(fake_chunk(sequence)).unwrap();
+                    first_sample_at.get_or_insert_with(|| start.elapsed());
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                first_sample_at.unwrap()
+            })
+        };
+        // Fake relay: the session reservation takes 300 ms.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let spool = FakeRemoteSpool::default();
+        let live = Arc::new(Mutex::new(Vec::new()));
+        let live_seen = live.clone();
+        capture
+            .handoff
+            .send(RemoteSpoolHandoff {
+                transfer: spool.clone(),
+                live: Some(Box::new(move |chunk: &crate::recorder::LiveAudioChunk| {
+                    live_seen.lock().unwrap().push(chunk.samples[0]);
+                })),
+            })
+            .unwrap();
+        let first_sample_at = recorder.join().unwrap();
+        drop(capture.sender);
+        let (returned, result) = capture.worker.join().unwrap();
+        result.unwrap();
+        assert!(returned.is_some());
+
+        assert!(
+            first_sample_at < std::time::Duration::from_millis(100),
+            "first captured sample arrived {first_sample_at:?} after Start"
+        );
+        let appended = spool.appended.lock().unwrap().clone();
+        let expected: Vec<_> = (0..60u64)
+            .map(|sequence| (NativeRemoteLane::Microphone, sequence as f32, 480))
+            .collect();
+        assert_eq!(appended, expected, "every chunk from Start onward, in order");
+        assert_eq!(
+            *live.lock().unwrap(),
+            (0..60).map(|sequence| sequence as f32).collect::<Vec<_>>()
+        );
+        assert_eq!(capture.queued.load(Ordering::Relaxed), 0);
+        assert_eq!(capture.mic_dropped.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn remote_pending_audio_drains_the_recorder_queue_and_is_bounded() {
+        let capture = fake_capture(480 * 3);
+        for sequence in 0..5 {
+            capture_chunk(&capture, sequence);
+        }
+        // The recorder's bounded queue is debited while the session is still
+        // pending, so the recorder itself never drops for want of a session.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while capture.queued.load(Ordering::Relaxed) != 0 {
+            assert!(std::time::Instant::now() < deadline, "pending audio was not drained");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let spool = FakeRemoteSpool::default();
+        capture
+            .handoff
+            .send(RemoteSpoolHandoff {
+                transfer: spool.clone(),
+                live: None,
+            })
+            .unwrap();
+        drop(capture.sender);
+        capture.worker.join().unwrap().1.unwrap();
+        let firsts: Vec<f32> = spool.appended.lock().unwrap().iter().map(|entry| entry.1).collect();
+        assert_eq!(firsts, vec![0.0, 1.0, 2.0]);
+        assert_eq!(capture.mic_dropped.load(Ordering::Relaxed), 480 * 2);
+        assert_eq!(capture.system_dropped.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn remote_capture_stopped_before_the_session_exists_still_delivers_its_audio() {
+        let capture = fake_capture(REMOTE_PENDING_MAX_SAMPLES);
+        capture_chunk(&capture, 0);
+        capture_chunk(&capture, 1);
+        drop(capture.sender);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let spool = FakeRemoteSpool::default();
+        capture
+            .handoff
+            .send(RemoteSpoolHandoff {
+                transfer: spool.clone(),
+                live: None,
+            })
+            .unwrap();
+        let (returned, result) = capture.worker.join().unwrap();
+        result.unwrap();
+        assert!(returned.is_some());
+        assert_eq!(spool.appended.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn remote_capture_without_a_session_ends_when_the_recorder_stops() {
+        let capture = fake_capture(REMOTE_PENDING_MAX_SAMPLES);
+        capture_chunk(&capture, 0);
+        // Reservation failed: no transfer will ever arrive.
+        drop(capture.handoff);
+        capture.queued.fetch_add(480, Ordering::Relaxed);
+        capture.sender.send(fake_chunk(1)).unwrap();
+        drop(capture.sender);
+        let (returned, result) = capture.worker.join().unwrap();
+        result.unwrap();
+        assert!(returned.is_none());
+        assert_eq!(capture.queued.load(Ordering::Relaxed), 0);
+    }
+
     #[cfg(feature = "audio-capture")]
     #[test]
     fn untouched_remote_memo_does_not_replace_concurrent_workspace_notes() {

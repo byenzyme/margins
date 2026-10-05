@@ -46,7 +46,9 @@ final class MenuRecorder: ObservableObject {
         Task { await refresh() }
         Task {
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(2))
+                // Poll quickly while starting so "Recording" appears as soon
+                // as the microphone delivers audio.
+                try? await Task.sleep(for: state == "getting_ready" ? .milliseconds(250) : .seconds(2))
                 await refresh()
             }
         }
@@ -219,14 +221,17 @@ final class MenuRecorder: ObservableObject {
             }
             if bridgeToken != nil {
                 let snapshot = try await bridgeRequest("/v1/status")
-                let permission = try await bridgeRequest("/v1/microphone-permission")
-                microphonePermission = permission["status"] as? String ?? "unknown"
                 state = snapshot["state"] as? String ?? "ready"
+                if !active {
+                    let permission = try await bridgeRequest("/v1/microphone-permission")
+                    microphonePermission = permission["status"] as? String ?? "unknown"
+                }
                 sessionID = snapshot["sessionId"] as? String
                 bridgePID = (snapshot["pid"] as? NSNumber)?.int32Value
                 let mic = (snapshot["microphoneSamples"] as? NSNumber)?.intValue ?? 0
                 let system = (snapshot["systemSamples"] as? NSNumber)?.intValue ?? 0
-                status = "\(state) · mic \(mic) · system \(system) samples"
+                status = state == "getting_ready" ? "Starting… don't speak yet"
+                    : "\(state) · mic \(mic) · system \(system) samples"
                 error = snapshot["error"] as? String
             } else {
                 state = "ready"

@@ -12,7 +12,7 @@ use std::time::Duration;
 const DEFAULT_PORT: u16 = 18765;
 const MAX_BODY: usize = 4096;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CaptureAction {
     Pause,
     Resume,
@@ -57,13 +57,13 @@ impl CaptureStatus {
         let load = |counter: &Option<Arc<AtomicU64>>| {
             counter.as_ref().map_or(0, |v| v.load(Ordering::Relaxed))
         };
-        let opened_mic = if matches!(self.state, "recording" | "paused") {
+        let opened_mic = if matches!(self.state, "getting_ready" | "recording" | "paused") {
             self.opened_mic_name.clone()
         } else {
             None
         };
         json!({
-            "state": if self.state.is_empty() { "ready" } else { self.state },
+            "state": self.visible_state(),
             "instanceId": instance_id,
             "workspaceId": workspace_id,
             "microphoneDeviceName": opened_mic
@@ -85,6 +85,24 @@ impl CaptureStatus {
         })
     }
 
+    /// The state users act on. Start opens the devices before the remote
+    /// session exists and buffers that audio; "recording" is reported once
+    /// the microphone has actually delivered samples, so nobody speaks into a
+    /// recorder that is still opening.
+    fn visible_state(&self) -> &'static str {
+        let mic = self.completed.mic
+            + self
+                .live
+                .mic
+                .as_ref()
+                .map_or(0, |v| v.load(Ordering::Relaxed));
+        match self.state {
+            "" => "ready",
+            "getting_ready" if mic > 0 => "recording",
+            state => state,
+        }
+    }
+
     fn fold_live(&mut self) {
         let load = |counter: &Option<Arc<AtomicU64>>| {
             counter.as_ref().map_or(0, |v| v.load(Ordering::Relaxed))
@@ -104,7 +122,36 @@ pub(super) struct CaptureController {
     status: Arc<Mutex<CaptureStatus>>,
 }
 
+impl LiveCounters {
+    fn for_segment(
+        sink: &crate::recorder::LiveAudioSink,
+        recorder: &crate::recorder::RecorderHandle,
+    ) -> Self {
+        LiveCounters {
+            mic: Some(sink.mic_accepted_samples.clone()),
+            system: Some(sink.system_accepted_samples.clone()),
+            mic_dropped: Some(sink.mic_dropped_samples.clone()),
+            system_dropped: Some(sink.system_dropped_samples.clone()),
+            frames: Some(recorder.spk_frames()),
+            silent: Some(recorder.spk_silence()),
+            mic_peak: Some(recorder.mic_peak()),
+        }
+    }
+}
+
 impl CaptureController {
+    /// The devices are open and audio is buffering while the remote session
+    /// is reserved. Status turns to "recording" with the first mic samples.
+    pub(super) fn capturing(
+        &self,
+        sink: &crate::recorder::LiveAudioSink,
+        recorder: &crate::recorder::RecorderHandle,
+    ) {
+        let mut state = self.status.lock().unwrap();
+        state.opened_mic_name = Some(recorder.mic_name().to_owned());
+        state.live = LiveCounters::for_segment(sink, recorder);
+    }
+
     pub(super) fn recording(
         &self,
         session: &str,
@@ -118,15 +165,7 @@ impl CaptureController {
         state.session_id = Some(session.into());
         state.transfer_id = Some(transfer.into());
         state.opened_mic_name = Some(recorder.mic_name().to_owned());
-        state.live = LiveCounters {
-            mic: Some(sink.mic_accepted_samples.clone()),
-            system: Some(sink.system_accepted_samples.clone()),
-            mic_dropped: Some(sink.mic_dropped_samples.clone()),
-            system_dropped: Some(sink.system_dropped_samples.clone()),
-            frames: Some(recorder.spk_frames()),
-            silent: Some(recorder.spk_silence()),
-            mic_peak: Some(recorder.mic_peak()),
-        };
+        state.live = LiveCounters::for_segment(sink, recorder);
     }
 
     pub(super) fn wait_action(&self, stop: &Arc<AtomicBool>) -> Result<crate::tui::TuiAction> {
@@ -655,7 +694,9 @@ fn microphone_permission() -> Value {
 }
 
 fn control(bridge: &Bridge, expected: &str, action: CaptureAction) -> (u16, Value) {
-    if bridge.status.lock().unwrap().state != expected {
+    // A Pause sent while the session is still being reserved is queued and
+    // applied as soon as the first segment begins.
+    if bridge.status.lock().unwrap().visible_state() != expected {
         return (409, json!({"error":"invalid_capture_state"}));
     }
     control_unchecked(bridge, action)
@@ -844,6 +885,42 @@ mod tests {
         let snapshot = finished.snapshot("instance", "workspace", Some("USB Digital Audio"));
         assert_eq!(snapshot["microphoneDeviceName"], "USB Digital Audio");
         assert_eq!(snapshot["microphoneDevicePinned"], true);
+    }
+
+    #[test]
+    fn status_reports_recording_only_once_the_microphone_delivers_audio() {
+        let mic = Arc::new(AtomicU64::new(0));
+        let status = Arc::new(Mutex::new(CaptureStatus {
+            state: "getting_ready",
+            live: LiveCounters {
+                mic: Some(mic.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }));
+        let snapshot = status
+            .lock()
+            .unwrap()
+            .snapshot("instance", "workspace", None);
+        assert_eq!(snapshot["state"], "getting_ready");
+        assert!(snapshot["sessionId"].is_null());
+
+        // Devices are open and buffering before the session exists.
+        mic.store(480, Ordering::Relaxed);
+        let snapshot = status
+            .lock()
+            .unwrap()
+            .snapshot("instance", "workspace", None);
+        assert_eq!(snapshot["state"], "recording");
+        assert_eq!(snapshot["microphoneSamples"], 480);
+
+        // Pause is accepted and queued until the first segment begins.
+        let (sender, receiver) = mpsc::channel();
+        let mut bridge = bridge();
+        bridge.status = status;
+        bridge.sender = Some(sender);
+        assert_eq!(control(&bridge, "recording", CaptureAction::Pause).0, 202);
+        assert!(receiver.try_recv() == Ok(CaptureAction::Pause));
     }
 
     #[test]

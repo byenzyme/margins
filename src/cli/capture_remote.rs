@@ -45,6 +45,310 @@ where
     errors
 }
 
+/// Audio captured before the remote session exists waits in memory, in order,
+/// until the reservation completes. The bound only stops a stalled relay from
+/// growing memory without limit (three minutes of two 48 kHz lanes); the
+/// recorder's local recovery WAV still holds everything it captured.
+#[cfg(any(test, feature = "audio-capture"))]
+const REMOTE_PENDING_MAX_SAMPLES: u64 = 48_000 * 2 * 180;
+
+/// Where the spool worker appends captured audio. The durable remote transfer
+/// in production; an in-memory fake in tests.
+#[cfg(any(test, feature = "audio-capture"))]
+trait RemoteAudioSpool {
+    fn append_lane(
+        &mut self,
+        lane: margins_workflows::remote_workspace::NativeRemoteLane,
+        sample_rate: u32,
+        samples: &[f32],
+    ) -> Result<()>;
+}
+
+#[cfg(any(test, feature = "audio-capture"))]
+impl RemoteAudioSpool for margins_workflows::remote_workspace::NativeRemoteTransfer {
+    fn append_lane(
+        &mut self,
+        lane: margins_workflows::remote_workspace::NativeRemoteLane,
+        sample_rate: u32,
+        samples: &[f32],
+    ) -> Result<()> {
+        self.append_f32(lane, sample_rate, samples).map(|_| ())
+    }
+}
+
+/// The transfer a segment's audio belongs to, handed to the spool worker once
+/// the segment has begun. For the first segment that is after the session
+/// reservation; the worker buffers what the recorder captured meanwhile.
+#[cfg(any(test, feature = "audio-capture"))]
+struct RemoteSpoolHandoff<T> {
+    transfer: T,
+    live: Option<Box<dyn FnMut(&crate::recorder::LiveAudioChunk) + Send>>,
+}
+
+#[cfg(any(test, feature = "audio-capture"))]
+struct RemoteSpoolWorkerIo<T> {
+    receiver: mpsc::Receiver<crate::recorder::LiveAudioChunk>,
+    handoff: mpsc::Receiver<RemoteSpoolHandoff<T>>,
+    queued_samples: Arc<std::sync::atomic::AtomicU64>,
+    mic_dropped_samples: Arc<std::sync::atomic::AtomicU64>,
+    system_dropped_samples: Arc<std::sync::atomic::AtomicU64>,
+    pending_max_samples: u64,
+}
+
+/// Drain the recorder's queue for one segment. Until the transfer arrives,
+/// chunks are buffered (and debited from the recorder's bounded queue, so the
+/// recorder never drops for lack of a session); on handoff they are appended
+/// first, in capture order. Returns the transfer, if one was handed over.
+#[cfg(any(test, feature = "audio-capture"))]
+fn run_remote_spool_worker<T: RemoteAudioSpool>(
+    io: RemoteSpoolWorkerIo<T>,
+) -> (Option<T>, Result<()>) {
+    use crate::recorder::{LiveAudioChannel, LiveAudioChunk};
+    use margins_workflows::remote_workspace::NativeRemoteLane;
+
+    let RemoteSpoolWorkerIo {
+        receiver,
+        handoff,
+        queued_samples,
+        mic_dropped_samples,
+        system_dropped_samples,
+        pending_max_samples,
+    } = io;
+    fn append<T: RemoteAudioSpool>(
+        target: &mut RemoteSpoolHandoff<T>,
+        chunk: &LiveAudioChunk,
+    ) -> Result<()> {
+        let lane = match chunk.channel {
+            LiveAudioChannel::Mic => NativeRemoteLane::Microphone,
+            LiveAudioChannel::System => NativeRemoteLane::System,
+        };
+        target
+            .transfer
+            .append_lane(lane, chunk.sample_rate, &chunk.samples)?;
+        if let Some(live) = target.live.as_mut() {
+            live(chunk);
+        }
+        Ok(())
+    }
+    let mut handoff = Some(handoff);
+    let mut target: Option<RemoteSpoolHandoff<T>> = None;
+    let mut pending = std::collections::VecDeque::<LiveAudioChunk>::new();
+    let mut pending_samples = 0u64;
+    let result = (|| -> Result<()> {
+        loop {
+            if target.is_none() {
+                let received = match handoff.as_ref().map(|handoff| handoff.try_recv()) {
+                    Some(Ok(next)) => Some(next),
+                    Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                        // The session never began; this audio has no transfer.
+                        handoff = None;
+                        None
+                    }
+                    Some(Err(mpsc::TryRecvError::Empty)) | None => None,
+                };
+                if let Some(next) = received {
+                    handoff = None;
+                    if !pending.is_empty() {
+                        crate::cli_log::event(
+                            "remote_capture_buffer_flushed",
+                            format!("samples={pending_samples} chunks={}", pending.len()),
+                        );
+                    }
+                    let target = target.insert(next);
+                    for chunk in pending.drain(..) {
+                        append(target, &chunk)?;
+                    }
+                    pending_samples = 0;
+                }
+            }
+            let chunk = if target.is_none() && handoff.is_some() {
+                match receiver.recv_timeout(std::time::Duration::from_millis(20)) {
+                    Ok(chunk) => chunk,
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        // Capture ended before the session existed. Wait for
+                        // the transfer so the buffered audio still lands.
+                        if let Some(next) = handoff.take().and_then(|handoff| handoff.recv().ok()) {
+                            let target = target.insert(next);
+                            for chunk in pending.drain(..) {
+                                append(target, &chunk)?;
+                            }
+                        }
+                        return Ok(());
+                    }
+                }
+            } else {
+                match receiver.recv() {
+                    Ok(chunk) => chunk,
+                    Err(_) => return Ok(()),
+                }
+            };
+            let count = chunk.samples.len() as u64;
+            match target.as_mut() {
+                Some(target) => {
+                    let appended = append(target, &chunk);
+                    queued_samples.fetch_sub(count, Ordering::Relaxed);
+                    appended?;
+                }
+                None => {
+                    queued_samples.fetch_sub(count, Ordering::Relaxed);
+                    if handoff.is_none() {
+                        continue;
+                    }
+                    if pending_samples.saturating_add(count) > pending_max_samples {
+                        match chunk.channel {
+                            LiveAudioChannel::Mic => &mic_dropped_samples,
+                            LiveAudioChannel::System => &system_dropped_samples,
+                        }
+                        .fetch_add(count, Ordering::Relaxed);
+                        continue;
+                    }
+                    pending_samples += count;
+                    pending.push_back(chunk);
+                }
+            }
+        }
+    })();
+    (target.map(|target| target.transfer), result)
+}
+
+/// One segment's open recorder and the spool worker draining it.
+#[cfg(feature = "audio-capture")]
+struct OpenedRemoteSegment {
+    recorder: crate::recorder::RecorderHandle,
+    stop: Arc<AtomicBool>,
+    sink: crate::recorder::LiveAudioSink,
+    handoff: mpsc::Sender<
+        RemoteSpoolHandoff<margins_workflows::remote_workspace::NativeRemoteTransfer>,
+    >,
+    worker: std::thread::JoinHandle<(
+        Option<margins_workflows::remote_workspace::NativeRemoteTransfer>,
+        Result<()>,
+    )>,
+}
+
+#[cfg(feature = "audio-capture")]
+fn open_remote_segment(
+    saved: Option<&audio_preferences::InputPreference>,
+    selected: Option<&crate::recorder::SelectedInputDevice>,
+) -> Result<(OpenedRemoteSegment, bool, Option<String>)> {
+    use margins_workflows::remote_workspace::NATIVE_REMOTE_RATE_HZ;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let queued_samples = Arc::new(AtomicU64::new(0));
+    let (sender, receiver) = mpsc::channel();
+    let sink = crate::recorder::LiveAudioSink {
+        sender,
+        generation: 1,
+        generation_clock: Arc::new(Mutex::new(crate::recorder::LiveGenerationClock {
+            generation: 1,
+            session_offset_ms: 0,
+        })),
+        mic_accepted_samples: Arc::new(AtomicU64::new(0)),
+        system_accepted_samples: Arc::new(AtomicU64::new(0)),
+        mic_dropped_samples: Arc::new(AtomicU64::new(0)),
+        system_dropped_samples: Arc::new(AtomicU64::new(0)),
+        queued_samples: queued_samples.clone(),
+        queue_max_samples: u64::from(NATIVE_REMOTE_RATE_HZ) * 10 * 2,
+    };
+    // Start draining before the devices open so the first callback already
+    // has a consumer.
+    let (handoff, handoff_receiver) = mpsc::channel();
+    let worker_io = RemoteSpoolWorkerIo {
+        receiver,
+        handoff: handoff_receiver,
+        queued_samples,
+        mic_dropped_samples: sink.mic_dropped_samples.clone(),
+        system_dropped_samples: sink.system_dropped_samples.clone(),
+        pending_max_samples: REMOTE_PENDING_MAX_SAMPLES,
+    };
+    let worker_stop = stop.clone();
+    let worker = std::thread::Builder::new()
+        .name("margins-remote-spool".into())
+        .spawn(move || {
+            let (transfer, result) = run_remote_spool_worker(worker_io);
+            if result.is_err() {
+                worker_stop.store(true, Ordering::SeqCst);
+            }
+            (transfer, result)
+        })?;
+    let (recorder, fell_back, note) =
+        audio_preferences::open_with_saved_fallback(saved, selected, |choice| {
+            crate::recorder::RecorderHandle::start_with_selected_audio(
+                stop.clone(),
+                choice,
+                Some(sink.clone()),
+            )
+        })?;
+    Ok((
+        OpenedRemoteSegment {
+            recorder,
+            stop,
+            sink,
+            handoff,
+            worker,
+        },
+        fell_back,
+        note,
+    ))
+}
+
+/// The first segment opens before the remote session is reserved. If setup
+/// fails before that segment begins, this retires the devices and keeps what
+/// was captured as a local WAV when the caller supplied a directory for one.
+#[cfg(feature = "audio-capture")]
+struct PreopenedRemoteSegment<'a> {
+    segment: Option<OpenedRemoteSegment>,
+    opened_at: std::time::Instant,
+    opened_at_local: chrono::DateTime<Local>,
+    local_audio_dir: Option<&'a Path>,
+    controller: Option<&'a native_bridge::CaptureController>,
+}
+
+#[cfg(feature = "audio-capture")]
+impl Drop for PreopenedRemoteSegment<'_> {
+    fn drop(&mut self) {
+        let Some(segment) = self.segment.take() else {
+            return;
+        };
+        let OpenedRemoteSegment {
+            recorder,
+            stop,
+            sink,
+            handoff,
+            worker,
+        } = segment;
+        stop.store(true, Ordering::SeqCst);
+        // Without a handoff the worker discards; closing every sender ends it.
+        drop(handoff);
+        let keep = self.local_audio_dir.and_then(|directory| {
+            std::fs::create_dir_all(directory).ok()?;
+            Some(directory.join(format!(
+                "unsent-{}.wav",
+                self.opened_at_local.format("%Y-%m-%d-%H-%M-%S")
+            )))
+        });
+        let written = match &keep {
+            Some(path) => recorder.stop_and_write(&path.to_string_lossy()).is_ok(),
+            None => {
+                let _ = recorder.stop_and_flush(|| Ok(()));
+                false
+            }
+        };
+        drop(sink);
+        let _ = worker.join();
+        match keep.filter(|_| written) {
+            Some(path) => {
+                crate::cli_log::event("remote_capture_aborted_before_session", "audio=kept");
+                if let Some(controller) = self.controller {
+                    controller.local_audio_saved(&path);
+                }
+            }
+            None => crate::cli_log::event("remote_capture_aborted_before_session", "audio=discarded"),
+        }
+    }
+}
+
 #[cfg(feature = "audio-capture")]
 fn copy_remote_recovery_for_local_asr(
     source: &Path,
@@ -109,7 +413,7 @@ fn run_remote_native_capture(
         deliver_available, deliver_transfer, list_transfers, native_create_session_command,
         pending_capture_reservations, transfer_root, validate_native_opus_capture_lanes,
         CaptureReservationIntentV1, CaptureReservationRequestV1, DurableTransferSpool,
-        NativeRemoteLane, NativeRemoteTransfer, RemoteConnection, NATIVE_REMOTE_RATE_HZ,
+        NativeRemoteTransfer, RemoteConnection, NATIVE_REMOTE_RATE_HZ,
     };
 
     if !permissions_verified {
@@ -155,6 +459,35 @@ fn run_remote_native_capture(
     let mut saved_choice_active =
         controller.is_none() && mic_device_name.is_none() && selected_device.is_some();
     let mut pending_selection = false;
+    // Open the devices before any remote round trip. Reserving the session can
+    // take seconds through a relay, and speech in that window belongs in the
+    // recording: the spool worker buffers it until the transfer exists.
+    let start_requested = std::time::Instant::now();
+    let (first_segment, fell_back, open_note) = open_remote_segment(
+        saved_choice_active.then_some(preference.as_ref()).flatten(),
+        selected_device.as_ref(),
+    )?;
+    if fell_back {
+        selected_device = None;
+        saved_choice_active = false;
+    }
+    if let Some(note) = open_note {
+        preference_note = Some(note);
+    }
+    crate::cli_log::event(
+        "remote_capture_opened",
+        format!("open_ms={}", start_requested.elapsed().as_millis()),
+    );
+    if let Some(controller) = &controller {
+        controller.capturing(&first_segment.sink, &first_segment.recorder);
+    }
+    let mut preopened = PreopenedRemoteSegment {
+        segment: Some(first_segment),
+        opened_at: std::time::Instant::now(),
+        opened_at_local: Local::now(),
+        local_audio_dir,
+        controller: controller.as_ref(),
+    };
     let token = std::env::var("MARGINS_REMOTE_TOKEN").ok();
     let connection = match prepared_connection {
         Some(connection) => connection,
@@ -417,7 +750,7 @@ fn run_remote_native_capture(
     let initial_memo = connection.client.memo(&session_id)?;
     let initial_revision = initial_memo.revision.clone();
     let initial_lines = initial_memo.lines.clone();
-    let started_at = Local::now()
+    let started_at = preopened.opened_at_local
         - chrono::Duration::milliseconds(initial_offset_ms.min(i64::MAX as u64) as i64);
     let draft_path = transfer.spool().root().join("memo-draft.md");
     let document = if draft_path.is_file() {
@@ -531,72 +864,64 @@ fn run_remote_native_capture(
                 std::thread::sleep(backoff);
             }
         })?;
-    let capture_started = std::time::Instant::now();
+    // The session clock starts when the first devices opened, so audio
+    // buffered during the reservation keeps its true position.
+    let capture_started = preopened.opened_at;
     let mut announced_sources = false;
     let mut local_segment_index = 0usize;
     'capture: loop {
         let offset_ms =
             initial_offset_ms.saturating_add(capture_started.elapsed().as_millis() as u64);
         let segment_id = format!("native-{}", uuid::Uuid::new_v4().simple());
-        let stop = Arc::new(AtomicBool::new(false));
-        let queued_samples = Arc::new(AtomicU64::new(0));
-        let (sender, receiver) = mpsc::channel();
-        let sink = crate::recorder::LiveAudioSink {
-            sender,
-            generation: 1,
-            generation_clock: Arc::new(Mutex::new(crate::recorder::LiveGenerationClock {
-                generation: 1,
-                session_offset_ms: offset_ms,
-            })),
-            mic_accepted_samples: Arc::new(AtomicU64::new(0)),
-            system_accepted_samples: Arc::new(AtomicU64::new(0)),
-            mic_dropped_samples: Arc::new(AtomicU64::new(0)),
-            system_dropped_samples: Arc::new(AtomicU64::new(0)),
-            queued_samples: queued_samples.clone(),
-            queue_max_samples: u64::from(NATIVE_REMOTE_RATE_HZ) * 10 * 2,
-        };
-        let recorder = match audio_preferences::open_with_saved_fallback(
-            saved_choice_active.then_some(preference.as_ref()).flatten(),
-            selected_device.as_ref(),
-            |choice| {
-                crate::recorder::RecorderHandle::start_with_selected_audio(
-                    stop.clone(),
-                    choice,
-                    Some(sink.clone()),
-                )
+        let (opened, offset_ms) = match preopened.segment.take() {
+            Some(opened) => (opened, initial_offset_ms),
+            None => match open_remote_segment(
+                saved_choice_active.then_some(preference.as_ref()).flatten(),
+                selected_device.as_ref(),
+            ) {
+                Ok((opened, fell_back, note)) => {
+                    if fell_back {
+                        selected_device = None;
+                        saved_choice_active = false;
+                    }
+                    if let Some(note) = note {
+                        app.message = Some(note);
+                    }
+                    (opened, offset_ms)
+                }
+                Err(error) => {
+                    // A reservation is not a successful capture. Seal it aborted,
+                    // retaining the transfer if the server cannot acknowledge. No
+                    // cleanup step may short-circuit the later steps: in particular,
+                    // stop/join the uploader and dispose the reservation even if the
+                    // durable abort intent itself fails.
+                    let cleanup_errors = cleanup_failed_remote_recorder_start(
+                        transfer,
+                        initial_offset_ms,
+                        &mut reservation_intent,
+                        &transfer_dir,
+                        &uploader_done,
+                        uploader,
+                        |spool| deliver_transfer(spool, &connection.client),
+                    );
+                    if cleanup_errors.is_empty() {
+                        return Err(error);
+                    }
+                    return Err(error.context(cleanup_errors.join("; ")));
+                }
             },
-        ) {
-            Ok((recorder, fell_back, note)) => {
-                if fell_back {
-                    selected_device = None;
-                    saved_choice_active = false;
-                }
-                if let Some(note) = note {
-                    app.message = Some(note);
-                }
-                recorder
-            }
-            Err(error) => {
-                // A reservation is not a successful capture. Seal it aborted,
-                // retaining the transfer if the server cannot acknowledge. No
-                // cleanup step may short-circuit the later steps: in particular,
-                // stop/join the uploader and dispose the reservation even if the
-                // durable abort intent itself fails.
-                let cleanup_errors = cleanup_failed_remote_recorder_start(
-                    transfer,
-                    initial_offset_ms,
-                    &mut reservation_intent,
-                    &transfer_dir,
-                    &uploader_done,
-                    uploader,
-                    |spool| deliver_transfer(spool, &connection.client),
-                );
-                if cleanup_errors.is_empty() {
-                    return Err(error);
-                }
-                return Err(error.context(cleanup_errors.join("; ")));
-            }
         };
+        let OpenedRemoteSegment {
+            recorder,
+            stop,
+            sink,
+            handoff,
+            worker,
+        } = opened;
+        sink.generation_clock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .session_offset_ms = offset_ms;
         app.current_mic_name = recorder.mic_name().to_owned();
         app.current_mic_uid = recorder.mic_uid().map(str::to_owned);
         if pending_selection {
@@ -626,33 +951,36 @@ fn run_remote_native_capture(
         }
         let recovery_path = transfer.spool().recovery_path(&segment_id)?;
         let active_transfer_id = transfer.spool().manifest().transfer_id.clone();
-        let worker_stop = stop.clone();
         let live_sink = live.as_ref().map(|worker| worker.sink_for_offset(offset_ms));
-        let worker = std::thread::Builder::new()
-            .name("margins-remote-spool".into())
-            .spawn(move || {
-                let mut transfer = transfer;
-                let result = (|| -> Result<()> {
-                    while let Ok(chunk) = receiver.recv() {
-                        let count = chunk.samples.len() as u64;
-                        let lane = match chunk.channel {
-                            crate::recorder::LiveAudioChannel::Mic => NativeRemoteLane::Microphone,
-                            crate::recorder::LiveAudioChannel::System => NativeRemoteLane::System,
-                        };
-                        let append = transfer.append_f32(lane, chunk.sample_rate, &chunk.samples);
-                        queued_samples.fetch_sub(count, Ordering::Relaxed);
-                        append?;
-                        if let Some(sink) = &live_sink {
-                            enqueue_remote_live_chunk(sink, &chunk);
-                        }
-                    }
-                    Ok(())
-                })();
-                if result.is_err() {
-                    worker_stop.store(true, Ordering::SeqCst);
+        let live_tee = live_sink.map(|sink| {
+            Box::new(move |chunk: &crate::recorder::LiveAudioChunk| {
+                // Chunks buffered before the session existed carry no offset.
+                if chunk.session_offset_ms == offset_ms {
+                    enqueue_remote_live_chunk(&sink, chunk);
+                } else {
+                    let mut chunk = chunk.clone();
+                    chunk.session_offset_ms = offset_ms;
+                    enqueue_remote_live_chunk(&sink, &chunk);
                 }
-                (transfer, result)
-            })?;
+            }) as Box<dyn FnMut(&crate::recorder::LiveAudioChunk) + Send>
+        });
+        if handoff
+            .send(RemoteSpoolHandoff {
+                transfer,
+                live: live_tee,
+            })
+            .is_err()
+        {
+            bail!("remote spool worker stopped before the segment began");
+        }
+        drop(handoff);
+        crate::cli_log::event(
+            "remote_segment_began",
+            format!(
+                "offset_ms={offset_ms} since_start_ms={}",
+                start_requested.elapsed().as_millis()
+            ),
+        );
 
         app.mic_level = recorder.mic_peak();
         app.spk_level = recorder.spk_peak();
@@ -707,7 +1035,7 @@ fn run_remote_native_capture(
         let (returned, spool_result) = worker
             .join()
             .map_err(|_| anyhow::anyhow!("remote spool worker panicked"))?;
-        transfer = returned;
+        transfer = returned.context("remote spool worker lost the transfer")?;
         spool_result.context("remote audio spool failed; local recovery WAV was retained")?;
 
         match action {
