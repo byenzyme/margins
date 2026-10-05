@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // Isolated bb + Chrome journey. Steps 1-6 stop before Make note; step 7 requires an explicit opt-in.
+// Linux runs Chrome in Docker; macOS runs a pinned Chrome for Testing as a local headless process.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { closeSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -16,21 +17,31 @@ const required = (name) => {
   if (!value || !path.isAbsolute(value) || !existsSync(value)) throw new Error(`${name} must be an existing absolute path`);
   return value;
 };
+// The macOS lane uses a local headless Chrome for Testing and the CoreML recorder runtime.
+const macLane = process.platform === "darwin";
+const CHROME_FOR_TESTING_VERSION = "154.0.8037.92";
 const marginsBin = required("MARGINS_E2E_BIN");
 const freshRelease = process.env.MARGINS_E2E_FRESH_RELEASE === "1";
 const coldAsr = process.env.MARGINS_E2E_COLD_ASR === "1";
 const serverBin = freshRelease ? null : required("MARGINS_E2E_SERVER_BIN");
 const bbApp = required("MARGINS_E2E_BB_APP");
-const chromeBin = required("MARGINS_E2E_CHROME_BIN");
+// Host-only bb-app installs (an enrolled machine's runtime) cannot serve an isolated bb.
+if (!existsSync(path.resolve(path.dirname(bbApp), "../server/dist/index.js"))) {
+  throw new Error("MARGINS_E2E_BB_APP must be a full bb-app package with server/dist, not a host-only runtime");
+}
+const chromeBin = macLane && !process.env.MARGINS_E2E_CHROME_BIN ? null : required("MARGINS_E2E_CHROME_BIN");
 const spokenWav = process.env.MARGINS_E2E_SPOKEN_WAV
   ? required("MARGINS_E2E_SPOKEN_WAV")
   : path.join(here, "fixtures", "launch-accessibility.wav");
-const asrModelDir = coldAsr ? null : required("MARGINS_E2E_ASR_MODEL_DIR");
-const ortLibrary = coldAsr ? null : required("MARGINS_E2E_ORT_LIBRARY");
+const asrModelDir = coldAsr || macLane ? null : required("MARGINS_E2E_ASR_MODEL_DIR");
+const ortLibrary = coldAsr || macLane ? null : required("MARGINS_E2E_ORT_LIBRARY");
+const coremlModelDir = coldAsr || !macLane ? null : required("MARGINS_E2E_COREML_MODEL_DIR");
 const realLlm = process.env.MARGINS_E2E_REAL_LLM === "1";
+const ffmpeg = process.env.MARGINS_E2E_FFMPEG ? required("MARGINS_E2E_FFMPEG") : "ffmpeg";
 const image = process.env.MARGINS_E2E_CHROME_IMAGE || "margins-bb-e2e-chrome:local";
 const artifacts = path.resolve(process.env.MARGINS_E2E_ARTIFACTS || path.join(plugin, "e2e-artifacts", new Date().toISOString().replace(/[:.]/g, "-")));
-const temporary = mkdtempSync(path.join(os.tmpdir(), "margins-bb-meetings-"));
+// macOS caps Unix socket paths at 104 bytes, so avoid the long per-user TMPDIR there.
+const temporary = mkdtempSync(path.join(macLane ? "/private/tmp" : os.tmpdir(), "margins-bb-meetings-"));
 const home = path.join(temporary, "margins-home");
 const vault = path.join(temporary, "vault");
 const code = path.join(temporary, "code");
@@ -40,6 +51,16 @@ const wav = path.join(temporary, "meeting.wav");
 const browserConfig = path.join(temporary, "agent-browser.json");
 const chromeName = `margins-bb-e2e-${process.pid}`;
 const browserSession = `margins-bb-e2e-${process.pid}`;
+const browserSocketDir = path.join(temporary, "agent-browser");
+// agent-browser encodes the journey video with the ffmpeg it finds on PATH.
+const browserEnv = { ...process.env, AGENT_BROWSER_CONFIG: browserConfig,
+  ...(macLane ? { AGENT_BROWSER_SOCKET_DIR: browserSocketDir } : {}),
+  ...(ffmpeg !== "ffmpeg" ? { PATH: `${path.dirname(ffmpeg)}${path.delimiter}${process.env.PATH}` } : {}) };
+const coldCache = path.join(temporary, "cache");
+const coldCoremlModel = path.join(coldCache, "FluidAudio/Models/parakeet-tdt-0.6b-v2");
+const menuBridgePorts = [18764, 18765];
+const coremlRequired = ["Preprocessor.mlmodelc", "Encoder.mlmodelc", "Decoder.mlmodelc", "JointDecision.mlmodelc"];
+let chromeProcess;
 let bbProcess;
 let videoStarted = false;
 let videoStartedAt = 0;
@@ -55,6 +76,7 @@ mkdirSync(code, { recursive: true });
 cpSync(path.join(repo, "desktop/test-harness/local-e2e/seed-vault"), vault, { recursive: true });
 mkdirSync(path.join(vault, "inbox"), { recursive: true });
 writeFileSync(browserConfig, "{}\n");
+mkdirSync(browserSocketDir, { recursive: true });
 
 function command(binary, args, options = {}) {
   const result = spawnSync(binary, args, { encoding: "utf8", maxBuffer: 8 * 1024 * 1024, ...options });
@@ -74,7 +96,7 @@ function makeSpokenWav(file, source) {
   // Chrome starts consuming fake microphone audio at launch, before a cold
   // release install and recorder startup finish. Repeat the utterance so the
   // captured interval contains speech even when setup takes longer.
-  command("ffmpeg", ["-nostdin", "-loglevel", "error", "-stream_loop", "-1", "-i", source,
+  command(ffmpeg, ["-nostdin", "-loglevel", "error", "-stream_loop", "-1", "-i", source,
     "-t", "120", "-ac", "1", "-ar", "16000", "-acodec", "pcm_s16le", "-y", file]);
 }
 async function freePort() {
@@ -96,19 +118,54 @@ async function until(label, probe, timeoutMs = 20_000) {
   throw new Error(`${label} did not become ready: ${last || "timeout"}`);
 }
 
+function chromeForTestingBinary() {
+  if (chromeBin) return chromeBin;
+  // Pinned Chrome for Testing in a reusable cache; never the user's Chrome or profile.
+  const platformName = process.arch === "arm64" ? "mac-arm64" : "mac-x64";
+  const cache = path.resolve(process.env.MARGINS_E2E_CHROME_CACHE
+    || path.join(os.homedir(), "Library/Caches/margins-bb-e2e/chrome-for-testing"));
+  const root = path.join(cache, CHROME_FOR_TESTING_VERSION);
+  const binary = path.join(root, `chrome-${platformName}`, "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing");
+  if (existsSync(binary)) return binary;
+  mkdirSync(cache, { recursive: true });
+  const staging = mkdtempSync(path.join(cache, ".download-"));
+  try {
+    const zip = path.join(staging, "chrome.zip");
+    command("curl", ["-fsSL", "--retry", "3", "-o", zip,
+      `https://storage.googleapis.com/chrome-for-testing-public/${CHROME_FOR_TESTING_VERSION}/${platformName}/chrome-${platformName}.zip`]);
+    command("ditto", ["-x", "-k", zip, path.join(staging, "unpacked")]);
+    rmSync(root, { recursive: true, force: true });
+    command("mv", [path.join(staging, "unpacked"), root]);
+  } finally { rmSync(staging, { recursive: true, force: true }); }
+  if (!existsSync(binary)) throw new Error(`Chrome for Testing ${CHROME_FOR_TESTING_VERSION} did not unpack to ${binary}`);
+  return binary;
+}
+function coremlInstalled(dir) {
+  return coremlRequired.every((name) => existsSync(path.join(dir, name)))
+    && existsSync(path.join(dir, "parakeet_vocab.json"));
+}
+function startLocalChrome() {
+  const binary = chromeForTestingBinary();
+  const out = openSync(path.join(artifacts, "chrome.log"), "w");
+  chromeProcess = spawn(binary, ["--headless=new", "--disable-gpu", `--remote-debugging-port=${cdpPort}`,
+    "--remote-allow-origins=*", `--user-data-dir=${path.join(temporary, "chrome-profile")}`,
+    "--no-first-run", "--no-default-browser-check", "--use-mock-keychain", "--password-store=basic",
+    // The macOS audio-service sandbox cannot read the fake-microphone WAV.
+    "--disable-features=AudioServiceSandbox",
+    "--use-fake-device-for-media-stream", `--use-file-for-fake-audio-capture=${wav}`,
+    "--use-fake-ui-for-media-stream", "about:blank"], { stdio: ["ignore", out, out], detached: true });
+  closeSync(out);
+  return binary;
+}
 function browser(args) {
   if (interruptedSignal) throw new Error(`Interrupted by ${interruptedSignal}`);
   browserUsed = true;
-  return command("agent-browser", ["--session", browserSession, "--cdp", String(cdpPort), ...args], {
-    env: { ...process.env, AGENT_BROWSER_CONFIG: browserConfig },
-  });
+  return command("agent-browser", ["--session", browserSession, "--cdp", String(cdpPort), ...args], { env: browserEnv });
 }
 function browserEval(source) {
   if (interruptedSignal) throw new Error(`Interrupted by ${interruptedSignal}`);
   browserUsed = true;
-  return jsonCommand("agent-browser", ["--session", browserSession, "--cdp", String(cdpPort), "--json", "eval", source], {
-    env: { ...process.env, AGENT_BROWSER_CONFIG: browserConfig },
-  }).data.result;
+  return jsonCommand("agent-browser", ["--session", browserSession, "--cdp", String(cdpPort), "--json", "eval", source], { env: browserEnv }).data.result;
 }
 function shot(name) { browser(["screenshot", path.join(artifacts, name)]); }
 function bb(args) { return jsonCommand("bb", [...args, "--json"], { env: bbEnv }); }
@@ -116,7 +173,33 @@ function assertMemo(text) {
   assert.equal(browserEval(`document.querySelector('textarea[aria-label="Meeting memo pad"]')?.value`), text);
 }
 
+function processTable() {
+  if (!macLane) {
+    // Linux containers may lack ps; /proc has the same facts.
+    const entries = [];
+    for (const entry of readdirSync("/proc")) {
+      if (!/^\d+$/.test(entry)) continue;
+      try {
+        const stat = readFileSync(`/proc/${entry}/stat`, "utf8");
+        const ppid = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
+        entries.push({ pid: Number(entry), ppid, command: readFileSync(`/proc/${entry}/cmdline`, "utf8").replaceAll("\0", " ") });
+      } catch { /* process exited while /proc was read */ }
+    }
+    return entries;
+  }
+  return command("ps", ["-A", "-ww", "-o", "pid=,ppid=,command="]).split("\n").map((line) => {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
+    return match ? { pid: Number(match[1]), ppid: Number(match[2]), command: match[3] } : null;
+  }).filter(Boolean);
+}
 function browserDaemonPids() {
+  if (macLane) {
+    // macOS has no /proc; the daemon records its pid in the isolated socket dir.
+    try {
+      const pid = Number(readFileSync(path.join(browserSocketDir, `${browserSession}.pid`), "utf8").trim());
+      return pid && processTable().some((entry) => entry.pid === pid && entry.command.includes("agent-browser")) ? [pid] : [];
+    } catch { return []; }
+  }
   const pids = [];
   for (const entry of readdirSync("/proc")) {
     if (!/^\d+$/.test(entry)) continue;
@@ -134,7 +217,7 @@ function closeBrowserSession() {
   if (browserCloseResult && daemonPidsBefore.length === 0) return browserCloseResult;
   const result = browserUsed && daemonPidsBefore.length
     ? spawnSync("agent-browser", ["--session", browserSession, "--cdp", String(cdpPort), "close"], {
-      env: { ...process.env, AGENT_BROWSER_CONFIG: browserConfig }, encoding: "utf8", timeout: 10_000,
+      env: browserEnv, encoding: "utf8", timeout: 10_000,
     }) : null;
   browserCloseResult = { session: browserSession,
     daemonPidsBefore: [...new Set([...(browserCloseResult?.daemonPidsBefore || []), ...daemonPidsBefore])],
@@ -213,12 +296,19 @@ try {
   const serverPort = await freePort();
   const daemonPort = await freePort();
   cdpPort = await freePort();
-  bbEnv = { ...process.env, BB_SERVER_URL: `http://127.0.0.1:${serverPort}`, BB_DATA_DIR: bbData,
+  // Drop the parent bb thread's identity so CLI calls cannot reach the real bb.
+  const parentEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+    !["BB_THREAD_ID", "BB_PROJECT_ID", "BB_ENVIRONMENT_ID", "BB_HOST_DAEMON_PORT", "BB_THREAD_STORAGE"].includes(key)));
+  bbEnv = { ...parentEnv, BB_SERVER_URL: `http://127.0.0.1:${serverPort}`, BB_DATA_DIR: bbData,
     MARGINS_HOME: home,
-    ...(coldAsr ? { XDG_CACHE_HOME: path.join(temporary, "cache") } : {
-      MARGINS_PARAKEET_MODEL_DIR: asrModelDir, MARGINS_PARAKEET_MODEL_KIND: "tdt",
-      ORT_DYLIB_PATH: ortLibrary,
-    }),
+    // HOME stays real: bb's built-in plugins query the login keychain, and an
+    // empty HOME makes macOS show "Keychain Not Found". Every Margins and bb
+    // write location is redirected explicitly instead.
+    ...(macLane ? { MARGINS_FLUID_COREML_MODEL_DIR: coldAsr ? coldCoremlModel : coremlModelDir }
+      : coldAsr ? { XDG_CACHE_HOME: coldCache } : {
+        MARGINS_PARAKEET_MODEL_DIR: asrModelDir, MARGINS_PARAKEET_MODEL_KIND: "tdt",
+        ORT_DYLIB_PATH: ortLibrary,
+      }),
     ...(freshRelease ? { MARGINS_CLI_BIN_DIR: freshCliBinDir } : { MARGINS_CLI_BIN: marginsBin }),
     // This journey exercises the explicit Make note action once. The separate
     // auto-note scheduler has its own test and must not race a paid E2E call.
@@ -229,14 +319,14 @@ try {
     delete bbEnv.MARGINS_BB_REMOTE_URL;
     delete bbEnv.MARGINS_BB_REMOTE_TOKEN;
   }
-  if (coldAsr) {
+  if (coldAsr || macLane) {
     delete bbEnv.MARGINS_PARAKEET_MODEL_DIR;
     delete bbEnv.MARGINS_PARAKEET_MODEL_KIND;
     delete bbEnv.ORT_DYLIB_PATH;
   }
   const hostData = path.join(bbData, "plugins/margins/host-data");
   mkdirSync(hostData, { recursive: true });
-  if (!freshRelease && !coldAsr) writeFileSync(path.join(hostData, "asr-runtime.json"), `${JSON.stringify({ serverPath: serverBin,
+  if (!freshRelease && !coldAsr && !macLane) writeFileSync(path.join(hostData, "asr-runtime.json"), `${JSON.stringify({ serverPath: serverBin,
     modelDir: asrModelDir, ortLibraryPath: ortLibrary })}\n`);
   const bbOut = openSync(path.join(artifacts, "bb.log"), "w");
   const bbErr = openSync(path.join(artifacts, "bb-errors.log"), "w");
@@ -259,17 +349,24 @@ try {
   const threadTwo = findId(bb(["thread", "spawn", "--project", projectId, "--title", "E2E thread two", "--prompt", "Fixture only; do not run", "--send-at", "7d"]), "thr_");
   assert(threadOne && threadTwo, "Fixture threads did not return ids");
 
-  command("docker", ["run", "-d", "--rm", "--name", chromeName, "--network", "host",
+  if (macLane) writeFileSync(path.join(artifacts, "chrome.json"), `${JSON.stringify({ binary: startLocalChrome(),
+    version: chromeBin ? "caller-supplied" : CHROME_FOR_TESTING_VERSION }, null, 2)}\n`);
+  else command("docker", ["run", "-d", "--rm", "--name", chromeName, "--network", "host",
     "-v", `${path.dirname(chromeBin)}:/browser:ro`, "-v", `${wav}:/meeting.wav:ro`, image,
     "/browser/chrome", "--headless=new", "--no-sandbox", "--disable-gpu", `--remote-debugging-port=${cdpPort}`,
     "--remote-allow-origins=*", "--user-data-dir=/tmp/margins-browser-profile",
     "--use-fake-device-for-media-stream", "--use-file-for-fake-audio-capture=/meeting.wav",
     "--use-fake-ui-for-media-stream", "about:blank"]);
-  await until("Chrome CDP", async () => (await fetch(`http://127.0.0.1:${cdpPort}/json/version`)).ok);
+  await until("Chrome CDP", async () => (await fetch(`http://127.0.0.1:${cdpPort}/json/version`)).ok, macLane ? 60_000 : 20_000);
   browser(["record", "start", path.join(artifacts, "journey.webm"), `${bbEnv.BB_SERVER_URL}/plugins/margins/meetings`]);
   videoStarted = true;
   videoStartedAt = Date.now();
   browser(["set", "viewport", "1440", "900"]);
+  // A macOS client also talks to Margins Menu's loopback bridge. Keep the
+  // isolated page away from the user's running Menu.
+  if (macLane) for (const port of menuBridgePorts) for (const host of ["127.0.0.1", "localhost"]) {
+    browser(["network", "route", `http://${host}:${port}/**`, "--abort"]);
+  }
   await until("Meetings page", () => browserEval('!!document.querySelector(".margins-meetings-page")'));
   await until("Meetings workspace choice", () => browserEval(`document.body.innerText.includes('Choose a Margins Workspace') || !![...document.querySelectorAll('button')].find(button => button.textContent === 'Start meeting')`), 60_000);
   if (browserEval(`document.body.innerText.includes('Choose a Margins Workspace')`)) {
@@ -285,7 +382,9 @@ try {
   // A modal confirm can block headless Chrome's renderer before CDP can
   // acknowledge the click, so persist the same one-time choice first.
   browserEval('sessionStorage.setItem("margins.bb.browser-mic-confirmed", "yes"); true');
-  browser(["find", "role", "button", "click", "--name", "Start meeting", "--exact"]);
+  // On a macOS client, Start meeting goes through Margins Menu; the browser-only path is explicit.
+  if (macLane) await until("Browser mic only", () => browserEval(`!![...document.querySelectorAll('button')].find(button => button.textContent === 'Browser mic only')`), 60_000);
+  browser(["find", "role", "button", "click", "--name", macLane ? "Browser mic only" : "Start meeting", "--exact"]);
   const startState = await until("Recording", () => browserEval(`document.querySelector('button[aria-label="Pause recording"]') ? 'recording' : document.querySelector('.margins-meetings-empty [role="alert"]')?.textContent || null`), 60_000);
   assert.equal(startState, "recording", `Start failed: ${startState}`);
   await until("meeting memo pad", () => browserEval(`!!document.querySelector('textarea[aria-label="Meeting memo pad"]')`), 60_000);
@@ -372,7 +471,10 @@ try {
   assert(memos.some((name) => readFileSync(path.join(captureDir, name), "utf8").includes(revisedMemo)));
   shot("06-revised.png");
 
-  if (coldAsr) {
+  if (coldAsr && macLane) {
+    await until("fresh CoreML model install", () => coremlInstalled(coldCoremlModel), 600_000);
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  } else if (coldAsr) {
     const cache = path.join(temporary, "cache/margins/asr");
     await until("fresh ASR model and runtime install", () =>
       existsSync(path.join(cache, "parakeet-tdt-0.6b-v2-int8/encoder-model.int8.onnx"))
@@ -390,15 +492,24 @@ try {
     return result.view === "aligned" && String(result.body).includes("Source: Margins remote offline speech transcript")
       && utterances.length > 0 ? result : null;
   }, coldAsr ? 240_000 : 120_000);
+  writeFileSync(path.join(artifacts, "transcript.md"), `${transcript.body}\n`);
   writeFileSync(path.join(artifacts, "transcript.json"), `${JSON.stringify(transcript, null, 2)}\n`);
+  if (macLane) {
+    const bridgeRequests = JSON.parse(browser(["network", "requests", "--json"])).data.requests
+      .filter((request) => menuBridgePorts.some((port) => new RegExp(`^https?://(127\\.0\\.0\\.1|localhost):${port}/`).test(request.url)))
+      .map((request) => ({ method: request.method, url: request.url, status: request.status ?? null }));
+    writeFileSync(path.join(artifacts, "menu-bridge-requests.json"), `${JSON.stringify(bridgeRequests, null, 2)}\n`);
+    assert(bridgeRequests.every((request) => !request.status), `A request reached the Margins Menu bridge: ${JSON.stringify(bridgeRequests)}`);
+  }
   const threadIds = (value) => [...JSON.stringify(value).matchAll(/thr_[a-z0-9]+/g)].map((match) => match[0]).sort();
   const beforeNoteThreads = threadIds(bb(["thread", "list", "--project", projectId]));
   assert(!existsSync(path.join(code, ".margins")), "Capture must not fall back to the bb project folder");
   shot("07-before-note.png");
   const assertions = { projectId, threadOne, threadTwo, levels, memoSavedAfterStop: true, stopAcknowledged: true,
     overlayVisibleOnOtherThread: true, overlayClearOfComposerSubmit: composerClearance,
-    projectCaptureFallbackAbsent: true, transcription: "parakeet-asr", transcriptObserved: true,
-    freshReleaseInstalled: freshRelease, coldAsrInstalled: coldAsr, noLlm: !realLlm };
+    projectCaptureFallbackAbsent: true, transcription: macLane ? "coreml-asr" : "parakeet-asr", transcriptObserved: true,
+    freshReleaseInstalled: freshRelease, coldAsrInstalled: coldAsr, noLlm: !realLlm,
+    browserLane: macLane ? "macos-local-chrome" : "linux-docker-chrome", ...(macLane ? { menuBridgeUntouched: true } : {}) };
   writeFileSync(path.join(artifacts, "assertions.json"), `${JSON.stringify(assertions, null, 2)}\n`);
   if (process.env.MARGINS_E2E_HOLD_BEFORE_NOTE === "1") await holdBeforeNote();
   if (realLlm) {
@@ -457,7 +568,7 @@ try {
     browser(["record", "stop"]);
     videoStarted = false;
     const clipStart = Math.max(0, (otherThreadAt - videoStartedAt) / 1_000 - 2);
-    command("ffmpeg", ["-nostdin", "-loglevel", "error", "-ss", String(clipStart), "-i", path.join(artifacts, "journey.webm"),
+    command(ffmpeg, ["-nostdin", "-loglevel", "error", "-ss", String(clipStart), "-i", path.join(artifacts, "journey.webm"),
       "-t", "4", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-n", path.join(artifacts, "03-overlay-other-thread.mp4")]);
     assert(existsSync(path.join(artifacts, "03-overlay-other-thread.mp4")));
     passMessage = `PASS: no-LLM steps 1-6; evidence ${artifacts}`;
@@ -493,7 +604,17 @@ try {
   if (interruptedSignal) process.stderr.write(`Harness interrupted by ${interruptedSignal}; cleaning up.\n`);
   else throw error;
 } finally {
-  if (coldAsr) {
+  if (coldAsr && macLane) {
+    const installed = { modelInitiallyAbsent: true, modelDir: coldCoremlModel,
+      modelInstalled: coremlInstalled(coldCoremlModel), asrBackend: "coreml",
+      releaseRuntimeInstalled: freshRelease
+        ? existsSync(path.join(bbData, "plugins/margins/host-data/runtime/v0.4.15/margins-server")) : null };
+    writeFileSync(path.join(artifacts, "cold-asr-install.json"), `${JSON.stringify(installed, null, 2)}\n`);
+    if (existsSync(path.join(bbData, "logs")) && !existsSync(path.join(artifacts, "bb-diagnostic-logs"))) {
+      cpSync(path.join(bbData, "logs"), path.join(artifacts, "bb-diagnostic-logs"), { recursive: true });
+    }
+    if (passMessage) assert(installed.modelInstalled, "Cold CoreML model was not installed");
+  } else if (coldAsr) {
     const model = path.join(temporary, "cache/margins/asr/parakeet-tdt-0.6b-v2-int8");
     const runtime = path.join(temporary, "cache/margins/asr/onnxruntime-linux-x64-1.24.2/lib/libonnxruntime.so.1.24.2");
     const installed = {
@@ -518,10 +639,29 @@ try {
     assertions.browserDaemonReaped = browserCleanup.verified;
     writeFileSync(assertionsPath, `${JSON.stringify(assertions, null, 2)}\n`);
   }
-  try { command("docker", ["rm", "-f", chromeName]); } catch { /* already stopped */ }
+  if (!macLane) try { command("docker", ["rm", "-f", chromeName]); } catch { /* already stopped */ }
+  // Snapshot every descendant first: bb-spawned recorders outlive a killed parent.
+  const snapshot = processTable();
+  const owned = new Map(snapshot.filter((entry) => [bbProcess?.pid, chromeProcess?.pid].includes(entry.pid)).map((entry) => [entry.pid, entry.command]));
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const entry of snapshot) if (owned.has(entry.ppid) && !owned.has(entry.pid)) { owned.set(entry.pid, entry.command); grew = true; }
+  }
+  if (chromeProcess?.exitCode === null) try { process.kill(-chromeProcess.pid, "SIGTERM"); } catch { /* already exited */ }
   if (bbProcess) { bbProcess.kill("SIGINT"); await new Promise((resolve) => setTimeout(resolve, 1200)); if (bbProcess.exitCode === null) bbProcess.kill("SIGKILL"); }
+  const tempTag = path.basename(temporary);
+  const leftovers = () => processTable().filter((entry) => entry.pid !== process.pid
+    && (owned.get(entry.pid) === entry.command || entry.command.includes(tempTag))).map((entry) => entry.pid);
+  for (const signal of ["SIGTERM", "SIGKILL"]) {
+    for (const pid of leftovers()) try { process.kill(pid, signal); } catch { /* already exited */ }
+    const deadline = Date.now() + 3_000;
+    while (leftovers().length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  const processCleanup = { ownedPids: [...owned.keys()], remaining: leftovers() };
+  writeFileSync(path.join(artifacts, "process-cleanup.json"), `${JSON.stringify(processCleanup, null, 2)}\n`);
   if (process.env.MARGINS_E2E_KEEP_TEMP === "1") console.log(`Diagnostic temp kept: ${temporary}`);
   else rmSync(temporary, { recursive: true, force: true });
   assert(browserCleanup.verified, `agent-browser daemon remained for ${browserSession}: ${JSON.stringify(browserCleanup)}`);
+  assert.deepEqual(processCleanup.remaining, [], "Harness processes remained after cleanup");
 }
 if (passMessage) console.log(`${passMessage}; browser daemon reaped`);

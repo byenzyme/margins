@@ -63,6 +63,87 @@ results are written under gitignored `../e2e-artifacts/<timestamp>/`. Set
 The runner closes its named agent-browser session, verifies that its daemon
 exited, and records the result in `browser-cleanup.json` and `assertions.json`.
 It removes only its own temporary home, bb data, and Chrome container.
+The isolated bb server and CLI calls do not inherit the parent bb thread's
+`BB_THREAD_ID`, `BB_PROJECT_ID`, `BB_ENVIRONMENT_ID`, `BB_HOST_DAEMON_PORT`, or
+`BB_THREAD_STORAGE`.
+
+## macOS lane (no Docker)
+
+On macOS the runner selects a local lane automatically. It runs the same
+journey and assertions with these differences:
+
+- Chrome runs as a local headless process instead of in Docker, with the same
+  fake-media flags, so the prepared WAV is the microphone. Set
+  `MARGINS_E2E_CHROME_BIN` to the inner executable of a Chrome or Chrome for
+  Testing app. If it is unset, the runner downloads the pinned Chrome for Testing
+  version in `no-llm.mjs` into `MARGINS_E2E_CHROME_CACHE` (default
+  `~/Library/Caches/margins-bb-e2e/chrome-for-testing`) and reuses it on later
+  runs. The browser profile is always a temporary directory, so the runner never
+  opens your normal Chrome profile. Chrome runs with
+  `--disable-features=AudioServiceSandbox`, because the macOS audio-service
+  sandbox cannot read the WAV and would leave the microphone silent. Every other
+  part of Chrome stays sandboxed.
+- On a macOS client, Start meeting records through Margins Menu. The runner
+  instead clicks **Browser mic only**, which is the explicit browser-microphone
+  path. It also aborts all page requests to the Menu bridge on loopback ports
+  18764 and 18765. Any such requests are recorded in
+  `menu-bridge-requests.json`, and the run fails if one of them gets a response.
+  As a result, the isolated page never reaches a MarginsMenu that is running on
+  your Mac.
+- The temporary root is under `/private/tmp`, because macOS limits Unix socket
+  paths to 104 bytes. The agent-browser socket and pid files are written there
+  (`AGENT_BROWSER_SOCKET_DIR`), and that pid file is how the runner checks that
+  the daemon exited.
+- The isolated bb server keeps your real `HOME`. bb's built-in plugins query
+  the login keychain, and an empty `HOME` makes macOS show "Keychain Not Found".
+  Instead, each write location is redirected into the temporary root:
+  `BB_DATA_DIR`, `MARGINS_HOME`, `MARGINS_CLI_BIN_DIR` (fresh release), and
+  `MARGINS_FLUID_COREML_MODEL_DIR`.
+- Transcription uses the CoreML recorder. For a local build, use
+  `scripts/cargo-lane shared -- cargo build -p margins-server --no-default-features --features coreml-asr --bin margins-server`
+  and set `MARGINS_E2E_COREML_MODEL_DIR` to an installed
+  `parakeet-tdt-0.6b-v2` CoreML directory. The runner opens it read-only through
+  `MARGINS_FLUID_COREML_MODEL_DIR`. The ONNX
+  `MARGINS_E2E_ASR_MODEL_DIR` and `MARGINS_E2E_ORT_LIBRARY` variables are not
+  used on macOS.
+- With `MARGINS_E2E_COLD_ASR=1`, the runner points
+  `MARGINS_FLUID_COREML_MODEL_DIR` at an empty directory under the temporary
+  root. It then waits up to ten minutes for the server to download the
+  four `.mlmodelc` bundles and `parakeet_vocab.json` before it clicks Transcribe.
+  `cold-asr-install.json` records whether the model and the release runtime were
+  installed.
+- At exit, the runner stops Chrome and bb. It then terminates every process
+  that descended from either one, and every process whose command line contains
+  the temporary root's name. This includes recorders that bb started. The result
+  is recorded in `process-cleanup.json`, and the run fails if any process is
+  still running. The cleanup does not touch any other `margins-server` or
+  MarginsMenu.
+
+To run the published release with an empty model cache, use these commands.
+`margins-public` only prepares the disposable Workspace:
+
+```bash
+scripts/cargo-lane shared -- cargo build -p margins-cli --bin margins-public
+MARGINS_E2E_FRESH_RELEASE=1 MARGINS_E2E_COLD_ASR=1 \
+MARGINS_E2E_BIN=/absolute/shared-target/debug/margins-public \
+MARGINS_E2E_BB_APP=/absolute/bb-app/dist/bb-app.js \
+node integrations/bb-plugin-margins/test-harness/no-llm.mjs
+```
+
+The local-build override is the same command without
+`MARGINS_E2E_FRESH_RELEASE`, with `MARGINS_E2E_SERVER_BIN` set to the CoreML
+server built above. Add `MARGINS_E2E_COREML_MODEL_DIR` unless `MARGINS_E2E_COLD_ASR=1`.
+The macOS lane needs `ffmpeg`, `curl`, `agent-browser`, and `bb` on `PATH`.
+If the `ffmpeg` on `PATH` is broken, set `MARGINS_E2E_FFMPEG` to a working
+binary that has libx264. The runner uses it for the WAV and the clip, and puts
+its directory first on agent-browser's `PATH` for the journey video.
+`MARGINS_E2E_BB_APP` must be a full `bb-app` package that includes
+`server/dist`. An enrolled machine's host-only runtime cannot serve the
+isolated bb. For example, use `npm install --prefix /tmp/bb-app-e2e bb-app@<host version>`
+and then
+`/tmp/bb-app-e2e/node_modules/bb-app/dist/bb-app.js`. Run `npm ci` in
+`integrations/bb-plugin-margins` first, because bb bundles the plugin frontend
+from its `node_modules`.
 
 ## Approved real-LLM step 7
 
