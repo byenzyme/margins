@@ -1,19 +1,24 @@
-Margins 0.4.15 ships the CLI/TUI and bb plugin with a standalone project server.
+Margins 0.4.16 makes recording start and stop faster and more reliable.
 The release archives contain `margins` and `margins-server`.
 
-- BB browser recordings recover across reloads and network drops. Missing audio
-  is marked incomplete rather than treated as a complete meeting: choose
-  **Finish with what was saved**, or let the server finish an abandoned capture.
-  Memo and transcript timing now share one clock.
-- The TUI streams audio safely during capture, making Stop fast and limiting a
-  crash to at most about five seconds of uncommitted audio with bounded temporary
-  storage. BB and TUI memo edits merge or show a conflict instead of silently
-  overwriting each other. A second recorder cannot take over the same session.
-- Speech uses one transcription path. `--speakers` works for stereo recordings,
-  and CoreML model downloads and cache repair are safer.
-- The desktop app and `margins-live` no longer ship. Margins Menu records only
-  in BB project mode.
+- Margins Menu (BB mode) opens your microphone before the meeting session is
+  ready and keeps what you say while it starts, so the first words are no
+  longer lost. The menu says **Starting…** until capture is live. Pause and
+  Finish work during that window; Finish turns the microphone off right away.
+  If bb cannot be reached, the audio already captured is kept in
+  `~/.margins/unsent` and is not discarded.
+- Finishing a Menu recording no longer waits for live transcription to wind
+  down, so Stop reaches *saved* in about a second. The server then starts the
+  final transcript automatically. Before this fix, a Menu recording could stay
+  untranscribed until the next job came in.
+- The bb recording timer for Menu recordings now keeps real time. It used
+  to run about three times too fast with 48 kHz microphones. The *Saved*
+  label shows the length of the saved recording.
+- When live transcription finishes warming up, it catches up on the audio
+  recorded so far. It no longer starts partway into the meeting.
+- BB browser recordings keep audio the server has not yet acknowledged in the
+  browser's storage. A page reload no longer loses those chunks.
+- `margins --version` reports the version, commit, and build kind.
+  `margins setup --only` no longer fails when no catalyst is configured.
 
-Known limits: a page reload can lose browser chunks that the server has not
-acknowledged; the recording shows those gaps. Linux live transcription is not
-available.
+Known limits: Linux live transcription is not available.

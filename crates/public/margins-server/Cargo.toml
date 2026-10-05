@@ -1,6 +1,6 @@
 [package]
 name = "margins-server"
-version = "0.4.15"
+version = "0.4.16"
 edition = "2021"
 license = "Apache-2.0"
 description = "Workspace HTTP service and BB browser capture adapter for Margins"
