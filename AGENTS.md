@@ -143,7 +143,13 @@ run their hermetic script tests (`SCRIPT_TESTS` in `scripts/local-gate`, for
 example `scripts/cargo-lane` runs `tests/test_cargo_lane.py`); changing
 `scripts/local-gate` runs all of them. `tests/test_*.py` and `tests/test_*.sh`
 edits alone do not trigger Rust tests. Script tests must stay fast and use only
-temp directories and temp git repos. `public` builds and tests the
+temp directories and temp git repos. Independently of its path arguments,
+`quick` inspects `git diff origin/main...HEAD` (override the base with
+`MARGINS_LOCAL_GATE_BASE`) plus uncommitted changes. When any `Cargo.toml`,
+`Cargo.lock`, or `Cargo.private-recall.lock` changed, it fails fast if the
+private lock no longer reproduces the public lock, then runs the `--locked`
+private-composition metadata check, which is reported as SKIP when
+`enzyme-rust` is unreachable. `public` builds and tests the
 root workspace with default features disabled and no private git source in its
 manifest or lockfile. `public` and `linux` both run every script test
 (`tests/test_*.py` plus the listed shell fixtures).

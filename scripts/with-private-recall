@@ -34,6 +34,9 @@ if [[ -f "$repo_root/Cargo.private-recall.lock" ]]; then
   cp "$repo_root/Cargo.private-recall.lock" "$repo_root/Cargo.lock"
 fi
 export MARGINS_PRIVATE_RECALL_ACTIVE=1
+# The checkout's own (public) Cargo.toml and Cargo.lock, for tools such as
+# scripts/local-gate that must inspect them while the substitution is active.
+export MARGINS_PRIVATE_RECALL_PUBLIC_DIR="$backup_dir"
 if [[ -z "${CARGO_NET_GIT_FETCH_WITH_CLI+x}" ]]; then
   export CARGO_NET_GIT_FETCH_WITH_CLI=true
 fi
