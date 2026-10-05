@@ -99,6 +99,18 @@ class WithPrivateRecallDirtyTests(unittest.TestCase):
         dirty, _ = self.run_wrapper()
         self.assertEqual(dirty, "true")
 
+    def test_public_manifest_copies_are_exported(self) -> None:
+        original = (self.repo / "Cargo.toml").read_text()
+        environment = self.base_env()
+        result = subprocess.run(
+            [
+                str(self.repo / "scripts/with-private-recall"), "bash", "-c",
+                'cat "$MARGINS_PRIVATE_RECALL_PUBLIC_DIR/Cargo.toml"',
+            ],
+            cwd=self.repo, env=environment, check=True, capture_output=True, text=True,
+        )
+        self.assertEqual(result.stdout, original)
+
     def test_explicit_value_is_preserved(self) -> None:
         dirty, _ = self.run_wrapper(MARGINS_BUILD_DIRTY="true")
         self.assertEqual(dirty, "true")
