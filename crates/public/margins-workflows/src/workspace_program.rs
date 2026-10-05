@@ -507,10 +507,25 @@ pub fn legacy_view(config: &WorkspaceConfig) -> Result<LegacyView> {
 
     let mut excluded_keys = BTreeSet::new();
     let mut excluded_entities = Vec::new();
+    // Every folder the program will leave out, root-relative and lowercased:
+    // the resolver refuses a folder reading at or under one of them.
+    let mut excluded_folders: Vec<String> = config
+        .policy
+        .excluded_folders
+        .iter()
+        .map(|folder| folder.trim().trim_matches('/').to_ascii_lowercase())
+        .filter(|folder| !folder.is_empty())
+        .collect();
     for entity in &config.policy.excluded_entities {
         excluded_keys.insert(entity.trim().to_ascii_lowercase());
         match legacy_entity(entity) {
             Some((kind @ ("folder" | "tag" | "link"), name)) => {
+                if kind == "folder" {
+                    let folder = name.trim().trim_matches('/').to_ascii_lowercase();
+                    if !folder.is_empty() {
+                        excluded_folders.push(folder);
+                    }
+                }
                 excluded_entities.push(enzyme_spec::entity_selector(kind, &name));
             }
             _ => warnings.push(format!(
@@ -549,10 +564,17 @@ pub fn legacy_view(config: &WorkspaceConfig) -> Result<LegacyView> {
                             .map(|_| (source.as_str(), &path[namespace.len() + 1..]))
                     }
                 });
-                match owner {
-                    Some((source, rest)) => folder_entity(source, rest),
-                    None => folder_entity(&home, path),
+                let (source, rest) = owner.unwrap_or((home.as_str(), path));
+                let relative = rest.trim_matches('/').to_ascii_lowercase();
+                if relative != "." && !relative.is_empty() && excluded_folders.iter().any(|excluded| {
+                    relative == *excluded || relative.starts_with(&format!("{excluded}/"))
+                }) {
+                    warnings.push(format!(
+                        "entity {entity_ref:?} is inside an excluded folder; the previous engine ignored it, so it is not migrated"
+                    ));
+                    continue;
                 }
+                folder_entity(source, rest)
             } else {
                 enzyme_spec::entity_selector(kind, &name)
             };
@@ -1430,6 +1452,37 @@ workspace "practice" {
         let legacy = legacy_view(&legacy_config(&one, &[&notes_inbox, "folder:library/x", "folder:/"])).unwrap();
         assert_eq!(entity_refs(&legacy.config), ["folder:Inbox", "folder:library/x"]);
         assert_eq!(legacy.warnings.len(), 1, "{:?}", legacy.warnings);
+    }
+
+    #[test]
+    fn legacy_folder_entities_inside_excluded_folders_are_dropped() {
+        for multi in [false, true] {
+            let mut bindings = vec![("notes", markdown("/abs/notes", SourceRole::Home))];
+            if multi {
+                bindings.push(("library", markdown("/abs/library", SourceRole::Reference)));
+            }
+            let mut config = legacy_config(
+                &bindings,
+                &["folder:archive/2024", "folder:Old/x", "folder:archived", "folder:people"],
+            );
+            config.policy.excluded_folders = vec!["Archive/".into()];
+            config.policy.excluded_entities = vec!["folder:old".into()];
+            let legacy = legacy_view(&config).unwrap();
+            let kept = if multi {
+                ["folder:notes/archived", "folder:notes/people"]
+            } else {
+                ["folder:archived", "folder:people"]
+            };
+            assert_eq!(entity_refs(&legacy.config), kept);
+            assert_eq!(legacy.warnings.len(), 2, "{:?}", legacy.warnings);
+            assert!(legacy.warnings[0].contains("inside an excluded folder"));
+            let program = WorkspaceProgram::from_program(
+                reconcile(&empty_program("w"), &with_home_folder(legacy.config), FolderQualification::Legacy)
+                    .unwrap(),
+            )
+            .unwrap();
+            validate_language(&program, Path::new("/state/ledger.db"), None).unwrap();
+        }
     }
 
     fn with_home_folder(mut config: WorkspaceConfig) -> WorkspaceConfig {

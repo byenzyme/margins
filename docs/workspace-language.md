@@ -114,7 +114,7 @@ Migration keeps exactly what the previous engine honored. A learning entity is
 read only as `#tag`, `[[link]]`, `log:<name>`, or `folder:<path>`; an excluded
 entity only as `folder:<path>`, `#tag`, or `[[link]]`. Other forms (`Project:
 Atlas`, `person:ada`, `tag:x`, bare names), learning entities that are also
-excluded, repeated entities, and `expandable` on anything but a folder were
+excluded (including folders at or under an excluded folder), repeated entities, and `expandable` on anything but a folder were
 ignored then and are dropped now, each reported in the migration `warnings`
 (`workspace migrate --json`) and on stderr. An unqualified legacy `folder:<path>`
 is Home-relative; with several Markdown sources it is qualified with the Home
