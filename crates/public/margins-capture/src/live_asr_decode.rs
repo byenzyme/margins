@@ -18,7 +18,7 @@ use margins_core::AsrStreamDecoder;
 use margins_media::timeline::RationalResampler;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -54,6 +54,8 @@ pub(super) struct LiveWorkerIo {
     pub segments: Arc<Mutex<BTreeMap<u64, i64>>>,
     pub durable: Option<LiveDurableSource>,
     pub durable_wait: Duration,
+    /// The owner abandoned the transcript; stop without a terminal checkpoint.
+    pub cancel: Arc<AtomicBool>,
 }
 
 struct Lane {
@@ -124,6 +126,7 @@ pub(super) fn run_live_worker<D: AsrStreamDecoder>(
         segments,
         durable,
         durable_wait,
+        cancel,
     } = io;
     let (durable, next_ordinal) = match durable {
         Some(source) => (Some(source.audio), Some(source.first_ordinal)),
@@ -157,6 +160,13 @@ pub(super) fn run_live_worker<D: AsrStreamDecoder>(
         decode.queued_samples.load(Ordering::Acquire) > LIVE_LAG_STATUS_SAMPLES || dropped() > 0,
     );
     loop {
+        if cancel.load(Ordering::Acquire) {
+            crate::cli_log::event(
+                "live_worker_cancelled",
+                format!("phase=decode local_end_ms={}", decode.local_end_ms()),
+            );
+            return Ok(());
+        }
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(chunk) => decode.on_chunk(chunk)?,
             Err(mpsc::RecvTimeoutError::Timeout) => {}

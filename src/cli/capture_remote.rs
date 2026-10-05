@@ -761,12 +761,11 @@ fn run_remote_native_capture(
     if let Some(controller) = &controller {
         controller.saving();
     }
-    if let Some(worker) = live {
-        let _ = worker
-            .begin_finish(final_ended_at_ms.saturating_sub(initial_offset_ms))
-            .complete();
-    }
-    drop(checkpoint_publisher);
+    // The server transcribes the delivered audio authoritatively, and it
+    // refuses checkpoints once the session is finalized. Waiting for the
+    // provisional on-device transcript (possibly still warming up) would only
+    // delay Stop, so retire it in the background instead.
+    retire_remote_live_transcript(live, checkpoint_publisher);
     uploader_done.store(true, Ordering::Release);
     uploader
         .join()
@@ -903,6 +902,43 @@ impl Drop for RemoteCheckpointPublisher {
     }
 }
 
+/// Cancel the optional live worker and stop its checkpoint publisher without
+/// blocking Stop. Both threads exit on their own (a warming worker as soon as
+/// its uninterruptible model load returns); the returned reaper joins them so
+/// their outcome is logged and nothing outlives its owner unobserved.
+#[cfg(feature = "audio-capture")]
+fn retire_remote_live_transcript(
+    live: Option<LiveTranscriptWorker>,
+    publisher: Option<RemoteCheckpointPublisher>,
+) -> Option<std::thread::JoinHandle<()>> {
+    if live.is_none() && publisher.is_none() {
+        return None;
+    }
+    if let Some(publisher) = &publisher {
+        publisher.done.store(true, Ordering::Release);
+    }
+    let finalizer = live.map(LiveTranscriptWorker::cancel);
+    let reaper = std::thread::Builder::new()
+        .name("margins-remote-live-retire".into())
+        .spawn(move || {
+            drop(publisher);
+            if let Some(finalizer) = finalizer {
+                let _ = finalizer.complete();
+            }
+        });
+    match reaper {
+        Ok(reaper) => Some(reaper),
+        Err(error) => {
+            // Without a reaper the cancelled threads still exit by themselves.
+            crate::cli_log::event(
+                "remote_live_retire_unavailable",
+                crate::cli_log::error_summary(&anyhow::Error::from(error)),
+            );
+            None
+        }
+    }
+}
+
 #[cfg(feature = "audio-capture")]
 fn enqueue_remote_live_chunk(
     sink: &crate::recorder::LiveAudioSink,
@@ -950,9 +986,10 @@ fn publish_remote_live_checkpoints(
     const MAX_BYTES: u64 = 256 * 1024;
     let mut last_sent = Vec::new();
     let mut last_attempt = std::time::Instant::now() - std::time::Duration::from_secs(3);
-    loop {
-        let closing = done.load(Ordering::Acquire);
-        if closing || last_attempt.elapsed() >= std::time::Duration::from_secs(3) {
+    // Stop does not flush a final checkpoint: the session is finalized right
+    // away and the server's own transcript supersedes this provisional view.
+    while !done.load(Ordering::Acquire) {
+        if last_attempt.elapsed() >= std::time::Duration::from_secs(3) {
             if let Ok(metadata) = std::fs::metadata(path) {
                 if metadata.len() > 0 && metadata.len() <= MAX_BYTES {
                     if let Ok(body) = std::fs::read(path) {
@@ -961,19 +998,54 @@ fn publish_remote_live_checkpoints(
                             match client.put_live_checkpoint(session, producer_token, body.clone())
                             {
                                 Ok(()) => last_sent = body,
-                                Err(error) => crate::cli_log::event(
-                                    "remote_live_checkpoint_upload_failed",
-                                    crate::cli_log::error_summary(&error),
-                                ),
+                                Err(error) => {
+                                    let (kind, detail) = remote_live_checkpoint_failure(&error);
+                                    crate::cli_log::event(kind, detail);
+                                }
                             }
                         }
                     }
                 }
             }
         }
-        if closing {
-            break;
-        }
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
+}
+
+/// Diagnostic for a rejected checkpoint. A request that raced finalize is an
+/// expected skip, not a failure; otherwise record the server's error code (a
+/// fixed protocol token) rather than the generic application category.
+#[cfg(any(test, feature = "audio-capture"))]
+fn remote_live_checkpoint_failure(error: &anyhow::Error) -> (&'static str, String) {
+    let message = format!("{error:#}");
+    if message.contains("capture producer is no longer active") {
+        return (
+            "remote_live_checkpoint_skipped",
+            "reason=session_finalized".into(),
+        );
+    }
+    let code = message.split_once(": ").map(|(code, _)| code).filter(|code| {
+        !code.is_empty()
+            && code.len() <= 64
+            && code.bytes().all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+    });
+    let detail = if let Some(code) = code {
+        let reason = if message.contains("word timeline") {
+            " reason=word_timeline"
+        } else if message.contains("watermarks") {
+            " reason=watermarks"
+        } else {
+            ""
+        };
+        format!("category=server code={code}{reason}")
+    } else if let Some(status) = message
+        .strip_prefix("capture relay rejected request (")
+        .and_then(|rest| rest.split_once(')'))
+        .map(|(status, _)| status)
+    {
+        format!("category=relay status={status}")
+    } else {
+        crate::cli_log::error_summary(error)
+    };
+    ("remote_live_checkpoint_upload_failed", detail)
 }

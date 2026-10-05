@@ -177,3 +177,90 @@
         assert!(reopened.manifest().finalize_command.is_some());
         assert!(reopened.pending_chunks().unwrap().is_empty());
     }
+
+    #[cfg(feature = "audio-capture")]
+    #[test]
+    fn remote_stop_retires_a_warming_live_worker_without_waiting_for_it() {
+        let warmup = std::time::Duration::from_secs(4);
+        let status = Arc::new(std::sync::atomic::AtomicU8::new(
+            crate::app::LIVE_TRANSCRIPTION_WARMING,
+        ));
+        let worker = LiveTranscriptWorker::start_simulated_warmup(status, warmup);
+        // Audio captured during warmup is queued for a decoder that is not
+        // ready yet, as in the reported 14.9 s CoreML warmup.
+        let sink = worker.sink_for_offset(0);
+        sink.sender
+            .send(crate::recorder::LiveAudioChunk {
+                channel: crate::recorder::LiveAudioChannel::Mic,
+                generation: sink.generation,
+                session_offset_ms: 0,
+                sample_rate: 48_000,
+                start_frame: 0,
+                synthesized: false,
+                samples: vec![0.0; 48_000],
+            })
+            .unwrap();
+        drop(sink);
+        let done = Arc::new(AtomicBool::new(false));
+        let publisher_done = done.clone();
+        let publisher = RemoteCheckpointPublisher {
+            done,
+            join: Some(std::thread::spawn(move || {
+                while !publisher_done.load(Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            })),
+        };
+
+        let stop = std::time::Instant::now();
+        let reaper = retire_remote_live_transcript(Some(worker), Some(publisher))
+            .expect("live threads are reaped in the background");
+        // Stop proceeds straight to sealing and finalizing the session.
+        let finalized_after = stop.elapsed();
+        assert!(
+            finalized_after < std::time::Duration::from_secs(1),
+            "Stop waited {finalized_after:?} for the live worker"
+        );
+        assert!(!reaper.is_finished(), "warmup is still in progress");
+
+        reaper.join().unwrap();
+        let retired_after = stop.elapsed();
+        assert!(retired_after >= warmup - std::time::Duration::from_millis(100));
+        assert!(
+            retired_after < warmup + std::time::Duration::from_secs(2),
+            "cancelled worker kept running after warmup: {retired_after:?}"
+        );
+    }
+
+    #[cfg(feature = "audio-capture")]
+    #[test]
+    fn remote_stop_without_a_live_worker_has_nothing_to_retire() {
+        assert!(retire_remote_live_transcript(None, None).is_none());
+    }
+
+    #[test]
+    fn remote_live_checkpoint_failures_name_their_cause() {
+        let classify = |message: &str| remote_live_checkpoint_failure(&anyhow::anyhow!("{message}"));
+        assert_eq!(
+            classify("invalid_request: capture producer is no longer active"),
+            (
+                "remote_live_checkpoint_skipped",
+                "reason=session_finalized".to_string()
+            )
+        );
+        assert_eq!(
+            classify("invalid_request: invalid live checkpoint word timeline"),
+            (
+                "remote_live_checkpoint_upload_failed",
+                "category=server code=invalid_request reason=word_timeline".to_string()
+            )
+        );
+        assert_eq!(
+            classify("capture relay rejected request (401 Unauthorized)").1,
+            "category=relay status=401 Unauthorized"
+        );
+        assert_eq!(
+            classify("Some free-form failure with /private/path").1,
+            "category=application details=stderr"
+        );
+    }

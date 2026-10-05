@@ -225,6 +225,7 @@
         status: Arc<AtomicU8>,
         unrecovered: Arc<AtomicU64>,
         segments: Arc<Mutex<BTreeMap<u64, i64>>>,
+        cancel: Arc<std::sync::atomic::AtomicBool>,
         root: tempfile::TempDir,
     }
 
@@ -243,6 +244,7 @@
                 status: Arc::new(AtomicU8::new(crate::app::LIVE_TRANSCRIPTION_WARMING)),
                 unrecovered: Arc::new(AtomicU64::new(0)),
                 segments,
+                cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 root: tempfile::tempdir().unwrap(),
             }
         }
@@ -277,6 +279,7 @@
                     first_ordinal: 0,
                 }),
                 durable_wait,
+                cancel: self.cancel.clone(),
             };
             std::thread::spawn(move || {
                 let mut mic = RecordingDecoder::default();
@@ -496,6 +499,39 @@
         assert!(
             value["live_dropped_samples"].as_u64().unwrap()
                 >= harness.dropped.load(Ordering::Acquire)
+        );
+    }
+
+    #[test]
+    fn cancelled_worker_abandons_its_backlog_without_a_terminal_checkpoint() {
+        let mut harness = DecodeHarness::new();
+        let tx = harness.tx.clone().unwrap();
+        // A long warmup leaves a backlog queued for the decoder.
+        for second in 0..20u64 {
+            for channel in [LiveAudioChannel::Mic, LiveAudioChannel::System] {
+                tx.send(LiveAudioChunk {
+                    channel,
+                    generation: 1,
+                    session_offset_ms: 0,
+                    sample_rate: 16_000,
+                    start_frame: second * 16_000,
+                    synthesized: false,
+                    samples: vec![0.1; 16_000],
+                })
+                .unwrap();
+            }
+        }
+        drop(tx);
+        harness.cancel.store(true, Ordering::Release);
+        let worker = harness.start_worker(None, Duration::from_millis(2));
+        drop(harness.tx.take());
+        let run = worker.join().unwrap();
+
+        run.result.unwrap();
+        assert!(run.mic.audio.is_empty() && run.system.audio.is_empty());
+        assert!(
+            !harness.checkpoint().exists(),
+            "a cancelled transcript must not publish a checkpoint"
         );
     }
 
