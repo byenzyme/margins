@@ -63,7 +63,7 @@ pub fn exercise_recall(root: &Path) {
         result
             .results
             .iter()
-            .any(|hit| hit.document_ref.ends_with("/projects/source.md")),
+            .any(|hit| hit.document_ref == "projects/source.md"),
         "literal retrieval must retain the exact project source alongside catalysts"
     );
 }

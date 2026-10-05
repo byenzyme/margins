@@ -592,8 +592,8 @@ fn workspace_status_reports_engine_source_refresh_staleness() {
              );",
         )
         .unwrap();
-    let engine_source =
-        margins_workflows::workspace::gmail_collection_namespace("owner@example.com").unwrap();
+    // The lowered SQLite source keeps the program's source name.
+    let engine_source = "google-mail";
     index
         .execute(
             "INSERT INTO source_refreshes VALUES (?1, 4, 2, 1)",
@@ -1031,8 +1031,7 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
         "{}",
         String::from_utf8_lossy(&initial_index.stderr)
     );
-    let namespace =
-        margins_workflows::workspace::gmail_collection_namespace("owner@example.com").unwrap();
+    let namespace = "mail";
     let before: i64 = rusqlite::Connection::open(workspace.recall_path())
         .unwrap()
         .query_row(

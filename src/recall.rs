@@ -775,9 +775,21 @@ fn catalyst_readiness(
     })
 }
 
+/// Per-entity reasons from engines that audit skipped generations. Engines
+/// from v0.9.2 on no longer keep `catalyst_generation_skips`; pending entities
+/// then report `no-occurrence`/`no-catalyst` from occurrence data alone.
 fn latest_generation_skip_reasons(
     database: &recall_engine::db::Database,
 ) -> Result<BTreeMap<String, String>> {
+    let audited = database.query_read(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type = 'table' AND name = 'catalyst_generation_skips'",
+        Vec::new(),
+        |row| row.get::<i64>(0),
+    )?;
+    if audited.first().copied().unwrap_or_default() == 0 {
+        return Ok(BTreeMap::new());
+    }
     let rows = database.query_read(
         "SELECT entity, reason_code
          FROM catalyst_generation_skips

@@ -8,7 +8,7 @@ mod fixture_generator;
 /// rusqlite-backed unit tests cannot initialize SQLite first and poison it.
 #[test]
 fn exact_phrase_recall_returns_actual_source_path() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     margins::initialize_sqlite_runtime().unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let margins_home = tmp.path().join("margins-home");
@@ -59,7 +59,7 @@ fn exact_phrase_recall_returns_actual_source_path() {
     let source_hit = out
         .results
         .iter()
-        .find(|result| result.document_ref.ends_with("/projects/source.md"))
+        .find(|result| result.document_ref == "projects/source.md")
         .expect("literal retrieval must retain the exact project source alongside catalysts");
     assert_eq!(source_hit.source, "home");
     assert_eq!(
@@ -81,7 +81,7 @@ fn exact_phrase_recall_returns_actual_source_path() {
 
 #[test]
 fn recall_without_selected_entities_still_searches_declared_notes() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     margins::initialize_sqlite_runtime().unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let margins_home = tmp.path().join("margins-home");
@@ -127,11 +127,11 @@ fn recall_without_selected_entities_still_searches_declared_notes() {
     assert!(out
         .results
         .iter()
-        .any(|hit| hit.document_ref.ends_with("/decision.md")));
+        .any(|hit| hit.document_ref == "decision.md"));
     assert!(out
         .results
         .iter()
-        .any(|hit| hit.document_ref.ends_with("/questions.md")));
+        .any(|hit| hit.document_ref == "questions.md"));
 
     let handle = margins::recall::open_workspace(&workspace).unwrap().unwrap();
     let in_process: serde_json::Value = serde_json::from_str(
@@ -144,7 +144,7 @@ fn recall_without_selected_entities_still_searches_declared_notes() {
     assert!(in_process["results"].as_array().unwrap().iter().any(|hit| {
         hit["document_ref"]
             .as_str()
-            .is_some_and(|path| path.ends_with("/decision.md"))
+            .is_some_and(|path| path == "decision.md")
     }));
 
     let exact = margins::recall::recall(
@@ -154,12 +154,12 @@ fn recall_without_selected_entities_still_searches_declared_notes() {
     )
     .unwrap();
     assert_eq!(exact.status, "ok");
-    assert!(exact.results[0].document_ref.ends_with("/interview.md"));
+    assert!(exact.results[0].document_ref == "interview.md");
 }
 
 #[test]
 fn recall_missing_snapshot_does_not_create_or_migrate_state() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     margins::initialize_sqlite_runtime().unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let margins_home = tmp.path().join("margins-home");
