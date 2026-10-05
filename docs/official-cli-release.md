@@ -31,9 +31,22 @@ Each native runner creates its archive, extracts it, and executes that exact
 packaged binary's `__release-smoke` contract. A separate publish job verifies
 that both archives and checksums are present, then creates the release in
 `byenzyme/margins` and updates `byenzyme/homebrew-margins`. Build jobs receive
-no publishing credential. The publish job is protected by the
-`official-cli-release` GitHub Environment so reviewers can inspect all artifacts
-before secrets become available.
+no publishing credential. The build and publish jobs run in the
+`official-cli-release` GitHub Environment, which holds every release secret
+(see below). The build steps live in the composite action
+`.github/actions/build-official-cli`, shared with the no-publish dry run.
+
+The Rust cache in that action contains private `enzyme-rust` source and build
+artifacts. Only a tag-push release run saves it, because tag-scoped caches are
+unreadable from other refs, and it uses a distinct `v0-official-private` key
+prefix. A cache saved on `main` would be restorable by any run, including fork
+pull requests in `public-ci.yml`. So a `workflow_dispatch` of `cli-release.yml`
+and the dry run never restore or save a cache.
+
+Re-dispatching `cli-release.yml` for a tag created before the
+environment-secrets change (v0.4.15 and earlier) does not work. The workflow
+checks out the tag, and those tags do not contain
+`.github/actions/build-official-cli`. Cut a new patch tag instead.
 
 The publish job uploads archives to the release for that same public source
 tag. It does not transform, rsync, commit, or tag a second source tree. Tags
@@ -54,42 +67,86 @@ Release in this order:
 3. Merge the PR that bumps `RUNTIME_RELEASE_VERSION` and its rebuilt `dist/`
    **immediately** before tagging. Between that merge and the published release,
    fresh plugin installs point at a runtime that does not exist yet.
-4. Create tag `vX.Y.Z`. A manually pushed tag triggers `cli-release.yml`
-   directly. The **Version Bump** workflow commits and pushes the tag with
-   `GITHUB_TOKEN`, whose events do not start other workflows, so its final step
-   explicitly dispatches `cli-release.yml` with that existing tag. The release
-   workflow builds, signs, notarizes and publishes on GitHub. This is the only
-   validation-adjacent work that runs on GitHub runners.
+4. Bump and tag:
+   1. Run the **Version Bump** workflow (`version-bump.yml`) from `main` with
+      `X.Y.Z`. It runs in the `official-cli-release` environment, bumps the
+      package versions and both lockfiles, commits `Release vX.Y.Z` and pushes
+      it to `main`. It does **not** create a tag or dispatch `cli-release.yml`;
+      the tag ruleset forbids it.
+   2. The workflow's notice and job summary print the release commit SHA and
+      the exact tag commands. A repository admin (Joshua) runs them locally:
+
+      ```bash
+      git fetch origin main
+      git tag -a vX.Y.Z <sha> -m "Margins X.Y.Z" && git push origin vX.Y.Z
+      ```
+
+   3. That tag push triggers `cli-release.yml`, which builds, signs, notarizes
+      and publishes on GitHub. This is the only validation-adjacent work that
+      runs on GitHub runners besides the optional dry run below.
 5. Verify the published archives and a fresh BB plugin install against the new
    release.
 
 ## Required secrets and permissions
 
-Configure these repository secrets in `byenzyme/margins` for the build jobs:
+All release secrets are **environment secrets on the `official-cli-release`
+GitHub Environment** of `byenzyme/margins`, not repository secrets. Only jobs
+that declare `environment: official-cli-release` can read them: `build` and
+`publish` in `cli-release.yml` (`validate` reads no secrets and stays outside
+the environment), `bump` in `version-bump.yml`, and
+`build` in `cli-release-validation.yml`.
 
-- `ENZYME_RUST_READ_TOKEN`: a fine-grained PAT or GitHub App token with
-  **Contents: read** for private `byenzyme/enzyme-rust`. The build sets
-  `CARGO_NET_GIT_FETCH_WITH_CLI=true` and configures `gh` as Git's credential
-  helper before Cargo resolves the pinned dependency.
-- `MARGINS_GOOGLE_OAUTH_CLIENT_JSON`: the downloaded Desktop OAuth client JSON.
-  The CLI build embeds it through `option_env!`; source and lockfiles contain
-  no client credential. A public source build may instead set a runtime file or
-  JSON environment variable.
+| Secret | Used by | Purpose |
+| --- | --- | --- |
+| `ENZYME_RUST_READ_TOKEN` | build, bump, dry run | Fine-grained token with read-only **Contents** on private `byenzyme/enzyme-rust`. The build sets `CARGO_NET_GIT_FETCH_WITH_CLI=true` and runs `gh auth setup-git` before Cargo resolves the pinned dependency. |
+| `MARGINS_GOOGLE_OAUTH_CLIENT_JSON` | build, dry run | The downloaded Desktop OAuth client JSON. The CLI build embeds it through `option_env!`; source and lockfiles contain no client credential. A public source build may instead set a runtime file or JSON environment variable. |
+| `APPLE_CERTIFICATE_BASE64` | macOS build, dry run | Base64 Developer ID Application `.p12`. |
+| `APPLE_CERTIFICATE_PASSWORD` | macOS build, dry run | Password for that `.p12`. |
+| `APPLE_TEAM_ID` | macOS build, dry run | Team for `notarytool`. |
+| `APPLE_ID` | macOS build, dry run | Apple ID for `notarytool`. |
+| `APPLE_PASSWORD` | macOS build, dry run | App-specific password for `notarytool`. |
+| `HOMEBREW_TAP_TOKEN` | publish | Separate fine-grained PAT limited to `byenzyme/homebrew-margins`, with **Contents: read and write**. It needs no access to releases or private source. |
 
-Configure this secret on the protected `official-cli-release` Environment:
+`MARGINS_RELEASE_TOKEN` and the `TAURI_*` secrets are no longer used and can be
+deleted. A missing secret fails its step with an `::error::` naming it.
 
-- `HOMEBREW_TAP_TOKEN`: a separate fine-grained PAT limited to
-  `byenzyme/homebrew-margins`, with repository **Contents: read and write**. It
-  needs no access to releases or private source.
+Environment and tag policy:
 
-Protect the Environment with required reviewers and restrict it to `v*` tags.
-Protect release tags in the public repository. Prefer short-lived GitHub App
-tokens where available.
+- The `official-cli-release` deployment policy allows only `v*` tags and the
+  `main` branch, so a workflow dispatched from any other branch cannot read the
+  secrets.
+- The active tag ruleset "release tags v*" lets only repository admins create,
+  update or delete `v*` tags. GitHub Actions cannot be exempted, which is why
+  the Version Bump workflow prints tag commands instead of tagging.
+- If required reviewers are configured on the environment, every job that
+  declares it (including `build`) waits for approval; approve
+  `publish` only after the real-Mac verification below.
+- Prefer short-lived GitHub App tokens where available.
 
 The workflow's built-in `GITHUB_TOKEN` has `contents: read` except for the
 publish job, where it receives `contents: write` to publish on the current
-repository. Checkout does not persist credentials. The Enzyme token is scoped
-to build jobs, and the Homebrew token is scoped to its publish step.
+repository, and the bump job, where it pushes the release commit to `main`.
+Checkout does not persist credentials in release builds. The Homebrew token is
+scoped to its publish step.
+
+## No-publish dry run
+
+`.github/workflows/cli-release-validation.yml` (**Validate official CLI
+packages**) is a manual rehearsal of the release build. It uses the same
+`.github/actions/build-official-cli` composite action as `cli-release.yml`: it
+fetches the private engine with `ENZYME_RUST_READ_TOKEN` and the official
+feature composition, embeds `MARGINS_GOOGLE_OAUTH_CLIENT_JSON`, and on macOS
+imports the Apple certificate, codesigns and submits to `notarytool --wait`.
+It then smokes the packaged archive (`oauth_client` valid, recall present) and
+uploads the archives as short-lived workflow artifacts. It never creates a
+release or tag and never touches the Homebrew tap.
+
+Run it from `main` (the environment rejects other branches), only when a
+rehearsal is worth a real notarization submission:
+
+```bash
+gh workflow run cli-release-validation.yml --repo byenzyme/margins --ref main
+```
 
 ## Packaged-binary smoke contract
 
