@@ -38,6 +38,65 @@
     }
 
     #[test]
+    fn terminal_tail_word_never_ends_past_the_decoded_watermark() {
+        let root = tempfile::tempdir().unwrap();
+        let checkpoint = root.path().join("live.json");
+        let word = |start_ms, end_ms, text: &str| margins_core::TranscriptWord {
+            start_ms,
+            end_ms,
+            text: text.into(),
+            speaker: None,
+            confidence_per_mille: None,
+        };
+        // The terminal flush committed tokens whose durations overrun the
+        // 9 300 ms of audio actually decoded.
+        let mic = margins_core::AsrStreamUpdate {
+            committed: vec![word(8_000, 8_900, "almost"), word(9_100, 9_420, "done")],
+            hypothesis: Vec::new(),
+            decoded_until_ms: 9_300,
+            committed_until_ms: 9_300,
+        };
+        let system = margins_core::AsrStreamUpdate {
+            committed: vec![word(9_350, 9_500, "late")],
+            hypothesis: Vec::new(),
+            decoded_until_ms: 9_300,
+            committed_until_ms: 9_300,
+        };
+        write_checkpoint(&checkpoint, &mic, &system, 1_000, true, Some(10_300), 0, 0).unwrap();
+
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&checkpoint).unwrap()).unwrap();
+        let decoded = value["decoded_until_ms"].as_u64().unwrap();
+        assert_eq!(decoded, 10_300);
+        let words = value["transcripts"][0]["words"].as_array().unwrap();
+        assert_eq!(words.len(), 2, "a word with no decoded audio is dropped");
+        for word in words {
+            let start = word["start_ms"].as_u64().unwrap();
+            let end = word["end_ms"].as_u64().unwrap();
+            assert!(start < end && end <= decoded, "{word}");
+        }
+        assert_eq!(words[0]["end_ms"], 9_900);
+        assert_eq!(words[1]["start_ms"], 10_100);
+        assert_eq!(words[1]["end_ms"], 10_300);
+    }
+
+    #[test]
+    fn words_ending_exactly_at_the_watermark_are_untouched() {
+        let entry = |start_ms, end_ms| margins_media::transcript::TranscriptWordEntry {
+            channel: 0,
+            start_ms,
+            end_ms,
+            text: " word".into(),
+        };
+        let words = vec![entry(0, 100), entry(100, 300)];
+        assert_eq!(clamp_words_to_watermark(words.clone(), 300), words);
+        assert_eq!(
+            clamp_words_to_watermark(vec![entry(250, 400), entry(300, 450)], 300),
+            vec![entry(250, 300)]
+        );
+    }
+
+    #[test]
     fn dropped_or_short_live_audio_cannot_be_terminal() {
         assert!(live_checkpoint_complete(60_000, 60_000, 0));
         assert!(!live_checkpoint_complete(60_000, 11, 0));
@@ -139,6 +198,7 @@
             join: std::thread::spawn(|| -> Result<()> {
                 anyhow::bail!("synthetic worker stopped before finalization")
             }),
+            cancelled: false,
         };
 
         assert!(!finalizer.complete().unwrap());

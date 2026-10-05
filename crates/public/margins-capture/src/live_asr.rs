@@ -96,6 +96,9 @@ pub struct LiveTranscriptWorker {
     segments: Arc<Mutex<std::collections::BTreeMap<u64, i64>>>,
     /// Present when missed queue audio can be recovered from durable audio.
     unrecovered_frames: Option<Arc<AtomicU64>>,
+    /// Set when the owner no longer wants a transcript; the worker exits at its
+    /// next check without decoding its backlog or writing a terminal checkpoint.
+    cancel: Arc<std::sync::atomic::AtomicBool>,
     finish_tx: mpsc::Sender<u64>,
     join: std::thread::JoinHandle<Result<()>>,
 }
@@ -105,6 +108,24 @@ pub struct LiveTranscriptFinalizer {
     status: Arc<AtomicU8>,
     send_result: std::result::Result<(), mpsc::SendError<u64>>,
     join: std::thread::JoinHandle<Result<()>>,
+    cancelled: bool,
+}
+
+/// Model warmup cannot be interrupted; a worker cancelled meanwhile stops as
+/// soon as warmup returns instead of decoding audio nobody will read.
+#[cfg(all(
+    feature = "audio-capture",
+    any(
+        feature = "test-support",
+        all(feature = "coreml-asr", target_os = "macos")
+    )
+))]
+fn cancelled_after_warmup(cancel: &std::sync::atomic::AtomicBool) -> bool {
+    let cancelled = cancel.load(Ordering::Acquire);
+    if cancelled {
+        crate::cli_log::event("live_worker_cancelled", "phase=warmup");
+    }
+    cancelled
 }
 
 #[cfg(feature = "audio-capture")]
@@ -140,6 +161,8 @@ impl LiveTranscriptWorker {
         let unrecovered_for_thread = unrecovered_frames
             .clone()
             .unwrap_or_else(|| Arc::new(AtomicU64::new(0)));
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel_for_thread = cancel.clone();
         let join = std::thread::Builder::new()
             .name("margins-cli-live-transcription".into())
             .spawn(move || {
@@ -165,6 +188,9 @@ impl LiveTranscriptWorker {
                             "live_worker_ready",
                             format!("warmup_ms={}", warm_started.elapsed().as_millis()),
                         );
+                        if cancelled_after_warmup(&cancel_for_thread) {
+                            return Ok(());
+                        }
                         // The decode loop reports READY or CATCHING_UP.
                         rolling
                     }
@@ -196,6 +222,7 @@ impl LiveTranscriptWorker {
                         segments: segments_for_thread,
                         durable,
                         durable_wait: decode::DURABLE_WAIT,
+                        cancel: cancel_for_thread,
                     },
                 )
             })?;
@@ -213,9 +240,51 @@ impl LiveTranscriptWorker {
             status,
             segments,
             unrecovered_frames,
+            cancel,
             finish_tx,
             join,
         }))
+    }
+
+    /// A worker that only simulates an uninterruptible model warmup, for
+    /// exercising owners' stop paths without native models.
+    #[cfg(feature = "test-support")]
+    pub fn start_simulated_warmup(status: Arc<AtomicU8>, warmup: std::time::Duration) -> Self {
+        let (tx, rx) = mpsc::channel::<crate::recorder::LiveAudioChunk>();
+        let (finish_tx, finish_rx) = mpsc::channel::<u64>();
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel_for_thread = cancel.clone();
+        let join = std::thread::Builder::new()
+            .name("margins-cli-live-transcription".into())
+            .spawn(move || {
+                std::thread::sleep(warmup);
+                if cancelled_after_warmup(&cancel_for_thread) {
+                    return Ok(());
+                }
+                while rx.recv().is_ok() {}
+                finish_rx.recv().map(|_| ()).map_err(|_| {
+                    anyhow::anyhow!("live transcription ended without a final duration")
+                })
+            })
+            .expect("spawn simulated live worker");
+        Self {
+            tx,
+            generation_clock: Arc::new(Mutex::new(crate::recorder::LiveGenerationClock {
+                generation: 0,
+                session_offset_ms: 0,
+            })),
+            mic_accepted_samples: Arc::new(AtomicU64::new(0)),
+            system_accepted_samples: Arc::new(AtomicU64::new(0)),
+            mic_dropped_samples: Arc::new(AtomicU64::new(0)),
+            system_dropped_samples: Arc::new(AtomicU64::new(0)),
+            queued_samples: Arc::new(AtomicU64::new(0)),
+            status,
+            segments: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            unrecovered_frames: None,
+            cancel,
+            finish_tx,
+            join,
+        }
     }
 
     #[cfg(not(all(feature = "coreml-asr", target_os = "macos")))]
@@ -306,6 +375,26 @@ impl LiveTranscriptWorker {
             status: self.status,
             send_result,
             join: self.join,
+            cancelled: false,
+        }
+    }
+
+    /// Abandon the transcript: the worker stops at its next check (after
+    /// warmup, or between queued chunks) without a terminal checkpoint. The
+    /// returned finalizer only joins the thread.
+    pub fn cancel(self) -> LiveTranscriptFinalizer {
+        crate::cli_log::event(
+            "live_worker_cancel_requested",
+            format!("queued={}", self.queued_samples.load(Ordering::Acquire)),
+        );
+        self.cancel.store(true, Ordering::Release);
+        drop(self.tx);
+        drop(self.finish_tx);
+        LiveTranscriptFinalizer {
+            status: self.status,
+            send_result: Ok(()),
+            join: self.join,
+            cancelled: true,
         }
     }
 }
@@ -317,6 +406,18 @@ impl LiveTranscriptFinalizer {
     }
 
     pub fn complete(self) -> Result<bool> {
+        if self.cancelled {
+            let outcome = match self.join.join() {
+                Ok(Ok(())) => "status=cancelled".to_string(),
+                Ok(Err(error)) => format!(
+                    "status=cancelled reason=worker_failed: {}",
+                    crate::cli_log::error_summary(&error)
+                ),
+                Err(_) => "status=cancelled reason=worker_panicked".to_string(),
+            };
+            crate::cli_log::event("live_worker_finished", outcome);
+            return Ok(false);
+        }
         let finish_error = self.send_result.err().map(|error| error.to_string());
         let join_error = match self.join.join() {
             Ok(Ok(())) => None,
@@ -427,6 +528,10 @@ fn write_checkpoint(
     dropped_samples: u64,
     recovered_frames: u64,
 ) -> Result<()> {
+    let decoded_until_ms = mic
+        .decoded_until_ms
+        .max(system.decoded_until_ms)
+        .saturating_add(offset_ms);
     let to_entries = |words: &[margins_core::TranscriptWord], channel| {
         let timings = words
             .iter()
@@ -436,10 +541,7 @@ fn write_checkpoint(
     };
     let mut entries = to_entries(&mic.committed, 0);
     entries.extend(to_entries(&system.committed, 1));
-    let decoded_until_ms = mic
-        .decoded_until_ms
-        .max(system.decoded_until_ms)
-        .saturating_add(offset_ms);
+    let entries = clamp_words_to_watermark(entries, decoded_until_ms);
     let committed_until_ms = mic
         .committed_until_ms
         .min(system.committed_until_ms)
@@ -471,6 +573,51 @@ fn write_checkpoint(
         ),
     );
     Ok(())
+}
+
+/// Overruns beyond this are not token-duration rounding and are logged.
+#[cfg(any(test, all(feature = "coreml-asr", target_os = "macos")))]
+const WORD_OVERRUN_LOG_MS: u64 = 500;
+
+/// The terminal TDT flush may commit a tail word whose token duration runs
+/// past the decoded audio. No word may end beyond the watermark a checkpoint
+/// claims (the Workspace service rejects such a checkpoint outright), so
+/// overrunning ends are clamped. A word starting at or past the watermark has
+/// no decoded audio at all and is dropped. Large overruns and drops suggest an
+/// offset bug rather than rounding, so they are logged instead of hidden.
+#[cfg(any(test, all(feature = "coreml-asr", target_os = "macos")))]
+fn clamp_words_to_watermark(
+    entries: Vec<margins_media::transcript::TranscriptWordEntry>,
+    decoded_until_ms: u64,
+) -> Vec<margins_media::transcript::TranscriptWordEntry> {
+    let mut clamped = 0usize;
+    let mut dropped = 0usize;
+    let mut max_overrun_ms = 0u64;
+    let entries = entries
+        .into_iter()
+        .filter_map(|mut entry| {
+            if entry.start_ms >= decoded_until_ms && entry.end_ms > decoded_until_ms {
+                dropped += 1;
+                max_overrun_ms = max_overrun_ms.max(entry.end_ms - decoded_until_ms);
+                return None;
+            }
+            if entry.end_ms > decoded_until_ms {
+                clamped += 1;
+                max_overrun_ms = max_overrun_ms.max(entry.end_ms - decoded_until_ms);
+                entry.end_ms = decoded_until_ms;
+            }
+            Some(entry)
+        })
+        .collect();
+    if dropped > 0 || max_overrun_ms > WORD_OVERRUN_LOG_MS {
+        crate::cli_log::event(
+            "live_checkpoint_words_clamped",
+            format!(
+                "decoded_until_ms={decoded_until_ms} clamped={clamped} dropped={dropped} max_overrun_ms={max_overrun_ms}"
+            ),
+        );
+    }
+    entries
 }
 
 #[cfg(any(test, all(feature = "coreml-asr", target_os = "macos")))]

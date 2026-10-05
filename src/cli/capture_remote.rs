@@ -103,8 +103,7 @@ fn run_remote_native_capture(
     permissions_verified: bool,
 ) -> Result<()> {
     use margins_meeting_protocol::{
-        SegmentCloseReasonV1, SessionFinalizeReasonV1, WorkspaceAttachV1, WorkspaceMemoLineV1,
-        WorkspaceMemoReplaceV1,
+        SegmentCloseReasonV1, WorkspaceAttachV1, WorkspaceMemoLineV1, WorkspaceMemoReplaceV1,
     };
     use margins_workflows::remote_workspace::{
         deliver_available, deliver_transfer, list_transfers, native_create_session_command,
@@ -374,13 +373,22 @@ fn run_remote_native_capture(
     // transfer until a separate publisher sends a bounded copy to the service.
     let checkpoint_path = transfer.spool().root().join("live-checkpoint.json");
     let live_status = Arc::new(AtomicU8::new(crate::app::LIVE_TRANSCRIPTION_WARMING));
-    let live = start_live_transcript_worker(
-        checkpoint_path.clone(),
-        initial_offset_ms,
-        live_status.clone(),
-        // Remote capture keeps no local durable runtime audio to catch up from.
-        None,
-    );
+    let live = if REMOTE_LIVE_RETIREMENT.ready_for_new_worker() {
+        start_live_transcript_worker(
+            checkpoint_path.clone(),
+            initial_offset_ms,
+            live_status.clone(),
+            // Remote capture keeps no local durable runtime audio to catch up from.
+            None,
+        )
+    } else {
+        // A quick Start after Stop must not stack a second CoreML load on the
+        // previous capture's still-warming worker. The server transcript
+        // remains authoritative; only the provisional view is skipped.
+        crate::cli_log::event("live_worker_skipped", "reason=previous_worker_retiring");
+        live_status.store(crate::app::LIVE_TRANSCRIPTION_DEGRADED, Ordering::Release);
+        None
+    };
     let checkpoint_publisher = if live.is_some() {
         let client = connection.client.clone();
         let session = session_id.clone();
@@ -761,56 +769,103 @@ fn run_remote_native_capture(
     if let Some(controller) = &controller {
         controller.saving();
     }
-    if let Some(worker) = live {
-        let _ = worker
-            .begin_finish(final_ended_at_ms.saturating_sub(initial_offset_ms))
-            .complete();
+    let result = stop_remote_capture(
+        transfer,
+        final_ended_at_ms,
+        live,
+        checkpoint_publisher,
+        &REMOTE_LIVE_RETIREMENT,
+        &uploader_done,
+        uploader,
+        |transfer| {
+            app.save().context("remote memo draft could not be saved")?;
+            let lines: Vec<WorkspaceMemoLineV1> = app
+                .memo
+                .lines()
+                .iter()
+                .cloned()
+                .map(|line| WorkspaceMemoLineV1 {
+                    text: line.text,
+                    created_secs: line.created_secs,
+                    edited_secs: line.edited_secs,
+                    draft_started_secs: line.draft_started_secs,
+                    audio_pending_at_mark: line.audio_pending_at_mark,
+                    block_ordinal: line.block_ordinal,
+                })
+                .collect();
+            // The native bridge has no memo editor. BB/Codex may have edited the
+            // Workspace memo during capture, so sending our initial snapshot here
+            // would overwrite it (or block finalization with a revision conflict).
+            if controller.is_none() && remote_memo_was_edited(&initial_lines, &lines) {
+                let memo_request_id =
+                    format!("native-memo-{}", transfer.spool().manifest().transfer_id);
+                transfer
+                    .spool_mut()
+                    .set_memo_intent(WorkspaceMemoReplaceV1 {
+                        request_id: memo_request_id,
+                        expected_revision: initial_revision,
+                        lines,
+                    })?;
+            }
+            Ok(())
+        },
+        |spool| deliver_transfer(spool, &connection.client),
+    );
+    if controller.is_none() {
+        // A one-shot CLI process exits next. Give a warming CoreML worker a
+        // bounded chance to unwind instead of tearing it down mid-load.
+        REMOTE_LIVE_RETIREMENT.wait(REMOTE_LIVE_EXIT_WAIT);
     }
-    drop(checkpoint_publisher);
+    if result.is_ok() {
+        eprintln!("Saved to remote Workspace; processing state is separate.");
+    }
+    result
+}
+
+/// How long a one-shot remote capture process waits at exit for its cancelled
+/// live worker before abandoning it.
+#[cfg(feature = "audio-capture")]
+const REMOTE_LIVE_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Stop's server-facing tail. The live transcript is retired first and never
+/// awaited: the server transcribes the delivered audio authoritatively and
+/// refuses checkpoints once the session is finalized, so waiting for the
+/// provisional on-device transcript (possibly still warming up) would only
+/// delay Stop.
+#[cfg(feature = "audio-capture")]
+#[allow(clippy::too_many_arguments)]
+fn stop_remote_capture<M, D>(
+    mut transfer: margins_workflows::remote_workspace::NativeRemoteTransfer,
+    final_ended_at_ms: u64,
+    live: Option<LiveTranscriptWorker>,
+    publisher: Option<RemoteCheckpointPublisher>,
+    retirement: &RemoteLiveRetirement,
+    uploader_done: &AtomicBool,
+    uploader: std::thread::JoinHandle<()>,
+    before_seal: M,
+    deliver: D,
+) -> Result<()>
+where
+    M: FnOnce(&mut margins_workflows::remote_workspace::NativeRemoteTransfer) -> Result<()>,
+    D: FnOnce(&mut margins_workflows::remote_workspace::DurableTransferSpool) -> Result<()>,
+{
+    retirement.hold(retire_remote_live_transcript(live, publisher));
     uploader_done.store(true, Ordering::Release);
     uploader
         .join()
         .map_err(|_| anyhow::anyhow!("remote delivery worker panicked"))?;
-    app.save().context("remote memo draft could not be saved")?;
-    let lines: Vec<WorkspaceMemoLineV1> = app
-        .memo
-        .lines()
-        .iter()
-        .cloned()
-        .map(|line| WorkspaceMemoLineV1 {
-            text: line.text,
-            created_secs: line.created_secs,
-            edited_secs: line.edited_secs,
-            draft_started_secs: line.draft_started_secs,
-            audio_pending_at_mark: line.audio_pending_at_mark,
-            block_ordinal: line.block_ordinal,
-        })
-        .collect();
-    // The native bridge has no memo editor. BB/Codex may have edited the
-    // Workspace memo during capture, so sending our initial snapshot here
-    // would overwrite it (or block finalization with a revision conflict).
-    if controller.is_none() && remote_memo_was_edited(&initial_lines, &lines) {
-        let memo_request_id = format!("native-memo-{}", transfer.spool().manifest().transfer_id);
-        transfer
-            .spool_mut()
-            .set_memo_intent(WorkspaceMemoReplaceV1 {
-                request_id: memo_request_id,
-                expected_revision: initial_revision,
-                lines,
-            })?;
-    }
-    transfer.seal_session(final_ended_at_ms, SessionFinalizeReasonV1::Completed)?;
+    before_seal(&mut transfer)?;
+    transfer.seal_session(
+        final_ended_at_ms,
+        margins_meeting_protocol::SessionFinalizeReasonV1::Completed,
+    )?;
     let transfer_id = transfer.spool().manifest().transfer_id.clone();
     let mut spool = transfer.into_spool();
-    match deliver_transfer(&mut spool, &connection.client) {
-        Ok(()) => {
-            eprintln!("Saved to remote Workspace; processing state is separate.");
-            Ok(())
-        }
-        Err(error) => bail!(
+    deliver(&mut spool).map_err(|error| {
+        anyhow::anyhow!(
             "recording stopped; upload pending in transfer {transfer_id}. Retry with `margins transfers retry {transfer_id}`: {error}"
-        ),
-    }
+        )
+    })
 }
 
 #[cfg(feature = "audio-capture")]
@@ -903,6 +958,101 @@ impl Drop for RemoteCheckpointPublisher {
     }
 }
 
+/// Reapers of live workers cancelled by earlier captures in this process. A
+/// new capture starts its own worker only once they have all exited, so quick
+/// Start/Stop cycles within one CoreML warmup never stack concurrent loads.
+#[cfg(feature = "audio-capture")]
+struct RemoteLiveRetirement(Mutex<Vec<std::thread::JoinHandle<()>>>);
+
+#[cfg(feature = "audio-capture")]
+static REMOTE_LIVE_RETIREMENT: RemoteLiveRetirement = RemoteLiveRetirement::new();
+
+#[cfg(feature = "audio-capture")]
+impl RemoteLiveRetirement {
+    const fn new() -> Self {
+        Self(Mutex::new(Vec::new()))
+    }
+
+    fn hold(&self, reaper: Option<std::thread::JoinHandle<()>>) {
+        if let Some(reaper) = reaper {
+            self.reapers().push(reaper);
+        }
+    }
+
+    fn reapers(&self) -> std::sync::MutexGuard<'_, Vec<std::thread::JoinHandle<()>>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Join finished reapers; true when none is still running.
+    fn ready_for_new_worker(&self) -> bool {
+        let mut reapers = self.reapers();
+        let (finished, running): (Vec<_>, Vec<_>) =
+            reapers.drain(..).partition(|reaper| reaper.is_finished());
+        for reaper in finished {
+            let _ = reaper.join();
+        }
+        *reapers = running;
+        reapers.is_empty()
+    }
+
+    /// Wait up to `timeout` for every reaper; true when all have exited.
+    fn wait(&self, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if self.ready_for_new_worker() {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                crate::cli_log::event(
+                    "remote_live_retire_abandoned",
+                    format!("waited_ms={}", timeout.as_millis()),
+                );
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+}
+
+/// Cancel the optional live worker and stop its checkpoint publisher without
+/// blocking Stop. Both threads exit on their own (a warming worker as soon as
+/// its uninterruptible model load returns); the returned reaper joins them so
+/// their outcome is logged and nothing outlives its owner unobserved.
+#[cfg(feature = "audio-capture")]
+fn retire_remote_live_transcript(
+    live: Option<LiveTranscriptWorker>,
+    publisher: Option<RemoteCheckpointPublisher>,
+) -> Option<std::thread::JoinHandle<()>> {
+    if live.is_none() && publisher.is_none() {
+        return None;
+    }
+    if let Some(publisher) = &publisher {
+        publisher.done.store(true, Ordering::Release);
+    }
+    let finalizer = live.map(LiveTranscriptWorker::cancel);
+    let reaper = std::thread::Builder::new()
+        .name("margins-remote-live-retire".into())
+        .spawn(move || {
+            drop(publisher);
+            if let Some(finalizer) = finalizer {
+                let _ = finalizer.complete();
+            }
+        });
+    match reaper {
+        Ok(reaper) => Some(reaper),
+        Err(error) => {
+            // Without a reaper the cancelled threads still exit by themselves.
+            crate::cli_log::event(
+                "remote_live_retire_unavailable",
+                crate::cli_log::error_summary(&anyhow::Error::from(error)),
+            );
+            None
+        }
+    }
+}
+
 #[cfg(feature = "audio-capture")]
 fn enqueue_remote_live_chunk(
     sink: &crate::recorder::LiveAudioSink,
@@ -950,9 +1100,10 @@ fn publish_remote_live_checkpoints(
     const MAX_BYTES: u64 = 256 * 1024;
     let mut last_sent = Vec::new();
     let mut last_attempt = std::time::Instant::now() - std::time::Duration::from_secs(3);
-    loop {
-        let closing = done.load(Ordering::Acquire);
-        if closing || last_attempt.elapsed() >= std::time::Duration::from_secs(3) {
+    // Stop does not flush a final checkpoint: the session is finalized right
+    // away and the server's own transcript supersedes this provisional view.
+    while !done.load(Ordering::Acquire) {
+        if last_attempt.elapsed() >= std::time::Duration::from_secs(3) {
             if let Ok(metadata) = std::fs::metadata(path) {
                 if metadata.len() > 0 && metadata.len() <= MAX_BYTES {
                     if let Ok(body) = std::fs::read(path) {
@@ -961,19 +1112,54 @@ fn publish_remote_live_checkpoints(
                             match client.put_live_checkpoint(session, producer_token, body.clone())
                             {
                                 Ok(()) => last_sent = body,
-                                Err(error) => crate::cli_log::event(
-                                    "remote_live_checkpoint_upload_failed",
-                                    crate::cli_log::error_summary(&error),
-                                ),
+                                Err(error) => {
+                                    let (kind, detail) = remote_live_checkpoint_failure(&error);
+                                    crate::cli_log::event(kind, detail);
+                                }
                             }
                         }
                     }
                 }
             }
         }
-        if closing {
-            break;
-        }
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
+}
+
+/// Diagnostic for a rejected checkpoint. A request that raced finalize is an
+/// expected skip, not a failure; otherwise record the server's error code (a
+/// fixed protocol token) rather than the generic application category.
+#[cfg(any(test, feature = "audio-capture"))]
+fn remote_live_checkpoint_failure(error: &anyhow::Error) -> (&'static str, String) {
+    let message = format!("{error:#}");
+    if message.contains("capture producer is no longer active") {
+        return (
+            "remote_live_checkpoint_skipped",
+            "reason=session_finalized".into(),
+        );
+    }
+    let code = message.split_once(": ").map(|(code, _)| code).filter(|code| {
+        !code.is_empty()
+            && code.len() <= 64
+            && code.bytes().all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+    });
+    let detail = if let Some(code) = code {
+        let reason = if message.contains("word timeline") {
+            " reason=word_timeline"
+        } else if message.contains("watermarks") {
+            " reason=watermarks"
+        } else {
+            ""
+        };
+        format!("category=server code={code}{reason}")
+    } else if let Some(status) = message
+        .strip_prefix("capture relay rejected request (")
+        .and_then(|rest| rest.split_once(')'))
+        .map(|(status, _)| status)
+    {
+        format!("category=relay status={status}")
+    } else {
+        crate::cli_log::error_summary(error)
+    };
+    ("remote_live_checkpoint_upload_failed", detail)
 }
