@@ -107,6 +107,25 @@ result, writes the program atomically, and renames the old file to
 every binding kind. `margins workspace migrate --dry-run` prints the program
 without writing.
 
+Migration keeps exactly what the previous engine honored. A learning entity is
+read only as `#tag`, `[[link]]`, `log:<name>`, or `folder:<path>`; an excluded
+entity only as `folder:<path>`, `#tag`, or `[[link]]`. Other forms (`Project:
+Atlas`, `person:ada`, `tag:x`, bare names), learning entities that are also
+excluded, repeated entities, and `expandable` on anything but a folder were
+ignored then and are dropped now, each reported in the migration `warnings`
+(`workspace migrate --json`) and on stderr. An unqualified legacy `folder:<path>`
+is Home-relative; with several Markdown sources it is qualified with the Home
+source name even when its first segment names another source.
+`folder:markdown_<hash>/<path>` (the old internal identity of a Markdown root)
+maps back to that source's name.
+
+A Workspace that cannot migrate keeps its `config.toml` untouched (conversion
+and validation run before anything is written) and is skipped with a warning by
+Workspace listing; `workspace list` shows it with its error. A `config.toml`
+found beside an existing program (a crash between the program write and the
+rename) is retired under the Workspace lock to the first free
+`config.toml.migrated[.<n>]`.
+
 ## Engine changes (enzyme-rust)
 
 - Any number and mix of sources per workspace; vault-body statements
@@ -150,7 +169,11 @@ without writing.
 - Migration also runs explicitly: `margins workspace migrate [--dry-run] [--json]`.
   Enzyme's implicit folder exclusions (`.git`, `node_modules`, …) are not written.
   With several Markdown sources, unqualified legacy folder references are
-  qualified with the Home source name.
+  qualified with the Home source name. `workspace compile` qualifies its
+  Home-relative scan specs the same way and plans them as a view change.
+- `update_program` is emitted only when applying the view actions to the
+  current program does not yield the desired program's statements (layout-only
+  differences are visible in the diff).
 
 ## Margins implementation (recall side)
 

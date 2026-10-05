@@ -1623,12 +1623,16 @@ fn program_from_config(
 /// Convert a retired `config.toml` Workspace config to its program,
 /// deterministically. Name and retention are machine-owned and not part of the
 /// program; see [`migrate_workspace`].
-pub fn program_from_legacy_config(config: &WorkspaceConfig) -> Result<WorkspaceProgram> {
-    program_from_config(
-        config,
+/// Returns the program and what the previous engine ignored and is therefore
+/// not migrated (see [`program_lang::legacy_view`]).
+pub fn program_from_legacy_config(config: &WorkspaceConfig) -> Result<(WorkspaceProgram, Vec<String>)> {
+    let legacy = program_lang::legacy_view(config)?;
+    let program = program_from_config(
+        &legacy.config,
         &program_lang::empty_program(&config.id),
         FolderQualification::Legacy,
-    )
+    )?;
+    Ok((program, legacy.warnings))
 }
 
 /// Result of migrating one retired `config.toml`.
@@ -1645,6 +1649,10 @@ pub struct WorkspaceMigration {
     pub legacy_backup: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retention_override: Option<RetentionPolicy>,
+    /// Legacy settings the previous engine ignored and that are therefore not
+    /// part of the program.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 fn read_legacy_config(path: &Path) -> Result<WorkspaceConfig> {
@@ -1668,13 +1676,14 @@ pub fn preview_workspace_migration(margins_home: &Path, id: &str) -> Result<Work
             program,
             legacy_backup: None,
             retention_override: None,
+            warnings: Vec::new(),
         });
     }
     let legacy = read_legacy_config(&state_dir.join(LEGACY_WORKSPACE_CONFIG))?;
     if legacy.id != id {
         bail!("workspace directory '{id}' contains config for '{}'", legacy.id);
     }
-    let program = program_from_legacy_config(&legacy)?;
+    let (program, warnings) = program_from_legacy_config(&legacy)?;
     validate_program(margins_home, &program)?;
     Ok(WorkspaceMigration {
         schema_version: WORKSPACE_MIGRATE_SCHEMA.to_string(),
@@ -1683,10 +1692,45 @@ pub fn preview_workspace_migration(margins_home: &Path, id: &str) -> Result<Work
         program_path,
         revision: program.sha256(),
         program: program.text().to_string(),
-        legacy_backup: Some(state_dir.join(LEGACY_WORKSPACE_CONFIG_MIGRATED)),
+        legacy_backup: Some(legacy_backup_path(&state_dir)),
         retention_override: (legacy.retention != RetentionPolicy::default())
             .then_some(legacy.retention),
+        warnings,
     })
+}
+
+/// The first free retirement name: `config.toml.migrated`, then
+/// `config.toml.migrated.1`, `.2`, ….
+fn legacy_backup_path(state_dir: &Path) -> PathBuf {
+    let first = state_dir.join(LEGACY_WORKSPACE_CONFIG_MIGRATED);
+    if !first.exists() {
+        return first;
+    }
+    (1u32..)
+        .map(|n| state_dir.join(format!("{LEGACY_WORKSPACE_CONFIG_MIGRATED}.{n}")))
+        .find(|path| !path.exists())
+        .expect("a free retirement name")
+}
+
+/// Whether `name` is a retired legacy config (`config.toml.migrated[.<n>]`).
+fn is_legacy_backup_name(name: &std::ffi::OsStr) -> bool {
+    name.to_str().is_some_and(|name| {
+        name == LEGACY_WORKSPACE_CONFIG_MIGRATED
+            || name
+                .strip_prefix(LEGACY_WORKSPACE_CONFIG_MIGRATED)
+                .and_then(|rest| rest.strip_prefix('.'))
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
+/// Rename a legacy `config.toml` out of the way; the caller holds the lock.
+fn retire_legacy_config(state_dir: &Path) -> Result<PathBuf> {
+    let legacy_path = state_dir.join(LEGACY_WORKSPACE_CONFIG);
+    let backup = legacy_backup_path(state_dir);
+    std::fs::rename(&legacy_path, &backup)
+        .with_context(|| format!("retiring {}", legacy_path.display()))?;
+    sync_parent_directory(&backup)?;
+    Ok(backup)
 }
 
 /// Migrate a retired `workspaces/<id>/config.toml` to `configs/<id>.enzyme`.
@@ -1701,16 +1745,12 @@ pub fn migrate_workspace(margins_home: &Path, id: &str) -> Result<WorkspaceMigra
     let legacy_path = state_dir.join(LEGACY_WORKSPACE_CONFIG);
     let program_path = workspace_program_path(margins_home, id)?;
     if program_path.exists() {
-        // A concurrent resolver migrated first, or the program was authored
-        // directly. Retire a leftover legacy file without reinterpreting it.
+        // A concurrent resolver migrated first, a crash came between the
+        // program write and the rename, or the program was authored directly.
+        // Retire a leftover legacy file without reinterpreting it.
         let mut migration = preview_workspace_migration(margins_home, id)?;
         if legacy_path.is_file() {
-            let backup = state_dir.join(LEGACY_WORKSPACE_CONFIG_MIGRATED);
-            if !backup.exists() {
-                std::fs::rename(&legacy_path, &backup)?;
-                sync_parent_directory(&backup)?;
-                migration.legacy_backup = Some(backup);
-            }
+            migration.legacy_backup = Some(retire_legacy_config(&state_dir)?);
         }
         return Ok(migration);
     }
@@ -1718,8 +1758,13 @@ pub fn migrate_workspace(margins_home: &Path, id: &str) -> Result<WorkspaceMigra
     if legacy.id != id {
         bail!("workspace directory '{id}' contains config for '{}'", legacy.id);
     }
-    let program = program_from_legacy_config(&legacy)?;
-    // Machine-owned settings first: a crash before the program write leaves
+    // Convert and validate before anything is written, so a Workspace that
+    // cannot migrate leaves its legacy file and machine config untouched.
+    let (program, warnings) = program_from_legacy_config(&legacy)
+        .with_context(|| format!("migrating {}", legacy_path.display()))?;
+    validate_program(margins_home, &program)
+        .with_context(|| format!("migrating {}", legacy_path.display()))?;
+    // Machine-owned settings next: a crash before the program write leaves
     // the legacy file authoritative and the migration simply runs again.
     if legacy.name.is_some() && workspace_display_name(margins_home, id)? != legacy.name {
         set_workspace_display_name(margins_home, id, legacy.name.as_deref())?;
@@ -1727,12 +1772,11 @@ pub fn migrate_workspace(margins_home: &Path, id: &str) -> Result<WorkspaceMigra
     if legacy.retention != RetentionPolicy::default() {
         set_workspace_retention(margins_home, id, &legacy.retention)?;
     }
-    validate_program(margins_home, &program)?;
     atomic_write(&program_path, program.text().as_bytes())?;
-    let backup = state_dir.join(LEGACY_WORKSPACE_CONFIG_MIGRATED);
-    std::fs::rename(&legacy_path, &backup)
-        .with_context(|| format!("retiring {}", legacy_path.display()))?;
-    sync_parent_directory(&backup)?;
+    let backup = retire_legacy_config(&state_dir)?;
+    for warning in &warnings {
+        eprintln!("margins: migrated Workspace '{id}': {warning}");
+    }
     Ok(WorkspaceMigration {
         schema_version: WORKSPACE_MIGRATE_SCHEMA.to_string(),
         workspace_id: id.to_string(),
@@ -1743,6 +1787,7 @@ pub fn migrate_workspace(margins_home: &Path, id: &str) -> Result<WorkspaceMigra
         legacy_backup: Some(backup),
         retention_override: (legacy.retention != RetentionPolicy::default())
             .then_some(legacy.retention),
+        warnings,
     })
 }
 
@@ -1773,7 +1818,26 @@ pub fn resolve_state_dir(state_dir: &Path) -> Result<ResolvedWorkspace> {
     resolve_at(margins_home_of_state_dir(state_dir)?, state_dir_id(state_dir)?)
 }
 
+/// Every Workspace that resolves. A Workspace that cannot resolve (an invalid
+/// program, or a legacy config that cannot migrate) is skipped with a warning
+/// rather than hiding every other Workspace; see [`list_workspace_entries`].
 pub fn list_workspaces(margins_home: &Path) -> Result<Vec<ResolvedWorkspace>> {
+    Ok(list_workspace_entries(margins_home)?
+        .into_iter()
+        .filter_map(|(id, resolved)| match resolved {
+            Ok(workspace) => Some(workspace),
+            Err(error) => {
+                eprintln!("margins: skipping Workspace '{id}': {error:#}");
+                None
+            }
+        })
+        .collect())
+}
+
+/// Every declared Workspace id with its resolution, in id order.
+pub fn list_workspace_entries(
+    margins_home: &Path,
+) -> Result<Vec<(String, Result<ResolvedWorkspace>)>> {
     let mut ids = std::collections::BTreeSet::new();
     let configs = margins_home.join(CONFIGS_DIR);
     if configs.exists() {
@@ -1794,9 +1858,13 @@ pub fn list_workspaces(margins_home: &Path) -> Result<Vec<ResolvedWorkspace>> {
         }
     }
     ids.extend(legacy_workspace_ids(margins_home)?);
-    ids.into_iter()
-        .map(|id| resolve_at(margins_home, &id))
-        .collect()
+    Ok(ids
+        .into_iter()
+        .map(|id| {
+            let resolved = resolve_at(margins_home, &id);
+            (id, resolved)
+        })
+        .collect())
 }
 
 /// Remove an unused Workspace declaration without touching any declared Source.
@@ -1827,7 +1895,7 @@ pub fn remove_empty_workspace(margins_home: &Path, id: &str) -> Result<()> {
             }
             for entry in std::fs::read_dir(&state_dir)? {
                 let name = entry?.file_name();
-                if name != WORKSPACE_LOCK && name != LEGACY_WORKSPACE_CONFIG_MIGRATED {
+                if name != WORKSPACE_LOCK && !is_legacy_backup_name(&name) {
                     bail!("Workspace has stored data; migrate or retain it before removal");
                 }
             }
@@ -1972,7 +2040,12 @@ pub fn plan_legacy_workspace_config(
         )
         .into());
     }
-    let program = desired_program_from_config(workspace, &desired, FolderQualification::Legacy)?;
+    let legacy = program_lang::legacy_view(&desired)?;
+    for warning in &legacy.warnings {
+        eprintln!("margins: desired Workspace '{}': {warning}", desired.id);
+    }
+    let program =
+        desired_program_from_config(workspace, &legacy.config, FolderQualification::Legacy)?;
     plan_workspace_program(workspace, program.text())
 }
 
@@ -3820,6 +3893,7 @@ account = "owner@example.com"
         std::fs::create_dir_all(notes.join("people")).unwrap();
         std::fs::create_dir_all(notes.join("inbox")).unwrap();
         std::fs::create_dir_all(&reference).unwrap();
+        let reference_namespace = native_markdown_collection_namespace(&reference).unwrap();
         let legacy_text = format!(
             r##"id = "legacy"
 name = "Client practice"
@@ -3832,6 +3906,7 @@ entities = [
   "#craft",
   {{ "folder:people" = {{ profile = "relational", expandable = true }} }},
   {{ "folder:reference/papers" = {{ profile = "decision_trace" }} }},
+  {{ "folder:{reference_namespace}/papers" = {{ profile = "decision_trace" }} }},
 ]
 
 [retention]
@@ -3864,9 +3939,14 @@ backfill_days = 365
         let text = &migration.program;
         assert!(text.contains("remember in folder \"inbox\" in source \"home\" create note"), "{text}");
         assert!(text.contains("learn questions from tag \"craft\""), "{text}");
-        // Several Markdown roots: unqualified legacy folders meant the Home root.
+        // Several Markdown roots: unqualified legacy folders meant the Home
+        // root, even when their first segment names another source; the
+        // internal identity of a reference root maps back to its source name.
         assert!(text.contains("learn questions from folder \"home/people\"\n    including linked pages\n    about relational"), "{text}");
+        assert!(text.contains("learn questions from folder \"home/reference/papers\"\n    about decision_trace"), "{text}");
         assert!(text.contains("learn questions from folder \"reference/papers\"\n    about decision_trace"), "{text}");
+        assert!(!text.contains("markdown_"), "{text}");
+        assert!(migration.warnings.is_empty(), "{:?}", migration.warnings);
         assert!(text.contains("leave out folders [\"archive\", \"old\"]"), "{text}");
         assert!(text.contains("leave out tags [\"private\", \"draft\"]"), "{text}");
         assert!(text.contains("leave out links [\"Noise Sender\"]"), "{text}");
@@ -3900,41 +3980,105 @@ backfill_days = 365
         );
     }
 
-    /// A hand-written program whose only change is attention policy plans as
-    /// that policy change, without a redundant `update_program`.
+    /// Entity forms the previous engine ignored must not block migration (and
+    /// so every Workspace); they are dropped and reported.
     #[test]
-    fn a_policy_only_program_change_plans_without_update_program() {
+    fn legacy_entities_the_previous_engine_ignored_are_dropped_and_reported() {
         let temp = tempfile::tempdir().unwrap();
-        let margins_home = temp.path().join("state");
+        let margins_home = temp.path().join("machine");
         let notes = temp.path().join("notes");
         std::fs::create_dir_all(notes.join("people")).unwrap();
-        let workspace = create_workspace(&margins_home, "practice", None, &notes).unwrap();
-        for statement in [
-            "  learn questions from folder \"people\"\n\n",
-            "  learn questions from folder \"people\" including linked pages about relationships\n\n",
-            "  leave out folders { \"archive\" }\n  leave out tags { \"draft\" }\n  leave out links { \"Noise\" }\n\n",
-        ] {
-            let program = workspace
-                .program
-                .text()
-                .replace("  remember in folder", &format!("{statement}  remember in folder"));
-            let plan = plan_workspace_program(&workspace, &program).unwrap();
-            assert!(
-                matches!(plan.actions.as_slice(), [WorkspacePlanAction::SetPolicy { .. }]),
-                "{statement}: {:?}",
-                plan.actions
-            );
-        }
-        // A view-modelled change plus a statement outside the view still says so.
-        let program = workspace.program.text().replace(
-            "  remember in folder",
-            "  learn questions from folder \"people\" {\n    sample by time\n  }\n\n  remember in folder",
+        let legacy_text = legacy_home(
+            &notes,
+            r##"
+[policy]
+excluded_entities = ["person:ada", "Plain", "tag:x", "[[Noise]]", "#draft", "folder:old"]
+entities = [
+  "Project: Atlas",
+  "person:ada",
+  "tag:craft",
+  "[[Noise]]",
+  { "[[Project: Atlas]]" = { expandable = true } },
+  { "#craft" = { profile = "relational", expandable = true } },
+  "log:journal",
+  { "folder:people" = { expandable = true } },
+  "folder:people",
+]
+"##,
         );
-        let plan = plan_workspace_program(&workspace, &program).unwrap();
-        assert!(plan
-            .actions
-            .iter()
-            .any(|action| matches!(action, WorkspacePlanAction::UpdateProgram { .. })));
+        let legacy_path = write_legacy(&margins_home, "legacy", &legacy_text);
+
+        let preview = preview_workspace_migration(&margins_home, "legacy").unwrap();
+        let migration = migrate_workspace(&margins_home, "legacy").unwrap();
+        assert_eq!(preview.program, migration.program);
+        assert_eq!(preview.warnings, migration.warnings);
+        assert!(!legacy_path.exists());
+        let text = &migration.program;
+        assert!(text.contains("learn questions from link \"Project: Atlas\"\n"), "{text}");
+        assert!(text.contains("learn questions from tag \"craft\"\n    about relational"), "{text}");
+        assert!(text.contains("learn questions from log \"journal\""), "{text}");
+        assert!(text.contains("learn questions from folder \"people\"\n    including linked pages"), "{text}");
+        assert!(text.contains("leave out folders [\"old\"]"), "{text}");
+        assert!(text.contains("leave out tags [\"draft\"]"), "{text}");
+        assert!(text.contains("leave out links [\"Noise\"]"), "{text}");
+        for ignored in ["Atlas\"\n    including", "ada", "Plain", "\"x\"", "from link \"Noise\""] {
+            assert!(!text.contains(ignored), "{ignored}: {text}");
+        }
+        assert_eq!(text.matches("folder \"people\"").count(), 1, "{text}");
+        let warnings = migration.warnings.join("\n");
+        for reported in [
+            "excluded entity \"person:ada\"",
+            "excluded entity \"Plain\"",
+            "excluded entity \"tag:x\"",
+            "entity \"Project: Atlas\" is not",
+            "entity \"person:ada\" is not",
+            "entity \"tag:craft\" is not",
+            "entity \"[[Noise]]\" is also excluded",
+            "entity \"[[Project: Atlas]]\" is expandable",
+            "entity \"#craft\" is expandable",
+            "entity \"folder:people\" repeats",
+        ] {
+            assert!(warnings.contains(reported), "{reported}: {warnings}");
+        }
+        assert_eq!(migration.warnings.len(), 10, "{warnings}");
+        let json = serde_json::to_value(&migration).unwrap();
+        assert_eq!(json["warnings"].as_array().unwrap().len(), 10);
+    }
+
+    /// One Workspace that cannot migrate leaves its legacy file untouched and
+    /// does not hide the others.
+    #[test]
+    fn a_workspace_that_cannot_migrate_does_not_hide_the_others() {
+        let temp = tempfile::tempdir().unwrap();
+        let margins_home = temp.path().join("machine");
+        let notes = temp.path().join("notes");
+        let other = temp.path().join("other");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        create_workspace(&margins_home, "good", Some("Good"), &other).unwrap();
+        let broken = legacy_home(&notes, "")
+            .replace("id = \"legacy\"", "id = \"broken\"\nname = \"Broken\"")
+            .replace("role = \"home\"", "role = \"home\"\nnote_folder = \"../outside\"");
+        let legacy_path = write_legacy(&margins_home, "broken", &broken);
+
+        assert!(resolve_at(&margins_home, "broken").is_err());
+        assert!(migrate_workspace(&margins_home, "broken").is_err());
+        assert_eq!(std::fs::read_to_string(&legacy_path).unwrap(), broken);
+        assert!(!workspace_program_path(&margins_home, "broken").unwrap().exists());
+        assert!(!margins_home.join(WORKSPACES_DIR).join("broken").join(LEGACY_WORKSPACE_CONFIG_MIGRATED).exists());
+        assert_eq!(workspace_display_name(&margins_home, "broken").unwrap(), None);
+
+        let listed = list_workspaces(&margins_home).unwrap();
+        assert_eq!(
+            listed.iter().map(|workspace| workspace.config.id.as_str()).collect::<Vec<_>>(),
+            ["good"]
+        );
+        let entries = list_workspace_entries(&margins_home).unwrap();
+        assert_eq!(entries.len(), 2);
+        let (id, resolved) = &entries[0];
+        assert_eq!(id, "broken");
+        assert!(resolved.is_err());
+        assert_eq!(std::fs::read_to_string(&legacy_path).unwrap(), broken);
     }
 
     #[test]

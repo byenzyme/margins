@@ -72,15 +72,18 @@ pub fn new(
 
 pub fn list(json: bool, stdout: &mut dyn Write) -> Result<(), CliError> {
     let home = workspace::margins_home().map_err(CliError::from_anyhow)?;
-    let workspaces = workspace::list_workspaces(&home).map_err(CliError::from_anyhow)?;
+    let workspaces = workspace::list_workspace_entries(&home).map_err(CliError::from_anyhow)?;
     let default = workspace::default_workspace(&home).map_err(CliError::from_anyhow)?;
     if json {
         let entries = workspaces
             .iter()
-            .map(|item| {
-                serde_json::json!({
+            .map(|(id, resolved)| match resolved {
+                Ok(item) => serde_json::json!({
                     "id": item.config.id, "name": item.config.name,
-                })
+                }),
+                Err(error) => serde_json::json!({
+                    "id": id, "error": format!("{error:#}"),
+                }),
             })
             .collect::<Vec<_>>();
         serde_json::to_writer(
@@ -92,13 +95,16 @@ pub fn list(json: bool, stdout: &mut dyn Write) -> Result<(), CliError> {
         .map_err(|error| CliError::from_anyhow(error.into()))?;
         writeln!(stdout).map_err(|error| CliError::from_anyhow(error.into()))
     } else {
-        for item in workspaces {
-            writeln!(
-                stdout,
-                "{}\t{}",
-                item.config.id,
-                item.config.name.as_deref().unwrap_or("")
-            )
+        for (id, resolved) in workspaces {
+            match resolved {
+                Ok(item) => writeln!(
+                    stdout,
+                    "{}\t{}",
+                    item.config.id,
+                    item.config.name.as_deref().unwrap_or("")
+                ),
+                Err(error) => writeln!(stdout, "{id}\t(invalid: {error:#})"),
+            }
             .map_err(|error| CliError::from_anyhow(error.into()))?;
         }
         Ok(())
@@ -422,17 +428,39 @@ pub fn migrate(
         Some(id) => vec![id.to_string()],
         None => workspace::legacy_workspace_ids(&home).map_err(CliError::from_anyhow)?,
     };
+    let output = |error: std::io::Error| CliError::from_anyhow(error.into());
+    let mut failed = Vec::new();
     for id in ids {
-        let migration = if dry_run {
+        let migration = match if dry_run {
             workspace::preview_workspace_migration(&home, &id)
         } else {
             workspace::migrate_workspace(&home, &id)
-        }
-        .map_err(CliError::from_anyhow)?;
+        } {
+            Ok(migration) => migration,
+            Err(error) => {
+                // One Workspace that cannot migrate must not block the others;
+                // its legacy file stays in place.
+                if json {
+                    serde_json::to_writer(
+                        &mut *stdout,
+                        &serde_json::json!({
+                            "schema_version": workspace::WORKSPACE_MIGRATE_SCHEMA,
+                            "workspace_id": id, "status": "failed", "error": format!("{error:#}"),
+                        }),
+                    )
+                    .map_err(|error| CliError::from_anyhow(error.into()))?;
+                    writeln!(stdout).map_err(output)?;
+                } else {
+                    writeln!(stdout, "{id}: failed: {error:#}").map_err(output)?;
+                }
+                failed.push((id, error));
+                continue;
+            }
+        };
         if json {
             serde_json::to_writer(&mut *stdout, &migration)
                 .map_err(|error| CliError::from_anyhow(error.into()))?;
-            writeln!(stdout).map_err(|error| CliError::from_anyhow(error.into()))?;
+            writeln!(stdout).map_err(output)?;
         } else {
             writeln!(
                 stdout,
@@ -441,14 +469,26 @@ pub fn migrate(
                 migration.status,
                 migration.program_path.display()
             )
-            .map_err(|error| CliError::from_anyhow(error.into()))?;
+            .map_err(output)?;
+            for warning in &migration.warnings {
+                writeln!(stdout, "  warning: {warning}").map_err(output)?;
+            }
             if dry_run {
-                write!(stdout, "{}", migration.program)
-                    .map_err(|error| CliError::from_anyhow(error.into()))?;
+                write!(stdout, "{}", migration.program).map_err(output)?;
             }
         }
     }
-    Ok(())
+    match failed.len() {
+        0 => Ok(()),
+        1 => Err(CliError::from_anyhow(failed.remove(0).1)),
+        n => Err(CliError::new(
+            "workspace_migration_failed",
+            format!(
+                "{n} Workspaces could not migrate: {}",
+                failed.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>().join(", ")
+            ),
+        )),
+    }
 }
 
 pub fn require_explicit_workspace(selector: Option<&str>) -> Result<&str, CliError> {

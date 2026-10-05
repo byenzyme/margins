@@ -268,6 +268,60 @@ fn workspace_plan_apply_and_migrate_use_enzyme_programs() {
     );
     assert!(again.is_ok());
     assert!(output.is_empty());
+
+    // Forms the previous engine ignored are reported, not fatal; a Workspace
+    // that cannot migrate is listed with its error and keeps its legacy file.
+    let home_binding = format!(
+        "\n[bindings.home]\nkind = \"notes\"\npath = {:?}\nrole = \"home\"\n",
+        vault.canonicalize().unwrap()
+    );
+    let odd_dir = machine.join("workspaces/odd");
+    std::fs::create_dir_all(&odd_dir).unwrap();
+    std::fs::write(
+        odd_dir.join("config.toml"),
+        format!("id = \"odd\"\n\n[policy]\nentities = [\"person:ada\", \"#craft\"]\n{home_binding}"),
+    )
+    .unwrap();
+    let broken_dir = machine.join("workspaces/broken");
+    std::fs::create_dir_all(&broken_dir).unwrap();
+    let broken = format!(
+        "id = \"broken\"\n{}",
+        home_binding.replace("role = \"home\"", "role = \"home\"\nnote_folder = \"../out\"")
+    );
+    std::fs::write(broken_dir.join("config.toml"), &broken).unwrap();
+    let (migrated, output, _) = invoke(
+        &service,
+        &vault,
+        &["margins", "workspace", "migrate", "--json"],
+    );
+    assert!(migrated.is_err());
+    let lines: Vec<serde_json::Value> = output
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2, "{output}");
+    assert_eq!(lines[0]["workspace_id"], "broken");
+    assert_eq!(lines[0]["status"], "failed");
+    assert_eq!(lines[1]["workspace_id"], "odd");
+    assert_eq!(lines[1]["status"], "migrated");
+    let warnings = lines[1]["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].as_str().unwrap().contains("person:ada"));
+    assert!(lines[1]["program"].as_str().unwrap().contains("learn questions from tag \"craft\""));
+    assert_eq!(std::fs::read_to_string(broken_dir.join("config.toml")).unwrap(), broken);
+
+    let (listed, output, stderr) = invoke(
+        &service,
+        &vault,
+        &["margins", "workspace", "list", "--json"],
+    );
+    assert!(listed.is_ok(), "{stderr}");
+    let listed: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+    let entries = listed["workspaces"].as_array().unwrap();
+    let ids: Vec<&str> = entries.iter().map(|entry| entry["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["broken", "odd", "old", "practice"], "{listed}");
+    assert!(entries[0]["error"].as_str().is_some_and(|error| !error.is_empty()));
+    assert!(entries[1].get("error").is_none());
     restore_env("MARGINS_HOME", old.as_ref());
 }
 

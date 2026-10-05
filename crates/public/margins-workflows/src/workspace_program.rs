@@ -453,8 +453,192 @@ pub enum FolderQualification {
     /// The view was derived from the base program; its folder references use
     /// the base program's qualification.
     Program,
-    /// A retired `config.toml`: an unqualified folder ref meant the Home source.
+    /// The view came from [`legacy_view`]: its folder references are already
+    /// qualified for the desired sources and are written unchanged.
     Legacy,
+}
+
+/// A retired `config.toml` view rewritten to the meaning the previous engine
+/// gave it, plus what it ignored and is therefore not migrated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyView {
+    pub config: WorkspaceConfig,
+    pub warnings: Vec<String>,
+}
+
+/// Rewrite a retired `config.toml` view so that it migrates exactly what the
+/// previous engine honored, and nothing it ignored.
+///
+/// The previous engine read a learning entity only as `#tag`, `[[link]]`,
+/// `log:<name>`, or `folder:<path>` and silently skipped anything else
+/// (`Project: Atlas`, `person:ada`, `tag:x`, bare names). It left out an entity
+/// only as `folder:<path>`, `#tag`, or `[[link]]`, and dropped every learning
+/// entity equal to a left-out one. It expanded linked pages only for folders.
+/// An unqualified `folder:<path>` was Home-relative; `folder:markdown_<hash>/…`
+/// named a folder of the Markdown source with that internal identity. Anything
+/// not honored is dropped and reported in `warnings`.
+pub fn legacy_view(config: &WorkspaceConfig) -> Result<LegacyView> {
+    let mut warnings = Vec::new();
+    let mut markdown = Vec::new();
+    let mut home = None;
+    for (name, binding) in &config.bindings {
+        if let WorkspaceBinding::NativeMarkdown { path, role, .. } = binding {
+            if *role == SourceRole::Home {
+                home = Some(name.clone());
+            }
+            let namespace = crate::workspace::native_markdown_collection_namespace(path)
+                .ok()
+                .map(|namespace| namespace.to_ascii_lowercase());
+            markdown.push((name.clone(), namespace));
+        }
+    }
+    let home = home.context("workspace must declare exactly one Home Markdown source")?;
+    let qualified = markdown.len() > 1;
+    let folder_entity = |source: &str, rest: &str| {
+        let rest = rest.trim_matches('/');
+        let path = match (qualified, rest.is_empty() || rest == ".") {
+            (true, true) => source.to_string(),
+            (true, false) => format!("{source}/{rest}"),
+            (false, true) => ".".to_string(),
+            (false, false) => rest.to_string(),
+        };
+        enzyme_spec::entity_selector("folder", &path)
+    };
+
+    let mut excluded_keys = BTreeSet::new();
+    let mut excluded_entities = Vec::new();
+    for entity in &config.policy.excluded_entities {
+        excluded_keys.insert(entity.trim().to_ascii_lowercase());
+        match legacy_entity(entity) {
+            Some((kind @ ("folder" | "tag" | "link"), name)) => {
+                excluded_entities.push(enzyme_spec::entity_selector(kind, &name));
+            }
+            _ => warnings.push(format!(
+                "excluded entity {entity:?} is not folder:<path>, #tag, or [[link]]; the previous engine ignored it, so it is not migrated"
+            )),
+        }
+    }
+
+    let mut entities = Vec::new();
+    let mut seen = BTreeSet::new();
+    for configured in &config.policy.entities {
+        for (entity_ref, options) in configured.entries() {
+            let Some((kind, name)) = legacy_entity(entity_ref) else {
+                warnings.push(format!(
+                    "entity {entity_ref:?} is not #tag, [[link]], folder:<path>, or log:<name>; the previous engine ignored it, so it is not migrated"
+                ));
+                continue;
+            };
+            if excluded_keys.contains(&entity_ref.trim().to_ascii_lowercase()) {
+                warnings.push(format!(
+                    "entity {entity_ref:?} is also excluded; the previous engine ignored it, so it is not migrated"
+                ));
+                continue;
+            }
+            let entity = if kind == "folder" {
+                let path = name.trim().trim_matches('/');
+                let lower = path.to_ascii_lowercase();
+                let owner = markdown.iter().find_map(|(source, namespace)| {
+                    let namespace = namespace.as_deref()?;
+                    if lower == namespace {
+                        Some((source.as_str(), ""))
+                    } else {
+                        lower
+                            .strip_prefix(namespace)
+                            .and_then(|rest| rest.strip_prefix('/'))
+                            .map(|_| (source.as_str(), &path[namespace.len() + 1..]))
+                    }
+                });
+                match owner {
+                    Some((source, rest)) => folder_entity(source, rest),
+                    None => folder_entity(&home, path),
+                }
+            } else {
+                enzyme_spec::entity_selector(kind, &name)
+            };
+            if !seen.insert(entity.to_ascii_lowercase()) {
+                warnings.push(format!(
+                    "entity {entity_ref:?} repeats an earlier entity; the previous engine used the first, so it is not migrated again"
+                ));
+                continue;
+            }
+            let mut options = options.cloned().unwrap_or_default();
+            if options.expandable && kind != "folder" {
+                warnings.push(format!(
+                    "entity {entity_ref:?} is expandable, but the previous engine expanded only folders; expandable is not migrated"
+                ));
+                options.expandable = false;
+            }
+            options.children.clear();
+            entities.push(if options.profile.is_none() && !options.expandable {
+                WorkspaceEntity::simple(entity)
+            } else {
+                WorkspaceEntity::with_options(entity, options)
+            });
+        }
+    }
+
+    let mut config = config.clone();
+    config.policy.entities = entities;
+    config.policy.excluded_entities = excluded_entities;
+    Ok(LegacyView { config, warnings })
+}
+
+/// Qualify a Home-relative `folder:<path>` spec (what `scan` emits) for the
+/// program behind `view`: with several Markdown sources it is prefixed with the
+/// Home source name. Other entity refs are returned unchanged.
+pub fn home_folder_entity(view: &WorkspaceConfig, spec: &str) -> String {
+    let (kind, name) = enzyme_spec::split_entity(spec.trim());
+    if !kind.eq_ignore_ascii_case("folder") {
+        return spec.to_string();
+    }
+    let mut markdown = 0;
+    let mut home = None;
+    for (source, binding) in &view.bindings {
+        if let WorkspaceBinding::NativeMarkdown { role, .. } = binding {
+            markdown += 1;
+            if *role == SourceRole::Home {
+                home = Some(source.as_str());
+            }
+        }
+    }
+    let path = name.trim().trim_matches('/');
+    let path = if path.is_empty() { "." } else { path };
+    match home {
+        Some(home) if markdown > 1 => enzyme_spec::entity_selector(
+            "folder",
+            &if path == "." { home.to_string() } else { format!("{home}/{path}") },
+        ),
+        _ => enzyme_spec::entity_selector("folder", path),
+    }
+}
+
+/// The kind and name of one entity reference as the previous engine parsed it.
+fn legacy_entity(entity_ref: &str) -> Option<(&'static str, String)> {
+    let trimmed = entity_ref.trim();
+    let nonempty = |name: &str| {
+        let name = name.trim();
+        (!name.is_empty()).then(|| name.to_string())
+    };
+    if let Some(tag) = trimmed.strip_prefix('#') {
+        nonempty(tag).map(|name| ("tag", name))
+    } else if let Some(link) = trimmed.strip_prefix("[[").and_then(|rest| rest.strip_suffix("]]")) {
+        nonempty(link).map(|name| ("link", name))
+    } else if let Some(log) = trimmed.strip_prefix("log:") {
+        nonempty(log).map(|name| ("log", name))
+    } else if trimmed
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("folder:"))
+    {
+        let name = trimmed[7..].trim();
+        if name.trim_matches('/').is_empty() && name != "." {
+            None
+        } else {
+            Some(("folder", name.to_string()))
+        }
+    } else {
+        None
+    }
 }
 
 /// A minimal program for one Workspace id, before any source is declared.
@@ -736,7 +920,7 @@ fn qualify_folder(
     home: &str,
 ) -> String {
     let (kind, name) = enzyme_spec::split_entity(entity);
-    if kind != "folder" {
+    if kind != "folder" || qualification == FolderQualification::Legacy {
         return entity.to_string();
     }
     let first = name.split('/').next().unwrap_or(name);
@@ -748,9 +932,9 @@ fn qualify_folder(
             enzyme_spec::entity_selector("folder", &format!("{home}/{path}"))
         }
     };
-    let base_qualified = qualification == FolderQualification::Program && base_markdown.len() > 1;
+    let base_qualified = base_markdown.len() > 1;
     if markdown.len() > 1 {
-        if base_qualified || (qualification == FolderQualification::Legacy && names_source(markdown)) {
+        if base_qualified {
             entity.to_string()
         } else {
             prefixed(name)
@@ -1166,6 +1350,111 @@ workspace "practice" {
         assert_eq!(workspace.exclusions, vec!["archive", "old"]);
         assert_eq!(workspace.excluded_tags, vec!["draft"]);
         assert_eq!(workspace.excluded_links, vec!["Noise", "Plain"]);
+    }
+
+    fn markdown(path: &str, role: SourceRole) -> WorkspaceBinding {
+        WorkspaceBinding::NativeMarkdown {
+            path: path.into(),
+            role,
+            note_folder: None,
+        }
+    }
+
+    fn legacy_config(bindings: &[(&str, WorkspaceBinding)], entities: &[&str]) -> WorkspaceConfig {
+        WorkspaceConfig {
+            id: "w".into(),
+            name: None,
+            policy: WorkspacePolicy {
+                excluded_folders: Vec::new(),
+                excluded_tags: Vec::new(),
+                entities: entities.iter().map(|entity| WorkspaceEntity::simple(*entity)).collect(),
+                excluded_entities: Vec::new(),
+            },
+            retention: RetentionPolicy::default(),
+            bindings: bindings
+                .iter()
+                .map(|(name, binding)| (name.to_string(), binding.clone()))
+                .collect(),
+        }
+    }
+
+    fn entity_refs(config: &WorkspaceConfig) -> Vec<String> {
+        config
+            .policy
+            .entities
+            .iter()
+            .flat_map(|entity| entity.entries().into_iter().map(|(entity, _)| entity.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn legacy_folders_are_home_relative_unless_they_name_a_root_identity() {
+        let library_ns =
+            crate::workspace::native_markdown_collection_namespace(Path::new("/abs/library")).unwrap();
+        let notes_ns =
+            crate::workspace::native_markdown_collection_namespace(Path::new("/abs/notes")).unwrap();
+        let both = [
+            ("notes", markdown("/abs/notes", SourceRole::Home)),
+            ("library", markdown("/abs/library", SourceRole::Reference)),
+        ];
+        let library_people = format!("folder:{library_ns}/people");
+        let library_root = format!("folder:{library_ns}");
+        let notes_inbox = format!("folder:{notes_ns}/Inbox");
+        let legacy = legacy_view(&legacy_config(
+            &both,
+            &["folder:library/x", "folder:.", "Folder:people", &library_people, &library_root, &notes_inbox],
+        ))
+        .unwrap();
+        assert!(legacy.warnings.is_empty(), "{:?}", legacy.warnings);
+        assert_eq!(
+            entity_refs(&legacy.config),
+            [
+                "folder:notes/library/x",
+                "folder:notes",
+                "folder:notes/people",
+                "folder:library/people",
+                "folder:library",
+                "folder:notes/Inbox",
+            ]
+        );
+        let program = WorkspaceProgram::from_program(
+            reconcile(&empty_program("w"), &with_home_folder(legacy.config), FolderQualification::Legacy).unwrap(),
+        )
+        .unwrap();
+        assert!(program.text().contains("learn questions from folder \"library/people\""), "{}", program.text());
+        assert!(program.text().contains("learn questions from folder \"notes/library/x\""), "{}", program.text());
+        validate_language(&program, Path::new("/state/ledger.db"), None).unwrap();
+
+        // One root: the internal identity and plain refs are root-relative.
+        let one = [("notes", markdown("/abs/notes", SourceRole::Home))];
+        let legacy = legacy_view(&legacy_config(&one, &[&notes_inbox, "folder:library/x", "folder:/"])).unwrap();
+        assert_eq!(entity_refs(&legacy.config), ["folder:Inbox", "folder:library/x"]);
+        assert_eq!(legacy.warnings.len(), 1, "{:?}", legacy.warnings);
+    }
+
+    fn with_home_folder(mut config: WorkspaceConfig) -> WorkspaceConfig {
+        for binding in config.bindings.values_mut() {
+            if let WorkspaceBinding::NativeMarkdown { role: SourceRole::Home, note_folder, .. } = binding {
+                *note_folder = Some("inbox".into());
+            }
+        }
+        config
+    }
+
+    #[test]
+    fn scan_specs_are_qualified_with_the_home_source() {
+        let both = legacy_config(
+            &[
+                ("notes", markdown("/abs/notes", SourceRole::Home)),
+                ("library", markdown("/abs/library", SourceRole::Reference)),
+            ],
+            &[],
+        );
+        assert_eq!(home_folder_entity(&both, "folder:library/x"), "folder:notes/library/x");
+        assert_eq!(home_folder_entity(&both, "folder:."), "folder:notes");
+        assert_eq!(home_folder_entity(&both, "#craft"), "#craft");
+        let one = legacy_config(&[("notes", markdown("/abs/notes", SourceRole::Home))], &[]);
+        assert_eq!(home_folder_entity(&one, "folder:/people/"), "folder:people");
     }
 
     #[test]

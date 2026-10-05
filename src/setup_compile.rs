@@ -7,6 +7,7 @@ use anyhow::{bail, ensure, Context, Result};
 use margins_workflows::workspace::{
     ResolvedWorkspace, SourceRole, WorkspaceBinding, WorkspaceEntity, WorkspaceEntityOptions,
 };
+use margins_workflows::workspace_program::home_folder_entity;
 use recall_engine::llm::CATALYST_PROFILES;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -313,7 +314,7 @@ pub(crate) fn compile(workspace: &ResolvedWorkspace, note_folder: Option<&str>) 
             .unwrap_or((false, None));
         if included || people_anchor(&candidate.spec) {
             selected.push(WorkspaceEntity::with_options(
-                candidate.spec.clone(),
+                home_folder_entity(&desired, &candidate.spec),
                 WorkspaceEntityOptions {
                     profile,
                     expandable: candidate.expandable,
@@ -330,7 +331,7 @@ pub(crate) fn compile(workspace: &ResolvedWorkspace, note_folder: Option<&str>) 
             .take(6)
         {
             if let Some(spec) = entry["spec"].as_str() {
-                selected.push(WorkspaceEntity::Simple(spec.to_owned()));
+                selected.push(WorkspaceEntity::Simple(home_folder_entity(&desired, spec)));
             }
         }
     }
@@ -349,9 +350,9 @@ pub(crate) fn compile(workspace: &ResolvedWorkspace, note_folder: Option<&str>) 
             }
         }
     }
-    // Scan specs are Home-relative (`folder:<path>`), the same reading rule
-    // as a retired config: plan them through the migration qualification.
-    let plan = margins_workflows::workspace::plan_legacy_workspace_config(workspace, desired)?;
+    // Scan specs are Home-relative (`folder:<path>`); they were qualified for
+    // the program above, so the rest of the view keeps its program meaning.
+    let plan = margins_workflows::workspace::plan_workspace_config(workspace, desired)?;
     let selected_entities = margins_workflows::workspace_program::derive_view(
         &margins_workflows::workspace::WorkspaceProgram::parse(&plan.desired_program)?,
         None,
