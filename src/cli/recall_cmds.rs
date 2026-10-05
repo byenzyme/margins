@@ -39,7 +39,7 @@ fn run_sync(workspace_selector: Option<&str>, source_filter: Option<&str>, json:
             );
         }
     }
-    let revision = match margins_workflows::workspace::workspace_revision(&workspace.config) {
+    let revision = match margins_workflows::workspace::workspace_revision(&workspace) {
         Ok(revision) => revision,
         Err(error) => return report_error(&format!("reading workspace revision: {error:#}")),
     };

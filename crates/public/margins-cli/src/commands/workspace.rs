@@ -4,8 +4,9 @@ use anyhow::Context;
 use margins_workflows::catalyst::{selected_status, CatalystStatus};
 use margins_workflows::workspace::{
     self, CalendarCollectionSelector, GmailCollectionSelector, IndexPolicy, ResolvedWorkspace,
-    SourceKind, SourceRole, WorkspaceBinding, WorkspaceConfig, WorkspacePlan,
+    SourceKind, SourceRole, WorkspaceBinding, WorkspaceConfig, WorkspacePlan, WorkspaceProgram,
 };
+use margins_workflows::workspace_program::derive_view;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -212,33 +213,65 @@ pub fn plan(
             format!("could not read {}: {error}", desired_path.display()),
         )
     })?;
-    let desired: WorkspaceConfig = toml::from_str(&body).map_err(|error| {
-        CliError::new(
-            "workspace_desired_invalid",
-            format!("invalid desired workspace config: {error}"),
-        )
-    })?;
-    validate_desired_home_folder_entities(&desired)?;
-    let plan = workspace::plan_workspace_config(&workspace.config, desired)
-        .map_err(CliError::from_anyhow)?;
+    let legacy_toml = desired_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("toml"));
+    let plan = if legacy_toml {
+        // Older setup callers still write the retired config.toml shape.
+        let desired: WorkspaceConfig = toml::from_str(&body).map_err(|error| {
+            CliError::new(
+                "workspace_desired_invalid",
+                format!("invalid desired workspace config: {error}"),
+            )
+        })?;
+        workspace::plan_legacy_workspace_config(&workspace, desired)
+    } else {
+        workspace::plan_workspace_program(&workspace, &body)
+    }
+    .map_err(|error| desired_error(error))?;
+    let desired_view = WorkspaceProgram::parse(&plan.desired_program)
+        .and_then(|program| {
+            derive_view(
+                &program,
+                workspace.config.name.clone(),
+                workspace.config.retention.clone(),
+            )
+        })
+        .map_err(|error| desired_error(error))?;
+    validate_desired_home_folder_entities(&desired_view)?;
     serde_json::to_writer_pretty(&mut *stdout, &plan)
         .map_err(|error| CliError::new("output_failed", error.to_string()))?;
     writeln!(stdout).map_err(|error| CliError::new("output_failed", error.to_string()))
 }
 
+/// Typed mutation errors keep their codes; anything else in a desired program
+/// is the caller's input to fix.
+fn desired_error(error: anyhow::Error) -> CliError {
+    if error
+        .downcast_ref::<workspace::WorkspaceMutationError>()
+        .is_some()
+    {
+        return CliError::from_anyhow(error);
+    }
+    CliError::new("workspace_desired_invalid", format!("{error:#}"))
+}
+
 /// Scan emits unscoped `folder:<path>` specs for the Workspace home. Refuse a
 /// plan that cannot resolve one of those specs before the user reviews and
-/// consents to a policy that would fail later during init.
+/// consents to a policy that would fail later during init. With several
+/// Markdown sources, folder readings are root-qualified; only those of the
+/// Home source are checked here.
 fn validate_desired_home_folder_entities(desired: &WorkspaceConfig) -> Result<(), CliError> {
-    let home = desired
+    let (home_name, home) = desired
         .bindings
-        .values()
-        .find_map(|binding| match binding {
+        .iter()
+        .find_map(|(name, binding)| match binding {
             WorkspaceBinding::NativeMarkdown {
                 path,
                 role: SourceRole::Home,
                 ..
-            } => Some(path.as_path()),
+            } => Some((name.as_str(), path.as_path())),
             _ => None,
         })
         .ok_or_else(|| {
@@ -247,11 +280,25 @@ fn validate_desired_home_folder_entities(desired: &WorkspaceConfig) -> Result<()
                 "desired workspace must declare one home notes source",
             )
         })?;
+    let markdown_sources = desired
+        .bindings
+        .values()
+        .filter(|binding| matches!(binding, WorkspaceBinding::NativeMarkdown { .. }))
+        .count();
 
     for configured in &desired.policy.entities {
         for (entity_ref, _) in configured.entries() {
             let Some(folder) = strip_ascii_case_prefix(entity_ref.trim(), "folder:") else {
                 continue;
+            };
+            let folder = if markdown_sources > 1 {
+                let (root, rest) = folder.split_once('/').unwrap_or((folder, "."));
+                if !root.eq_ignore_ascii_case(home_name) {
+                    continue;
+                }
+                rest
+            } else {
+                folder
             };
             if resolve_scan_folder(home, folder)?.is_none() {
                 return Err(CliError::new(
@@ -360,6 +407,48 @@ pub fn apply(
     serde_json::to_writer_pretty(&mut *stdout, &receipt)
         .map_err(|error| CliError::new("output_failed", error.to_string()))?;
     writeln!(stdout).map_err(|error| CliError::new("output_failed", error.to_string()))
+}
+
+/// Convert retired `workspaces/<id>/config.toml` files to programs. With
+/// `--workspace`, only that Workspace; otherwise every one still to migrate.
+pub fn migrate(
+    selector: Option<&str>,
+    dry_run: bool,
+    json: bool,
+    stdout: &mut dyn Write,
+) -> Result<(), CliError> {
+    let home = workspace::margins_home().map_err(CliError::from_anyhow)?;
+    let ids = match selector {
+        Some(id) => vec![id.to_string()],
+        None => workspace::legacy_workspace_ids(&home).map_err(CliError::from_anyhow)?,
+    };
+    for id in ids {
+        let migration = if dry_run {
+            workspace::preview_workspace_migration(&home, &id)
+        } else {
+            workspace::migrate_workspace(&home, &id)
+        }
+        .map_err(CliError::from_anyhow)?;
+        if json {
+            serde_json::to_writer(&mut *stdout, &migration)
+                .map_err(|error| CliError::from_anyhow(error.into()))?;
+            writeln!(stdout).map_err(|error| CliError::from_anyhow(error.into()))?;
+        } else {
+            writeln!(
+                stdout,
+                "{}: {} -> {}",
+                migration.workspace_id,
+                migration.status,
+                migration.program_path.display()
+            )
+            .map_err(|error| CliError::from_anyhow(error.into()))?;
+            if dry_run {
+                write!(stdout, "{}", migration.program)
+                    .map_err(|error| CliError::from_anyhow(error.into()))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn require_explicit_workspace(selector: Option<&str>) -> Result<&str, CliError> {
@@ -600,7 +689,7 @@ fn render_workspace(
 ) -> Result<(), CliError> {
     let view = PublicWorkspaceView {
         id: &workspace.config.id,
-        revision: workspace::workspace_revision(&workspace.config)
+        revision: workspace::workspace_revision(&workspace)
             .map_err(CliError::from_anyhow)?,
         name: &workspace.config.name,
         state_dir: workspace.state_dir.to_string_lossy().into_owned(),
@@ -640,7 +729,7 @@ fn render_runtime_workspace(
     let margins_home = workspace::margins_home().map_err(CliError::from_anyhow)?;
     let view = RuntimeWorkspaceView {
         id: &workspace.config.id,
-        revision: workspace::workspace_revision(&workspace.config)
+        revision: workspace::workspace_revision(&workspace)
             .map_err(CliError::from_anyhow)?,
         name: &workspace.config.name,
         state_dir: workspace.state_dir.to_string_lossy().into_owned(),
@@ -784,10 +873,16 @@ mod tests {
             },
         );
 
+        // Several Markdown roots: folder readings are root-qualified, and a
+        // folder that exists only under the reference root is not Home's.
+        desired.policy.entities = vec![WorkspaceEntity::simple("folder:home/people")];
         let error = validate_desired_home_folder_entities(&desired).unwrap_err();
 
         assert_eq!(error.code(), "workspace_desired_invalid");
         assert!(error.to_string().contains("does not resolve to a folder"));
+
+        desired.policy.entities = vec![WorkspaceEntity::simple("folder:reference/people")];
+        validate_desired_home_folder_entities(&desired).unwrap();
     }
 
     #[test]

@@ -249,6 +249,16 @@ fn run_inner(
             );
         }
         Some(Command::Workspace {
+            command: WorkspaceCommand::Migrate { dry_run, json },
+        }) => {
+            return commands::workspace::migrate(
+                workspace_selector.as_deref(),
+                dry_run,
+                json,
+                stdout,
+            );
+        }
+        Some(Command::Workspace {
             command: WorkspaceCommand::Apply { plan, .. },
         }) => {
             return commands::workspace::apply(

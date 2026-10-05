@@ -349,12 +349,13 @@ pub enum WorkspaceCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Compile complete desired Workspace settings into a revisioned plan
+    /// Compile a complete desired Workspace program into a revisioned plan
     Plan {
-        /// TOML file containing the complete desired Workspace settings
+        /// `.enzyme` file with the complete desired `workspace "<id>" { … }`
+        /// program (a legacy `.toml` desired config is still accepted)
         #[arg(long)]
         desired: PathBuf,
-        /// Emit margins.workspace.plan.v1 JSON
+        /// Emit margins.workspace.plan.v2 JSON
         #[arg(long, required = true)]
         json: bool,
     },
@@ -363,7 +364,7 @@ pub enum WorkspaceCommand {
         /// Optional relative folder for approved notes under Home
         #[arg(long)]
         note_folder: Option<String>,
-        /// Emit a machine-readable proposal and complete desired TOML
+        /// Emit a machine-readable proposal and the complete desired program
         #[arg(long, required = true)]
         json: bool,
     },
@@ -372,8 +373,17 @@ pub enum WorkspaceCommand {
         /// JSON plan emitted by `workspace plan`
         #[arg(long)]
         plan: PathBuf,
-        /// Emit margins.workspace.apply.v1 JSON
+        /// Emit margins.workspace.apply.v2 JSON
         #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Convert retired `workspaces/<id>/config.toml` files to `configs/<id>.enzyme`
+    Migrate {
+        /// Print the programs without writing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit margins.workspace.migrate.v1 JSON lines
+        #[arg(long)]
         json: bool,
     },
 }

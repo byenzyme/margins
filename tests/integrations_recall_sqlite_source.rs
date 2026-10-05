@@ -634,7 +634,7 @@ fn materialized_mail_threads_use_generic_shared_document_context() {
         connector_id: EMAIL_CONNECTOR_ID.to_string(),
         source_account: "owner@example.com".to_string(),
     };
-    let revision = workspace_revision(&workspace.config).unwrap();
+    let revision = workspace_revision(&workspace).unwrap();
     let all_plan = preview_retention(&workspace, &target, RetentionScope::All).unwrap();
     apply_retention(&workspace, &all_plan, &revision, "recall-all-purge").unwrap();
     margins::recall::provision_workspace_for_init(&workspace).unwrap();

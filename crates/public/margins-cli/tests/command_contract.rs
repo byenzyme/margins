@@ -56,7 +56,7 @@ fn workspace_default_and_destination_are_explicit_json_reads() {
         panic!()
     };
     *note_folder = Some(PathBuf::from("inbox"));
-    let plan = workspace::plan_workspace_config(&workspace.config, desired).unwrap();
+    let plan = workspace::plan_workspace_config(&workspace, desired).unwrap();
     let mut workspace = workspace;
     workspace::apply_workspace_plan(&mut workspace, &plan).unwrap();
     let (set, output, _) = invoke(
@@ -90,6 +90,188 @@ fn workspace_default_and_destination_are_explicit_json_reads() {
 }
 
 #[test]
+fn workspace_plan_apply_and_migrate_use_enzyme_programs() {
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let machine = temp.path().join("machine");
+    let vault = temp.path().join("vault");
+    std::fs::create_dir_all(vault.join("people")).unwrap();
+    let old = std::env::var_os("MARGINS_HOME");
+    std::env::set_var("MARGINS_HOME", &machine);
+    let service = services(&vault);
+    let workspace = workspace::create_workspace(&machine, "practice", None, &vault).unwrap();
+    let program_path = machine.join("configs/practice.enzyme");
+    assert_eq!(workspace.config_path, program_path);
+
+    let (status, output, _) = invoke(
+        &service,
+        &vault,
+        &["margins", "--workspace", "practice", "workspace", "status", "--json"],
+    );
+    assert!(status.is_ok(), "{output}");
+    let status: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(status["config"], program_path.to_string_lossy().as_ref());
+    assert_eq!(status["revision"], workspace.program.sha256());
+
+    let desired = workspace.program.text().replace(
+        "  remember in folder",
+        "  learn questions from folder \"people\" about relationships {\n    sample by time\n  }\n\n  remember in folder",
+    );
+    let desired_path = temp.path().join("desired.enzyme");
+    std::fs::write(&desired_path, &desired).unwrap();
+    let (planned, output, stderr) = invoke(
+        &service,
+        &vault,
+        &[
+            "margins",
+            "--workspace",
+            "practice",
+            "workspace",
+            "plan",
+            "--desired",
+            desired_path.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(planned.is_ok(), "{stderr}");
+    let plan: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(plan["schema_version"], "margins.workspace.plan.v2");
+    assert_eq!(plan["workspace_id"], "practice");
+    assert_eq!(plan["base_revision"], workspace.program.sha256());
+    assert_eq!(plan["desired_program"], desired.as_str());
+    assert_eq!(
+        plan["desired_sha256"],
+        margins_workflows::workspace::program_sha256(&desired)
+    );
+    assert!(plan["plan_id"].as_str().unwrap().len() == 64);
+    assert!(plan["diff"]
+        .as_str()
+        .unwrap()
+        .contains("+  learn questions from folder \"people\" about relationships {"));
+    let actions = plan["actions"].as_array().unwrap();
+    assert!(actions.iter().any(|action| action["action"] == "set_policy"));
+    assert!(actions.iter().any(|action| action["action"] == "update_program"));
+    assert!(actions
+        .iter()
+        .all(|action| action["summary"].as_str().is_some_and(|summary| !summary.is_empty())));
+    let plan_path = temp.path().join("plan.json");
+    std::fs::write(&plan_path, &output).unwrap();
+
+    for replayed in [false, true] {
+        let (applied, output, stderr) = invoke(
+            &service,
+            &vault,
+            &[
+                "margins",
+                "--workspace",
+                "practice",
+                "workspace",
+                "apply",
+                "--plan",
+                plan_path.to_str().unwrap(),
+                "--json",
+            ],
+        );
+        assert!(applied.is_ok(), "{stderr}");
+        let receipt: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(receipt["schema_version"], "margins.workspace.apply.v2");
+        assert_eq!(receipt["after_revision"], plan["desired_sha256"]);
+        assert_eq!(receipt["replayed"], replayed);
+    }
+    assert_eq!(std::fs::read_to_string(&program_path).unwrap(), desired);
+
+    // A desired file in the retired TOML shape is still accepted and keeps
+    // the program's learning settings.
+    let mut legacy = workspace::resolve_at(&machine, "practice").unwrap().config;
+    legacy.policy.excluded_folders = vec!["archive".to_string()];
+    let legacy_path = temp.path().join("desired.toml");
+    std::fs::write(&legacy_path, toml::to_string_pretty(&legacy).unwrap()).unwrap();
+    let (planned, output, stderr) = invoke(
+        &service,
+        &vault,
+        &[
+            "margins",
+            "--workspace",
+            "practice",
+            "workspace",
+            "plan",
+            "--desired",
+            legacy_path.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(planned.is_ok(), "{stderr}");
+    let plan: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let program = plan["desired_program"].as_str().unwrap();
+    assert!(program.contains("leave out folders [\"archive\"]"), "{program}");
+    assert!(program.contains("sample by time"), "{program}");
+
+    // An invalid desired program is refused with a stable code.
+    std::fs::write(&desired_path, desired.replace("remember in folder", "remember in folders")).unwrap();
+    let (refused, _, _) = invoke(
+        &service,
+        &vault,
+        &[
+            "margins",
+            "--workspace",
+            "practice",
+            "workspace",
+            "plan",
+            "--desired",
+            desired_path.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(refused.unwrap_err().code(), "workspace_desired_invalid");
+
+    // Migration of a retired config.toml: dry run, then write, then nothing left.
+    let legacy_dir = machine.join("workspaces/old");
+    std::fs::create_dir_all(&legacy_dir).unwrap();
+    std::fs::write(
+        legacy_dir.join("config.toml"),
+        format!(
+            "id = \"old\"\n\n[bindings.home]\nkind = \"notes\"\npath = {:?}\nrole = \"home\"\n",
+            vault.canonicalize().unwrap()
+        ),
+    )
+    .unwrap();
+    let (dry, output, stderr) = invoke(
+        &service,
+        &vault,
+        &["margins", "workspace", "migrate", "--dry-run", "--json"],
+    );
+    assert!(dry.is_ok(), "{stderr}");
+    let preview: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+    assert_eq!(preview["schema_version"], "margins.workspace.migrate.v1");
+    assert_eq!(preview["status"], "would_migrate");
+    assert!(!machine.join("configs/old.enzyme").exists());
+    let (migrated, output, stderr) = invoke(
+        &service,
+        &vault,
+        &["margins", "workspace", "migrate", "--json"],
+    );
+    assert!(migrated.is_ok(), "{stderr}");
+    let migration: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+    assert_eq!(migration["status"], "migrated");
+    assert_eq!(migration["program"], preview["program"]);
+    assert_eq!(
+        std::fs::read_to_string(machine.join("configs/old.enzyme")).unwrap(),
+        preview["program"].as_str().unwrap()
+    );
+    assert!(legacy_dir.join("config.toml.migrated").is_file());
+    let (again, output, _) = invoke(
+        &service,
+        &vault,
+        &["margins", "workspace", "migrate", "--json"],
+    );
+    assert!(again.is_ok());
+    assert!(output.is_empty());
+    restore_env("MARGINS_HOME", old.as_ref());
+}
+
+#[test]
 fn workspace_remove_only_accepts_a_non_default_config_only_workspace() {
     let _guard = ENV_LOCK
         .lock()
@@ -115,7 +297,7 @@ fn workspace_remove_only_accepts_a_non_default_config_only_workspace() {
         &["margins", "workspace", "remove", "default", "--json"],
     );
     assert!(default_result.is_err());
-    assert!(machine.join("workspaces/default/config.toml").exists());
+    assert!(machine.join("configs/default.enzyme").exists());
 
     let (data_result, _, _) = invoke(
         &service,
@@ -558,10 +740,11 @@ fn parser_accepts_workspace_plan_apply_and_integrations_reconcile() {
         "workspace",
         "plan",
         "--desired",
-        "desired.toml",
+        "desired.enzyme",
         "--json",
     ])
     .unwrap();
+    Args::try_parse_from(["margins", "workspace", "migrate", "--dry-run", "--json"]).unwrap();
     Args::try_parse_from([
         "margins",
         "workspace",
@@ -1774,7 +1957,7 @@ fn sync_declared_sources_default_and_narrow_error() {
         },
     )
     .unwrap();
-    let revision = workspace::workspace_revision(&workspace.config).unwrap();
+    let revision = workspace::workspace_revision(&workspace).unwrap();
 
     let all = margins_cli::commands::integrations::sync_declared_with_google_credential(
         &workspace.state_dir,

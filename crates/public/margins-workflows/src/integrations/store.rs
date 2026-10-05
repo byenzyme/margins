@@ -2983,12 +2983,17 @@ mod tests {
             .downcast_ref::<RetentionMutationError>()
             .is_some_and(|error| matches!(error, RetentionMutationError::InvalidPlan(_))));
 
-        workspace.config.retention.raw_cache_max_age_days = Some(30);
-        std::fs::write(
-            &workspace.config_path,
-            toml::to_string(&workspace.config).unwrap(),
+        crate::workspace::set_workspace_retention(
+            &margins_home,
+            "safety",
+            &crate::workspace::RetentionPolicy {
+                raw_cache_max_age_days: Some(30),
+                tombstone_max_age_days: None,
+            },
         )
         .unwrap();
+        workspace = crate::workspace::resolve_at(&margins_home, "safety").unwrap();
+        assert_eq!(workspace.config.retention.raw_cache_max_age_days, Some(30));
         let mut expired = preview_retention(&workspace, &target, RetentionScope::Expired).unwrap();
         expired.cutoffs.raw_cache_before = expired
             .cutoffs

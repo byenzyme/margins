@@ -332,14 +332,16 @@ mod retention_store {
     ) -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let mut workspace = open_workspace(&temp)?;
-        workspace.config.retention = RetentionPolicy {
-            raw_cache_max_age_days: Some(30),
-            tombstone_max_age_days: Some(30),
-        };
-        std::fs::write(
-            &workspace.config_path,
-            toml::to_string(&workspace.config).unwrap(),
+        let margins_home = workspace.state_dir.parent().unwrap().parent().unwrap().to_path_buf();
+        margins_workflows::workspace::set_workspace_retention(
+            &margins_home,
+            &workspace.config.id,
+            &RetentionPolicy {
+                raw_cache_max_age_days: Some(30),
+                tombstone_max_age_days: Some(30),
+            },
         )?;
+        workspace = margins_workflows::workspace::resolve_state_dir(&workspace.state_dir)?;
         let store = IntegrationsStore::open(&workspace.state_dir)?;
         let ctx = email_ctx(&workspace.state_dir);
         seed_email_fixture(&store, &ctx)?;
@@ -422,12 +424,10 @@ mod retention_store {
                 margins_workflows::integrations::RetentionMutationError::PlanStale { .. }
             )));
         let current_plan = preview_retention(&workspace, &target(), RetentionScope::RawCache)?;
-        let mut changed_config = workspace.config.clone();
-        changed_config.name = Some("revision changed after preview".to_string());
-        std::fs::write(
-            &workspace.config_path,
-            toml::to_string(&changed_config).unwrap(),
-        )?;
+        let mut changed = workspace.clone();
+        let mut policy = changed.config.policy.clone();
+        policy.excluded_folders.push("revision-changed-after-preview".to_string());
+        margins_workflows::workspace::update_policy(&mut changed, policy)?;
         let revision_conflict = apply_retention(
             &workspace,
             &current_plan,
