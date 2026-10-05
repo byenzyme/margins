@@ -731,7 +731,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
         {message && <p role="alert">{message}</p>}
       </div>}
       {panel?.state !== "unavailable" && starting ? <div className="margins-preparing-pad">
-        <header><div><span className="margins-meeting-kicker" role="status">{startError ? "Recording could not start" : nativeStatus?.state === "recording" ? "Recording" : "Preparing audio…"}</span>
+        <header><div><span className="margins-meeting-kicker" role="status">{startError ? "Recording could not start" : nativeStatus?.state === "recording" ? "Recording" : "Starting… don't speak yet"}</span>
           <h2>New meeting</h2><p className="margins-meeting-details">{nativeBridgeOwner.paired ? `${nativeStatus?.microphoneDeviceName || "Microphone"} + computer audio` : "Browser microphone"}{resolvedWorkspaceName && ` · Workspace: ${resolvedWorkspaceName}`} · Started from {projects.find((item) => item.id === projectId)?.name || "this project"}</p></div>{startError && <button onClick={() => void start()}>Retry Start</button>}</header>
         {startError && <p role="alert">{startError}</p>}
         <textarea aria-label="Meeting memo pad" placeholder="Write notes..." autoFocus value={pendingDraft}
@@ -743,7 +743,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
           {(!selected.inputFinalized || memoChangedSinceNote) && <span className="margins-meeting-kicker">
           {!selected.inputFinalized ? nativeStatus?.sessionId === selected.sessionId && nativeStatus.state === "saving" ? "Saving recording…"
             : audioStartingId === selected.sessionId && nativeStatus?.state === "needs_attention" ? "Audio needs attention"
-              : audioStartingId === selected.sessionId && !(nativeStatus?.sessionId === selected.sessionId && ["recording", "paused"].includes(nativeStatus.state)) ? "Preparing audio…"
+              : audioStartingId === selected.sessionId && !(nativeStatus?.sessionId === selected.sessionId && ["recording", "paused"].includes(nativeStatus.state)) ? "Starting… don't speak yet"
                 : <><i className={`margins-meeting-state-dot${pausedSession(selected.sessionId) ? " paused" : ""}`} aria-hidden="true" />{pausedSession(selected.sessionId) ? "Paused" : "Recording"}</>
             : "Memo updated since note"}</span>}
           {selected.notePath && <nav className="margins-meeting-links" aria-label="Meeting links">

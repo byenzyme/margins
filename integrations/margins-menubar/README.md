@@ -32,6 +32,15 @@ The menu app controls recording but does not acquire audio permission itself.
 The signed capture process needs its own Microphone and System Audio grants.
 The menu does not run a second `margins transcribe` pass after Stop.
 
+Record opens the microphone and system audio at once and holds that audio
+while the Workspace session is created, so nothing said after the click is
+lost; the menu shows **Starting… don't speak yet** until the microphone
+delivers audio. Pause and Finish act immediately, even before the session
+exists. If the session cannot be created (for example, bb is unreachable), the
+audio captured so far is kept in `~/.margins/unsent/` (or `$MARGINS_HOME/unsent/`)
+as an owner-only WAV, and the error names the file. Import it with
+`margins transcribe <file>`, then delete it.
+
 For bb-connected recording, macOS lists the bundled **Margins Capture** helper
 under System Settings → Privacy & Security → Microphone after its first access
 request. The helper should not be dragged into the Settings list. When packaging

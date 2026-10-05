@@ -12,7 +12,7 @@ use std::time::Duration;
 const DEFAULT_PORT: u16 = 18765;
 const MAX_BODY: usize = 4096;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CaptureAction {
     Pause,
     Resume,
@@ -48,6 +48,10 @@ struct CaptureStatus {
     error: Option<String>,
     opened_mic_name: Option<String>,
     local_audio_paths: Vec<String>,
+    unsent_audio_path: Option<String>,
+    /// Stop arrived for this capture. Checked before the devices open, so a
+    /// Stop sent during the permission step records nothing.
+    stop_requested: bool,
     completed: Counters,
     live: LiveCounters,
 }
@@ -57,13 +61,13 @@ impl CaptureStatus {
         let load = |counter: &Option<Arc<AtomicU64>>| {
             counter.as_ref().map_or(0, |v| v.load(Ordering::Relaxed))
         };
-        let opened_mic = if matches!(self.state, "recording" | "paused") {
+        let opened_mic = if matches!(self.state, "getting_ready" | "recording" | "paused") {
             self.opened_mic_name.clone()
         } else {
             None
         };
         json!({
-            "state": if self.state.is_empty() { "ready" } else { self.state },
+            "state": self.visible_state(),
             "instanceId": instance_id,
             "workspaceId": workspace_id,
             "microphoneDeviceName": opened_mic
@@ -82,7 +86,26 @@ impl CaptureStatus {
             "micPeak": self.live.mic_peak.as_ref().map(|peak| f32::from_bits(peak.load(Ordering::Relaxed))).unwrap_or(0.0),
             "error": self.error,
             "localAudioPaths": self.local_audio_paths,
+            "unsentAudioPath": self.unsent_audio_path,
         })
+    }
+
+    /// The state users act on. Start opens the devices before the remote
+    /// session exists and buffers that audio; "recording" is reported once
+    /// the microphone has actually delivered samples, so nobody speaks into a
+    /// recorder that is still opening.
+    fn visible_state(&self) -> &'static str {
+        let mic = self.completed.mic
+            + self
+                .live
+                .mic
+                .as_ref()
+                .map_or(0, |v| v.load(Ordering::Relaxed));
+        match self.state {
+            "" => "ready",
+            "getting_ready" if mic > 0 => "recording",
+            state => state,
+        }
     }
 
     fn fold_live(&mut self) {
@@ -104,7 +127,36 @@ pub(super) struct CaptureController {
     status: Arc<Mutex<CaptureStatus>>,
 }
 
+impl LiveCounters {
+    fn for_segment(
+        sink: &crate::recorder::LiveAudioSink,
+        recorder: &crate::recorder::RecorderHandle,
+    ) -> Self {
+        LiveCounters {
+            mic: Some(sink.mic_accepted_samples.clone()),
+            system: Some(sink.system_accepted_samples.clone()),
+            mic_dropped: Some(sink.mic_dropped_samples.clone()),
+            system_dropped: Some(sink.system_dropped_samples.clone()),
+            frames: Some(recorder.spk_frames()),
+            silent: Some(recorder.spk_silence()),
+            mic_peak: Some(recorder.mic_peak()),
+        }
+    }
+}
+
 impl CaptureController {
+    /// The devices are open and audio is buffering while the remote session
+    /// is reserved. Status turns to "recording" with the first mic samples.
+    pub(super) fn capturing(
+        &self,
+        sink: &crate::recorder::LiveAudioSink,
+        recorder: &crate::recorder::RecorderHandle,
+    ) {
+        let mut state = self.status.lock().unwrap();
+        state.opened_mic_name = Some(recorder.mic_name().to_owned());
+        state.live = LiveCounters::for_segment(sink, recorder);
+    }
+
     pub(super) fn recording(
         &self,
         session: &str,
@@ -118,15 +170,34 @@ impl CaptureController {
         state.session_id = Some(session.into());
         state.transfer_id = Some(transfer.into());
         state.opened_mic_name = Some(recorder.mic_name().to_owned());
-        state.live = LiveCounters {
-            mic: Some(sink.mic_accepted_samples.clone()),
-            system: Some(sink.system_accepted_samples.clone()),
-            mic_dropped: Some(sink.mic_dropped_samples.clone()),
-            system_dropped: Some(sink.system_dropped_samples.clone()),
-            frames: Some(recorder.spk_frames()),
-            silent: Some(recorder.spk_silence()),
-            mic_peak: Some(recorder.mic_peak()),
-        };
+        state.live = LiveCounters::for_segment(sink, recorder);
+    }
+
+    /// Pause or Stop sent while the session is still being reserved. Resume
+    /// cannot arrive first: the bridge accepts it only when paused.
+    pub(super) fn pre_session_control(
+        &self,
+        timeout: Duration,
+    ) -> Option<super::PreSessionControl> {
+        match self.receiver.recv_timeout(timeout) {
+            Ok(CaptureAction::Pause) => Some(super::PreSessionControl::Pause),
+            Ok(CaptureAction::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Some(super::PreSessionControl::Stop)
+            }
+            Ok(CaptureAction::Resume) | Err(mpsc::RecvTimeoutError::Timeout) => None,
+        }
+    }
+
+    /// The session exists for capture that was paused or stopped before it
+    /// did; the state the user chose stands.
+    pub(super) fn session_ready(&self, session: &str, transfer: &str) {
+        let mut state = self.status.lock().unwrap();
+        state.session_id = Some(session.into());
+        state.transfer_id = Some(transfer.into());
+    }
+
+    pub(super) fn unsent_audio_saved(&self, path: &std::path::Path) {
+        self.status.lock().unwrap().unsent_audio_path = Some(path.to_string_lossy().into_owned());
     }
 
     pub(super) fn wait_action(&self, stop: &Arc<AtomicBool>) -> Result<crate::tui::TuiAction> {
@@ -590,6 +661,11 @@ fn handle_stream(mut stream: TcpStream, bridge: &mut Bridge) -> Result<()> {
                             .context("microphone permission request did not complete")
                             .and_then(|result| result.map_err(anyhow::Error::msg))
                             .and_then(|()| {
+                                if bridge_status.lock().unwrap().stop_requested {
+                                    // Later Stops are queued and handled once
+                                    // the devices are open.
+                                    return Ok(false);
+                                }
                                 super::run_remote_native_capture(
                                     &remote,
                                     &workspace,
@@ -600,14 +676,22 @@ fn handle_stream(mut stream: TcpStream, bridge: &mut Bridge) -> Result<()> {
                                     prepared_connection,
                                     true,
                                 )
+                                .map(|()| true)
                             });
                         let mut state = bridge_status.lock().unwrap();
                         state.opened_mic_name = None;
                         match result {
-                            Ok(()) => state.state = "saved",
+                            Ok(true) => state.state = "saved",
+                            // Stopped before anything was recorded.
+                            Ok(false) => state.state = "ready",
                             Err(error) => {
                                 state.state = "needs_attention";
-                                state.error = Some(format!("{error:#}"));
+                                state.error = Some(match &state.unsent_audio_path {
+                                    Some(path) => format!(
+                                        "{error:#}. Recording saved locally: {path}. Import it with `margins transcribe {path:?}`."
+                                    ),
+                                    None => format!("{error:#}"),
+                                });
                             }
                         }
                     })?;
@@ -617,10 +701,12 @@ fn handle_stream(mut stream: TcpStream, bridge: &mut Bridge) -> Result<()> {
         ("POST", "/v1/pause") => control(bridge, "recording", CaptureAction::Pause),
         ("POST", "/v1/resume") => control(bridge, "paused", CaptureAction::Resume),
         ("POST", "/v1/stop") => {
-            let state = bridge.status.lock().unwrap().state;
-            if !matches!(state, "recording" | "paused" | "getting_ready") {
+            let mut status = bridge.status.lock().unwrap();
+            if !matches!(status.state, "recording" | "paused" | "getting_ready") {
                 (409, json!({"error":"capture_not_active"}))
             } else {
+                status.stop_requested = true;
+                drop(status);
                 control_unchecked(bridge, CaptureAction::Stop)
             }
         }
@@ -655,7 +741,9 @@ fn microphone_permission() -> Value {
 }
 
 fn control(bridge: &Bridge, expected: &str, action: CaptureAction) -> (u16, Value) {
-    if bridge.status.lock().unwrap().state != expected {
+    // A Pause sent while the session is still being reserved is queued and
+    // applied as soon as the first segment begins.
+    if bridge.status.lock().unwrap().visible_state() != expected {
         return (409, json!({"error":"invalid_capture_state"}));
     }
     control_unchecked(bridge, action)
@@ -847,6 +935,79 @@ mod tests {
     }
 
     #[test]
+    fn status_reports_recording_only_once_the_microphone_delivers_audio() {
+        let mic = Arc::new(AtomicU64::new(0));
+        let status = Arc::new(Mutex::new(CaptureStatus {
+            state: "getting_ready",
+            live: LiveCounters {
+                mic: Some(mic.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }));
+        let snapshot = status
+            .lock()
+            .unwrap()
+            .snapshot("instance", "workspace", None);
+        assert_eq!(snapshot["state"], "getting_ready");
+        assert!(snapshot["sessionId"].is_null());
+
+        // Devices are open and buffering before the session exists.
+        mic.store(480, Ordering::Relaxed);
+        let snapshot = status
+            .lock()
+            .unwrap()
+            .snapshot("instance", "workspace", None);
+        assert_eq!(snapshot["state"], "recording");
+        assert_eq!(snapshot["microphoneSamples"], 480);
+
+        // Pause is accepted and queued until the first segment begins.
+        let (sender, receiver) = mpsc::channel();
+        let mut bridge = bridge();
+        bridge.status = status;
+        bridge.sender = Some(sender);
+        assert_eq!(control(&bridge, "recording", CaptureAction::Pause).0, 202);
+        assert!(receiver.try_recv() == Ok(CaptureAction::Pause));
+    }
+
+    #[test]
+    fn pause_and_stop_act_before_the_session_exists() {
+        let (sender, receiver) = mpsc::channel();
+        let controller = CaptureController {
+            receiver,
+            status: Arc::new(Mutex::new(CaptureStatus::default())),
+        };
+        let wait = Duration::from_millis(1);
+        assert_eq!(controller.pre_session_control(wait), None);
+        sender.send(CaptureAction::Pause).unwrap();
+        assert_eq!(
+            controller.pre_session_control(wait),
+            Some(super::super::PreSessionControl::Pause)
+        );
+        sender.send(CaptureAction::Stop).unwrap();
+        assert_eq!(
+            controller.pre_session_control(wait),
+            Some(super::super::PreSessionControl::Stop)
+        );
+        controller.paused();
+        controller.session_ready("session", "transfer");
+        controller.unsent_audio_saved(std::path::Path::new("/tmp/unsent.wav"));
+        let snapshot = controller.status.lock().unwrap().snapshot("i", "w", None);
+        assert_eq!(
+            snapshot["state"], "paused",
+            "the user's Pause stands once the session exists"
+        );
+        assert_eq!(snapshot["sessionId"], "session");
+        assert_eq!(snapshot["unsentAudioPath"], "/tmp/unsent.wav");
+        drop(sender);
+        assert_eq!(
+            controller.pre_session_control(wait),
+            Some(super::super::PreSessionControl::Stop),
+            "a vanished bridge stops capture"
+        );
+    }
+
+    #[test]
     fn exact_origin_host_pairing_and_authority_identity() {
         let mut bridge = bridge();
         let body = r#"{"code":"secret-code"}"#;
@@ -1031,6 +1192,44 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("capture worker did not publish the permission error");
+    }
+
+    #[test]
+    fn stop_during_the_permission_step_records_nothing() {
+        let mut bridge = bridge();
+        bridge.token = Some("paired-token".into());
+        let (permission_request, permission_receiver) = mpsc::channel();
+        bridge.permission_request = permission_request;
+        let request = |method: &str, path: &str, body: &str| {
+            format!(
+                "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:18765\r\nOrigin: https://example.test\r\nAuthorization: Bearer paired-token\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+        };
+        assert!(
+            exchange(&mut bridge, &request("POST", "/v1/start", "{}")).starts_with("HTTP/1.1 202")
+        );
+        let reply = permission_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        // Stop while macOS still shows the permission alert.
+        assert!(
+            exchange(&mut bridge, &request("POST", "/v1/stop", "{}")).starts_with("HTTP/1.1 202")
+        );
+        reply.send(Ok(())).unwrap();
+        for _ in 0..200 {
+            let status = exchange(&mut bridge, &request("GET", "/v1/status", ""));
+            // Opening devices or reserving against this fake remote would
+            // fail and report needs_attention instead.
+            if status.contains("\"state\":\"ready\"") {
+                assert!(status.contains("\"sessionId\":null"));
+                assert!(status.contains("\"error\":null"));
+                return;
+            }
+            assert!(!status.contains("needs_attention"), "{status}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("Stop during the permission step did not cancel the start");
     }
 
     #[test]

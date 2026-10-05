@@ -202,7 +202,7 @@ function NativeCapturePanel({ projectId, title }: { projectId: string; title?: s
       {status?.state === "ready" && <button disabled={busy} onClick={() => void act(async () => { if (browserCaptureOwner.active) throw new Error("Stop the microphone-only recording before starting Mac audio."); await nativeBridgeOwner.verify(await authority()); try { sessionStorage.setItem("margins.bb.meetings-project", projectId); } catch { /* private browser */ } await nativeBridgeOwner.control("start", title); })}>Start Mac recording</button>}
       {status?.state === "recording" && <div className="margins-native-actions"><button disabled={busy} onClick={() => void act(() => nativeBridgeOwner.control("pause"))}>Pause</button><button disabled={busy} onClick={() => void act(() => nativeBridgeOwner.control("stop"))}>Stop and save</button></div>}
       {status?.state === "paused" && <div className="margins-native-actions"><button disabled={busy} onClick={() => void act(() => nativeBridgeOwner.control("resume"))}>Resume</button><button disabled={busy} onClick={() => void act(() => nativeBridgeOwner.control("stop"))}>Stop and save</button></div>}
-      {status?.state === "getting_ready" && <p>Getting microphone and computer audio ready…</p>}
+      {status?.state === "getting_ready" && <p>Starting the microphone and computer audio. Don't speak yet; recording begins when this says Recording.</p>}
       {status?.microphoneDeviceName && <p>Microphone: {status.microphoneDeviceName} · Change it in Margins Menu before recording.</p>}
       {status?.state === "saving" && <p>Saving the meeting…</p>}
       {status?.state === "saved" && <p>Mac recording saved. The connected note action will appear in this thread once BB confirms the session.</p>}

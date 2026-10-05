@@ -19430,10 +19430,10 @@ function stateCopy(state, sourceLabel, error61) {
       };
     case "getting_ready":
       return {
-        title: "Getting recording ready",
-        detail: "Nothing is being recorded until your microphone and the project are both ready.",
+        title: "Starting\u2026 don't speak yet",
+        detail: "Nothing is recorded until your microphone delivers audio. Start speaking when this says Recording.",
         primaryAction: "none",
-        primaryLabel: "Getting ready"
+        primaryLabel: "Starting\u2026"
       };
     case "recording":
       return {
