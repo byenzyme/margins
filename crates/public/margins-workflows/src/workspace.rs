@@ -1518,7 +1518,8 @@ fn canonical_or_absolute(path: &Path, cwd: &Path) -> PathBuf {
 pub fn resolve_at(margins_home: &Path, id: &str) -> Result<ResolvedWorkspace> {
     let state_dir = workspace_state_dir(margins_home, id)?;
     let program_path = workspace_program_path(margins_home, id)?;
-    if !program_path.exists() && state_dir.join(LEGACY_WORKSPACE_CONFIG).is_file() {
+    if state_dir.join(LEGACY_WORKSPACE_CONFIG).is_file() {
+        // Migrate, or retire a legacy file left beside an existing program.
         migrate_workspace(margins_home, id)?;
     }
     let text = std::fs::read_to_string(&program_path)
@@ -4079,6 +4080,74 @@ entities = [
         assert_eq!(id, "broken");
         assert!(resolved.is_err());
         assert_eq!(std::fs::read_to_string(&legacy_path).unwrap(), broken);
+    }
+
+    /// A crash between the program write and the rename leaves both files; the
+    /// next resolution retires the legacy file under a free name.
+    #[test]
+    fn a_legacy_config_beside_a_program_is_retired_on_resolution() {
+        let temp = tempfile::tempdir().unwrap();
+        let margins_home = temp.path().join("machine");
+        let notes = temp.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        let legacy_path = write_legacy(&margins_home, "legacy", &legacy_home(&notes, ""));
+        let migrated = resolve_at(&margins_home, "legacy").unwrap();
+        let state_dir = migrated.state_dir.clone();
+        assert!(state_dir.join(LEGACY_WORKSPACE_CONFIG_MIGRATED).is_file());
+
+        // Simulate the crash window, with an earlier retirement already present.
+        let stale = legacy_home(&notes, "\n[policy]\nentities = [\"#stale\"]\n");
+        std::fs::write(&legacy_path, &stale).unwrap();
+        let workspace = resolve_at(&margins_home, "legacy").unwrap();
+        assert_eq!(workspace.program.text(), migrated.program.text());
+        assert!(!legacy_path.exists());
+        let numbered = state_dir.join(format!("{LEGACY_WORKSPACE_CONFIG_MIGRATED}.1"));
+        assert_eq!(std::fs::read_to_string(&numbered).unwrap(), stale);
+        assert!(legacy_workspace_ids(&margins_home).unwrap().is_empty());
+
+        std::fs::write(&legacy_path, &stale).unwrap();
+        resolve_at(&margins_home, "legacy").unwrap();
+        assert!(state_dir.join(format!("{LEGACY_WORKSPACE_CONFIG_MIGRATED}.2")).is_file());
+        assert!(!legacy_path.exists());
+        assert!(is_legacy_backup_name(std::ffi::OsStr::new("config.toml.migrated.2")));
+        assert!(!is_legacy_backup_name(std::ffi::OsStr::new("config.toml.migrated.x")));
+    }
+
+    /// A hand-written program whose only change is attention policy plans as
+    /// that policy change, without a redundant `update_program`.
+    #[test]
+    fn a_policy_only_program_change_plans_without_update_program() {
+        let temp = tempfile::tempdir().unwrap();
+        let margins_home = temp.path().join("state");
+        let notes = temp.path().join("notes");
+        std::fs::create_dir_all(notes.join("people")).unwrap();
+        let workspace = create_workspace(&margins_home, "practice", None, &notes).unwrap();
+        for statement in [
+            "  learn questions from folder \"people\"\n\n",
+            "  learn questions from folder \"people\" including linked pages about relationships\n\n",
+            "  leave out folders { \"archive\" }\n  leave out tags { \"draft\" }\n  leave out links { \"Noise\" }\n\n",
+        ] {
+            let program = workspace
+                .program
+                .text()
+                .replace("  remember in folder", &format!("{statement}  remember in folder"));
+            let plan = plan_workspace_program(&workspace, &program).unwrap();
+            assert!(
+                matches!(plan.actions.as_slice(), [WorkspacePlanAction::SetPolicy { .. }]),
+                "{statement}: {:?}",
+                plan.actions
+            );
+        }
+        // A view-modelled change plus a statement outside the view still says so.
+        let program = workspace.program.text().replace(
+            "  remember in folder",
+            "  learn questions from folder \"people\" {\n    sample by time\n  }\n\n  remember in folder",
+        );
+        let plan = plan_workspace_program(&workspace, &program).unwrap();
+        assert!(plan
+            .actions
+            .iter()
+            .any(|action| matches!(action, WorkspacePlanAction::UpdateProgram { .. })));
     }
 
     #[test]
