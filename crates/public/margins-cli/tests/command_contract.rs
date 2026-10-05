@@ -2516,13 +2516,16 @@ fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only()
     assert!(stdout.contains("contiguous, verbatim phrase"));
     assert!(stdout.contains("one universal discovery question"));
     assert!(stdout.contains("universal pause."));
-    assert!(stdout.contains("Do not ask the user to design `[policy].entities`"));
+    assert!(stdout.contains("Do not ask the user to design readings"));
     assert!(stdout.contains("Never declare setup complete while"));
-    assert!(stdout.contains("Use exactly the spellings surfaced by scan"));
+    assert!(stdout.contains("Translate the scan spellings exactly"));
     assert!(stdout.contains("folder:<path>"));
-    assert!(stdout.contains("`[policy].entities`"));
-    assert!(stdout.contains("profile = \"relational\""));
-    assert!(stdout.contains("expandable = true"));
+    assert!(stdout.contains("`learn questions from …` reading"));
+    assert!(stdout.contains("    about relational"));
+    assert!(stdout.contains("    including linked pages"));
+    assert!(stdout.contains("remember in folder \"inbox\" create note"));
+    assert!(stdout.contains("/tmp/margins-workspace-desired.enzyme"));
+    assert!(!stdout.contains("desired-state TOML"));
     for field in [
         "summary",
         "instructions",
@@ -2578,7 +2581,7 @@ fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only()
     assert!(normalized_guide.contains("`entity_curation_candidates[].spec`"));
     assert!(normalized_guide.contains("`entity_curation_candidates[].expansion`"));
     assert!(normalized_guide
-        .contains("`expands_automatically = true` means `expandable = true` is redundant"));
+        .contains("`expands_automatically = true` means `including linked pages` is redundant"));
     assert!(
         normalized_guide.contains("`mode = \"explicit_available\"` means real child pages exist")
     );

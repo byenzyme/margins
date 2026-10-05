@@ -485,6 +485,45 @@ impl MarkdownFolderEntityIndex {
     }
 }
 
+/// Interim adapter until the engine reads the Workspace program directly: with
+/// several Markdown sources, program folder readings are root-qualified
+/// (`folder:<source>/<path>`). Map a Home-qualified folder to the Home scan
+/// spec and another root's folder to its indexed identity.
+fn engine_folder_ref(workspace: &ResolvedWorkspace, entity: &str) -> Result<String> {
+    let markdown = workspace
+        .config
+        .bindings
+        .iter()
+        .filter_map(|(name, binding)| match binding {
+            WorkspaceBinding::NativeMarkdown { path, role, .. } => Some((name, path, *role)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(folder) = prefixed_entity_name(entity, "folder:") else {
+        return Ok(entity.to_string());
+    };
+    if markdown.len() < 2 {
+        return Ok(entity.to_string());
+    }
+    let (root, rest) = folder.split_once('/').unwrap_or((folder.as_str(), "."));
+    let Some((_, path, role)) = markdown
+        .iter()
+        .find(|(name, _, _)| name.eq_ignore_ascii_case(root))
+    else {
+        return Ok(entity.to_string());
+    };
+    if *role == SourceRole::Home {
+        return Ok(format!("folder:{rest}"));
+    }
+    Ok(format!(
+        "folder:{}",
+        folder_identity(
+            &native_markdown_collection_namespace(path)?,
+            &rest.to_ascii_lowercase()
+        )
+    ))
+}
+
 fn folder_identity(source_prefix: &str, folder_name: &str) -> String {
     match (source_prefix.is_empty(), folder_name == ".") {
         (true, true) => ".".to_string(),
@@ -556,7 +595,7 @@ fn catalyst_entity_policy(
         for configured in &workspace.config.policy.entities {
             for (entity, options) in configured.entries() {
                 push_entity(
-                    entity.to_string(),
+                    engine_folder_ref(workspace, entity)?,
                     options.cloned(),
                     None,
                     &excluded,
