@@ -28,6 +28,7 @@ DOCUMENTED_PERSONAL_PATH_PATHS = set(
 )
 RULE_PATHS = {name: set(paths) for name, paths in CONFIG.get("rule_paths", {}).items()}
 SECRET_RULES = set(RULES) - {"email-address", "personal-macos-path", "personal-linux-path"}
+PERSONAL_PATH_RULES = {"personal-macos-path", "personal-linux-path"}
 
 
 def git(*args: str) -> bytes:
@@ -144,6 +145,11 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", help="machine-readable report")
     parser.add_argument("--fail-on-review", action="store_true", help="fail if any hit needs review")
     parser.add_argument("--fail-on-secret", action="store_true", help="fail on an unreviewed secret-shaped hit")
+    parser.add_argument(
+        "--fail-on-personal",
+        action="store_true",
+        help="fail on an unreviewed personal-path hit",
+    )
     args = parser.parse_args()
     try:
         if args.revision_range:
@@ -173,7 +179,13 @@ def main() -> int:
                 where = f"{hit['commit'][:12]} {where}"
             print(f"  {where} {hit['rule']} [{hit['disposition']}]")
     unreviewed = [hit for hit in hits if hit["disposition"] == "review"]
-    return int(args.fail_on_review and unreviewed or args.fail_on_secret and any(hit["rule"] in SECRET_RULES for hit in unreviewed))
+    return int(
+        args.fail_on_review and unreviewed
+        or args.fail_on_secret
+        and any(hit["rule"] in SECRET_RULES for hit in unreviewed)
+        or args.fail_on_personal
+        and any(hit["rule"] in PERSONAL_PATH_RULES for hit in unreviewed)
+    )
 
 
 if __name__ == "__main__":

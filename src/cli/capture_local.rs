@@ -752,7 +752,8 @@ mod startup_tests {
         });
         assert_eq!(clock.lock().unwrap().generation, 1);
         for _ in 0..60 {
-            mic.samples(100, vec![0.25; 100], Vec::new()).unwrap();
+            mic.write_test_samples(100, vec![0.25; 100], Vec::new())
+                .unwrap();
         }
         mic.retire().unwrap();
         writer.seal_at(6_000).unwrap();

@@ -14,6 +14,7 @@ RUN_LIVE=1
 KEEP_RUNROOT="${KEEP_MARGINS_CORE_PRODUCT_SMOKE:-0}"
 TITLE="core-product-smoke"
 INTERNAL_FOCUSED_TESTS=0
+OFFICIAL_MACOS_FEATURES="audio-capture,coreml-asr,polyvoice-coreml,recall,recall-local-model"
 
 usage() {
   cat <<'EOF'
@@ -87,8 +88,9 @@ case "$DURATION_SECS" in
 esac
 
 [ -x "$CARGO_LANE" ] || die "missing executable cargo lane wrapper: $CARGO_LANE"
-if [ "$RUN_BUILD" = "1" ] && [ "${MARGINS_PRIVATE_RECALL_ACTIVE:-}" != "1" ]; then
-  die "release build requires scripts/with-private-recall"
+if { [ "$RUN_BUILD" = "1" ] || [ "$RUN_TESTS" = "1" ]; } \
+    && [ "${MARGINS_PRIVATE_RECALL_ACTIVE:-}" != "1" ]; then
+  die "release build and private tests require scripts/with-private-recall"
 fi
 
 run_logged() {
@@ -179,11 +181,17 @@ run_focused_tests() {
     --no-default-features --features audio-capture,coreml-asr tui::tests::
 
   printf '\n== private production composition ==\n'
-  cargo test -p margins --test private_cli_composition production_
+  cargo test -p margins --test private_cli_composition \
+    --no-default-features --features "$OFFICIAL_MACOS_FEATURES" production_
 
   printf '\n== packaged native composition ==\n'
   cargo test -p margins --test private_cli_composition \
+    --no-default-features --features "$OFFICIAL_MACOS_FEATURES" \
     packaged_binary_reports_private_native_composition
+
+  printf '\n== private recall integration ==\n'
+  cargo test -p margins --test recall_index_process \
+    --no-default-features --features "$OFFICIAL_MACOS_FEATURES"
 }
 
 run_live_smoke() {
@@ -478,7 +486,7 @@ if [ "$RUN_BUILD" = "1" ]; then
   run_logged "10-build-release-margins-private" \
     "$CARGO_LANE" shared -- cargo build --release --bin margins-private \
     --no-default-features \
-    --features audio-capture,coreml-asr,polyvoice-coreml,recall,recall-local-model
+    --features "$OFFICIAL_MACOS_FEATURES"
 fi
 
 BINARY="$(binary_path)"

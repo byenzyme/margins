@@ -26,6 +26,7 @@ ROOT_PACKAGES = {
     "margins-workflows",
 }
 SERVER_MANIFEST = ROOT / "crates/public/margins-server/Cargo.toml"
+OFFICIAL_MACOS_FEATURES = "audio-capture,coreml-asr,polyvoice-coreml,recall,recall-local-model"
 if SERVER_MANIFEST.exists():
     ROOT_PACKAGES.add("margins-server")
 # Direct workspace dependency edges, reversed from the Cargo manifests. Quick
@@ -209,7 +210,15 @@ def linux(gate: Gate) -> None:
 
 
 def public(gate: Gate) -> None:
-    gate.run("scan public tree for secrets and personal data", [sys.executable, "scripts/scan-public-history.py", "--fail-on-secret"])
+    gate.run(
+        "scan public tree for secrets and personal data",
+        [
+            sys.executable,
+            "scripts/scan-public-history.py",
+            "--fail-on-secret",
+            "--fail-on-personal",
+        ],
+    )
     gate.cargo(
         "build and test workspace without private recall engine",
         "test", "--workspace", "--all-targets", "--no-default-features", "--locked",
@@ -223,7 +232,7 @@ def macos(gate: Gate) -> None:
         "build private release CLI",
         "build", "--release", "-p", "margins", "--bin", "margins-private", "--locked",
         "--no-default-features", "--features",
-        "audio-capture,coreml-asr,polyvoice-coreml,recall,recall-local-model",
+        OFFICIAL_MACOS_FEATURES,
     )
     gate.cargo(
         "build public workspace targets",
@@ -231,7 +240,13 @@ def macos(gate: Gate) -> None:
     )
     gate.cargo(
         "private composition, audio capture, CoreML, and recall integration",
-        "test", "-p", "margins", "--locked",
+        "test", "-p", "margins", "--locked", "--no-default-features", "--features",
+        OFFICIAL_MACOS_FEATURES,
+    )
+    gate.cargo(
+        "assert recall integration tests execute",
+        "test", "-p", "margins", "--test", "recall_index_process", "--locked",
+        "--no-default-features", "--features", OFFICIAL_MACOS_FEATURES,
     )
     gate.cargo(
         "public workspace tests",

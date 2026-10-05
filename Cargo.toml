@@ -45,6 +45,11 @@ path = "src/lib.rs"
 name = "margins-private"
 path = "src/main.rs"
 
+[[test]]
+name = "recall_index_process"
+path = "tests/recall_index_process.rs"
+required-features = ["recall"]
+
 [features]
 default = ["audio-capture"]
 audio-capture = ["margins-capture/audio-capture"]
@@ -94,5 +99,6 @@ uuid = { version = "1", features = ["v4"] }
 [dev-dependencies]
 ctor = "0.2.9"
 hound = "3.5"
+margins-capture = { path = "crates/public/margins-capture", features = ["test-support"] }
 margins-workflows = { path = "crates/public/margins-workflows", features = ["test-support"] }
 margins-meeting-runtime = { path = "crates/public/margins-meeting-runtime", features = ["test-support"] }

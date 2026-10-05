@@ -321,6 +321,17 @@ impl CaptureSink {
         self.write(source_rate, samples, packets)
     }
 
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn write_test_samples(
+        &self,
+        source_rate: u32,
+        samples: Vec<f32>,
+        packets: Vec<PacketDesc>,
+    ) -> Result<()> {
+        self.samples(source_rate, samples, packets)
+    }
+
     pub fn retire(&self) -> Result<RetireAck> {
         let (tx, rx) = mpsc::channel();
         self.sender

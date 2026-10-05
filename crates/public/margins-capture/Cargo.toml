@@ -14,6 +14,7 @@ coreml-asr = ["margins-media/coreml-asr", "margins-media/model-download", "dep:t
 parakeet-asr = ["margins-media/parakeet-onnx", "margins-media/model-download"]
 polyvoice-diarization = ["margins-media/polyvoice-diarization"]
 polyvoice-coreml = ["polyvoice-diarization", "margins-media/polyvoice-coreml"]
+test-support = []
 
 [dependencies]
 anyhow = "1"

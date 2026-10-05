@@ -27,6 +27,9 @@ literal:/Users/example/==>/Users/example/
 literal:/home/example/==>/home/example/
 ```
 
+Because this runbook contains the literal expressions, `--replace-text` also
+rewrites the two lines above in replayed history; that self rewrite is expected.
+
 These are the only real personal home prefixes found. Paths such as
 `/Users/alice/` and `/Users/me/` are deliberate examples and fixtures.
 
