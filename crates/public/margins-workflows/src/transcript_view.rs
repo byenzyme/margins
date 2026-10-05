@@ -679,7 +679,7 @@ fn final_transcript_current(
 ) -> bool {
     let Some(meta) = meta else { return false };
     if let Some(recorded) = coverage {
-        return canonical::transcript_coverage(&meta.segments) == Some(recorded);
+        return canonical::transcript_coverage_matches(&meta.segments, recorded);
     }
     if meta
         .segments
