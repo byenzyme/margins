@@ -1,3 +1,5 @@
+    include!("live_asr_catch_up_tests.rs");
+
     #[test]
     fn checkpoint_replace_is_atomic_and_does_not_follow_symlinks() {
         let root = tempfile::tempdir().unwrap();
@@ -18,13 +20,6 @@
                 .unwrap(),
             value
         );
-    }
-
-    #[test]
-    fn recorder_generation_gaps_preserve_the_session_timeline() {
-        assert_eq!(timeline_gap_samples(12_000, 10_000, 1_500), 8_000);
-        assert_eq!(timeline_gap_samples(12_000, 10_000, 2_000), 0);
-        assert_eq!(timeline_gap_samples(9_000, 10_000, 0), 0);
     }
 
     #[test]
@@ -59,7 +54,8 @@
             crate::app::LIVE_TRANSCRIPTION_WARMING,
         ));
         let started = std::time::Instant::now();
-        let worker = super::LiveTranscriptWorker::start(checkpoint.clone(), 4_250, status.clone())
+        let worker =
+            super::LiveTranscriptWorker::start(checkpoint.clone(), 4_250, status.clone(), None)
             .unwrap()
             .expect("local CoreML models are required for this smoke test");
         assert!(
@@ -80,6 +76,8 @@
                 generation: sink.generation,
                 session_offset_ms: 4_250,
                 sample_rate: 16_000,
+                start_frame: 0,
+                synthesized: false,
                 samples,
             })
             .unwrap();

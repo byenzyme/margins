@@ -84,6 +84,12 @@ pub struct LiveAudioChunk {
     /// Wall-clock position of this generation on the capture session timeline.
     pub session_offset_ms: u64,
     pub sample_rate: u32,
+    /// Position of the first sample in this generation's lane spool, in
+    /// `sample_rate` frames. Durable runtime audio uses the same frame axis.
+    pub start_frame: u64,
+    /// Silence substituted for real audio that missed the bounded live queue.
+    /// The durable runtime still holds the real audio for this span.
+    pub synthesized: bool,
     pub samples: Vec<f32>,
 }
 
@@ -1775,6 +1781,8 @@ fn drain_available_samples(
                     generation: tx.generation,
                     session_offset_ms: generation_clock.session_offset_ms,
                     sample_rate,
+                    start_frame: *samples_written - sample_count,
+                    synthesized: false,
                     samples: chunk,
                 };
                 match tx.sender.send(chunk) {

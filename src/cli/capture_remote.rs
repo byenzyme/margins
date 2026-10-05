@@ -378,6 +378,8 @@ fn run_remote_native_capture(
         checkpoint_path.clone(),
         initial_offset_ms,
         live_status.clone(),
+        // Remote capture keeps no local durable runtime audio to catch up from.
+        None,
     );
     let checkpoint_publisher = if live.is_some() {
         let client = connection.client.clone();
