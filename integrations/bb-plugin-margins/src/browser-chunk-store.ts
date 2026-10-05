@@ -1,7 +1,8 @@
 import type { WebChunkTiming } from "../../../desktop/src/lib/web-durable-upload.js";
 
 const DB_NAME = "margins.bb.browser-chunks";
-const DB_VERSION = 1;
+// v2 adds the [storedAtMs, size] index to stores created by v1.
+const DB_VERSION = 2;
 const STORE = "chunks";
 /** [storedAtMs, size] lets the sweep and budget accounting walk keys only,
  * without reading retained audio into memory. */
@@ -243,6 +244,18 @@ export class BrowserChunkStore {
             ? request.transaction!.objectStore(STORE)
             : request.result.createObjectStore(STORE, { keyPath: ["sessionId", "sequence"] });
           if (!store.indexNames.contains(META_INDEX)) store.createIndex(META_INDEX, ["storedAtMs", "size"]);
+          // v1 entries carry no size, so the index would never sweep them.
+          const backfill = store.openCursor();
+          backfill.onsuccess = () => {
+            const cursor = backfill.result;
+            if (!cursor) return;
+            const value = cursor.value as Partial<PersistedChunk> & { size?: unknown };
+            if (typeof value.size !== "number") {
+              if (isPersistedChunk(value)) cursor.update({ ...value, size: value.bytes.byteLength });
+              else cursor.delete();
+            }
+            cursor.continue();
+          };
         };
         request.onsuccess = () => {
           const db = request.result;

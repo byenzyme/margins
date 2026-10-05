@@ -24,11 +24,12 @@ function uploadedBody(options: RequestInit) {
 }
 
 const refused = () => new Response(JSON.stringify({ ok: false, error: {
-  code: "sequence_conflict", message: "audio upload failed (409): lane sequence is already declared discontinuous", retryable: false,
+  code: "browser_chunk_conflict", message: "audio upload failed (409): Browser audio sequence is already durable with different content", retryable: false,
 } }), { status: 502, headers: { "content-type": "application/json" } });
 const unavailable = () => new Response(JSON.stringify({ ok: false, error: {
-  code: "audio_upload_failed", message: "audio upload failed (503)", retryable: true,
+  code: "chunk_not_acknowledged", message: "audio upload failed (409): Browser audio chunk was not durably acknowledged", retryable: true,
 } }), { status: 502, headers: { "content-type": "application/json" } });
+const unreachable = () => Promise.reject(new TypeError("Failed to fetch"));
 const chunkTiming = (sequence: number) => ({ capturedStartUnixMs: 1_000 + sequence * 3_000, capturedEndUnixMs: 4_000 + sequence * 3_000 });
 
 async function seed(store: BrowserChunkStore, sessionId: string, sequences: number[]) {
@@ -240,8 +241,8 @@ describe("browser capture chunk persistence", () => {
     await seed(new BrowserChunkStore(() => factory), "rec-1", [1, 2, 3]);
     sessionStorage.setItem(CAPTURE_KEY, JSON.stringify({ sessionId: "rec-1", startedAtMs: 1_000,
       nextSequence: 1, expectedNextSequence: 4, paused: false }));
-    // Page 2: sequence 2 keeps failing transiently, so 2 and 3 stay retained
-    // through the flush and the rotation declares them missing.
+    // Page 2: the server keeps answering sequence 2 with a retryable error.
+    // It is retained, 3 still lands, and the rotation declares 2 missing.
     const order: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (_url: string, options: RequestInit) => {
       const { sequence } = uploadedBody(options);
@@ -254,7 +255,7 @@ describe("browser capture chunk persistence", () => {
     const second = media();
     const page2 = owner(recoveringRpc(order, 4), page2Store, second.recorder, second.stream);
     await vi.waitFor(() => expect(page2.owner.active).toBe(true));
-    expect(order).toEqual(["readCapture", "upload-1", "upload-2", "upload-2", "pause", "resume"]);
+    expect(order).toEqual(["readCapture", "upload-1", "upload-2", "upload-2", "upload-3", "pause", "resume"]);
     await vi.waitFor(async () => expect(await page2Store.sequences("rec-1")).toEqual([]));
     // A new chunk is in flight when the page reloads again.
     second.recorder.ondataavailable?.({ data: new Blob(["chunk-4"]) } as BlobEvent);
@@ -319,7 +320,24 @@ describe("browser capture chunk persistence", () => {
     expect(rpc).not.toHaveBeenCalled();
   });
 
-  it("bounds Stop retries while persisted audio cannot be uploaded, then offers Finish", async () => {
+  it("stops a flush when the server is unreachable and keeps every later chunk", async () => {
+    const factory = new IDBFactory();
+    await seed(new BrowserChunkStore(() => factory), "rec-1", [3, 4]);
+    pendingStop({ expectedNextSequence: 5 });
+    const uploads: number[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, options: RequestInit) => {
+      uploads.push(uploadedBody(options).sequence);
+      return unreachable();
+    }));
+    const store = new BrowserChunkStore(() => factory);
+    const { recorder, stream } = media();
+    const page = owner(vi.fn(async () => state({}) as never) as unknown as BrowserCaptureDependencies["rpc"], store, recorder, stream);
+    await vi.waitFor(() => expect(page.owner.panel()).toMatchObject({ primaryAction: "retry" }));
+    expect(uploads).toEqual([3, 3]);
+    expect(await store.sequences("rec-1")).toEqual([3, 4]);
+  });
+
+  it("bounds user Stop retries while persisted audio cannot be uploaded, then offers Finish", async () => {
     const factory = new IDBFactory();
     await seed(new BrowserChunkStore(() => factory), "rec-1", [3]);
     pendingStop();
@@ -328,14 +346,48 @@ describe("browser capture chunk persistence", () => {
     const store = new BrowserChunkStore(() => factory);
     const { recorder, stream } = media();
     const page = owner(rpc, store, recorder, stream);
+    // The automatic attempt on reload does not count.
     await vi.waitFor(() => expect(page.owner.panel()).toMatchObject({ primaryAction: "retry" }));
-    expect(page.owner.canFinishIncomplete).toBe(false);
     await page.owner.retryPendingStop();
+    await page.owner.retryPendingStop();
+    expect(page.owner.canFinishIncomplete).toBe(false);
     expect(page.owner.panel()).toMatchObject({ primaryAction: "retry" });
     await page.owner.retryPendingStop();
     expect(page.owner.canFinishIncomplete).toBe(true);
     expect(page.owner.panel()).toMatchObject({ primaryAction: "finish_incomplete" });
+    expect(await store.sequences("rec-1")).toEqual([3]);
     expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it("does not count reload recoveries and resets the count when retained audio lands", async () => {
+    const factory = new IDBFactory();
+    await seed(new BrowserChunkStore(() => factory), "rec-1", [3, 4]);
+    pendingStop({ expectedNextSequence: 5, persistedDeliveryFailures: 2 });
+    let reachable = false;
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, options: RequestInit) => {
+      if (!reachable) return unreachable();
+      return uploadedBody(options).sequence === 3 ? ok() : unavailable();
+    }));
+    const rpc = vi.fn(async () => state({}) as never) as unknown as BrowserCaptureDependencies["rpc"];
+    // Three reloads while the server is down leave Stop retryable.
+    for (let reload = 0; reload < 3; reload += 1) {
+      const { recorder, stream } = media();
+      const page = owner(rpc, new BrowserChunkStore(() => factory), recorder, stream);
+      await vi.waitFor(() => expect(page.owner.panel()).toMatchObject({ primaryAction: "retry" }));
+      expect(page.owner.canFinishIncomplete).toBe(false);
+      page.uninstall();
+    }
+    expect(JSON.parse(sessionStorage.getItem(CAPTURE_KEY)!)).toMatchObject({ persistedDeliveryFailures: 2 });
+    // Recovery delivers sequence 3, which resets the count; the user's next
+    // retry with 4 still retained counts once, so Finish is not offered yet.
+    reachable = true;
+    const { recorder, stream } = media();
+    const page = owner(rpc, new BrowserChunkStore(() => factory), recorder, stream);
+    await vi.waitFor(() => expect(page.owner.panel()).toMatchObject({ primaryAction: "retry" }));
+    await page.owner.retryPendingStop();
+    expect(JSON.parse(sessionStorage.getItem(CAPTURE_KEY)!)).toMatchObject({ persistedDeliveryFailures: 1 });
+    expect(page.owner.canFinishIncomplete).toBe(false);
+    expect(page.owner.panel()).toMatchObject({ primaryAction: "retry" });
   });
 
   it("clears retained audio when a meeting is discarded and sweeps abandoned audio on page load", async () => {

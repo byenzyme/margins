@@ -166,26 +166,46 @@ describe("ProjectServerManager remote adapter", () => {
       ["https://margins.example.test/v1/workspaces/practice/sessions/meeting-1", "DELETE"],
     ]);
   });
-  it("marks a chunk the server refused as non-retryable and transport failures as retryable", async () => {
+  it.each([
+    [409, "browser_chunk_conflict", false, false],
+    [409, "browser_lease_expired", false, false],
+    [409, "browser_already_saved", false, false],
+    [422, "invalid_chunk_time", false, false],
+    [409, "browser_chunk_gap", true, true],
+    [409, "chunk_not_acknowledged", true, true],
+    // service_error's catch-all marks everything non-retryable, including a
+    // transient "database is locked"; it says nothing about the chunk.
+    [422, "invalid_request", false, true],
+    [409, "conflict", false, true],
+    [401, "unauthorized", false, true],
+    [403, "forbidden", false, true],
+    [401, "owner_required", false, true],
+    [400, "some_future_code", true, true],
+  ])("reports a %i %s chunk verdict (server retryable %s) as retryable=%s", async (status, code, serverRetryable, retryable) => {
     const manager = { ensure: vi.fn(async () => ({ baseUrl: "http://127.0.0.1:8787", token: "service-token",
       workspaceId: "practice", instanceId: "instance-1" })) } as unknown as ProjectServerManager;
-    const responses = [
-      new Response(JSON.stringify({ ok: false, error: { code: "browser_chunk_conflict", retryable: false,
-        message: "Browser audio sequence is already durable with different content" } }), { status: 409 }),
-      new Response(JSON.stringify({ ok: false, error: { code: "browser_chunk_gap", retryable: true,
-        message: "Missing browser audio sequence 0; retry the chunk before Stop." } }), { status: 409 }),
-      new Response("upstream down", { status: 503 }),
-    ];
-    vi.stubGlobal("fetch", vi.fn(async () => responses.shift()!));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: false, error: {
+      code, retryable: serverRetryable, message: "server detail" } }), { status })));
     const transport = new ProjectMarginsTransport(manager);
     const target = { projectId: "project", projectRoot: "/tmp/project", hostId: "host", workspaceId: "practice" };
-    const upload = () => transport.upload(target, "/tmp/data", "recording", "owner", 2, "YQ==", 8_000, 9_000);
-    await expect(upload()).resolves.toEqual({ ok: false, error: { code: "browser_chunk_conflict", retryable: false,
-      message: "audio upload failed (409): Browser audio sequence is already durable with different content" } });
-    // A chunk below a closed boundary can never land, whatever the code says.
-    await expect(upload()).resolves.toMatchObject({ ok: false, error: { code: "browser_chunk_gap", retryable: false } });
-    await expect(upload()).resolves.toEqual({ ok: false, error: { code: "audio_upload_failed", retryable: true,
-      message: "audio upload failed (503)" } });
+    await expect(transport.upload(target, "/tmp/data", "recording", "owner", 2, "YQ==", 8_000, 9_000))
+      .resolves.toEqual({ ok: false, error: { code, retryable, message: `audio upload failed (${status}): server detail` } });
+  });
+  it("keeps chunks retryable when the server's answer is unstructured or unreachable", async () => {
+    const manager = { ensure: vi.fn(async () => ({ baseUrl: "http://127.0.0.1:8787", token: "service-token",
+      workspaceId: "practice", instanceId: "instance-1" })) } as unknown as ProjectServerManager;
+    const responses: Array<() => Response> = [
+      () => new Response("upstream down", { status: 503 }),
+      () => new Response("<html>bad gateway</html>", { status: 404 }),
+      () => { throw new TypeError("fetch failed"); },
+    ];
+    vi.stubGlobal("fetch", vi.fn(async () => responses.shift()!()));
+    const transport = new ProjectMarginsTransport(manager);
+    const target = { projectId: "project", projectRoot: "/tmp/project", hostId: "host", workspaceId: "practice" };
+    for (let index = 0; index < 3; index += 1) {
+      await expect(transport.upload(target, "/tmp/data", "recording", "owner", 2, "YQ==", 8_000, 9_000))
+        .resolves.toMatchObject({ ok: false, error: { retryable: true } });
+    }
   });
   it("forwards capture upload through the selected Workspace service only", async () => {
     const manager = { ensure: vi.fn(async () => ({ baseUrl: "http://127.0.0.1:8787", token: "service-token",

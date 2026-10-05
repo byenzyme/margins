@@ -34068,6 +34068,22 @@ async function verifyServerCompatibility(baseUrl, token, workspaceId, signal) {
 function hostError(code, message, retryable = true) {
   return { code, message, retryable };
 }
+var PERMANENT_CHUNK_CODES = /* @__PURE__ */ new Set(["browser_chunk_conflict", "browser_lease_expired", "browser_already_saved"]);
+var GENERIC_SERVICE_CODES = /* @__PURE__ */ new Set([
+  "invalid_request",
+  "conflict",
+  "forbidden",
+  "unauthorized",
+  "not_found",
+  "too_large",
+  "capability_unavailable",
+  "owner_required"
+]);
+function chunkPermanentlyRefused(status, code, retryable) {
+  if (PERMANENT_CHUNK_CODES.has(code)) return true;
+  if (status === 401 || status === 403 || GENERIC_SERVICE_CODES.has(code)) return false;
+  return retryable === false;
+}
 var WorkspaceRequestError = class extends Error {
   constructor(code, message, retryable) {
     super(message);
@@ -34637,11 +34653,11 @@ var ProjectMarginsTransport = class {
       if (!response.ok || !value?.ok) {
         const structured = typeof value?.error === "object" ? value.error : void 0;
         const detail = typeof value?.error === "string" ? value.error : structured?.message;
-        const permanent = response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429;
+        const code = structured?.code || "audio_upload_failed";
         return { ok: false, error: hostError(
-          structured?.code || "audio_upload_failed",
+          code,
           detail ? `audio upload failed (${response.status}): ${detail}` : `audio upload failed (${response.status})`,
-          !permanent
+          !chunkPermanentlyRefused(response.status, code, structured?.retryable)
         ) };
       }
       return { ok: true };

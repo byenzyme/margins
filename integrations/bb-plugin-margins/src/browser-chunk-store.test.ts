@@ -109,11 +109,32 @@ describe("browser chunk store", () => {
     // A newer page version bumps the schema; this page must not hang or
     // silently lose writes against a closed connection.
     await new Promise<void>((resolve, reject) => {
-      const request = factory.open("margins.bb.browser-chunks", 2);
+      const request = factory.open("margins.bb.browser-chunks", 3);
       request.onsuccess = () => { request.result.close(); resolve(); };
       request.onerror = () => reject(request.error);
     });
     expect(await store.persist("rec-1", 1, new Blob(["b"]), timing(1))).toBe(false);
     expect(await store.sequences("rec-1")).toEqual([]);
+  });
+
+  it("upgrades a v1 database, indexing and sweeping its entries", async () => {
+    const factory = new IDBFactory();
+    // The shape the first version of this store wrote: no index, no size.
+    await new Promise<void>((resolve, reject) => {
+      const request = factory.open("margins.bb.browser-chunks", 1);
+      request.onupgradeneeded = () => {
+        const store = request.result.createObjectStore("chunks", { keyPath: ["sessionId", "sequence"] });
+        store.put({ sessionId: "old", sequence: 0, bytes: new TextEncoder().encode("stale").buffer, timing: timing(0), storedAtMs: 1_000 });
+        store.put({ sessionId: "kept", sequence: 0, bytes: new TextEncoder().encode("fresh").buffer, timing: timing(0), storedAtMs: 50_000 });
+      };
+      request.onsuccess = () => { request.result.close(); resolve(); };
+      request.onerror = () => reject(request.error);
+    });
+    const store = new BrowserChunkStore(() => factory, { maxAgeMs: 10_000, now: () => 55_000, maxBytes: 8 });
+    await store.sweep();
+    expect(await store.sequences("old")).toEqual([]);
+    expect(text((await store.get("kept", 0))!.bytes)).toBe("fresh");
+    // The upgraded entry counts toward its recording's budget.
+    expect(await store.persist("kept", 1, new Blob(["1234"]), timing(1))).toBe(false);
   });
 });
