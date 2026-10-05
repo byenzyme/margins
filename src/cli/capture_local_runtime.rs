@@ -56,10 +56,16 @@ impl SessionOwnerLock {
             .read(true)
             .write(true)
             .open(dir.join(format!("{session_id}.capture.lock")))?;
-        if !file.try_lock_exclusive()? {
-            bail!(
-                "Session '{session_id}' is already recording in another process. Close that recorder before running margins attach."
-            );
+        // A transcript reader can briefly hold a shared probe lock. Give it
+        // time to finish before deciding that another recorder owns the session.
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while !file.try_lock_exclusive()? {
+            if Instant::now() >= deadline {
+                bail!(
+                    "Session '{session_id}' is already recording in another process. Close that recorder before running margins attach."
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
         Ok(Self {
             session_id: session_id.to_owned(),
@@ -1066,6 +1072,24 @@ mod tests {
         )
         .unwrap();
         assert!(!resumed.recover_pending_segment(0, 0).unwrap());
+    }
+
+    #[test]
+    fn local_owner_retries_a_short_transcript_reader_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("read.capture.lock");
+        let reader = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .unwrap();
+        assert!(FileExt::try_lock_shared(&reader).unwrap());
+        let path = dir.path().to_path_buf();
+        let recorder = std::thread::spawn(move || SessionOwnerLock::acquire(&path, "read"));
+        std::thread::sleep(Duration::from_millis(80));
+        drop(reader);
+        assert_eq!(recorder.join().unwrap().unwrap().session_id, "read");
     }
 
     #[test]

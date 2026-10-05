@@ -37,6 +37,18 @@
         assert_eq!(queued.load(std::sync::atomic::Ordering::Acquire), 0);
     }
 
+    #[test]
+    fn live_queue_budget_uses_native_rate_for_both_lanes() {
+        assert!(LIVE_QUEUE_MAX_SAMPLES >= 96_000 * 2 * 30);
+    }
+
+    #[test]
+    fn dropped_or_short_live_audio_cannot_be_terminal() {
+        assert!(live_checkpoint_complete(60_000, 60_000, 0));
+        assert!(!live_checkpoint_complete(60_000, 11, 0));
+        assert!(!live_checkpoint_complete(60_000, 60_000, 1));
+    }
+
     #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
     #[test]
     #[ignore = "requires local FluidAudio CoreML assets"]

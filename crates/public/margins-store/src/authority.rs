@@ -1,10 +1,10 @@
 use crate::canonical;
 use anyhow::{bail, Context, Result};
 use margins_core::{MemoMoment, TimedMemoDocument, TimedMemoLine};
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{error::Error, fmt};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -528,6 +528,36 @@ impl SqliteWorkspaceAuthorityStorage {
             .query_map([], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<String>>>()?;
         Ok(sessions)
+    }
+
+    /// The CLI uses the same producer state as WorkspaceService without
+    /// creating authority tables during a transcript read.
+    pub fn session_producer_state_read_only(
+        directory: &Path,
+        session_id: &str,
+    ) -> Result<Option<String>> {
+        let path = canonical::database_path(directory);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.busy_timeout(Duration::from_secs(5))?;
+        let has_table: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspace_session_producers')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_table {
+            return Ok(None);
+        }
+        connection
+            .query_row(
+                "SELECT state FROM workspace_session_producers WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn memo(&self, session_id: &str) -> Result<AuthorityMemoReceipt> {

@@ -4,18 +4,20 @@ use crate::alignment::render_aligned_markdown;
 use crate::transcript_view::transcript_artifact_path;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Local};
+use fs4::fs_std::FileExt;
 use margins_core::{AsrBackend, AsrRequest, DiarizationBackend, DiarizationRequest, SpeakerId};
 use margins_media::audio::{
     downmix_to_mono, extract_channel, load_audio_any, resample_mono_linear, write_interleaved_wav,
     AudioBuffer,
 };
 use margins_media::transcript::{transcript_json, TranscriptWordEntry};
-use margins_store::canonical::{self, SESSION_ARTIFACT_KIND_TRANSCRIPT};
+use margins_store::canonical::{self, TranscriptCoverage};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap};
 use std::io::Write;
 use std::path::Component;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 #[derive(Debug, Clone)]
 pub struct ProcessRequest<'a> {
@@ -98,6 +100,41 @@ pub fn process_session(
     if meta.segments.is_empty() {
         bail!("Session '{}' has no audio segments.", request.session_name);
     }
+    let coverage =
+        canonical::transcript_coverage(&meta.segments).context("session has no audio segments")?;
+    let unfinished = meta
+        .segments
+        .iter()
+        .filter(|segment| segment.duration_secs.is_none())
+        .collect::<Vec<_>>();
+    // An unfinished segment may be a crash remnant or one that is still being
+    // recorded. Hold the same local owner lock through registration, and honor
+    // the Workspace producer reservation for browser/native-bridge capture.
+    let _capture_owner = if unfinished.is_empty() {
+        None
+    } else {
+        if margins_store::SqliteWorkspaceAuthorityStorage::session_producer_state_read_only(
+            request.margins_dir,
+            request.session_name,
+        )?
+        .as_deref()
+            == Some("active")
+        {
+            bail!("session is still recording; finish capture before processing");
+        }
+        let path = request
+            .margins_dir
+            .join(format!("{}.capture.lock", request.session_name));
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        if !file.try_lock_exclusive()? {
+            bail!("session is still recording; finish capture before processing");
+        }
+        Some(file)
+    };
     // Validate metadata needed to render the result before invoking providers.
     // A malformed session must not replace an existing transcript JSON.
     let session_start = DateTime::parse_from_rfc3339(&meta.start_time)
@@ -107,6 +144,7 @@ pub fn process_session(
         .margins_dir
         .join(format!("{}_transcript.json", request.session_name));
     let mut entries = if request.align_only {
+        ensure_transcript_json_covers_segments(&transcript_path, &meta, coverage)?;
         read_transcript_entries(&transcript_path)?
     } else {
         Vec::new()
@@ -122,12 +160,6 @@ pub fn process_session(
             .iter()
             .filter(|segment| segment.duration_secs.is_some())
             .collect::<Vec<_>>();
-        if segments.is_empty() {
-            bail!(
-                "Session '{}' has no finished audio segments.",
-                request.session_name
-            );
-        }
         segments.sort_by_key(|segment| segment.segment_index);
         for segment in segments {
             let path = resolve_input_path(request.work_dir, &segment.wav_path);
@@ -158,13 +190,32 @@ pub fn process_session(
         entries.sort_by_key(|entry| (entry.start_ms, entry.channel));
         replace_file_atomically(
             &transcript_path,
-            serde_json::to_string_pretty(&transcript_json(&entries))?.as_bytes(),
+            serde_json::to_string_pretty(&transcript_json_with_coverage(&entries, coverage))?
+                .as_bytes(),
         )?;
     }
 
     let memo_path = resolve_input_path(request.work_dir, &meta.notes_path);
     let memo = std::fs::read_to_string(memo_path).unwrap_or_default();
-    let aligned = render_aligned_markdown(request.session_name, &session_start, &memo, &entries);
+    let mut aligned =
+        render_aligned_markdown(request.session_name, &session_start, &memo, &entries);
+    if !unfinished.is_empty() {
+        aligned.push_str("\n## Incomplete audio\n\n");
+        for segment in &unfinished {
+            aligned.push_str(&format!(
+                "- Segment {} began at {} ms but did not finish; its audio was skipped.\n",
+                segment.segment_index, segment.offset_ms
+            ));
+            canonical::record_processing_gap(
+                request.margins_dir,
+                request.session_name,
+                &format!("segment-{}", segment.segment_index),
+                0,
+                0,
+                "unfinished segment skipped during offline processing",
+            )?;
+        }
+    }
     let local_aligned_path = request
         .margins_dir
         .join(format!("{}_aligned.md", request.session_name));
@@ -176,18 +227,15 @@ pub fn process_session(
     std::fs::create_dir_all(aligned_path.parent().expect("aligned path has parent"))?;
     replace_file_atomically(&aligned_path, aligned.as_bytes())?;
     let local_registry_path = format!(".margins/{}_aligned.md", request.session_name);
-    canonical::upsert_session_artifact(
+    canonical::register_processed_transcript(
         request.margins_dir,
         request.session_name,
-        SESSION_ARTIFACT_KIND_TRANSCRIPT,
-        0,
         &crate::archive::aligned_registry_path(
             request.work_dir,
             request.session_name,
             &local_registry_path,
         ),
-        "durable",
-        None,
+        coverage,
     )?;
     Ok(ProcessResult {
         session_name: request.session_name.to_string(),
@@ -202,6 +250,69 @@ pub fn process_session(
             backends.into_iter().collect::<Vec<_>>().join(",")
         },
     })
+}
+
+fn transcript_json_with_coverage(
+    entries: &[TranscriptWordEntry],
+    coverage: TranscriptCoverage,
+) -> Value {
+    let mut value = transcript_json(entries);
+    value["input_segment_count"] = coverage.segment_count.into();
+    value["input_max_segment_index"] = coverage.max_segment_index.into();
+    value["covered_segment_count"] = coverage.finished_segment_count.into();
+    value["covered_until_ms"] = coverage.covered_until_ms.into();
+    value["finished_segment_count"] = coverage.finished_segment_count.into();
+    value
+}
+
+fn ensure_transcript_json_covers_segments(
+    path: &Path,
+    meta: &canonical::SessionMeta,
+    expected: TranscriptCoverage,
+) -> Result<()> {
+    let value: Value = serde_json::from_slice(&std::fs::read(path)?)?;
+    let count = value
+        .get("input_segment_count")
+        .or_else(|| value.get("covered_segment_count"))
+        .and_then(Value::as_i64);
+    let index = value
+        .get("input_max_segment_index")
+        .or_else(|| value.get("covered_max_segment_index"))
+        .and_then(Value::as_i64);
+    let end = value.get("covered_until_ms").and_then(Value::as_u64);
+    let finished = value
+        .get("finished_segment_count")
+        .and_then(Value::as_i64)
+        .or(count);
+    if let (Some(count), Some(index), Some(end), Some(finished)) = (count, index, end, finished) {
+        if (TranscriptCoverage {
+            segment_count: count,
+            max_segment_index: index,
+            covered_until_ms: end,
+            finished_segment_count: finished,
+        }) == expected
+        {
+            return Ok(());
+        }
+        bail!("transcript JSON predates newer audio; run margins process without --align-only");
+    }
+    // Older JSON has no coverage fields. Its modification time must be newer
+    // than every segment start before it can be safely realigned.
+    let modified_ns = std::fs::metadata(path)?
+        .modified()?
+        .duration_since(UNIX_EPOCH)?
+        .as_nanos();
+    if expected.finished_segment_count == expected.segment_count
+        && meta.segments.iter().all(|segment| {
+            DateTime::parse_from_rfc3339(&segment.started_at)
+                .ok()
+                .and_then(|started| started.timestamp_nanos_opt())
+                .is_some_and(|started_ns| modified_ns >= started_ns.max(0) as u128)
+        })
+    {
+        return Ok(());
+    }
+    bail!("transcript JSON may predate newer audio; run margins process without --align-only")
 }
 
 pub fn transcribe_audio(
@@ -269,7 +380,15 @@ pub fn transcribe_audio(
     }
     std::fs::write(
         &transcript_json_path,
-        serde_json::to_string_pretty(&transcript_json(&entries))?,
+        serde_json::to_string_pretty(&transcript_json_with_coverage(
+            &entries,
+            TranscriptCoverage {
+                segment_count: 1,
+                max_segment_index: 0,
+                covered_until_ms: (duration * 1_000.0).round() as u64,
+                finished_segment_count: 1,
+            },
+        ))?,
     )?;
     std::fs::create_dir_all(aligned_path.parent().expect("artifact path has parent"))?;
     std::fs::write(
@@ -282,14 +401,16 @@ pub fn transcribe_audio(
         ),
     )?;
     let local_registry_path = format!(".margins/artifacts/{name}/transcript.md");
-    canonical::upsert_session_artifact(
+    canonical::register_processed_transcript(
         request.margins_dir,
         &name,
-        SESSION_ARTIFACT_KIND_TRANSCRIPT,
-        0,
         &crate::archive::aligned_registry_path(request.work_dir, &name, &local_registry_path),
-        "durable",
-        None,
+        TranscriptCoverage {
+            segment_count: 1,
+            max_segment_index: 0,
+            covered_until_ms: (duration * 1_000.0).round() as u64,
+            finished_segment_count: 1,
+        },
     )?;
     Ok(TranscribeResult {
         session_name: name,

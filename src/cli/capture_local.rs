@@ -153,6 +153,12 @@ fn create_native_session(work_dir: &Path, title: Option<&str>) -> Result<()> {
         margins_store::SqliteWorkspaceAuthorityStorage::open(&margins_dir)?.memo(&name)?;
     app.observe_memo(observed.revision, observed.lines);
     app.live_transcription_status = live_status;
+    if let Some(worker) = &live {
+        (
+            app.live_mic_dropped_samples,
+            app.live_system_dropped_samples,
+        ) = worker.dropped_counters();
+    }
 
     let outcome = run_segment(
         &mut app,
@@ -165,7 +171,7 @@ fn create_native_session(work_dir: &Path, title: Option<&str>) -> Result<()> {
         Some(initial_input),
     )?;
     drop(owner);
-    complete_post_capture(outcome, Some(&name))
+    complete_post_capture(outcome, Some(&name), work_dir, &name)
 }
 
 #[cfg(feature = "audio-capture")]
@@ -227,6 +233,12 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
     app.bind_workspace_authority(margins_dir.clone(), name.clone());
     app.observe_memo(observed.revision, observed.lines);
     app.live_transcription_status = live_status;
+    if let Some(worker) = &live {
+        (
+            app.live_mic_dropped_samples,
+            app.live_system_dropped_samples,
+        ) = worker.dropped_counters();
+    }
 
     let outcome = run_segment(
         &mut app,
@@ -239,13 +251,18 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
         None,
     )?;
     drop(owner);
-    complete_post_capture(outcome, None)
+    complete_post_capture(outcome, None, work_dir, &name)
 }
 
 #[cfg(feature = "audio-capture")]
-fn complete_post_capture(outcome: SegmentOutcome, new_session: Option<&str>) -> Result<()> {
+fn complete_post_capture(
+    outcome: SegmentOutcome,
+    new_session: Option<&str>,
+    work_dir: &Path,
+    session_name: &str,
+) -> Result<()> {
     let action_result = match outcome.action {
-        PostCaptureAction::Distill => crate::note::run(false),
+        PostCaptureAction::Distill => distill_after_complete_transcript(work_dir, session_name),
         PostCaptureAction::SavedOnly => {
             eprintln!("Session saved.");
             Ok(())
@@ -264,6 +281,52 @@ fn complete_post_capture(outcome: SegmentOutcome, new_session: Option<&str>) -> 
         (Some(capture), Ok(())) => Err(capture),
         (None, result) => result,
     }
+}
+
+#[cfg(feature = "audio-capture")]
+fn distill_after_complete_transcript(work_dir: &Path, session_name: &str) -> Result<()> {
+    let margins_dir = work_dir.join(".margins");
+    run_after_complete_transcript(
+        || {
+            margins_workflows::transcript_view::load_transcript_view(
+                work_dir,
+                &margins_dir,
+                session_name,
+            )
+            .map(|view| view.terminal)
+            .or(Ok(false))
+        },
+        || {
+            eprintln!("Live transcript incomplete; processing saved audio before distilling…");
+            let mut output = Vec::new();
+            margins_cli::commands::process::process_session(
+                &margins_cli::standalone_services(),
+                work_dir,
+                session_name,
+                1,
+                false,
+                &mut output,
+            )
+            .map_err(|error| anyhow::anyhow!("offline transcription failed: {error}"))?;
+            Ok(())
+        },
+        || crate::note::run(false),
+    )
+}
+
+#[cfg(any(test, feature = "audio-capture"))]
+fn run_after_complete_transcript(
+    mut terminal: impl FnMut() -> Result<bool>,
+    mut process: impl FnMut() -> Result<()>,
+    note: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if !terminal()? {
+        process()?;
+        if !terminal()? {
+            bail!("offline processing did not produce a complete transcript");
+        }
+    }
+    note()
 }
 
 #[cfg(feature = "audio-capture")]
@@ -290,6 +353,15 @@ fn open_before_reserving_session<T, U>(
 ) -> Result<(T, U)> {
     let opened = open()?;
     Ok((opened, reserve()?))
+}
+
+#[cfg(any(test, feature = "audio-capture"))]
+fn sink_for_new_recorder<T>(preopened: bool, make_sink: impl FnOnce() -> Option<T>) -> Option<T> {
+    if preopened {
+        None
+    } else {
+        make_sink()
+    }
 }
 
 #[cfg(feature = "audio-capture")]
@@ -439,9 +511,12 @@ fn run_segment(
                 (Local::now() - started_at).num_milliseconds().max(0)
             };
             first_segment = false;
-            let live_sink = live
-                .as_ref()
-                .map(|worker| worker.sink_for_offset(segment_offset_ms as u64));
+            // The first recorder was already given a sink before reservation.
+            // Advancing its generation here makes every live send look stale.
+            let live_sink = sink_for_new_recorder(preopened.is_some(), || {
+                live.as_ref()
+                    .map(|worker| worker.sink_for_offset(segment_offset_ms as u64))
+            });
             let (recorder, stop) = if let Some(initial) = preopened.take() {
                 initial
             } else {
@@ -643,6 +718,50 @@ mod startup_tests {
         assert!(result.unwrap_err().to_string().contains("device failed"));
         assert!(!margins_dir.exists());
     }
+
+    #[test]
+    fn initial_recorder_feeds_live_sink_for_simulated_minute() {
+        use crate::recorder::{LiveAudioSink, LiveGenerationClock, SegmentWriter};
+        use std::sync::atomic::AtomicU64;
+        use std::sync::{mpsc, Mutex};
+
+        let (sender, receiver) = mpsc::channel();
+        let clock = Arc::new(Mutex::new(LiveGenerationClock {
+            generation: 1,
+            session_offset_ms: 0,
+        }));
+        let accepted = Arc::new(AtomicU64::new(0));
+        let dropped = Arc::new(AtomicU64::new(0));
+        let initial_sink = LiveAudioSink {
+            sender,
+            generation: 1,
+            generation_clock: clock.clone(),
+            mic_accepted_samples: accepted.clone(),
+            system_accepted_samples: Arc::new(AtomicU64::new(0)),
+            mic_dropped_samples: dropped.clone(),
+            system_dropped_samples: Arc::new(AtomicU64::new(0)),
+            queued_samples: Arc::new(AtomicU64::new(0)),
+            queue_max_samples: LIVE_QUEUE_MAX_SAMPLES,
+        };
+        let writer = SegmentWriter::start(0, 100, 100, Some(initial_sink)).unwrap();
+        let mic = writer.mic_sink(1);
+        mic.attach(100, 0).unwrap();
+        let _second_sink: Option<()> = sink_for_new_recorder(true, || {
+            clock.lock().unwrap().generation += 1;
+            Some(())
+        });
+        assert_eq!(clock.lock().unwrap().generation, 1);
+        for _ in 0..60 {
+            mic.samples(100, vec![0.25; 100], Vec::new()).unwrap();
+        }
+        mic.retire().unwrap();
+        writer.seal_at(6_000).unwrap();
+        assert!(accepted.load(Ordering::Acquire) > 0);
+        assert_eq!(dropped.load(Ordering::Acquire), 0);
+        assert!(receiver
+            .try_iter()
+            .any(|chunk| chunk.samples.iter().any(|s| *s != 0.0)));
+    }
 }
 
 #[cfg(all(test, target_os = "macos", feature = "audio-capture"))]
@@ -812,6 +931,41 @@ mod resume_failure_tests {
     use margins_meeting_protocol::SegmentCloseReasonV1;
 
     #[test]
+    fn distill_waits_for_offline_processing_when_live_transcript_is_incomplete() {
+        let complete = std::cell::Cell::new(false);
+        let processed = std::cell::Cell::new(false);
+        let noted = std::cell::Cell::new(false);
+        run_after_complete_transcript(
+            || Ok(complete.get()),
+            || {
+                processed.set(true);
+                complete.set(true);
+                Ok(())
+            },
+            || {
+                noted.set(true);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(processed.get());
+        assert!(noted.get());
+
+        noted.set(false);
+        let error = run_after_complete_transcript(
+            || Ok(false),
+            || anyhow::bail!("offline model unavailable"),
+            || {
+                noted.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("offline model unavailable"));
+        assert!(!noted.get());
+    }
+
+    #[test]
     fn resume_device_failure_saves_paused_edits_and_error_finalizes() {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join(".margins");
@@ -870,10 +1024,12 @@ mod resume_failure_tests {
         )
         .unwrap();
         assert_eq!(outcome.action, PostCaptureAction::NotOffered);
-        assert!(complete_post_capture(outcome, None)
-            .unwrap_err()
-            .to_string()
-            .contains("selected audio input"));
+        assert!(
+            complete_post_capture(outcome, None, root.path(), "resume-failure")
+                .unwrap_err()
+                .to_string()
+                .contains("selected audio input")
+        );
         assert_eq!(
             authority.memo("resume-failure").unwrap().lines[0].text,
             "typed while paused"
