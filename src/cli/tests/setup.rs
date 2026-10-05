@@ -587,7 +587,10 @@
         )
         .unwrap();
 
-        assert!(failed, "no catalyst is configured in this fixture");
+        assert!(
+            !failed,
+            "an unconfigured catalyst is a note, not a failure, under --only skills"
+        );
         assert_eq!(provisioner.hosted_calls.load(Ordering::SeqCst), 0);
         assert_eq!(
             String::from_utf8(stdout).unwrap(),
@@ -598,7 +601,140 @@
         assert!(stderr.contains("Codex skills: skipped (not installed)"));
         assert!(stderr.contains("Cursor skills: skipped (not installed)"));
         assert!(stderr.contains("setup skills: ok"));
+        assert!(stderr.contains(
+            "catalyst mode: none — setup_required (not part of this setup; run margins setup --only catalyst)"
+        ));
         assert!(!temp.path().join(".margins").exists());
+    }
+
+    fn speech_only_provisioner(speech_error: Option<&'static str>) -> SpySetupProvisioner {
+        SpySetupProvisioner {
+            hosted_calls: AtomicUsize::new(0),
+            speech_calls: AtomicUsize::new(0),
+            local_calls: AtomicUsize::new(0),
+            hosted: HostedCatalystSetup::Offline {
+                reason: "unused".into(),
+            },
+            speech_model: None,
+            speech_error,
+            local_model: None,
+        }
+    }
+
+    fn run_speech_only(provisioner: &SpySetupProvisioner, margins_home: &Path) -> (bool, String) {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let failed = run_setup_with(
+            provisioner,
+            SetupSelection::from_args(
+                &[SetupStepArg::Speech],
+                None,
+                SetupLocalModelPolicyArg::Fallback,
+            ),
+            Some(margins_home),
+            None,
+            None,
+            None,
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
+        (failed, String::from_utf8(stderr).unwrap())
+    }
+
+    #[test]
+    fn setup_only_speech_succeeds_without_a_configured_catalyst() {
+        let temp = tempfile::tempdir().unwrap();
+        let provisioner = speech_only_provisioner(None);
+
+        let (failed, stderr) = run_speech_only(&provisioner, temp.path());
+
+        assert!(!failed, "{stderr}");
+        assert_eq!(provisioner.speech_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provisioner.hosted_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(provisioner.local_calls.load(Ordering::SeqCst), 0);
+        assert!(stderr.contains("setup speech: ok"));
+        assert!(stderr.contains(
+            "catalyst mode: none — setup_required (not part of this setup; run margins setup --only catalyst)"
+        ));
+    }
+
+    #[test]
+    fn setup_only_speech_fails_when_speech_fails_even_with_a_usable_catalyst() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::hosted_credentials::install_bundle(
+            temp.path(),
+            "fixture-machine",
+            "fixture-key",
+            "https://fixture.invalid/v1",
+            "fixture-model",
+            Some(4_102_444_800),
+        )
+        .unwrap();
+        let provisioner = speech_only_provisioner(Some("fixture speech setup failed"));
+
+        let (failed, stderr) = run_speech_only(&provisioner, temp.path());
+
+        assert!(failed, "{stderr}");
+        assert!(stderr.contains("setup speech: failed — fixture speech setup failed"));
+        assert!(stderr.contains("catalyst mode: hosted — hosted_bundle_ready"));
+    }
+
+    #[test]
+    fn setup_only_skills_fails_when_skills_cannot_be_installed() {
+        let temp = tempfile::tempdir().unwrap();
+        let provisioner = speech_only_provisioner(None);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let failed = run_setup_with(
+            &provisioner,
+            SetupSelection::from_args(
+                &[SetupStepArg::Skills],
+                None,
+                SetupLocalModelPolicyArg::Fallback,
+            ),
+            Some(temp.path()),
+            None,
+            None,
+            None,
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
+
+        assert!(failed);
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(stderr.contains("setup skills: failed"));
+    }
+
+    #[test]
+    fn setup_with_catalyst_selected_still_fails_without_a_usable_generator() {
+        let temp = tempfile::tempdir().unwrap();
+        let provisioner = speech_only_provisioner(None);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let failed = run_setup_with(
+            &provisioner,
+            SetupSelection::from_args(
+                &[SetupStepArg::Speech, SetupStepArg::Catalyst],
+                None,
+                SetupLocalModelPolicyArg::Fallback,
+            ),
+            Some(temp.path()),
+            None,
+            None,
+            None,
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
+
+        assert!(failed);
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(stderr.contains("setup speech: ok"));
+        assert!(stderr.contains("catalyst mode: none — setup_required\n"));
     }
 
     #[cfg(all(feature = "recall", unix))]

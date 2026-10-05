@@ -24,6 +24,15 @@ pub fn get() -> BuildInfo {
     }
 }
 
+/// One-line `--version` report, e.g. `margins 0.4.15 (582d77f61abc, official)`.
+/// `version` is the calling binary's package version; `composition` matches
+/// the `composition` field of `margins capabilities`.
+pub fn version_line(version: &str, composition: &str) -> String {
+    let info = get();
+    let dirty = if info.dirty { "-dirty" } else { "" };
+    format!("margins {version} ({}{dirty}, {composition})", info.short)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,5 +60,14 @@ mod tests {
                 .as_str()
                 .is_some_and(|value| !value.is_empty()));
         }
+    }
+
+    #[test]
+    fn version_line_names_version_commit_and_composition() {
+        let line = version_line(env!("CARGO_PKG_VERSION"), "public");
+        let info = get();
+        assert!(line.starts_with(&format!("margins {} (", env!("CARGO_PKG_VERSION"))));
+        assert!(line.contains(info.short));
+        assert!(line.ends_with(", public)"));
     }
 }
