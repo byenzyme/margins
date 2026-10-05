@@ -30,6 +30,8 @@ dirs = "6"
 chacha20poly1305 = "0.10"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
+env_logger = { version = "0.11", default-features = false }
+log = "0.4"
 margins-core = { version = "0.1.0", path = "../margins-core" }
 margins-media = { version = "0.1.0", path = "../margins-media" }
 margins-meeting-protocol = { version = "0.1.0", path = "../margins-meeting-protocol" }

@@ -6,6 +6,7 @@ pub mod args;
 pub mod build_info;
 pub mod commands;
 pub mod error;
+pub mod logging;
 pub mod output;
 pub mod services;
 pub mod vault_guard;

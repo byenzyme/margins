@@ -85,6 +85,43 @@ fn production_source_add_help_exposes_granola_workspace_source() {
 }
 
 #[test]
+fn production_binary_logs_migration_warnings_to_stderr() {
+    let temp = tempfile::tempdir().unwrap();
+    let margins_home = temp.path().join("margins-home");
+    let notes = temp.path().join("notes");
+    fs::create_dir_all(&notes).unwrap();
+    let legacy_dir = margins_home.join("workspaces/odd");
+    fs::create_dir_all(&legacy_dir).unwrap();
+    fs::write(
+        legacy_dir.join("config.toml"),
+        format!(
+            "id = \"odd\"\n\n[policy]\nentities = [\"person:ada\"]\n\n[bindings.home]\nkind = \"notes\"\npath = {:?}\nrole = \"home\"\n",
+            notes.canonicalize().unwrap()
+        ),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_margins-private"))
+        .args(["workspace", "migrate", "--json"])
+        .env_clear()
+        .env("HOME", temp.path())
+        .env("MARGINS_HOME", &margins_home)
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    let migration: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(migration["warnings"].as_array().unwrap().len(), 1);
+    assert!(
+        stderr.lines().any(
+            |line| line.starts_with("margins: warning: migrated Workspace 'odd': ")
+                && line.contains("person:ada")
+        ),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn production_capture_preflights_and_uses_one_native_start_path() {
     let composition = source("src/cli/capture_local.rs");
     let interactive = composition

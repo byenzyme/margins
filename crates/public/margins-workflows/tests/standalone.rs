@@ -13,26 +13,6 @@ fn copy_tree(source: &Path, destination: &Path) {
     }
 }
 
-/// `enzyme-spec` is a draft path dependency on a sibling checkout until its
-/// public repository exists. Point the isolated copy at the same crate so the
-/// check still proves this tree needs nothing else from the repository.
-fn pin_sibling_path_dependencies(original_crate: &Path, copied_manifest: &Path) {
-    let manifest = std::fs::read_to_string(copied_manifest).unwrap();
-    let rewritten = manifest
-        .lines()
-        .map(|line| {
-            let Some(rest) = line.strip_prefix("enzyme-spec = { path = \"") else {
-                return line.to_string();
-            };
-            let relative = rest.split('"').next().unwrap();
-            let absolute = original_crate.join(relative).canonicalize().unwrap();
-            format!("enzyme-spec = {{ path = {:?} }}", absolute)
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    std::fs::write(copied_manifest, rewritten + "\n").unwrap();
-}
-
 #[test]
 fn crate_builds_from_an_isolated_public_tree() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -58,7 +38,6 @@ fn crate_builds_from_an_isolated_public_tree() {
     )
     .unwrap();
     let manifest = temp.path().join("margins-workflows/Cargo.toml");
-    pin_sibling_path_dependencies(&public_dir.join("margins-workflows"), &manifest);
     let output = std::process::Command::new("cargo")
         .args([
             "metadata",

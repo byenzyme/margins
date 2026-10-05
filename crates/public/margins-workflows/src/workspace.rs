@@ -1776,7 +1776,7 @@ pub fn migrate_workspace(margins_home: &Path, id: &str) -> Result<WorkspaceMigra
     atomic_write(&program_path, program.text().as_bytes())?;
     let backup = retire_legacy_config(&state_dir)?;
     for warning in &warnings {
-        eprintln!("margins: migrated Workspace '{id}': {warning}");
+        log::warn!("migrated Workspace '{id}': {warning}");
     }
     Ok(WorkspaceMigration {
         schema_version: WORKSPACE_MIGRATE_SCHEMA.to_string(),
@@ -1828,7 +1828,7 @@ pub fn list_workspaces(margins_home: &Path) -> Result<Vec<ResolvedWorkspace>> {
         .filter_map(|(id, resolved)| match resolved {
             Ok(workspace) => Some(workspace),
             Err(error) => {
-                eprintln!("margins: skipping Workspace '{id}': {error:#}");
+                log::warn!("skipping Workspace '{id}': {error:#}");
                 None
             }
         })
@@ -2043,7 +2043,7 @@ pub fn plan_legacy_workspace_config(
     }
     let legacy = program_lang::legacy_view(&desired)?;
     for warning in &legacy.warnings {
-        eprintln!("margins: desired Workspace '{}': {warning}", desired.id);
+        log::warn!("desired Workspace '{}': {warning}", desired.id);
     }
     let program =
         desired_program_from_config(workspace, &legacy.config, FolderQualification::Legacy)?;

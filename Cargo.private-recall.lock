@@ -1365,9 +1365,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "env_filter"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "900d271a03799a1ee8d1ca9b19893b48ca674a9284fefcfb85f05e74ed314217"
+dependencies = [
+ "log",
+ "regex",
+]
+
+[[package]]
+name = "env_logger"
+version = "0.11.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de671bd27a75a797dc9ae289ba1e77276e75e2026408aab65185384e2d5cd3f6"
+dependencies = [
+ "env_filter",
+ "log",
+]
+
+[[package]]
 name = "enzyme-core"
 version = "0.7.2"
-source = "git+https://github.com/byenzyme/enzyme-rust.git?rev=2a1f175312b72f8d4ad1b1a1abec76b8d1e7f669#2a1f175312b72f8d4ad1b1a1abec76b8d1e7f669"
+source = "git+https://github.com/byenzyme/enzyme-rust.git?rev=624e539bc34ad7bb4855aaceb34492c85190ae9c#624e539bc34ad7bb4855aaceb34492c85190ae9c"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1401,7 +1421,8 @@ dependencies = [
 
 [[package]]
 name = "enzyme-spec"
-version = "0.11.1"
+version = "0.1.0"
+source = "git+https://github.com/byenzyme/enzyme-spec?tag=v0.1.0#37abd99c473aa3fa7341dd65b0242c9a909bc924"
 dependencies = [
  "anyhow",
  "serde",
@@ -1427,7 +1448,7 @@ dependencies = [
 [[package]]
 name = "ese"
 version = "0.1.0"
-source = "git+https://github.com/byenzyme/enzyme-rust.git?rev=2a1f175312b72f8d4ad1b1a1abec76b8d1e7f669#2a1f175312b72f8d4ad1b1a1abec76b8d1e7f669"
+source = "git+https://github.com/byenzyme/enzyme-rust.git?rev=624e539bc34ad7bb4855aaceb34492c85190ae9c#624e539bc34ad7bb4855aaceb34492c85190ae9c"
 dependencies = [
  "minreq",
  "rayon",
@@ -2776,7 +2797,9 @@ dependencies = [
  "clap",
  "crossterm 0.28.1",
  "dirs",
+ "env_logger",
  "libsql-rusqlite",
+ "log",
  "margins-core",
  "margins-media",
  "margins-meeting-protocol",
@@ -2856,8 +2879,10 @@ dependencies = [
  "axum",
  "chrono",
  "dirs",
+ "env_logger",
  "hound",
  "http-body-util",
+ "log",
  "margins-core",
  "margins-media",
  "margins-meeting-protocol",
@@ -2910,6 +2935,7 @@ dependencies = [
  "keyring",
  "libc",
  "libsql-rusqlite",
+ "log",
  "margins-core",
  "margins-media",
  "margins-meeting-protocol",

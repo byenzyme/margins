@@ -2,7 +2,8 @@
 
 Status: in progress (2026-10-05); public side and recall engine path implemented (see below). Decided by Joshua: adopt the `.enzyme`
 workspace language as the single Workspace configuration format; make
-`enzyme-spec` a public crate (prepared, not published); deliver as draft PRs.
+`enzyme-spec` a public crate (published: github.com/byenzyme/enzyme-spec,
+tag `v0.1.0`, Apache-2.0); deliver as draft PRs.
 
 ## Why
 
@@ -144,7 +145,8 @@ rename) is retired under the Workspace lock to the first free
   a resolved program, with no config file or `ENZYME_HOME` lookup, and the
   indexer takes its sources, roots, exclusions, logs and frontmatter fields from
   it.
-- `enzyme-spec` is self-contained and ready to publish as a public crate.
+- `enzyme-spec` is published at github.com/byenzyme/enzyme-spec (`v0.1.0`);
+  enzyme-rust consumes that tag and keeps no in-repo copy.
 
 ## Margins implementation (public side)
 
@@ -206,24 +208,12 @@ rename) is retired under the Workspace lock to the first free
   records the identity version; an index built by an earlier release (hashed
   `markdown_…`/`gmail_…` namespaces) is fully reindexed exactly once, and its
   folder/collection catalysts are dropped.
-- enzyme-spec unification: `scripts/private_recall_manifest.py` adds
-  `[patch."https://github.com/byenzyme/enzyme-rust.git"] enzyme-spec = <the
-  declaration margins-workflows uses>`, so the engine and Margins link one
-  `enzyme-spec` (check: `scripts/with-private-recall cargo tree -i enzyme-spec
-  --features recall`).
+- enzyme-spec unification: the engine and `margins-workflows` both depend on
+  `enzyme-spec = { git = "https://github.com/byenzyme/enzyme-spec", tag =
+  "v0.1.0" }`, so Cargo links one crate with no `[patch]` (check:
+  `scripts/with-private-recall cargo tree -i enzyme-spec --workspace --features
+  recall`). Bump the tag in both repositories together.
 
 ## Open items
 
-- Publish `enzyme-spec` publicly (repository, license choice). Until then
-  `margins-workflows` depends on it by path
-  (`../../../../enzyme-rust-worktrees/margins-workspace-language/crates/enzyme-spec`),
-  because Cargo must fetch a git source before a `[patch]` can replace it. On
-  publication, switch to
-  `enzyme-spec = { git = "https://github.com/byenzyme/enzyme-spec", tag = "v0.1.0" }`,
-  run `cargo update -p enzyme-spec` for `Cargo.lock` and
-  `Cargo.private-recall.lock`, and drop the path rewrite in
-  `crates/public/margins-workflows/tests/standalone.rs`.
-- The private composition's enzyme-spec patch points at the same sibling path
-  until publication; release CI cannot build the private composition until
-  enzyme-spec has a fetchable source.
 - `desktop/INTEGRATIONS_CONNECTOR_CONTRACT.md` (parked) still names plan.v1.

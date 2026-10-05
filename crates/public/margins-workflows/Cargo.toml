@@ -17,15 +17,13 @@ async-trait = "0.1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
-# Draft: `enzyme-spec` is not yet published. Until its public repository
-# exists this is a path to the sibling enzyme-rust worktree; on publication it
-# becomes `{ git = "https://github.com/byenzyme/enzyme-spec", tag = "v0.1.0" }`
-# (see docs/workspace-language.md, "Open items").
-enzyme-spec = { path = "../../../../enzyme-rust-worktrees/margins-workspace-language/crates/enzyme-spec" }
+# Public parser for the readable workspace language (github.com/byenzyme/enzyme-spec).
+enzyme-spec = { git = "https://github.com/byenzyme/enzyme-spec", tag = "v0.1.0" }
 fs4 = { version = "0.13", features = ["sync"] }
 globset = "0.4"
 keyring = { version = "3.6.2", default-features = false, features = ["apple-native", "linux-native-sync-persistent", "crypto-rust", "vendored"] }
 libc = "0.2"
+log = "0.4"
 margins-core = { version = "0.1.0", path = "../margins-core" }
 margins-media = { version = "0.1.0", path = "../margins-media" }
 margins-meeting-protocol = { version = "0.1.0", path = "../margins-meeting-protocol" }

@@ -8,10 +8,10 @@
 > card, examples, and benchmarks remain in that private git source.
 >
 > Pin update (2026-10-05): the dependency now pins enzyme-rust branch
-> `margins/workspace-language` at `2a1f175312b72f8d4ad1b1a1abec76b8d1e7f669`
-> (in-memory Workspace program API). The private composition patches the
-> engine's `enzyme-spec` to the copy `margins-workflows` declares; see
-> `scripts/private_recall_manifest.py` and `docs/workspace-language.md`.
+> `margins/workspace-language` at `624e539bc34ad7bb4855aaceb34492c85190ae9c`
+> (in-memory Workspace program API). The engine and `margins-workflows` both
+> depend on the published `enzyme-spec` v0.1.0 git tag, so Cargo links one
+> crate without a patch; see `docs/workspace-language.md`.
 
 `crates/private/recall-engine/` is a pristine git subtree of
 `crates/enzyme-core/` from the local enzyme-rust repository. Do not edit files

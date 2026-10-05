@@ -2,7 +2,6 @@
 """Compose the official Cargo manifest with the pinned private recall source."""
 
 from pathlib import Path
-import os
 import sys
 import tomllib
 
@@ -10,29 +9,6 @@ import tomllib
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "Cargo.toml"
 DEPENDENCY = ROOT / "scripts/private_recall_dependency.toml"
-ENGINE_GIT = "https://github.com/byenzyme/enzyme-rust.git"
-SPEC_DECLARER = ROOT / "crates/public/margins-workflows/Cargo.toml"
-
-
-def enzyme_spec_patch() -> str:
-    """Point the engine's own enzyme-spec at the copy Margins declares.
-
-    enzyme-core depends on enzyme-spec by path inside enzyme-rust, so Cargo
-    would otherwise link a second enzyme-spec (source: the enzyme-rust git
-    rev) whose `Program` type cannot unify with the one margins-workflows
-    parses. margins-workflows' declaration is the single authority; the
-    private composition patches the engine's edge to that same source.
-    """
-    declared = tomllib.loads(SPEC_DECLARER.read_text())["dependencies"]["enzyme-spec"]
-    if "path" in declared:
-        absolute = (SPEC_DECLARER.parent / declared["path"]).resolve()
-        target = f'{{ path = "{os.path.relpath(absolute, ROOT)}" }}'
-    else:
-        fields = ", ".join(
-            f'{key} = "{declared[key]}"' for key in ("git", "tag", "rev", "branch") if key in declared
-        )
-        target = f"{{ {fields} }}"
-    return f'\n[patch."{ENGINE_GIT}"]\nenzyme-spec = {target}\n'
 
 
 def compose() -> str:
@@ -64,7 +40,6 @@ def compose() -> str:
     )
     if "[patch." in source:
         raise ValueError("public manifest unexpectedly declares a [patch] section")
-    source += enzyme_spec_patch()
     manifest = tomllib.loads(source)
     assert manifest["features"]["recall"] == [
         "dep:recall-engine",
@@ -76,8 +51,7 @@ def compose() -> str:
         "recall-engine/local-llm",
     ]
     assert manifest["dependencies"]["recall-engine"]["optional"] is True
-    assert manifest["dependencies"]["recall-engine"]["rev"] == "2a1f175312b72f8d4ad1b1a1abec76b8d1e7f669"
-    assert "enzyme-spec" in manifest["patch"][ENGINE_GIT]
+    assert manifest["dependencies"]["recall-engine"]["rev"] == "624e539bc34ad7bb4855aaceb34492c85190ae9c"
     return source
 
 
