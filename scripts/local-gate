@@ -28,6 +28,25 @@ ROOT_PACKAGES = {
 SERVER_MANIFEST = ROOT / "crates/public/margins-server/Cargo.toml"
 if SERVER_MANIFEST.exists():
     ROOT_PACKAGES.add("margins-server")
+# Direct workspace dependency edges, reversed from the Cargo manifests. Quick
+# follows them transitively so a library edit also runs its consumers' tests.
+# Keep this map in sync when a root workspace crate adds a local dependency.
+REVERSE_DEPENDENTS = {
+    "enzyme-core": {"margins"},
+    "margins-cli": {"margins"},
+    "margins-core": {
+        "margins", "margins-cli", "margins-media", "margins-server",
+        "margins-store", "margins-workflows",
+    },
+    "margins-media": {"margins", "margins-cli", "margins-server", "margins-workflows"},
+    "margins-meeting-protocol": {
+        "margins", "margins-cli", "margins-meeting-runtime",
+        "margins-server", "margins-store", "margins-workflows",
+    },
+    "margins-meeting-runtime": {"margins", "margins-server", "margins-store", "margins-workflows"},
+    "margins-store": {"margins", "margins-cli", "margins-server", "margins-workflows"},
+    "margins-workflows": {"margins", "margins-cli", "margins-server"},
+}
 USAGE = "usage: scripts/local-gate quick <paths-or-crates>... | public | linux | macos"
 
 
@@ -111,6 +130,12 @@ def quick_selection(inputs: list[str]) -> tuple[list[str], bool, bool]:
             bb_plugin = True
     if global_rust:
         packages = ROOT_PACKAGES.copy()
+    pending = list(packages)
+    while pending:
+        for dependent in REVERSE_DEPENDENTS.get(pending.pop(), ()):
+            if dependent in ROOT_PACKAGES and dependent not in packages:
+                packages.add(dependent)
+                pending.append(dependent)
     return sorted(packages), parked_desktop, bb_plugin
 
 

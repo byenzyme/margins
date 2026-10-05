@@ -126,10 +126,11 @@ scripts/local-gate macos
 ```
 
 `quick` accepts changed paths or Cargo package names. It tests affected root
-workspace crates and checks shipped binaries. BB plugin paths also run its
-typecheck, tests, build, and committed `dist/` check; `desktop/` paths are
-reported as parked. `public` builds and tests the root workspace with default features
-disabled and the private recall engine and its nested `ese` crate excluded.
+workspace crates and their reverse dependents, then checks shipped binaries.
+BB plugin paths also run its typecheck, tests, build, and committed `dist/`
+check; `desktop/` paths are reported as parked. `public` builds and tests the
+root workspace with default features disabled and the private recall engine
+and its nested `ese` crate excluded.
 `linux` runs the full portable recall suite, the isolated
 Google onboarding fixture, setup rollout contracts, BB plugin checks, and shipped
 Linux binary checks. `macos` runs the native private and public composition suites and checks
