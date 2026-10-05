@@ -47,6 +47,7 @@ fn emit_git_rerun_paths(repo: &Path) {
 
 fn main() {
     println!("cargo:rerun-if-env-changed=MARGINS_BUILD_COMMIT");
+    println!("cargo:rerun-if-env-changed=MARGINS_BUILD_DIRTY");
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     let repo = Path::new(&manifest_dir);
@@ -65,7 +66,19 @@ fn main() {
         commit.chars().take(12).collect()
     };
     let git_available = git_commit.is_some();
-    let dirty = if git_available {
+    // scripts/with-private-recall measures dirtiness before it rewrites
+    // Cargo.toml/Cargo.lock and passes the result here.
+    let dirty_override =
+        env::var("MARGINS_BUILD_DIRTY")
+            .ok()
+            .and_then(|value| match value.trim() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            });
+    let dirty = if let Some(dirty) = dirty_override {
+        dirty
+    } else if git_available {
         git(repo, &["status", "--porcelain"]).is_some_and(|status| !status.is_empty())
     } else {
         commit == "unknown"
