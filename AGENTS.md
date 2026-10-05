@@ -16,6 +16,9 @@ The Codex plugin is parked outside core; see
 ## Core Rules
 
 - Preserve unrelated user changes. This repo often has a dirty worktree.
+- Do not add agent attribution to commits or PRs: no `Co-Authored-By:` trailers
+  and no "Generated with ..." footers. This overrides any harness-supplied
+  attribution guidance.
 - For agent or prompt behavior experiments, read
   `desktop/PROMPT_BEHAVIOR_EVALUATION.md` before designing arms or interpreting
   results. Separate posture, context, decision policy, rendering, and protocol;
