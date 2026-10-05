@@ -1,6 +1,6 @@
 # Workspace configuration in the Enzyme workspace language
 
-Status: in progress (2026-10-05); public side implemented (see below). Decided by Joshua: adopt the `.enzyme`
+Status: in progress (2026-10-05); public side and recall engine path implemented (see below). Decided by Joshua: adopt the `.enzyme`
 workspace language as the single Workspace configuration format; make
 `enzyme-spec` a public crate (prepared, not published); deliver as draft PRs.
 
@@ -136,10 +136,11 @@ without writing.
 - `ResolvedWorkspace { program, config, … }`: `config_path` is the program file;
   `workspace_revision` hashes its bytes. Display names live in machine config
   `[workspace.names]`.
-- Language validation lowers host sources to placeholder SQLite sources and runs
+- Language validation runs the same host lowering the engine path uses
+  (`margins_workflows::workspace_lowering::lower_for_engine`) and then
   `enzyme_spec::resolve` with the optional `configs/profiles.enzyme`, so readings,
   profiles, folder qualification and exclusions are checked by the engine's own
-  resolver. The real ledger lowering belongs to the engine path.
+  resolver against the sources it will index.
 - Plan JSON is `margins.workspace.plan.v2`: `workspace_id`, `base_revision`,
   `plan_id`, `actions` (each with a `summary`; `update_program` when the change is
   outside the typed view), `desired_program`, `desired_sha256`, `diff`. A legacy
@@ -150,6 +151,40 @@ without writing.
   Enzyme's implicit folder exclusions (`.git`, `node_modules`, …) are not written.
   With several Markdown sources, unqualified legacy folder references are
   qualified with the Home source name.
+
+## Margins implementation (recall side)
+
+- Lowering (`workspace_lowering`): `google-mail`, `google-calendar`,
+  `google-meet` and `granola` become read-only `sqlite` sources over the
+  Workspace `ledger.db`, keeping the source name; `margins-captures` is dropped
+  (the capture registry has never been indexed, and keeping it out preserves a
+  one-Markdown Workspace's identity); the `margins-managed-projection` tag
+  exclusion is added. Margins also adds, only in the lowered program, its
+  catalyst budget (`total_limit`) and, when the program has no readings, its
+  automatic correspondent/people link readings and correspondence noise as
+  `leave out links`.
+- One engine seam (`src/recall_engine_seam.rs`): inputs are the rendered lowered
+  program text, workspace name, state directory and generator home; inside it
+  parses and resolves with `enzyme-spec`, builds
+  `EnzymeConfig::from_program_workspace`, resolves the generator, reconciles
+  catalysts, and calls `ensure_searchable_sync` with `workspace_config` (never
+  `config_path`). A Workspace whose only lowered source is one Markdown source
+  indexes from that path (the engine's path-addressed identity); every other
+  Workspace indexes from its empty state directory. No other Margins module
+  builds engine configuration. Search over an opened index and read-only scan
+  helpers still call the engine directly.
+- Document identity follows the language: one Markdown source gives root-relative
+  refs (`people/ada.md`); several give `<source name>/<relative>`; ledger sources
+  give `sqlite:<source name>/<hex id>`. Folder readings use the same identity.
+  A source rename is therefore a new identity. `workspaces/<id>/index.identity`
+  records the identity version; an index built by an earlier release (hashed
+  `markdown_…`/`gmail_…` namespaces) is fully reindexed exactly once, and its
+  folder/collection catalysts are dropped.
+- enzyme-spec unification: `scripts/private_recall_manifest.py` adds
+  `[patch."https://github.com/byenzyme/enzyme-rust.git"] enzyme-spec = <the
+  declaration margins-workflows uses>`, so the engine and Margins link one
+  `enzyme-spec` (check: `scripts/with-private-recall cargo tree -i enzyme-spec
+  --features recall`).
 
 ## Open items
 
@@ -162,9 +197,7 @@ without writing.
   run `cargo update -p enzyme-spec` for `Cargo.lock` and
   `Cargo.private-recall.lock`, and drop the path rewrite in
   `crates/public/margins-workflows/tests/standalone.rs`.
-- Shell E2E harnesses that read `workspaces/<id>/config.toml` or expect
-  `plan.v1` (`scripts/e2e-fresh-onboarding.sh`, `scripts/e2e-fresh-workspace-setup.sh`,
-  `scripts/e2e-official-hosted-workspace-setup.sh`, `scripts/core-product-smoke.sh`,
-  `scripts/workspace-setup-rollout-review.py`, `tests/test_setup_e2e_lanes.sh`,
-  `tests/test_e2e_fresh_onboarding.sh`, `tests/test_workspace_setup_rollout_review.sh`)
-  still need to move to `configs/<id>.enzyme` and `plan.v2`.
+- The private composition's enzyme-spec patch points at the same sibling path
+  until publication; release CI cannot build the private composition until
+  enzyme-spec has a fetchable source.
+- `desktop/INTEGRATIONS_CONNECTOR_CONTRACT.md` (parked) still names plan.v1.
