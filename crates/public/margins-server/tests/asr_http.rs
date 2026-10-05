@@ -188,7 +188,10 @@ fn finalize_pcm(service: &WorkspaceService, principal: &ServicePrincipal) {
         .unwrap();
 }
 
-fn finalize_native_pcm(service: &WorkspaceService, principal: &ServicePrincipal) {
+fn prepare_native_pcm(
+    service: &WorkspaceService,
+    principal: &ServicePrincipal,
+) -> (String, ClientMessageV1) {
     let segment_id = format!("{SESSION}-seg-0");
     let reservation = service
         .reserve_session(
@@ -271,22 +274,26 @@ fn finalize_native_pcm(service: &WorkspaceService, principal: &ServicePrincipal)
             ),
         )
         .unwrap();
+    (
+        reservation.producer_token,
+        command(
+            "native-finalize",
+            ClientMessageBodyV1::FinalizeSession(FinalizeSessionV1 {
+                ended_at_ms: SessionMillis(200),
+                segment_closes: vec![SegmentCloseReferenceV1 {
+                    segment_id: segment_id.into(),
+                    close_message_id: "native-close".into(),
+                }],
+                reason: SessionFinalizeReasonV1::Completed,
+            }),
+        ),
+    )
+}
+
+fn finalize_native_pcm(service: &WorkspaceService, principal: &ServicePrincipal) {
+    let (token, finalize) = prepare_native_pcm(service, principal);
     service
-        .execute_capture(
-            principal,
-            &reservation.producer_token,
-            command(
-                "native-finalize",
-                ClientMessageBodyV1::FinalizeSession(FinalizeSessionV1 {
-                    ended_at_ms: SessionMillis(200),
-                    segment_closes: vec![SegmentCloseReferenceV1 {
-                        segment_id: segment_id.into(),
-                        close_message_id: "native-close".into(),
-                    }],
-                    reason: SessionFinalizeReasonV1::Completed,
-                }),
-            ),
-        )
+        .execute_capture(principal, &token, finalize)
         .unwrap();
 }
 
@@ -366,6 +373,67 @@ async fn typed_transcribe_route_runs_durable_job_against_runtime_audio() {
     let stale = service.transcript(&principal, SESSION).unwrap();
     assert!(!stale.terminal);
     assert!(!stale.body.contains("spoken evidence"));
+}
+
+#[tokio::test]
+async fn native_finalize_after_ready_wakes_durable_asr_job() {
+    let temp = tempfile::tempdir().unwrap();
+    let (app, service, principal) = fixture(temp.path());
+    let (token, finalize) = prepare_native_pcm(&service, &principal);
+    assert!(service
+        .latest_job(&principal, &SessionId(SESSION.into()))
+        .unwrap()
+        .is_none());
+
+    // Native bridge and TUI captures finalize through this command route. The
+    // model is already ready, and this test never calls jobs/transcribe.
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(format!(
+            "/v1/workspaces/practice/sessions/{SESSION}/commands"
+        ))
+        .header("authorization", format!("Bearer {TOKEN}"))
+        .header("x-margins-instance-id", "test-instance")
+        .header("x-margins-producer-token", token)
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&finalize).unwrap()))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 2 * 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+    for _ in 0..100 {
+        let job = service
+            .latest_job(&principal, &SessionId(SESSION.into()))
+            .unwrap()
+            .expect("finalize must durably admit a job");
+        match job.status.as_str() {
+            "complete" => break,
+            "failed" => panic!("ASR job failed: {:?}", job.failure),
+            _ => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    }
+    let job = service
+        .latest_job(&principal, &SessionId(SESSION.into()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.status, "complete", "native finalize stranded {job:?}");
+    assert_eq!(job.attempt, 1);
+    let (status, transcript) = call(
+        &app,
+        Method::GET,
+        &format!("/v1/workspaces/practice/sessions/{SESSION}/transcript"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{transcript}");
+    assert_eq!(transcript["result"]["terminal"], true);
+    assert!(transcript["result"]["body"]
+        .as_str()
+        .unwrap()
+        .contains("spoken evidence"));
 }
 
 #[tokio::test]
