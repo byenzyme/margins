@@ -2009,12 +2009,15 @@ pub fn plan_workspace_program(
     let desired_view = validate_program(margins_home, &desired)?;
     let mut actions = view_actions(&workspace.config, &desired_view);
     if workspace.program.text() != desired_program {
+        // The view actions explain the change when applying them to the
+        // current program yields the same statements as the desired program;
+        // layout and comments alone are visible in the diff.
         let explained = program_from_config(
             &desired_view,
             workspace.program.program(),
             FolderQualification::Program,
         )
-        .is_ok_and(|rendered| rendered.text() == desired_program);
+        .is_ok_and(|reconciled| reconciled.program() == desired.program());
         if actions.is_empty() || !explained {
             actions.push(WorkspacePlanAction::UpdateProgram {
                 summary: "Update program statements beyond sources and attention policy (learning settings, profiles, agent policies, or formatting); see diff".to_string(),
@@ -3895,6 +3898,43 @@ backfill_days = 365
             "{:?}",
             legacy_plan.actions
         );
+    }
+
+    /// A hand-written program whose only change is attention policy plans as
+    /// that policy change, without a redundant `update_program`.
+    #[test]
+    fn a_policy_only_program_change_plans_without_update_program() {
+        let temp = tempfile::tempdir().unwrap();
+        let margins_home = temp.path().join("state");
+        let notes = temp.path().join("notes");
+        std::fs::create_dir_all(notes.join("people")).unwrap();
+        let workspace = create_workspace(&margins_home, "practice", None, &notes).unwrap();
+        for statement in [
+            "  learn questions from folder \"people\"\n\n",
+            "  learn questions from folder \"people\" including linked pages about relationships\n\n",
+            "  leave out folders { \"archive\" }\n  leave out tags { \"draft\" }\n  leave out links { \"Noise\" }\n\n",
+        ] {
+            let program = workspace
+                .program
+                .text()
+                .replace("  remember in folder", &format!("{statement}  remember in folder"));
+            let plan = plan_workspace_program(&workspace, &program).unwrap();
+            assert!(
+                matches!(plan.actions.as_slice(), [WorkspacePlanAction::SetPolicy { .. }]),
+                "{statement}: {:?}",
+                plan.actions
+            );
+        }
+        // A view-modelled change plus a statement outside the view still says so.
+        let program = workspace.program.text().replace(
+            "  remember in folder",
+            "  learn questions from folder \"people\" {\n    sample by time\n  }\n\n  remember in folder",
+        );
+        let plan = plan_workspace_program(&workspace, &program).unwrap();
+        assert!(plan
+            .actions
+            .iter()
+            .any(|action| matches!(action, WorkspacePlanAction::UpdateProgram { .. })));
     }
 
     #[test]
