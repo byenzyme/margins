@@ -94,6 +94,13 @@ pub struct TranscriptCoverage {
     pub finished_segment_count: i64,
 }
 
+const EMPTY_TRANSCRIPT_COVERAGE: TranscriptCoverage = TranscriptCoverage {
+    segment_count: 0,
+    max_segment_index: -1,
+    covered_until_ms: 0,
+    finished_segment_count: 0,
+};
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionProcessingGap {
     pub session_name: String,
@@ -471,7 +478,7 @@ fn migrate_application_records_if_needed(conn: &mut Connection, dir: &Path) -> R
                 "running"
             };
             tx.execute(
-                "INSERT OR IGNORE INTO session_processing_jobs (job_id, session_name, operation, input_revision, attempt, status, progress, result_ref, failure, failed_stage, updated_at) VALUES (?1, ?2, 'legacy_note', 'legacy-session-columns', 0, ?3, ?4, NULL, ?5, ?6, ?7)",
+                "INSERT OR IGNORE INTO session_processing_jobs (job_id, session_name, operation, input_revision, attempt, status, progress, result_ref, failure, failed_stage, updated_at) SELECT ?1, ?2, 'legacy_note', 'legacy-session-columns', 0, ?3, ?4, NULL, ?5, ?6, ?7 WHERE NOT EXISTS (SELECT 1 FROM session_processing_jobs WHERE session_name = ?2)",
                 params![format!("legacy:{name}"), name, status, (status == "complete").then_some(1.0), error, failed_stage, created_at],
             )?;
         }
@@ -668,12 +675,7 @@ pub fn transcript_coverage(segments: &[SegmentMeta]) -> Option<TranscriptCoverag
 /// An empty finalized capture still has a transcript receipt. Keeping the
 /// zero-segment receipt makes any later attached audio invalidate that result.
 pub fn transcript_coverage_matches(segments: &[SegmentMeta], recorded: TranscriptCoverage) -> bool {
-    transcript_coverage(segments).unwrap_or(TranscriptCoverage {
-        segment_count: 0,
-        max_segment_index: -1,
-        covered_until_ms: 0,
-        finished_segment_count: 0,
-    }) == recorded
+    transcript_coverage(segments).unwrap_or(EMPTY_TRANSCRIPT_COVERAGE) == recorded
 }
 
 fn summarize_transcript_coverage(
@@ -718,6 +720,28 @@ fn db_transcript_coverage(conn: &Connection, name: &str) -> Result<Option<Transc
     ))
 }
 
+fn db_transcript_receipt(conn: &Connection, name: &str) -> Result<Option<TranscriptCoverage>> {
+    let values: Option<(i64, i64, i64, i64)> = conn
+        .query_row(
+            "SELECT segment_count, max_segment_index, covered_until_ms, finished_segment_count FROM session_transcript_coverage WHERE session_name = ?1",
+            params![name],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    values
+        .map(
+            |(segment_count, max_segment_index, covered_until_ms, finished_segment_count)| {
+                Ok(TranscriptCoverage {
+                    segment_count,
+                    max_segment_index,
+                    covered_until_ms: u64::try_from(covered_until_ms)?,
+                    finished_segment_count,
+                })
+            },
+        )
+        .transpose()
+}
+
 /// Commit the final artifact, its segment coverage, and the processed state
 /// together. Refuse a transcript if capture changed its segment set during ASR.
 pub fn register_processed_transcript(
@@ -732,12 +756,7 @@ pub fn register_processed_transcript(
     if db_transcript_coverage(&tx, name)? != expected {
         anyhow::bail!("session '{name}' changed during transcription; process it again");
     }
-    let expected = expected.unwrap_or(TranscriptCoverage {
-        segment_count: 0,
-        max_segment_index: -1,
-        covered_until_ms: 0,
-        finished_segment_count: 0,
-    });
+    let expected = expected.unwrap_or(EMPTY_TRANSCRIPT_COVERAGE);
     let now = Local::now().to_rfc3339();
     tx.execute(
         "INSERT INTO session_artifacts (session_name, kind, ordinal, path, retention_class, created_at, expires_at) VALUES (?1, ?2, 0, ?3, 'durable', ?4, NULL) ON CONFLICT(session_name, kind, ordinal) DO UPDATE SET path = excluded.path, retention_class = excluded.retention_class, created_at = excluded.created_at, expires_at = NULL",
@@ -1857,7 +1876,7 @@ pub fn get_processing_job(dir: &Path, job_id: &str) -> Result<Option<ProcessingJ
 pub fn latest_processing_job(dir: &Path, name: &str) -> Result<Option<ProcessingJob>> {
     let conn = open_db(dir)?;
     let job_id: Option<String> = conn.query_row(
-        "SELECT job_id FROM session_processing_jobs WHERE session_name = ?1 ORDER BY updated_at DESC, job_id DESC LIMIT 1",
+        "SELECT job_id FROM session_processing_jobs WHERE session_name = ?1 ORDER BY (operation = 'legacy_note') ASC, julianday(updated_at) DESC, job_id DESC LIMIT 1",
         params![name], |row| row.get(0),
     ).optional()?;
     job_id.map_or(Ok(None), |job_id| load_processing_job(&conn, &job_id))
@@ -1912,6 +1931,27 @@ pub fn update_processing_job(
         && current.status != status
     {
         anyhow::bail!("late processing result rejected after {}", current.status);
+    }
+    if status == "complete" && current.operation == "transcribe_session" {
+        let result = result_ref
+            .filter(|value| !value.trim().is_empty())
+            .context("a completed transcription job requires a transcript result reference")?;
+        let registered: Option<String> = tx
+            .query_row(
+                "SELECT path FROM session_artifacts WHERE session_name = ?1 AND kind = ?2 AND ordinal = 0",
+                params![current.session_name, SESSION_ARTIFACT_KIND_TRANSCRIPT],
+                |row| row.get(0),
+            )
+            .optional()?;
+        anyhow::ensure!(
+            registered.as_deref() == Some(result)
+                && db_transcript_receipt(&tx, &current.session_name)?
+                    == Some(
+                        db_transcript_coverage(&tx, &current.session_name)?
+                            .unwrap_or(EMPTY_TRANSCRIPT_COVERAGE)
+                    ),
+            "transcription result is not registered for the current audio"
+        );
     }
     tx.execute(
         "UPDATE session_processing_jobs SET status = ?1, progress = ?2, result_ref = ?3, failure = ?4, failed_stage = ?5, updated_at = ?6 WHERE job_id = ?7 AND attempt = ?8",
@@ -2234,6 +2274,85 @@ mod tests {
         let meta = get_session_meta(&dir, "empty").unwrap();
         assert!(!transcript_coverage_matches(&meta.segments, recorded));
         assert_eq!(meta.processing_state.as_deref(), Some("none"));
+    }
+
+    #[test]
+    fn transcription_completion_never_exposes_a_referenceless_legacy_job() {
+        let root = tempdir().unwrap();
+        let dir = root.path().join(".margins");
+        create_session(&dir, "meet", &Local::now(), "meet.md").unwrap();
+        add_segment(&dir, "meet", 0, "meet_seg0.wav", 0, Some(1.0)).unwrap();
+        let job = begin_processing_job(
+            &dir,
+            "meet",
+            "transcribe:meet",
+            "transcribe_session",
+            "audio-r1",
+        )
+        .unwrap();
+        update_processing_job(
+            &dir,
+            &job.job_id,
+            job.attempt,
+            "running",
+            Some(0.5),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let coverage =
+            transcript_coverage(&get_session_meta(&dir, "meet").unwrap().segments).unwrap();
+        let result_ref = ".margins/artifacts/meet/transcript.md";
+        register_processed_transcript(&dir, "meet", result_ref, coverage).unwrap();
+
+        // Force the interval between artifact registration and job completion.
+        // The session's done projection must not create a second, referenceless
+        // legacy job while the real ASR job is still running.
+        assert!(get_processing_job(&dir, "legacy:meet").unwrap().is_none());
+        let interim = latest_processing_job(&dir, "meet").unwrap().unwrap();
+        assert_eq!(interim.job_id, job.job_id);
+        assert_eq!(interim.status, "running");
+        assert!(interim.result_ref.is_none());
+        assert!(update_processing_job(
+            &dir,
+            &job.job_id,
+            job.attempt,
+            "complete",
+            Some(1.0),
+            None,
+            None,
+            None,
+        )
+        .is_err());
+
+        // Already-migrated databases can retain a synthetic row. A future UTC
+        // timestamp reproduces the Mac's lexical local/UTC sort reversal.
+        let conn = Connection::open(database_path(&dir)).unwrap();
+        conn.execute(
+            "INSERT INTO session_processing_jobs (job_id, session_name, operation, input_revision, attempt, status, progress, result_ref, updated_at) VALUES ('legacy:meet', 'meet', 'legacy_note', 'legacy-session-columns', 0, 'complete', 1.0, NULL, '2099-01-01T00:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+        let still_running = latest_processing_job(&dir, "meet").unwrap().unwrap();
+        assert_eq!(still_running.job_id, job.job_id);
+        assert_eq!(still_running.status, "running");
+
+        let completed = update_processing_job(
+            &dir,
+            &job.job_id,
+            job.attempt,
+            "complete",
+            Some(1.0),
+            Some(result_ref),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(completed.result_ref.as_deref(), Some(result_ref));
+        let observed = latest_processing_job(&dir, "meet").unwrap().unwrap();
+        assert_eq!(observed.status, "complete");
+        assert_eq!(observed.result_ref.as_deref(), Some(result_ref));
     }
 
     #[test]
