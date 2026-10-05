@@ -51,6 +51,7 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }
+margins-meeting-runtime = { version = "0.1.0", path = "../margins-meeting-runtime", features = ["test-support"] }
 tempfile = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
