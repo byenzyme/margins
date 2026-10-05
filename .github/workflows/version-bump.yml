@@ -12,6 +12,7 @@ jobs:
   bump:
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
     steps:
       - uses: actions/checkout@v4
@@ -39,7 +40,10 @@ jobs:
           GH_TOKEN: ${{ secrets.ENZYME_RUST_READ_TOKEN }}
           CARGO_NET_GIT_FETCH_WITH_CLI: "true"
         run: |
-          test -n "$GH_TOKEN"
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::error::Missing required secret: ENZYME_RUST_READ_TOKEN"
+            exit 1
+          fi
           gh auth setup-git
           scripts/with-private-recall bash -c '
              scripts/cargo-lane shared -- cargo update -p margins -p margins-cli -p margins-server
@@ -57,3 +61,10 @@ jobs:
           git commit -m "Release v${VERSION}"
           git tag "v${VERSION}"
           git push origin main --tags
+
+      - name: Dispatch CLI release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          gh workflow run cli-release.yml --ref main -f tag="v${VERSION}"

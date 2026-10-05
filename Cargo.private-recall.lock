@@ -2674,6 +2674,7 @@ dependencies = [
  "ctor",
  "dirs",
  "enzyme-core",
+ "fs4",
  "hound",
  "include_dir",
  "libsql-rusqlite",

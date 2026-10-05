@@ -87,6 +87,9 @@ case "$DURATION_SECS" in
 esac
 
 [ -x "$CARGO_LANE" ] || die "missing executable cargo lane wrapper: $CARGO_LANE"
+if [ "$RUN_BUILD" = "1" ] && [ "${MARGINS_PRIVATE_RECALL_ACTIVE:-}" != "1" ]; then
+  die "release build requires scripts/with-private-recall"
+fi
 
 run_logged() {
   local label="$1"
@@ -473,7 +476,9 @@ fi
 
 if [ "$RUN_BUILD" = "1" ]; then
   run_logged "10-build-release-margins-private" \
-    "$CARGO_LANE" shared -- cargo build --release --bin margins-private
+    "$CARGO_LANE" shared -- cargo build --release --bin margins-private \
+    --no-default-features \
+    --features audio-capture,coreml-asr,polyvoice-coreml,recall,recall-local-model
 fi
 
 BINARY="$(binary_path)"

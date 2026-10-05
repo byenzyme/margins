@@ -27,6 +27,10 @@
         assert_eq!(value["composition"], "official");
         assert_eq!(value["official"], true);
         assert_eq!(
+            value["oauth_client"],
+            crate::google_oauth_client::status()
+        );
+        assert_eq!(
             value["build"]["commit"],
             margins_cli::build_info::get().commit
         );

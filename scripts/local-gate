@@ -222,6 +222,8 @@ def macos(gate: Gate) -> None:
     gate.cargo(
         "build private release CLI",
         "build", "--release", "-p", "margins", "--bin", "margins-private", "--locked",
+        "--no-default-features", "--features",
+        "audio-capture,coreml-asr,polyvoice-coreml,recall,recall-local-model",
     )
     gate.cargo(
         "build public workspace targets",

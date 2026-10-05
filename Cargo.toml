@@ -46,7 +46,7 @@ name = "margins-private"
 path = "src/main.rs"
 
 [features]
-default = ["coreml-asr", "audio-capture", "polyvoice-coreml", "recall-local-model"]
+default = ["audio-capture"]
 audio-capture = ["margins-capture/audio-capture"]
 # The public manifest and lockfile contain no private git source. Official
 # builds use scripts/with-private-recall to inject the pinned optional engine.
@@ -80,6 +80,7 @@ chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
 dirs = "6"
+fs4 = { version = "0.13", features = ["sync"] }
 include_dir = "0.7"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
 serde = { version = "1", features = ["derive"] }

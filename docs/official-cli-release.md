@@ -14,9 +14,15 @@ and builds the root `margins` package's internal `margins-private` target with
 the user-facing `margins` executable alongside `margins-server`, for:
 
 - `aarch64-apple-darwin` on the `macos-15` Apple Silicon runner with
-  `audio-capture,coreml-asr`;
+  `audio-capture,coreml-asr,polyvoice-coreml,recall,recall-local-model`;
 - `x86_64-unknown-linux-gnu` on Ubuntu with
-  `audio-capture,parakeet-asr`.
+  `audio-capture,parakeet-asr,polyvoice-diarization,recall`.
+
+The public manifest defaults to portable capture only, so a source build never
+needs private repository access or a platform ASR/diarization backend. Official
+builds fail closed by explicitly enabling the target's full media and recall
+feature set through the private composition and asserting its capabilities in
+the packaged-binary smoke test.
 
 The Apple Silicon archive no longer includes `margins-live`; the desktop app
 and its live runtime were retired on 2026-10-02 (PR #100).
@@ -48,8 +54,12 @@ Release in this order:
 3. Merge the PR that bumps `RUNTIME_RELEASE_VERSION` and its rebuilt `dist/`
    **immediately** before tagging. Between that merge and the published release,
    fresh plugin installs point at a runtime that does not exist yet.
-4. Tag `vX.Y.Z`; `cli-release.yml` builds, signs, notarizes and publishes on
-   GitHub. This is the only validation-adjacent work that runs on GitHub runners.
+4. Create tag `vX.Y.Z`. A manually pushed tag triggers `cli-release.yml`
+   directly. The **Version Bump** workflow commits and pushes the tag with
+   `GITHUB_TOKEN`, whose events do not start other workflows, so its final step
+   explicitly dispatches `cli-release.yml` with that existing tag. The release
+   workflow builds, signs, notarizes and publishes on GitHub. This is the only
+   validation-adjacent work that runs on GitHub runners.
 5. Verify the published archives and a fresh BB plugin install against the new
    release.
 
@@ -96,14 +106,15 @@ one JSON object:
 ```json
 {
   "schema": 1,
+  "oauth_client": "valid",
   "capture_available": true,
   "capture_provider": "<private provider identity>",
   "tui_available": true
 }
 ```
 
-`scripts/smoke-official-cli.sh` rejects non-JSON output, a missing provider,
-false capability flags, `UnavailableCaptureProvider`, or
+`scripts/smoke-official-cli.sh` rejects non-JSON output, an invalid embedded
+OAuth client, a missing provider, false capability flags, `UnavailableCaptureProvider`, or
 `capture_unavailable`. The contract tests composition and linkage, not hardware
 behavior. It is a required integration point from sibling thread
 `thr_dny6tqhx9m`; the release workflow must not be enabled until that command
@@ -116,7 +127,7 @@ from a real terminal app with Microphone permission:
 
 ```bash
 MARGINS_FLUID_COREML_MODEL_DIR="$HOME/Library/Application Support/FluidAudio/Models/parakeet-tdt-0.6b-v2" \
-  scripts/core-product-smoke.sh
+  scripts/with-private-recall scripts/core-product-smoke.sh
 ```
 
 The full gate compiles the focused tests once in one disposable Cargo lane,

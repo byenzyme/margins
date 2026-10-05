@@ -97,14 +97,20 @@ jobs:
 
       - name: Authenticate private recall source
         run: |
-          test -n "$GH_TOKEN"
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::error::Missing required secret: ENZYME_RUST_READ_TOKEN"
+            exit 1
+          fi
           gh auth setup-git
 
       - name: Build the private root distributable
         env:
           MARGINS_GOOGLE_OAUTH_CLIENT_JSON: ${{ secrets.MARGINS_GOOGLE_OAUTH_CLIENT_JSON }}
         run: |
-          test -n "$MARGINS_GOOGLE_OAUTH_CLIENT_JSON"
+          if [[ -z "$MARGINS_GOOGLE_OAUTH_CLIENT_JSON" ]]; then
+            echo "::error::Missing required secret: MARGINS_GOOGLE_OAUTH_CLIENT_JSON"
+            exit 1
+          fi
           scripts/with-private-recall cargo build --release --locked --package margins --bin margins-private \
             --no-default-features --features "${{ matrix.features }}" \
             --target "${{ matrix.target }}"
@@ -328,7 +334,10 @@ jobs:
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
           set -euo pipefail
-          test -n "$GH_TOKEN"
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::error::Missing required secret: HOMEBREW_TAP_TOKEN"
+            exit 1
+          fi
           gh auth setup-git
           ARM_SHA=$(cut -d ' ' -f1 "dist/margins-${VERSION}-aarch64-apple-darwin.tar.gz.sha256")
           gh repo clone byenzyme/homebrew-margins "$RUNNER_TEMP/homebrew-margins" -- --depth 1

@@ -39,6 +39,7 @@ fn official_capabilities_json() -> serde_json::Value {
         "composition": "official",
         "official": true,
         "autonomous": true,
+        "oauth_client": crate::google_oauth_client::status(),
         "build": margins_cli::build_info::get(),
         "recall": {
             "available": cfg!(feature = "recall"),

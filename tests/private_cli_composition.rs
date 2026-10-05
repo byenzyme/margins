@@ -1209,6 +1209,7 @@ fn packaged_binary_reports_private_native_composition() {
     assert_eq!(contract["product"], "margins");
     assert_eq!(contract["composition"], "official");
     assert_eq!(contract["official"], true);
+    assert!(contract["oauth_client"].is_string());
     assert_eq!(contract["capture_available"], true);
     assert_eq!(contract["capture_provider"], "native-recorder");
     assert_eq!(contract["tui_available"], true);

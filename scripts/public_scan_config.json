@@ -25,6 +25,7 @@
     "stripe-live-key": "(?:sk|rk)_live_[0-9A-Za-z]{16,}",
     "netrc-password": "(?m)^machine\\s+\\S+\\s+login\\s+\\S+\\s+password\\s+\\S+",
     "oauth-client-secret": "\"client_secret\"\\s*:\\s*\"(?!REPLACE_ME|EXAMPLE|example|fixture|test|dummy)[^\"]{8,}\"",
+    "private-enzyme-git-source": "(?i)(?:git\\+)?https://github\\.com/byenzyme/enzyme-rust(?:\\.git)?",
     "personal-macos-path": "/Users[/]joshua[^\\s\"'<>)]*",
     "personal-linux-path": "/home[/]dev(?:/[^\\s\"'<>)]*)?",
     "email-address": "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9][A-Za-z0-9.-]*\\.[A-Za-z]{2,}\\b"
@@ -39,5 +40,14 @@
   ],
   "synthetic_secret_paths": [
     "tests/test_workspace_setup_rollout_review.sh"
-  ]
+  ],
+  "documented_personal_path_paths": [
+    "docs/public-cutover-history-filter.md"
+  ],
+  "rule_paths": {
+    "private-enzyme-git-source": [
+      "Cargo.toml",
+      "Cargo.lock"
+    ]
+  }
 }

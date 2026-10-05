@@ -13,14 +13,19 @@ DEST="$BIN_DIR/margins"
 # Build profile selects the compiled feature set:
 #   recall (default) — portable lookup only (`--features recall`), no native
 #     capture/ASR/inference toolchain. The honest maximum on Linux/CI.
-#   full — the default feature set (audio-capture + recall + recall-local-model
-#     + coreml-asr + polyvoice-coreml). macOS source installs use this so a
+#   full — audio-capture + recall + recall-local-model + coreml-asr +
+#     polyvoice-coreml. macOS source installs use this so a
 #     single `margins` records, transcribes, and generates catalyst bridges.
 PROFILE="${MARGINS_CLI_PROFILE:-recall}"
 BUILD_ARGS=(build --release --locked)
 case "$PROFILE" in
   recall) BUILD_ARGS+=(--no-default-features --features recall) ;;
-  full) ;;
+  full)
+    BUILD_ARGS+=(
+      --no-default-features
+      --features audio-capture,coreml-asr,polyvoice-coreml,recall,recall-local-model
+    )
+    ;;
   *) echo "Unknown MARGINS_CLI_PROFILE '$PROFILE' (expected 'recall' or 'full')" >&2; exit 1 ;;
 esac
 BUILD_ARGS+=(--bin margins-private)

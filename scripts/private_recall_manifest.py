@@ -15,20 +15,39 @@ def compose() -> str:
     source = MANIFEST.read_text()
     fragment = DEPENDENCY.read_text()
     dependency = next(line for line in fragment.splitlines() if line.startswith("recall-engine ="))
-    source = source.replace(
+
+    def replace_once(old: str, new: str, description: str) -> None:
+        nonlocal source
+        count = source.count(old)
+        if count != 1:
+            raise ValueError(f"expected exactly one {description}, found {count}")
+        source = source.replace(old, new, 1)
+
+    replace_once(
         'recall = ["dep:reqwest", "dep:tokio"]',
         'recall = ["dep:recall-engine", "dep:reqwest", "dep:tokio"]',
-        1,
-    ).replace(
+        "public recall feature line",
+    )
+    replace_once(
         'recall-local-model = ["recall"]',
         'recall-local-model = ["recall", "recall-engine/local-llm"]',
-        1,
-    ).replace(
+        "public recall-local-model feature line",
+    )
+    replace_once(
         'rusqlite.workspace = true\n',
         f'rusqlite.workspace = true\n{dependency}\n',
-        1,
+        "recall dependency insertion point",
     )
     manifest = tomllib.loads(source)
+    assert manifest["features"]["recall"] == [
+        "dep:recall-engine",
+        "dep:reqwest",
+        "dep:tokio",
+    ]
+    assert manifest["features"]["recall-local-model"] == [
+        "recall",
+        "recall-engine/local-llm",
+    ]
     assert manifest["dependencies"]["recall-engine"]["optional"] is True
     assert manifest["dependencies"]["recall-engine"]["rev"] == "d92f9e52ffddbe318ed2d6797cde2d821985c61a"
     return source

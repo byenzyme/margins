@@ -23,6 +23,10 @@ RULES = {name: re.compile(pattern) for name, pattern in CONFIG["rules"].items()}
 FILTER_PATHS = CONFIG["history_filter_paths"]
 SYNTHETIC_DOMAINS = set(CONFIG["synthetic_email_domains"])
 SYNTHETIC_SECRET_PATHS = set(CONFIG["synthetic_secret_paths"])
+DOCUMENTED_PERSONAL_PATH_PATHS = set(
+    CONFIG.get("documented_personal_path_paths", [])
+)
+RULE_PATHS = {name: set(paths) for name, paths in CONFIG.get("rule_paths", {}).items()}
 SECRET_RULES = set(RULES) - {"email-address", "personal-macos-path", "personal-linux-path"}
 
 
@@ -42,6 +46,11 @@ def disposition(path: str, rule: str, matched: str) -> str:
         domain = matched.rsplit("@", 1)[-1].lower()
         if domain in SYNTHETIC_DOMAINS or domain.endswith((".test", ".example", ".invalid")):
             return "synthetic-email"
+    if (
+        rule in {"personal-macos-path", "personal-linux-path"}
+        and path in DOCUMENTED_PERSONAL_PATH_PATHS
+    ):
+        return "documented-replacement"
     if rule in SECRET_RULES and path in SYNTHETIC_SECRET_PATHS:
         return "synthetic-test-secret"
     return "review"
@@ -50,6 +59,8 @@ def disposition(path: str, rule: str, matched: str) -> str:
 def scan_line(path: str, number: int, line: str, commit: str | None = None) -> list[dict]:
     hits = []
     for rule, pattern in RULES.items():
+        if rule in RULE_PATHS and path not in RULE_PATHS[rule]:
+            continue
         for match in pattern.finditer(line):
             hits.append({
                 "commit": commit,
@@ -102,19 +113,58 @@ def scan_history(revision_range: str) -> list[dict]:
     return hits
 
 
+def scan_git_tree(revision: str) -> list[dict]:
+    """Scan every text blob in one committed tree, including a future squash base."""
+    resolved = git("rev-parse", "--verify", f"{revision}^{{commit}}").decode().strip()
+    hits = []
+    paths = git("ls-tree", "-r", "--name-only", "-z", resolved).split(b"\0")
+    for raw_path in paths:
+        if not raw_path:
+            continue
+        path = raw_path.decode("utf-8", "replace")
+        data = git("show", f"{resolved}:{path}")
+        if b"\0" in data:
+            continue
+        for number, line in enumerate(data.decode("utf-8", "replace").splitlines(), 1):
+            hits.extend(scan_line(path, number, line, resolved))
+    return hits
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--range", dest="revision_range", help="Git revision range, e.g. 54a7a9d7c..HEAD")
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument(
+        "--range",
+        dest="revision_range",
+        help="Git revision range, e.g. 54a7a9d7c..HEAD",
+    )
+    source.add_argument(
+        "--tree", dest="tree_revision", help="single committed tree, e.g. 54a7a9d7c"
+    )
     parser.add_argument("--json", action="store_true", help="machine-readable report")
     parser.add_argument("--fail-on-review", action="store_true", help="fail if any hit needs review")
     parser.add_argument("--fail-on-secret", action="store_true", help="fail on an unreviewed secret-shaped hit")
     args = parser.parse_args()
     try:
-        hits = scan_history(args.revision_range) if args.revision_range else scan_tree()
+        if args.revision_range:
+            hits = scan_history(args.revision_range)
+        elif args.tree_revision:
+            hits = scan_git_tree(args.tree_revision)
+        else:
+            hits = scan_tree()
     except RuntimeError as error:
         parser.exit(2, f"scan-public-history: {error}\n")
     if args.json:
-        print(json.dumps({"range": args.revision_range, "hits": hits}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "range": args.revision_range,
+                    "tree": args.tree_revision,
+                    "hits": hits,
+                },
+                indent=2,
+            )
+        )
     else:
         print(f"scan-public-history: {len(hits)} hit(s)")
         for hit in hits:

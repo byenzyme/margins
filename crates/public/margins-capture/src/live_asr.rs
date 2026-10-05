@@ -1,3 +1,5 @@
+#[cfg(all(feature = "coreml-asr", target_os = "macos"))]
+use anyhow::bail;
 #[cfg(any(test, all(feature = "coreml-asr", target_os = "macos")))]
 use anyhow::Context;
 use anyhow::Result;

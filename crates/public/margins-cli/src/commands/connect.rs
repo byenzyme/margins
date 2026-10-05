@@ -18,7 +18,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
-const OFFICIAL_BUILD_REQUIRED: &str = "Google connect requires the official Margins build.";
+const OFFICIAL_BUILD_REQUIRED: &str = "Google connect requires the official Margins build or a source build configured with MARGINS_GOOGLE_OAUTH_CLIENT_FILE or MARGINS_GOOGLE_OAUTH_CLIENT_JSON.";
 
 pub fn granola(
     margins_home: &Path,
@@ -171,7 +171,7 @@ pub fn google(
     let credential = credential.ok_or_else(|| {
         CliError::unavailable("google_connect_unavailable", OFFICIAL_BUILD_REQUIRED)
     })?;
-    validate_credential(credential)?;
+    validate_google_oauth_client(credential)?;
     stderr.flush().map_err(io_error)?;
     let (mode, presenter, backend): (
         GoogleOAuthMode,
@@ -758,32 +758,39 @@ fn mark_retained_granola_workspaces_needs_auth(
     Ok(())
 }
 
-fn validate_credential(bytes: &[u8]) -> Result<(), CliError> {
+pub fn validate_google_oauth_client(bytes: &[u8]) -> Result<(), CliError> {
     let value: Value = serde_json::from_slice(bytes)
         .map_err(|_| CliError::new("google_credential_invalid", OFFICIAL_BUILD_REQUIRED))?;
     let installed = value
         .get("installed")
         .and_then(Value::as_object)
         .ok_or_else(|| CliError::new("google_credential_invalid", OFFICIAL_BUILD_REQUIRED))?;
-    for key in [
-        "client_id",
-        "client_secret",
-        "auth_uri",
-        "token_uri",
-        "redirect_uris",
-    ] {
-        if !installed.contains_key(key) {
+    for key in ["client_id", "client_secret", "auth_uri", "token_uri"] {
+        let valid = installed
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .is_some_and(|text| !text.is_empty() && !text.starts_with("REPLACE_WITH_"));
+        if !valid {
             return Err(CliError::new(
                 "google_credential_invalid",
                 OFFICIAL_BUILD_REQUIRED,
             ));
         }
     }
-    if installed.values().any(|value| {
-        value
-            .as_str()
-            .is_some_and(|text| text.starts_with("REPLACE_WITH_"))
-    }) {
+    let redirects_valid = installed
+        .get("redirect_uris")
+        .and_then(Value::as_array)
+        .is_some_and(|redirects| {
+            !redirects.is_empty()
+                && redirects.iter().all(|redirect| {
+                    redirect
+                        .as_str()
+                        .map(str::trim)
+                        .is_some_and(|text| !text.is_empty())
+                })
+        });
+    if !redirects_valid {
         return Err(CliError::new(
             "google_credential_invalid",
             OFFICIAL_BUILD_REQUIRED,
@@ -855,10 +862,18 @@ mod tests {
 
     #[test]
     fn fixture_has_the_installed_desktop_client_shape() {
-        validate_credential(include_bytes!(
+        validate_google_oauth_client(include_bytes!(
             "../../tests/fixtures/google-oauth-client.json"
         ))
         .unwrap();
+    }
+
+    #[test]
+    fn malformed_installed_client_is_rejected() {
+        let error = validate_google_oauth_client(br#"{"installed":{"client_id":""}}"#).unwrap_err();
+        assert_eq!(error.code(), "google_credential_invalid");
+        assert!(error.message().contains("MARGINS_GOOGLE_OAUTH_CLIENT_FILE"));
+        assert!(error.message().contains("MARGINS_GOOGLE_OAUTH_CLIENT_JSON"));
     }
     #[test]
     fn user_facing_strings_hide_implementation() {

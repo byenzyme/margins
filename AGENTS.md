@@ -547,8 +547,9 @@ The CI regression verifies only the harness's capture and hard-gate mechanics;
 it does not replace the real agent rollout against the release-candidate binary.
 
 For native CLI core-product verification, use
-`scripts/core-product-smoke.sh`; the full and zero-compile iteration commands
-are documented in `docs/official-cli-release.md`.
+`scripts/with-private-recall scripts/core-product-smoke.sh`; the full and
+zero-compile iteration commands are documented in
+`docs/official-cli-release.md`.
 
 See `docs/official-cli-release.md` for the release order, including BB plugin
 runtime pairing. `CLAUDE.md` holds older release, Homebrew tap, and legacy

@@ -2323,6 +2323,7 @@ dependencies = [
  "crossterm 0.28.1",
  "ctor",
  "dirs",
+ "fs4",
  "hound",
  "include_dir",
  "libsql-rusqlite",
