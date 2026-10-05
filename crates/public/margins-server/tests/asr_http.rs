@@ -343,10 +343,29 @@ async fn typed_transcribe_route_runs_durable_job_against_runtime_audio() {
     .await;
     assert_eq!(status, StatusCode::OK, "{transcript}");
     assert_eq!(transcript["result"]["terminal"], true);
+    assert_eq!(transcript["result"]["live"], false);
     assert!(transcript["result"]["body"]
         .as_str()
         .unwrap()
         .contains("[00:01] you (mic): spoken evidence"));
+    let meta = canonical::get_session_meta(service.margins_dir(), SESSION).unwrap();
+    assert_eq!(meta.processing_state.as_deref(), Some("done"));
+    assert_eq!(
+        canonical::transcript_coverage_read_only(service.margins_dir(), SESSION).unwrap(),
+        canonical::transcript_coverage(&meta.segments)
+    );
+    canonical::add_segment(
+        service.margins_dir(),
+        SESSION,
+        1,
+        ".margins/asr-http_seg1.wav",
+        100,
+        Some(0.1),
+    )
+    .unwrap();
+    let stale = service.transcript(&principal, SESSION).unwrap();
+    assert!(!stale.terminal);
+    assert!(!stale.body.contains("spoken evidence"));
 }
 
 #[tokio::test]
@@ -461,6 +480,7 @@ async fn legacy_browser_webm_upload_transcribes_without_runtime_capture_state() 
     let body = transcript["result"]["body"].as_str().unwrap();
     assert!(body.contains("spoken evidence"), "{body}");
     assert!(body.contains("Incomplete recording"), "{body}");
+    assert_eq!(transcript["result"]["terminal"], true);
     let summary = service
         .session(&principal, &SessionId(SESSION.into()))
         .unwrap();
@@ -625,6 +645,7 @@ async fn undecodable_webm_segment_is_recorded_as_gap_while_later_audio_transcrib
     let body = transcript["result"]["body"].as_str().unwrap();
     assert!(body.contains("spoken evidence"), "{body}");
     assert!(body.contains("Incomplete recording"), "{body}");
+    assert_eq!(transcript["result"]["terminal"], true);
     let (_, restarted, restarted_principal) = fixture(temp.path());
     assert!(
         restarted
@@ -719,6 +740,11 @@ async fn zero_audio_incomplete_session_gets_terminal_explanatory_transcript() {
     let body = transcript["result"]["body"].as_str().unwrap();
     assert!(body.contains("Incomplete recording"), "{body}");
     assert!(body.contains("_No timestamped transcript"), "{body}");
+    assert_eq!(transcript["result"]["terminal"], true);
+    let coverage = canonical::transcript_coverage_read_only(service.margins_dir(), SESSION)
+        .unwrap()
+        .unwrap();
+    assert_eq!(coverage.segment_count, 0);
 }
 
 #[tokio::test]

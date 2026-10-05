@@ -665,6 +665,17 @@ pub fn transcript_coverage(segments: &[SegmentMeta]) -> Option<TranscriptCoverag
     }))
 }
 
+/// An empty finalized capture still has a transcript receipt. Keeping the
+/// zero-segment receipt makes any later attached audio invalidate that result.
+pub fn transcript_coverage_matches(segments: &[SegmentMeta], recorded: TranscriptCoverage) -> bool {
+    transcript_coverage(segments).unwrap_or(TranscriptCoverage {
+        segment_count: 0,
+        max_segment_index: -1,
+        covered_until_ms: 0,
+        finished_segment_count: 0,
+    }) == recorded
+}
+
 fn summarize_transcript_coverage(
     segments: impl IntoIterator<Item = (i64, i64, Option<f64>)>,
 ) -> Option<TranscriptCoverage> {
@@ -713,13 +724,20 @@ pub fn register_processed_transcript(
     dir: &Path,
     name: &str,
     path: &str,
-    expected: TranscriptCoverage,
+    expected: impl Into<Option<TranscriptCoverage>>,
 ) -> Result<()> {
+    let expected = expected.into();
     let mut conn = open_db(dir)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if db_transcript_coverage(&tx, name)? != Some(expected) {
+    if db_transcript_coverage(&tx, name)? != expected {
         anyhow::bail!("session '{name}' changed during transcription; process it again");
     }
+    let expected = expected.unwrap_or(TranscriptCoverage {
+        segment_count: 0,
+        max_segment_index: -1,
+        covered_until_ms: 0,
+        finished_segment_count: 0,
+    });
     let now = Local::now().to_rfc3339();
     tx.execute(
         "INSERT INTO session_artifacts (session_name, kind, ordinal, path, retention_class, created_at, expires_at) VALUES (?1, ?2, 0, ?3, 'durable', ?4, NULL) ON CONFLICT(session_name, kind, ordinal) DO UPDATE SET path = excluded.path, retention_class = excluded.retention_class, created_at = excluded.created_at, expires_at = NULL",
@@ -1237,7 +1255,7 @@ pub fn get_session_meta(dir: &Path, name: &str) -> Result<SessionMeta> {
     }
 
     if transcript_coverage_read_only(dir, name)?
-        .is_some_and(|recorded| transcript_coverage(&meta.segments) != Some(recorded))
+        .is_some_and(|recorded| !transcript_coverage_matches(&meta.segments, recorded))
     {
         meta.processing_state = Some("none".to_string());
     }
@@ -2192,6 +2210,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(transcript_coverage_read_only(&dir, "meet").unwrap(), None);
+    }
+
+    #[test]
+    fn empty_processed_transcript_receipt_is_invalidated_by_later_audio() {
+        let root = tempdir().unwrap();
+        let dir = root.path().join(".margins");
+        create_session(&dir, "empty", &Local::now(), "empty.md").unwrap();
+        register_processed_transcript(&dir, "empty", ".margins/empty.md", None).unwrap();
+        let recorded = transcript_coverage_read_only(&dir, "empty")
+            .unwrap()
+            .unwrap();
+        assert!(transcript_coverage_matches(&[], recorded));
+        assert_eq!(recorded.segment_count, 0);
+        assert_eq!(
+            get_session_meta(&dir, "empty")
+                .unwrap()
+                .processing_state
+                .as_deref(),
+            Some("done")
+        );
+        add_segment(&dir, "empty", 0, "empty_seg0.wav", 0, Some(1.0)).unwrap();
+        let meta = get_session_meta(&dir, "empty").unwrap();
+        assert!(!transcript_coverage_matches(&meta.segments, recorded));
+        assert_eq!(meta.processing_state.as_deref(), Some("none"));
     }
 
     #[test]

@@ -408,6 +408,7 @@ fn transcribe_remote_session(
             !mono_16k.is_empty(),
             "legacy browser audio has no decodable samples"
         );
+        let decoded_duration_secs = mono_16k.len() as f64 / 16_000.0;
         decoded_audio = true;
         let result = backend.transcribe(AsrRequest {
             samples: mono_16k,
@@ -415,6 +416,21 @@ fn transcribe_remote_session(
             session_offset_ms: source.offset_ms,
             language: None,
         })?;
+        // The old browser could leave its segment unfinished after retaining
+        // a decodable upload. Record the surviving audio extent; the durable
+        // processing gap still identifies the unverified capture boundary.
+        if canonical::get_session_meta(service.margins_dir(), session_id.as_ref())?
+            .segments
+            .iter()
+            .any(|segment| segment.segment_index == 0 && segment.duration_secs.is_none())
+        {
+            canonical::update_segment_duration(
+                service.margins_dir(),
+                session_id.as_ref(),
+                0,
+                decoded_duration_secs,
+            )?;
+        }
         entries.extend(
             result
                 .words
@@ -585,16 +601,16 @@ fn transcribe_remote_session(
         if timeline.is_empty() { "_No timestamped transcript or memo entries were available._" } else { &timeline },
     );
     let path = transcript_artifact_path(service.margins_dir(), session_id.as_ref());
+    let coverage = canonical::transcript_coverage(
+        &canonical::get_session_meta(service.margins_dir(), session_id.as_ref())?.segments,
+    );
     write_atomic_utf8(&path, &content)?;
     let registry_path = format!(".margins/artifacts/{}/transcript.md", session_id.as_ref());
-    canonical::upsert_session_artifact(
+    canonical::register_processed_transcript(
         service.margins_dir(),
         session_id.as_ref(),
-        canonical::SESSION_ARTIFACT_KIND_TRANSCRIPT,
-        0,
         &registry_path,
-        "durable",
-        None,
+        coverage,
     )?;
     Ok(registry_path)
 }
