@@ -48,10 +48,13 @@ workspace "practice" {
   remember in folder "inbox" in source "notes" create note
 
   leave out folders { "archive" }
-  learn questions from folder "people" including linked pages about relationships
+  learn questions from folder "notes/people" including linked pages about relationships
   learn questions from source "mail"
 }
 ```
+
+With more than one Markdown source, folder names start with the source name
+(`"notes/people"`); with one, they are relative to its root (`"people"`).
 
 Mapping from the retired `config.toml`:
 
