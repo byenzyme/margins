@@ -1,5 +1,5 @@
 use chrono::{DateTime, Local};
-use margins_core::{AsrBackend, CaptureProvider, DiarizationBackend, EventSink};
+use margins_core::{AsrBackend, DiarizationBackend, EventSink};
 use margins_workflows::project::ResolvedProject;
 use std::ffi::OsStr;
 use std::path::Path;
@@ -263,7 +263,6 @@ impl ProjectService for SystemProjectService {
 }
 
 pub struct CliServices {
-    pub capture: Arc<dyn CaptureProvider>,
     pub sessions: Arc<dyn SessionStore>,
     pub asr: Arc<dyn AsrBackend>,
     pub diarization: Arc<dyn DiarizationBackend>,
@@ -276,7 +275,6 @@ pub struct CliServices {
 impl Default for CliServices {
     fn default() -> Self {
         Self {
-            capture: Arc::new(margins_core::UnavailableCaptureProvider::default()),
             sessions: Arc::new(LocalSessionStore),
             asr: Arc::new(margins_media::providers::UnavailableAsr),
             diarization: Arc::new(margins_media::providers::UnavailableDiarization),
@@ -297,7 +295,7 @@ pub fn standalone_services() -> CliServices {
     let mut services = CliServices::default();
 
     #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
-    if let Some(backend) = coreml_model_root().and_then(|path| {
+    if let Some(backend) = margins_media::model_registry::resolve_coreml_dir().and_then(|path| {
         margins_media::providers::coreml::CoreMlAsrBackend::from_dir_auto(path).ok()
     }) {
         services.asr = Arc::new(backend);
@@ -305,13 +303,13 @@ pub fn standalone_services() -> CliServices {
 
     #[cfg(feature = "parakeet-onnx")]
     if !services.asr.is_available() {
-        if let Some(backend) = model_path_from_env("MARGINS_PARAKEET_MODEL_DIR").and_then(|path| {
-            margins_media::providers::parakeet::ParakeetOnnxBackend::from_dir(
-                path,
-                margins_media::providers::parakeet::AsrModelKind::Tdt,
-            )
+        if let Some(backend) = margins_media::model_registry::resolve_parakeet_model()
             .ok()
-        }) {
+            .flatten()
+            .and_then(|(path, kind)| {
+                margins_media::providers::parakeet::ParakeetOnnxBackend::from_dir(path, kind).ok()
+            })
+        {
             services.asr = Arc::new(backend);
         }
     }
@@ -323,68 +321,4 @@ pub fn standalone_services() -> CliServices {
     }
 
     services
-}
-
-#[cfg(all(feature = "coreml-asr", target_os = "macos"))]
-fn coreml_model_root() -> Option<std::path::PathBuf> {
-    model_path_from_env("MARGINS_FLUID_COREML_MODEL_DIR").or_else(|| {
-        std::env::var_os("HOME")
-            .filter(|home| !home.is_empty())
-            .map(std::path::PathBuf::from)
-            .map(|home| home.join("Library/Application Support/FluidAudio/Models"))
-    })
-}
-
-#[cfg(any(
-    feature = "parakeet-onnx",
-    all(feature = "coreml-asr", target_os = "macos")
-))]
-fn model_path_from_env(name: &str) -> Option<std::path::PathBuf> {
-    model_path(
-        std::env::var_os(name)?,
-        std::env::var_os("HOME").as_deref().map(Path::new),
-    )
-}
-
-#[cfg(any(
-    feature = "parakeet-onnx",
-    all(feature = "coreml-asr", target_os = "macos"),
-    test
-))]
-fn model_path(value: std::ffi::OsString, home: Option<&Path>) -> Option<std::path::PathBuf> {
-    if value.to_string_lossy().trim().is_empty() {
-        return None;
-    }
-    let path = std::path::PathBuf::from(value);
-    let text = path.to_string_lossy();
-    if let Some(rest) = text.strip_prefix("~/") {
-        return home.map(|home| home.join(rest));
-    }
-    Some(path)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::model_path;
-    use std::ffi::OsString;
-    use std::path::{Path, PathBuf};
-
-    #[test]
-    fn model_paths_ignore_empty_values_and_expand_home() {
-        assert_eq!(
-            model_path(OsString::from("  "), Some(Path::new("/home/test"))),
-            None
-        );
-        assert_eq!(
-            model_path(
-                OsString::from("~/models/parakeet"),
-                Some(Path::new("/home/test"))
-            ),
-            Some(PathBuf::from("/home/test/models/parakeet"))
-        );
-        assert_eq!(
-            model_path(OsString::from("relative/models"), None),
-            Some(PathBuf::from("relative/models"))
-        );
-    }
 }

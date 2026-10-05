@@ -1,6 +1,7 @@
 use crate::error::CliError;
 use crate::output::{line, xml_escape_attr, xml_escape_text};
 use chrono::{DateTime, Local};
+use margins_workflows::artifacts::ArtifactView;
 use std::io::Write;
 use std::path::Path;
 
@@ -18,6 +19,14 @@ pub fn list(work_dir: &Path, meeting_id: &str, stdout: &mut dyn Write) -> Result
     let artifacts =
         margins_workflows::artifacts::list_artifacts(work_dir, &margins_dir, &meeting_id)
             .map_err(CliError::from_anyhow)?;
+    render_artifact_list(&meeting_id, artifacts, stdout)
+}
+
+fn render_artifact_list(
+    meeting_id: &str,
+    artifacts: Vec<ArtifactView>,
+    stdout: &mut dyn Write,
+) -> Result<(), CliError> {
     line(
         stdout,
         format_args!(
@@ -63,9 +72,64 @@ pub fn list(work_dir: &Path, meeting_id: &str, stdout: &mut dyn Write) -> Result
         .map_err(CliError::from_anyhow)?;
         line(stdout, format_args!("    <exists>{}</exists>", view.exists))
             .map_err(CliError::from_anyhow)?;
+        line(
+            stdout,
+            format_args!("    <available>{}</available>", view.available),
+        )
+        .map_err(CliError::from_anyhow)?;
+        if artifact.path.starts_with("meeting-runtime://") && view.available {
+            line(
+                stdout,
+                format_args!("    <export_command>margins audio-export</export_command>"),
+            )
+            .map_err(CliError::from_anyhow)?;
+            line(
+                stdout,
+                format_args!(
+                    "    <export_meeting_id>{}</export_meeting_id>",
+                    xml_escape_text(&meeting_id)
+                ),
+            )
+            .map_err(CliError::from_anyhow)?;
+        }
         line(stdout, format_args!("  </artifact>")).map_err(CliError::from_anyhow)?;
     }
     line(stdout, format_args!("</margins_artifacts>")).map_err(CliError::from_anyhow)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_audio_list_exposes_export_instead_of_claiming_a_missing_file() {
+        let artifact = margins_store::canonical::SessionArtifact {
+            session_name: "meeting".into(),
+            kind: "audio_mic_runtime".into(),
+            ordinal: 0,
+            path: "meeting-runtime://meeting/meeting-seg-0/mic".into(),
+            retention_class: "durable".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            expires_at: None,
+        };
+        let mut output = Vec::new();
+        render_artifact_list(
+            "meeting",
+            vec![ArtifactView {
+                artifact,
+                disk_path: "/tmp/.margins/meeting_seg0.wav".into(),
+                exists: false,
+                available: true,
+            }],
+            &mut output,
+        )
+        .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("<available>true</available>"));
+        assert!(output.contains("<exists>false</exists>"));
+        assert!(output.contains("<export_command>margins audio-export</export_command>"));
+        assert!(output.contains("<export_meeting_id>meeting</export_meeting_id>"));
+    }
 }
 
 pub fn prune(

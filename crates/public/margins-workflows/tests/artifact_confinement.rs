@@ -27,6 +27,50 @@ fn confinement_rejects_absolute_traversal_and_shallow_targets() {
 }
 
 #[test]
+fn listing_missing_storage_creates_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    let margins = temp.path().join(".margins");
+    assert!(list_artifacts(temp.path(), &margins, "missing")
+        .unwrap()
+        .is_empty());
+    assert!(!margins.exists());
+}
+
+#[test]
+fn listing_legacy_storage_does_not_create_runtime_blob_directory_or_tables() {
+    let temp = tempfile::tempdir().unwrap();
+    let margins = temp.path().join(".margins");
+    canonical::create_session(&margins, "meet", &Local::now(), ".margins/meet.md").unwrap();
+    assert!(!margins.join("meeting-blobs").exists());
+    assert!(list_artifacts(temp.path(), &margins, "meet")
+        .unwrap()
+        .is_empty());
+    assert!(!margins.join("meeting-blobs").exists());
+    let conn = rusqlite::Connection::open(margins.join("sessions.sqlite")).unwrap();
+    let runtime_tables: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'meeting_sessions'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(runtime_tables, 0);
+}
+
+#[test]
+fn listing_does_not_wait_for_an_active_sqlite_writer() {
+    let temp = tempfile::tempdir().unwrap();
+    let margins = temp.path().join(".margins");
+    canonical::create_session(&margins, "meet", &Local::now(), ".margins/meet.md").unwrap();
+    let writer = rusqlite::Connection::open(margins.join("sessions.sqlite")).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert!(list_artifacts(temp.path(), &margins, "meet")
+        .unwrap()
+        .is_empty());
+    writer.execute_batch("ROLLBACK").unwrap();
+}
+
+#[test]
 fn prune_rejects_cross_session_targets() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path().join(".margins");

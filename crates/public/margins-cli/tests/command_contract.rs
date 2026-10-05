@@ -3,12 +3,7 @@ use clap::Parser;
 use margins_cli::args::Args;
 use margins_cli::run;
 use margins_cli::services::{CliServices, Clock, ProjectService};
-use margins_core::{
-    AsrBackend, AsrRequest, AsrResult, AudioLane, CaptureCapabilities, CaptureCommand,
-    CaptureCommandResult, CaptureCommandStatus, CaptureDevice, CaptureError, CaptureHandle,
-    CaptureLaneSnapshot, CaptureLaneState, CaptureObserver, CaptureProvider, CaptureRequest,
-    CaptureSnapshot, CaptureState, PermissionState, TranscriptError,
-};
+use margins_core::{AsrBackend, AsrRequest, AsrResult, TranscriptError};
 use margins_meeting_protocol::{SessionId, SessionMillis, WorkspaceMemoUpdateV1};
 use margins_store::canonical;
 use margins_workflows::project::{ProjectSource, ResolvedProject};
@@ -89,7 +84,7 @@ fn workspace_default_and_destination_are_explicit_json_reads() {
     assert_eq!(json["note_folder"], "inbox");
     assert_eq!(
         json["destination"],
-        vault.join("inbox").to_string_lossy().as_ref()
+        workspace.home_dir.join("inbox").to_string_lossy().as_ref()
     );
     restore_env("MARGINS_HOME", old.as_ref());
 }
@@ -3042,8 +3037,9 @@ fn transcript_defaults_to_latest_json_and_preserves_default_xml() {
 
     let (result, default_xml, stderr) = invoke(&services, temp.path(), &["margins", "transcript"]);
     assert!(result.is_ok(), "{stderr}");
-    assert!(default_xml
-        .starts_with("<margins_transcript meeting_id=\"latest-json\" view=\"aligned\">\n"));
+    assert!(default_xml.starts_with(
+        "<margins_transcript meeting_id=\"latest-json\" view=\"aligned\" terminal=\"true\" incomplete=\"false\""
+    ));
 
     let (result, explicit_text, stderr) = invoke(
         &services,
@@ -3066,6 +3062,7 @@ fn transcript_defaults_to_latest_json_and_preserves_default_xml() {
         "body",
         "view",
         "decoded_until_ms",
+        "captured_until_ms",
         "committed_until_ms",
         "updated_at_unix_ms",
         "live",
@@ -3084,6 +3081,206 @@ fn transcript_defaults_to_latest_json_and_preserves_default_xml() {
 }
 
 #[test]
+fn transcript_xml_marks_finished_short_live_checkpoint_incomplete() {
+    let temp = tempfile::tempdir().unwrap();
+    let meeting_id = "short-live";
+    seed_checkpoint_session(temp.path(), meeting_id, true, 11);
+    let dir = temp.path().join(".margins");
+    canonical::update_segment_duration(&dir, meeting_id, 0, 48.5).unwrap();
+    canonical::mark_session_ended(&dir, meeting_id).unwrap();
+    std::fs::remove_file(dir.join("current")).unwrap();
+    let (result, xml, stderr) = invoke(
+        &services(temp.path()),
+        temp.path(),
+        &["margins", "transcript", meeting_id],
+    );
+    assert!(result.is_ok(), "{stderr}");
+    assert!(xml.contains("view=\"incomplete\" terminal=\"false\" incomplete=\"true\""));
+    assert!(xml.contains("captured_until_ms=\"48500\" decoded_until_ms=\"11\""));
+}
+
+#[test]
+fn transcript_xml_keeps_pending_remote_sessions_out_of_offline_processing() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join(".margins");
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in ["remote-pending", "remote-active"] {
+        canonical::create_session(&dir, name, &Local::now(), &format!(".margins/{name}.md"))
+            .unwrap();
+        canonical::add_segment(
+            &dir,
+            name,
+            0,
+            &format!("{name}_seg0.wav"),
+            0,
+            (name == "remote-pending").then_some(1.0),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(format!("{name}_capture_context.md")),
+            "<!-- margins:transcript-pending-v1 -->\nRemote ASR pending.\n",
+        )
+        .unwrap();
+    }
+    canonical::mark_session_ended(&dir, "remote-pending").unwrap();
+    let authority = margins_store::SqliteWorkspaceAuthorityStorage::open(&dir).unwrap();
+    authority
+        .reserve_producer("remote-active", "browser", "token")
+        .unwrap();
+    for (name, live) in [("remote-pending", false), ("remote-active", true)] {
+        let (result, xml, stderr) = invoke(
+            &services(temp.path()),
+            temp.path(),
+            &["margins", "transcript", name],
+        );
+        assert!(result.is_ok(), "{stderr}");
+        assert!(xml.contains("view=\"pending\" terminal=\"false\" incomplete=\"false\""));
+        assert!(xml.contains(&format!("live=\"{live}\"")));
+    }
+}
+
+#[test]
+fn active_remote_checkpoint_is_live_in_default_xml() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join(".margins");
+    std::fs::create_dir_all(&dir).unwrap();
+    canonical::create_session(
+        &dir,
+        "remote-live",
+        &Local::now(),
+        ".margins/remote-live.md",
+    )
+    .unwrap();
+    canonical::add_segment(&dir, "remote-live", 0, "remote-live_seg0.wav", 0, None).unwrap();
+    std::fs::write(
+        dir.join("remote-live_remote.live-transcript.json"),
+        serde_json::json!({
+            "version": 2, "terminal": false, "decoded_until_ms": 500,
+            "transcripts": [{"words": [{"channel": 0, "start_ms": 100,
+                "end_ms": 500, "text": "hello"}]}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let authority = margins_store::SqliteWorkspaceAuthorityStorage::open(&dir).unwrap();
+    authority
+        .reserve_producer("remote-live", "browser", "token")
+        .unwrap();
+    let (result, xml, stderr) = invoke(
+        &services(temp.path()),
+        temp.path(),
+        &["margins", "transcript", "remote-live"],
+    );
+    assert!(result.is_ok(), "{stderr}");
+    assert!(xml.contains("view=\"full\" terminal=\"false\" incomplete=\"false\" live=\"true\""));
+    authority
+        .release_producer("remote-live", "browser", "token")
+        .unwrap();
+    let (result, xml, stderr) = invoke(
+        &services(temp.path()),
+        temp.path(),
+        &["margins", "transcript", "remote-live"],
+    );
+    assert!(result.is_ok(), "{stderr}");
+    assert!(xml.contains("view=\"pending\" terminal=\"false\" incomplete=\"false\" live=\"false\""));
+    let (result, json, stderr) = invoke(
+        &services(temp.path()),
+        temp.path(),
+        &["margins", "transcript", "remote-live", "--format", "json"],
+    );
+    assert!(result.is_ok(), "{stderr}");
+    let report: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(report["view"], "pending");
+    assert_eq!(report["live"], false);
+}
+
+#[test]
+fn remote_session_with_stale_final_remains_pending_for_server_asr() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join(".margins");
+    std::fs::create_dir_all(&dir).unwrap();
+    canonical::create_session(
+        &dir,
+        "remote-stale",
+        &Local::now(),
+        ".margins/remote-stale.md",
+    )
+    .unwrap();
+    canonical::add_segment(&dir, "remote-stale", 0, "seg0.wav", 0, Some(1.0)).unwrap();
+    std::fs::write(dir.join("remote-stale_aligned.md"), "old remote transcript").unwrap();
+    let coverage = canonical::transcript_coverage(
+        &canonical::get_session_meta(&dir, "remote-stale")
+            .unwrap()
+            .segments,
+    )
+    .unwrap();
+    canonical::register_processed_transcript(
+        &dir,
+        "remote-stale",
+        ".margins/remote-stale_aligned.md",
+        coverage,
+    )
+    .unwrap();
+    let authority = margins_store::SqliteWorkspaceAuthorityStorage::open(&dir).unwrap();
+    authority
+        .reserve_producer("remote-stale", "browser", "token")
+        .unwrap();
+    authority
+        .release_producer("remote-stale", "browser", "token")
+        .unwrap();
+    canonical::add_segment(&dir, "remote-stale", 1, "seg1.wav", 10_000, Some(1.0)).unwrap();
+    let (result, xml, stderr) = invoke(
+        &services(temp.path()),
+        temp.path(),
+        &["margins", "transcript", "remote-stale"],
+    );
+    assert!(result.is_ok(), "{stderr}");
+    assert!(xml.contains("view=\"pending\" terminal=\"false\" incomplete=\"false\" live=\"false\""));
+    assert!(xml.contains("Remote audio is waiting for server transcription"));
+    assert!(!xml.contains("old remote transcript"));
+}
+
+#[test]
+fn crashed_local_session_with_partial_final_is_explicitly_incomplete() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join(".margins");
+    std::fs::create_dir_all(&dir).unwrap();
+    canonical::create_session(
+        &dir,
+        "crashed-local",
+        &Local::now(),
+        ".margins/crashed-local.md",
+    )
+    .unwrap();
+    canonical::add_segment(&dir, "crashed-local", 0, "seg0.wav", 0, Some(1.0)).unwrap();
+    canonical::add_segment(&dir, "crashed-local", 1, "seg1.wav", 10_000, None).unwrap();
+    std::fs::write(dir.join("crashed-local_aligned.md"), "partial transcript").unwrap();
+    let coverage = canonical::transcript_coverage(
+        &canonical::get_session_meta(&dir, "crashed-local")
+            .unwrap()
+            .segments,
+    )
+    .unwrap();
+    canonical::register_processed_transcript(
+        &dir,
+        "crashed-local",
+        ".margins/crashed-local_aligned.md",
+        coverage,
+    )
+    .unwrap();
+    let (result, xml, stderr) = invoke(
+        &services(temp.path()),
+        temp.path(),
+        &["margins", "transcript", "crashed-local"],
+    );
+    assert!(result.is_ok(), "{stderr}");
+    assert!(
+        xml.contains("view=\"incomplete\" terminal=\"false\" incomplete=\"true\" live=\"false\"")
+    );
+    assert!(xml.contains("partial transcript"));
+}
+
+#[test]
 fn transcript_json_reports_live_and_terminal_checkpoint_state() {
     for (meeting_id, terminal, expected_live, decoded) in [
         ("live-meeting", false, true, 12_345),
@@ -3091,6 +3288,12 @@ fn transcript_json_reports_live_and_terminal_checkpoint_state() {
     ] {
         let temp = tempfile::tempdir().unwrap();
         seed_checkpoint_session(temp.path(), meeting_id, terminal, decoded);
+        if expected_live {
+            margins_store::SqliteWorkspaceAuthorityStorage::open(temp.path().join(".margins"))
+                .unwrap()
+                .reserve_producer(meeting_id, "test-producer", "token")
+                .unwrap();
+        }
         let services = services(temp.path());
         let (result, stdout, stderr) = invoke(
             &services,
@@ -3326,7 +3529,7 @@ fn unavailable_capture_is_stable_and_precedes_all_mutation() {
 }
 
 #[test]
-fn explicit_workspace_new_uses_declared_capture_store_from_unrelated_cwd() {
+fn explicit_workspace_new_is_unavailable_without_side_effects() {
     let _guard = ENV_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let margins_home = temp.path().join("state");
@@ -3339,8 +3542,7 @@ fn explicit_workspace_new_uses_declared_capture_store_from_unrelated_cwd() {
     let old_margins_home = std::env::var_os("MARGINS_HOME");
     std::env::set_var("MARGINS_HOME", &margins_home);
     workspace::create_workspace(&margins_home, "practice", None, &notes).unwrap();
-    let mut services = services(&legacy_project);
-    services.capture = Arc::new(FakeCapture);
+    let services = services(&legacy_project);
 
     let (result, _stdout, stderr) = invoke(
         &services,
@@ -3356,10 +3558,13 @@ fn explicit_workspace_new_uses_declared_capture_store_from_unrelated_cwd() {
     );
     restore_env("MARGINS_HOME", old_margins_home.as_ref());
 
-    assert!(result.is_ok(), "{stderr}");
+    assert_eq!(
+        result.unwrap_err().code(),
+        "capture_unavailable",
+        "{stderr}"
+    );
     let canonical = margins_home.join("workspaces/practice/captures/.margins");
-    assert!(canonical.join("2026-08-10-12-00-00.md").is_file());
-    assert!(canonical.join("sessions.sqlite").is_file());
+    assert!(!canonical.exists());
     assert!(!unrelated.join(".margins").exists());
     assert!(!legacy_project.join(".margins").exists());
     assert!(!notes.join(".margins").exists());
@@ -3375,8 +3580,7 @@ fn explicit_workspace_rejects_project_before_capture_side_effects() {
     let old_margins_home = std::env::var_os("MARGINS_HOME");
     std::env::set_var("MARGINS_HOME", &margins_home);
     workspace::create_workspace(&margins_home, "practice", None, &notes).unwrap();
-    let mut services = services(temp.path());
-    services.capture = Arc::new(FakeCapture);
+    let services = services(temp.path());
 
     let (result, _stdout, stderr) = invoke(
         &services,
@@ -3397,239 +3601,6 @@ fn explicit_workspace_rejects_project_before_capture_side_effects() {
     assert!(!margins_home
         .join("workspaces/practice/captures/.margins")
         .exists());
-}
-
-#[derive(Default)]
-struct FakeCapture;
-
-impl CaptureProvider for FakeCapture {
-    fn capabilities(&self) -> CaptureCapabilities {
-        CaptureCapabilities {
-            available: true,
-            supported_lanes: vec![AudioLane::Microphone],
-            supports_device_selection: false,
-            supports_live_pcm: false,
-            unavailable_reason: None,
-        }
-    }
-    fn devices(&self) -> Result<Vec<CaptureDevice>, CaptureError> {
-        Ok(Vec::new())
-    }
-    fn permission(&self, _lane: AudioLane) -> Result<PermissionState, CaptureError> {
-        Ok(PermissionState::Granted)
-    }
-    fn request_permission(&self, _lane: AudioLane) -> Result<PermissionState, CaptureError> {
-        Ok(PermissionState::Granted)
-    }
-    fn start(
-        &self,
-        request: CaptureRequest,
-        _observer: Arc<dyn CaptureObserver>,
-    ) -> Result<Box<dyn CaptureHandle>, CaptureError> {
-        Ok(Box::new(FakeHandle {
-            snapshot: CaptureSnapshot {
-                session_id: request.session_id,
-                segment_id: request.segment_id,
-                state: CaptureState::Capturing,
-                lanes: vec![CaptureLaneSnapshot {
-                    lane: AudioLane::Microphone,
-                    state: CaptureLaneState::Active,
-                    generation: 0,
-                    delivered_frames: 0,
-                    durable_frames: 0,
-                    observed_signal: false,
-                    dropped_live_frames: 0,
-                    dropped_durable_frames: 0,
-                    last_error_code: None,
-                }],
-                timeline_reusable: true,
-            },
-        }))
-    }
-}
-
-struct FailingStartCapture;
-
-impl CaptureProvider for FailingStartCapture {
-    fn capabilities(&self) -> CaptureCapabilities {
-        FakeCapture.capabilities()
-    }
-    fn devices(&self) -> Result<Vec<CaptureDevice>, CaptureError> {
-        Ok(Vec::new())
-    }
-    fn permission(&self, _lane: AudioLane) -> Result<PermissionState, CaptureError> {
-        Ok(PermissionState::Granted)
-    }
-    fn request_permission(&self, _lane: AudioLane) -> Result<PermissionState, CaptureError> {
-        Ok(PermissionState::Granted)
-    }
-    fn start(
-        &self,
-        _request: CaptureRequest,
-        _observer: Arc<dyn CaptureObserver>,
-    ) -> Result<Box<dyn CaptureHandle>, CaptureError> {
-        Err(CaptureError::unavailable("provider disappeared"))
-    }
-}
-
-struct DeniedCapture;
-
-impl CaptureProvider for DeniedCapture {
-    fn capabilities(&self) -> CaptureCapabilities {
-        FakeCapture.capabilities()
-    }
-    fn devices(&self) -> Result<Vec<CaptureDevice>, CaptureError> {
-        Ok(Vec::new())
-    }
-    fn permission(&self, _lane: AudioLane) -> Result<PermissionState, CaptureError> {
-        Ok(PermissionState::Denied)
-    }
-    fn request_permission(&self, _lane: AudioLane) -> Result<PermissionState, CaptureError> {
-        Ok(PermissionState::Denied)
-    }
-    fn start(
-        &self,
-        _request: CaptureRequest,
-        _observer: Arc<dyn CaptureObserver>,
-    ) -> Result<Box<dyn CaptureHandle>, CaptureError> {
-        unreachable!("permission denial must preflight before start")
-    }
-}
-
-struct UnknownSystemCapture;
-
-impl CaptureProvider for UnknownSystemCapture {
-    fn capabilities(&self) -> CaptureCapabilities {
-        CaptureCapabilities {
-            available: true,
-            supported_lanes: vec![AudioLane::System],
-            supports_device_selection: false,
-            supports_live_pcm: false,
-            unavailable_reason: None,
-        }
-    }
-
-    fn devices(&self) -> Result<Vec<CaptureDevice>, CaptureError> {
-        Ok(Vec::new())
-    }
-
-    fn permission(&self, _lane: AudioLane) -> Result<PermissionState, CaptureError> {
-        Ok(PermissionState::Unknown)
-    }
-
-    fn request_permission(&self, _lane: AudioLane) -> Result<PermissionState, CaptureError> {
-        panic!("unknown system permission must be proven by capture health, not requested")
-    }
-
-    fn start(
-        &self,
-        request: CaptureRequest,
-        _observer: Arc<dyn CaptureObserver>,
-    ) -> Result<Box<dyn CaptureHandle>, CaptureError> {
-        Ok(Box::new(FakeHandle {
-            snapshot: CaptureSnapshot {
-                session_id: request.session_id,
-                segment_id: request.segment_id,
-                state: CaptureState::Capturing,
-                lanes: vec![CaptureLaneSnapshot {
-                    lane: AudioLane::System,
-                    state: CaptureLaneState::Active,
-                    generation: 0,
-                    delivered_frames: 0,
-                    durable_frames: 0,
-                    observed_signal: false,
-                    dropped_live_frames: 0,
-                    dropped_durable_frames: 0,
-                    last_error_code: None,
-                }],
-                timeline_reusable: true,
-            },
-        }))
-    }
-}
-
-struct FakeHandle {
-    snapshot: CaptureSnapshot,
-}
-
-impl CaptureHandle for FakeHandle {
-    fn snapshot(&self) -> Result<CaptureSnapshot, CaptureError> {
-        Ok(self.snapshot.clone())
-    }
-    fn command(&self, command: CaptureCommand) -> Result<CaptureCommandResult, CaptureError> {
-        let mut snapshot = self.snapshot.clone();
-        snapshot.state = CaptureState::Finished;
-        Ok(CaptureCommandResult {
-            operation_id: command.operation_id,
-            status: CaptureCommandStatus::Applied,
-            snapshot,
-            completed_artifacts: Vec::new(),
-        })
-    }
-}
-
-#[test]
-fn injected_capture_keeps_one_stable_id_across_attaches() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut services = services(temp.path());
-    services.capture = Arc::new(FakeCapture);
-    for args in [
-        vec!["margins", "new", "--title", "Stable"],
-        vec!["margins", "attach"],
-        vec!["margins", "attach"],
-    ] {
-        let (result, _, stderr) = invoke(&services, temp.path(), &args);
-        assert!(result.is_ok(), "{stderr}");
-    }
-    let margins_dir = temp.path().join(".margins");
-    let current = std::fs::read_to_string(margins_dir.join("current")).unwrap();
-    let id = current.trim();
-    assert_eq!(id, "2026-08-10-12-00-00");
-    let meta = canonical::get_session_meta(&margins_dir, id).unwrap();
-    assert_eq!(meta.title.as_deref(), Some("Stable"));
-    assert_eq!(
-        meta.segments
-            .iter()
-            .map(|segment| segment.segment_index)
-            .collect::<Vec<_>>(),
-        vec![0, 1, 2]
-    );
-    assert_eq!(canonical::list_sessions(&margins_dir).unwrap().len(), 1);
-}
-
-#[test]
-fn permission_and_failed_start_leave_no_capture_mutation() {
-    for (provider, expected) in [
-        (
-            Arc::new(DeniedCapture) as Arc<dyn CaptureProvider>,
-            "capture_permission_denied",
-        ),
-        (
-            Arc::new(FailingStartCapture) as Arc<dyn CaptureProvider>,
-            "capture_unavailable",
-        ),
-    ] {
-        let temp = tempfile::tempdir().unwrap();
-        let mut services = services(temp.path());
-        services.capture = provider;
-        let (result, stdout, _) = invoke(&services, temp.path(), &["margins", "new"]);
-        assert_eq!(result.unwrap_err().code(), expected);
-        assert!(stdout.is_empty());
-        assert!(!temp.path().join(".margins").exists());
-    }
-}
-
-#[test]
-fn unknown_system_permission_is_deferred_to_delivery_health() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut services = services(temp.path());
-    services.capture = Arc::new(UnknownSystemCapture);
-
-    let (result, stdout, stderr) = invoke(&services, temp.path(), &["margins", "new"]);
-
-    assert!(result.is_ok(), "{stderr}");
-    assert!(stdout.is_empty());
-    assert!(temp.path().join(".margins/current").is_file());
 }
 
 #[test]
@@ -3931,35 +3902,14 @@ fn public_note_handoff_defaults_to_latest_session_in_selected_workspace() {
 }
 
 #[test]
-fn bare_margins_creates_without_a_current_session_then_resumes_it() {
+fn bare_public_cli_is_unavailable_without_side_effects() {
     let temp = tempfile::tempdir().unwrap();
-    let mut services = services(temp.path());
-    services.capture = Arc::new(FakeCapture);
-
-    let (first, _, first_stderr) = invoke(&services, temp.path(), &["margins"]);
-    assert!(first.is_ok(), "{first_stderr}");
-
-    let margins_dir = temp.path().join(".margins");
-    let current = std::fs::read_to_string(margins_dir.join("current")).unwrap();
-    let id = current.trim();
-    let first_meta = canonical::get_session_meta(&margins_dir, id).unwrap();
-    assert_eq!(first_meta.segments.len(), 1);
-
-    let (second, _, second_stderr) = invoke(&services, temp.path(), &["margins"]);
-    assert!(second.is_ok(), "{second_stderr}");
-
-    let second_current = std::fs::read_to_string(margins_dir.join("current")).unwrap();
-    assert_eq!(second_current.trim(), id);
-    let resumed_meta = canonical::get_session_meta(&margins_dir, id).unwrap();
-    assert_eq!(
-        resumed_meta
-            .segments
-            .iter()
-            .map(|segment| segment.segment_index)
-            .collect::<Vec<_>>(),
-        vec![0, 1]
-    );
-    assert_eq!(canonical::list_sessions(&margins_dir).unwrap().len(), 1);
+    let services = services(temp.path());
+    for _ in 0..2 {
+        let (result, _, _) = invoke(&services, temp.path(), &["margins"]);
+        assert_eq!(result.unwrap_err().code(), "capture_unavailable");
+    }
+    assert!(!temp.path().join(".margins").exists());
 }
 
 #[test]

@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local};
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -67,6 +67,9 @@ pub struct SessionInfo {
     pub start_time: String,
     pub notes_path: String,
     pub segment_count: i64,
+    /// Read-time lifecycle: old finalized sessions never received an `ended`
+    /// write, while runtime-owned sessions use their recorded lifecycle.
+    pub lifecycle_state: String,
 }
 
 pub const SESSION_ARTIFACT_KIND_TRANSCRIPT: &str = "transcript";
@@ -81,6 +84,30 @@ pub struct SessionArtifact {
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TranscriptCoverage {
+    pub segment_count: i64,
+    pub max_segment_index: i64,
+    pub covered_until_ms: u64,
+    pub finished_segment_count: i64,
+}
+
+const EMPTY_TRANSCRIPT_COVERAGE: TranscriptCoverage = TranscriptCoverage {
+    segment_count: 0,
+    max_segment_index: -1,
+    covered_until_ms: 0,
+    finished_segment_count: 0,
+};
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionProcessingGap {
+    pub session_name: String,
+    pub segment_id: String,
+    pub start_sequence: u64,
+    pub end_exclusive: u64,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -214,6 +241,15 @@ fn init_schema(conn: &Connection) -> Result<()> {
             FOREIGN KEY (session_name) REFERENCES sessions(name) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS session_transcript_coverage (
+            session_name TEXT PRIMARY KEY NOT NULL,
+            segment_count INTEGER NOT NULL,
+            max_segment_index INTEGER NOT NULL,
+            covered_until_ms INTEGER NOT NULL,
+            finished_segment_count INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (session_name) REFERENCES sessions(name) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS session_tombstones (
             name TEXT PRIMARY KEY NOT NULL,
             state TEXT NOT NULL,
@@ -251,6 +287,16 @@ fn init_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_session_processing_jobs_session
             ON session_processing_jobs(session_name, updated_at DESC);
 
+        CREATE TABLE IF NOT EXISTS session_processing_gaps (
+            session_name TEXT NOT NULL,
+            segment_id TEXT NOT NULL,
+            start_sequence INTEGER NOT NULL,
+            end_exclusive INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            PRIMARY KEY (session_name, segment_id, start_sequence, end_exclusive, reason),
+            FOREIGN KEY (session_name) REFERENCES sessions(name) ON DELETE CASCADE
+        );
+
         CREATE INDEX IF NOT EXISTS idx_session_segments_session
             ON session_segments(session_name, segment_index);
         CREATE INDEX IF NOT EXISTS idx_session_people_session
@@ -281,6 +327,20 @@ fn init_schema(conn: &Connection) -> Result<()> {
         "TEXT NOT NULL DEFAULT 'active'",
     )?;
     ensure_column(conn, "sessions", "lifecycle_updated_at", "TEXT")?;
+    if ensure_column(
+        conn,
+        "session_transcript_coverage",
+        "finished_segment_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )? {
+        // Receipts written before this column existed represented only fully
+        // finished sessions. Run this write once during the schema upgrade;
+        // newer incomplete receipts may legitimately have zero finished rows.
+        conn.execute(
+            "UPDATE session_transcript_coverage SET finished_segment_count = segment_count",
+            [],
+        )?;
+    }
     ensure_column(
         conn,
         "session_note_associations",
@@ -296,19 +356,19 @@ fn init_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn ensure_column(conn: &Connection, table: &str, column: &str, kind: &str) -> Result<()> {
+fn ensure_column(conn: &Connection, table: &str, column: &str, kind: &str) -> Result<bool> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
     for row in rows {
         if row?.eq_ignore_ascii_case(column) {
-            return Ok(());
+            return Ok(false);
         }
     }
     conn.execute(
         &format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"),
         [],
     )?;
-    Ok(())
+    Ok(true)
 }
 
 fn migrate_json_metadata_if_needed(conn: &mut Connection, dir: &Path) -> Result<()> {
@@ -418,7 +478,7 @@ fn migrate_application_records_if_needed(conn: &mut Connection, dir: &Path) -> R
                 "running"
             };
             tx.execute(
-                "INSERT OR IGNORE INTO session_processing_jobs (job_id, session_name, operation, input_revision, attempt, status, progress, result_ref, failure, failed_stage, updated_at) VALUES (?1, ?2, 'legacy_note', 'legacy-session-columns', 0, ?3, ?4, NULL, ?5, ?6, ?7)",
+                "INSERT OR IGNORE INTO session_processing_jobs (job_id, session_name, operation, input_revision, attempt, status, progress, result_ref, failure, failed_stage, updated_at) SELECT ?1, ?2, 'legacy_note', 'legacy-session-columns', 0, ?3, ?4, NULL, ?5, ?6, ?7 WHERE NOT EXISTS (SELECT 1 FROM session_processing_jobs WHERE session_name = ?2)",
                 params![format!("legacy:{name}"), name, status, (status == "complete").then_some(1.0), error, failed_stage, created_at],
             )?;
         }
@@ -599,6 +659,156 @@ pub fn create_session(
     )?;
     tx.commit()?;
     Ok(())
+}
+
+/// The segment set and finished audio extent represented by an offline transcript.
+pub fn transcript_coverage(segments: &[SegmentMeta]) -> Option<TranscriptCoverage> {
+    summarize_transcript_coverage(segments.iter().map(|segment| {
+        (
+            segment.segment_index,
+            segment.offset_ms,
+            segment.duration_secs,
+        )
+    }))
+}
+
+/// An empty finalized capture still has a transcript receipt. Keeping the
+/// zero-segment receipt makes any later attached audio invalidate that result.
+pub fn transcript_coverage_matches(segments: &[SegmentMeta], recorded: TranscriptCoverage) -> bool {
+    transcript_coverage(segments).unwrap_or(EMPTY_TRANSCRIPT_COVERAGE) == recorded
+}
+
+fn summarize_transcript_coverage(
+    segments: impl IntoIterator<Item = (i64, i64, Option<f64>)>,
+) -> Option<TranscriptCoverage> {
+    let mut count = 0i64;
+    let mut finished_count = 0i64;
+    let mut max_index = -1i64;
+    let mut end_ms = 0u64;
+    for (index, offset_ms, duration_secs) in segments {
+        count += 1;
+        max_index = max_index.max(index);
+        if let Some(duration) = duration_secs {
+            finished_count += 1;
+            end_ms = end_ms.max(
+                (offset_ms.max(0) as u64)
+                    .saturating_add((duration.max(0.0) * 1_000.0).round() as u64),
+            );
+        }
+    }
+    (count > 0).then_some(TranscriptCoverage {
+        segment_count: count,
+        max_segment_index: max_index,
+        covered_until_ms: end_ms,
+        finished_segment_count: finished_count,
+    })
+}
+
+fn db_transcript_coverage(conn: &Connection, name: &str) -> Result<Option<TranscriptCoverage>> {
+    let mut stmt = conn.prepare(
+        "SELECT segment_index, offset_ms, duration_secs FROM session_segments WHERE session_name = ?1",
+    )?;
+    let rows = stmt.query_map(params![name], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Option<f64>>(2)?,
+        ))
+    })?;
+    Ok(summarize_transcript_coverage(
+        rows.collect::<rusqlite::Result<Vec<_>>>()?,
+    ))
+}
+
+fn db_transcript_receipt(conn: &Connection, name: &str) -> Result<Option<TranscriptCoverage>> {
+    let values: Option<(i64, i64, i64, i64)> = conn
+        .query_row(
+            "SELECT segment_count, max_segment_index, covered_until_ms, finished_segment_count FROM session_transcript_coverage WHERE session_name = ?1",
+            params![name],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    values
+        .map(
+            |(segment_count, max_segment_index, covered_until_ms, finished_segment_count)| {
+                Ok(TranscriptCoverage {
+                    segment_count,
+                    max_segment_index,
+                    covered_until_ms: u64::try_from(covered_until_ms)?,
+                    finished_segment_count,
+                })
+            },
+        )
+        .transpose()
+}
+
+/// Commit the final artifact, its segment coverage, and the processed state
+/// together. Refuse a transcript if capture changed its segment set during ASR.
+pub fn register_processed_transcript(
+    dir: &Path,
+    name: &str,
+    path: &str,
+    expected: impl Into<Option<TranscriptCoverage>>,
+) -> Result<()> {
+    let expected = expected.into();
+    let mut conn = open_db(dir)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if db_transcript_coverage(&tx, name)? != expected {
+        anyhow::bail!("session '{name}' changed during transcription; process it again");
+    }
+    let expected = expected.unwrap_or(EMPTY_TRANSCRIPT_COVERAGE);
+    let now = Local::now().to_rfc3339();
+    tx.execute(
+        "INSERT INTO session_artifacts (session_name, kind, ordinal, path, retention_class, created_at, expires_at) VALUES (?1, ?2, 0, ?3, 'durable', ?4, NULL) ON CONFLICT(session_name, kind, ordinal) DO UPDATE SET path = excluded.path, retention_class = excluded.retention_class, created_at = excluded.created_at, expires_at = NULL",
+        params![name, SESSION_ARTIFACT_KIND_TRANSCRIPT, path, now],
+    )?;
+    tx.execute(
+        "INSERT INTO session_transcript_coverage (session_name, segment_count, max_segment_index, covered_until_ms, finished_segment_count) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(session_name) DO UPDATE SET segment_count = excluded.segment_count, max_segment_index = excluded.max_segment_index, covered_until_ms = excluded.covered_until_ms, finished_segment_count = excluded.finished_segment_count",
+        params![name, expected.segment_count, expected.max_segment_index, i64::try_from(expected.covered_until_ms)?, expected.finished_segment_count],
+    )?;
+    tx.execute(
+        "UPDATE sessions SET processing_state = ?2, failed_stage = NULL WHERE name = ?1",
+        params![
+            name,
+            // A partial transcript is readable but cannot satisfy the final
+            // processing state or the distillation contract.
+            if expected.finished_segment_count == expected.segment_count {
+                "done"
+            } else {
+                "none"
+            }
+        ],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Read a processed artifact's coverage without creating schema or blob dirs.
+pub fn transcript_coverage_read_only(dir: &Path, name: &str) -> Result<Option<TranscriptCoverage>> {
+    let path = database_path(dir);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    let has_table: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_transcript_coverage')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_table {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT segment_count, max_segment_index, covered_until_ms, finished_segment_count FROM session_transcript_coverage WHERE session_name = ?1",
+        params![name],
+        |row| Ok(TranscriptCoverage {
+            segment_count: row.get(0)?,
+            max_segment_index: row.get(1)?,
+            covered_until_ms: row.get::<_, i64>(2)?.max(0) as u64,
+            finished_segment_count: row.get(3)?,
+        }),
+    ).optional().map_err(Into::into)
 }
 
 pub fn begin_delete_session(dir: &Path, name: &str) -> Result<()> {
@@ -811,22 +1021,49 @@ pub fn list_sessions(dir: &Path) -> Result<Vec<SessionInfo>> {
         return Ok(Vec::new());
     }
     let conn = open_db(dir)?;
-    let mut stmt = conn.prepare(
+    let runtime_table_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meeting_sessions')",
+        [], |row| row.get(0),
+    )?;
+    let runtime_condition = if runtime_table_exists {
+        "AND NOT EXISTS (SELECT 1 FROM meeting_sessions runtime WHERE runtime.session_id = s.name)"
+    } else {
+        ""
+    };
+    let current_session = std::fs::read_to_string(dir.join("current"))
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    // Legacy producers have no runtime lease. A current pointer is the only
+    // durable sign that a paused producer may return, so stale lifecycle rows
+    // are interpreted as ended only after a full day of inactivity and only
+    // when that pointer names another session (or is absent).
+    let inactive_before = (chrono::Utc::now() - chrono::Duration::hours(24)).timestamp();
+    let query = format!(
         r#"
-        SELECT s.name, s.start_time, s.notes_path, COUNT(seg.segment_index) AS segment_count
+        SELECT s.name, s.start_time, s.notes_path, COUNT(seg.segment_index) AS segment_count,
+            CASE WHEN s.lifecycle_state = 'active'
+                {runtime_condition}
+                AND s.name != ?1
+                AND COALESCE(MAX(CAST(strftime('%s', seg.started_at) AS INTEGER) + CAST(COALESCE(seg.duration_secs, 0) AS INTEGER)), CAST(strftime('%s', s.lifecycle_updated_at) AS INTEGER), CAST(strftime('%s', s.start_time) AS INTEGER), 0) < ?2
+                AND EXISTS (SELECT 1 FROM session_segments finished WHERE finished.session_name = s.name AND finished.duration_secs IS NOT NULL)
+                AND NOT EXISTS (SELECT 1 FROM session_segments unfinished WHERE unfinished.session_name = s.name AND unfinished.duration_secs IS NULL)
+                THEN 'ended' ELSE COALESCE(s.lifecycle_state, 'active') END AS effective_lifecycle
         FROM sessions s
         LEFT JOIN session_segments seg ON seg.session_name = s.name
         WHERE COALESCE(s.lifecycle_state, 'active') IN ('active', 'ended')
         GROUP BY s.name, s.start_time, s.notes_path
         ORDER BY s.start_time DESC
-        "#,
-    )?;
-    let rows = stmt.query_map([], |row| {
+        "#
+    );
+    let mut stmt = conn.prepare(&query)?;
+    let rows = stmt.query_map(params![current_session, inactive_before], |row| {
         Ok(SessionInfo {
             name: row.get(0)?,
             start_time: row.get(1)?,
             notes_path: row.get(2)?,
             segment_count: row.get(3)?,
+            lifecycle_state: row.get(4)?,
         })
     })?;
 
@@ -843,6 +1080,84 @@ pub fn list_sessions(dir: &Path) -> Result<Vec<SessionInfo>> {
             .then_with(|| left.name.cmp(&right.name))
     });
     Ok(sessions.into_iter().map(|(_, session)| session).collect())
+}
+
+#[cfg(test)]
+mod lifecycle_read_tests {
+    use super::*;
+
+    #[test]
+    fn finalized_legacy_audio_reads_as_ended_without_backfill() {
+        let directory = tempfile::tempdir().unwrap();
+        let dir = directory.path();
+        create_session(dir, "old", &Local::now(), ".margins/old.md").unwrap();
+        add_segment(dir, "old", 0, ".margins/old_seg0.wav", 0, Some(1.0)).unwrap();
+        open_db(dir)
+            .unwrap()
+            .execute(
+                "UPDATE session_segments SET started_at = '2020-01-01T00:00:00Z' WHERE session_name = 'old'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(list_sessions(dir).unwrap()[0].lifecycle_state, "ended");
+        let stored: String = open_db(dir)
+            .unwrap()
+            .query_row(
+                "SELECT lifecycle_state FROM sessions WHERE name = 'old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "active");
+    }
+
+    #[test]
+    fn paused_legacy_current_session_remains_active() {
+        let directory = tempfile::tempdir().unwrap();
+        let dir = directory.path();
+        create_session(dir, "paused", &Local::now(), ".margins/paused.md").unwrap();
+        add_segment(dir, "paused", 0, ".margins/paused_seg0.wav", 0, Some(1.0)).unwrap();
+        open_db(dir)
+            .unwrap()
+            .execute(
+                "UPDATE session_segments SET started_at = '2020-01-01T00:00:00Z' WHERE session_name = 'paused'",
+                [],
+            )
+            .unwrap();
+        std::fs::write(dir.join("current"), "paused\n").unwrap();
+        assert_eq!(list_sessions(dir).unwrap()[0].lifecycle_state, "active");
+    }
+
+    #[test]
+    fn recently_finished_legacy_segment_remains_active_without_current_pointer() {
+        let directory = tempfile::tempdir().unwrap();
+        let dir = directory.path();
+        let started = Local::now() - chrono::Duration::hours(25);
+        create_session(
+            dir,
+            "paused-elsewhere",
+            &started,
+            ".margins/paused-elsewhere.md",
+        )
+        .unwrap();
+        add_segment(
+            dir,
+            "paused-elsewhere",
+            0,
+            ".margins/paused-elsewhere_seg0.wav",
+            0,
+            Some(24.5 * 3600.0),
+        )
+        .unwrap();
+        open_db(dir)
+            .unwrap()
+            .execute(
+                "UPDATE session_segments SET started_at = ?1 WHERE session_name = 'paused-elsewhere'",
+                [started.to_rfc3339()],
+            )
+            .unwrap();
+        assert_eq!(list_sessions(dir).unwrap()[0].lifecycle_state, "active");
+    }
 }
 
 pub fn get_session_meta(dir: &Path, name: &str) -> Result<SessionMeta> {
@@ -958,6 +1273,12 @@ pub fn get_session_meta(dir: &Path, name: &str) -> Result<SessionMeta> {
         meta.failed_stage = job.failed_stage;
     }
 
+    if transcript_coverage_read_only(dir, name)?
+        .is_some_and(|recorded| !transcript_coverage_matches(&meta.segments, recorded))
+    {
+        meta.processing_state = Some("none".to_string());
+    }
+
     Ok(meta)
 }
 
@@ -970,9 +1291,10 @@ pub fn upsert_session_artifact(
     retention_class: &str,
     expires_at: Option<&str>,
 ) -> Result<()> {
-    let conn = open_db(dir)?;
+    let mut conn = open_db(dir)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let now = Local::now().to_rfc3339();
-    conn.execute(
+    tx.execute(
         r#"
         INSERT INTO session_artifacts
             (session_name, kind, ordinal, path, retention_class, created_at, expires_at)
@@ -992,6 +1314,15 @@ pub fn upsert_session_artifact(
             expires_at
         ],
     )?;
+    // A different transcript writer has replaced the covered artifact. Its
+    // own processing state and file freshness now decide whether it is final.
+    if kind == SESSION_ARTIFACT_KIND_TRANSCRIPT && ordinal == 0 {
+        tx.execute(
+            "DELETE FROM session_transcript_coverage WHERE session_name = ?1",
+            params![session_name],
+        )?;
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -1038,6 +1369,36 @@ pub fn rewrite_session_artifact_paths(
 
 pub fn list_session_artifacts(dir: &Path, session_name: &str) -> Result<Vec<SessionArtifact>> {
     let conn = open_db(dir)?;
+    list_session_artifacts_with_connection(&conn, session_name)
+}
+
+/// Inspect existing artifact rows without initializing storage or taking a
+/// SQLite writer connection. A directory without a database has no artifacts.
+pub fn list_session_artifacts_read_only(
+    dir: &Path,
+    session_name: &str,
+) -> Result<Vec<SessionArtifact>> {
+    let path = database_path(dir);
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    let has_artifacts: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_artifacts')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_artifacts {
+        return Ok(Vec::new());
+    }
+    list_session_artifacts_with_connection(&conn, session_name)
+}
+
+fn list_session_artifacts_with_connection(
+    conn: &Connection,
+    session_name: &str,
+) -> Result<Vec<SessionArtifact>> {
     let mut stmt = conn.prepare(
         r#"
         SELECT session_name, kind, ordinal, path, retention_class, created_at, expires_at
@@ -1063,6 +1424,47 @@ pub fn list_session_artifacts(dir: &Path, session_name: &str) -> Result<Vec<Sess
         artifacts.push(row.context("corrupt session artifact row")?);
     }
     Ok(artifacts)
+}
+
+/// Idempotently preserve a gap discovered while processing durable audio.
+pub fn record_processing_gap(
+    dir: &Path,
+    session_name: &str,
+    segment_id: &str,
+    start_sequence: u64,
+    end_exclusive: u64,
+    reason: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        end_exclusive >= start_sequence,
+        "invalid processing gap range"
+    );
+    let start = i64::try_from(start_sequence).context("gap start is too large")?;
+    let end = i64::try_from(end_exclusive).context("gap end is too large")?;
+    let conn = open_db(dir)?;
+    conn.execute(
+        "INSERT OR IGNORE INTO session_processing_gaps (session_name, segment_id, start_sequence, end_exclusive, reason) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![session_name, segment_id, start, end, reason],
+    )?;
+    Ok(())
+}
+
+pub fn list_processing_gaps(dir: &Path, session_name: &str) -> Result<Vec<SessionProcessingGap>> {
+    let conn = open_db(dir)?;
+    let mut statement = conn.prepare(
+        "SELECT session_name, segment_id, start_sequence, end_exclusive, reason FROM session_processing_gaps WHERE session_name = ?1 ORDER BY segment_id, start_sequence, end_exclusive, reason",
+    )?;
+    let rows = statement.query_map(params![session_name], |row| {
+        Ok(SessionProcessingGap {
+            session_name: row.get(0)?,
+            segment_id: row.get(1)?,
+            start_sequence: row.get::<_, i64>(2)?.max(0) as u64,
+            end_exclusive: row.get::<_, i64>(3)?.max(0) as u64,
+            reason: row.get(4)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 pub fn list_expired_session_artifacts(
@@ -1474,7 +1876,7 @@ pub fn get_processing_job(dir: &Path, job_id: &str) -> Result<Option<ProcessingJ
 pub fn latest_processing_job(dir: &Path, name: &str) -> Result<Option<ProcessingJob>> {
     let conn = open_db(dir)?;
     let job_id: Option<String> = conn.query_row(
-        "SELECT job_id FROM session_processing_jobs WHERE session_name = ?1 ORDER BY updated_at DESC, job_id DESC LIMIT 1",
+        "SELECT job_id FROM session_processing_jobs WHERE session_name = ?1 ORDER BY (operation = 'legacy_note') ASC, julianday(updated_at) DESC, job_id DESC LIMIT 1",
         params![name], |row| row.get(0),
     ).optional()?;
     job_id.map_or(Ok(None), |job_id| load_processing_job(&conn, &job_id))
@@ -1529,6 +1931,27 @@ pub fn update_processing_job(
         && current.status != status
     {
         anyhow::bail!("late processing result rejected after {}", current.status);
+    }
+    if status == "complete" && current.operation == "transcribe_session" {
+        let result = result_ref
+            .filter(|value| !value.trim().is_empty())
+            .context("a completed transcription job requires a transcript result reference")?;
+        let registered: Option<String> = tx
+            .query_row(
+                "SELECT path FROM session_artifacts WHERE session_name = ?1 AND kind = ?2 AND ordinal = 0",
+                params![current.session_name, SESSION_ARTIFACT_KIND_TRANSCRIPT],
+                |row| row.get(0),
+            )
+            .optional()?;
+        anyhow::ensure!(
+            registered.as_deref() == Some(result)
+                && db_transcript_receipt(&tx, &current.session_name)?
+                    == Some(
+                        db_transcript_coverage(&tx, &current.session_name)?
+                            .unwrap_or(EMPTY_TRANSCRIPT_COVERAGE)
+                    ),
+            "transcription result is not registered for the current audio"
+        );
     }
     tx.execute(
         "UPDATE session_processing_jobs SET status = ?1, progress = ?2, result_ref = ?3, failure = ?4, failed_stage = ?5, updated_at = ?6 WHERE job_id = ?7 AND attempt = ?8",
@@ -1775,6 +2198,193 @@ pub fn remove_vault_note_by_path(dir: &Path, path: &str) -> Result<bool> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn processed_transcript_registration_is_atomic_and_fenced_by_segments() {
+        let root = tempdir().unwrap();
+        let dir = root.path().join(".margins");
+        create_session(&dir, "meet", &Local::now(), "meet.md").unwrap();
+        add_segment(&dir, "meet", 0, "meet_seg0.wav", 0, Some(10.0)).unwrap();
+        let first = transcript_coverage(&get_session_meta(&dir, "meet").unwrap().segments).unwrap();
+        register_processed_transcript(&dir, "meet", ".margins/meet_aligned.md", first).unwrap();
+        assert_eq!(
+            transcript_coverage_read_only(&dir, "meet").unwrap(),
+            Some(first)
+        );
+        assert_eq!(
+            get_session_meta(&dir, "meet")
+                .unwrap()
+                .processing_state
+                .as_deref(),
+            Some("done")
+        );
+
+        add_segment(&dir, "meet", 1, "meet_seg1.wav", 10_000, Some(10.0)).unwrap();
+        assert_eq!(
+            get_session_meta(&dir, "meet")
+                .unwrap()
+                .processing_state
+                .as_deref(),
+            Some("none")
+        );
+        assert!(
+            register_processed_transcript(&dir, "meet", ".margins/new.md", first)
+                .unwrap_err()
+                .to_string()
+                .contains("changed during transcription")
+        );
+        assert_eq!(
+            transcript_coverage_read_only(&dir, "meet").unwrap(),
+            Some(first)
+        );
+        let artifacts = list_session_artifacts_read_only(&dir, "meet").unwrap();
+        assert_eq!(artifacts[0].path, ".margins/meet_aligned.md");
+        upsert_session_artifact(
+            &dir,
+            "meet",
+            SESSION_ARTIFACT_KIND_TRANSCRIPT,
+            0,
+            ".margins/artifacts/meet/transcript.md",
+            "durable",
+            None,
+        )
+        .unwrap();
+        assert_eq!(transcript_coverage_read_only(&dir, "meet").unwrap(), None);
+    }
+
+    #[test]
+    fn empty_processed_transcript_receipt_is_invalidated_by_later_audio() {
+        let root = tempdir().unwrap();
+        let dir = root.path().join(".margins");
+        create_session(&dir, "empty", &Local::now(), "empty.md").unwrap();
+        register_processed_transcript(&dir, "empty", ".margins/empty.md", None).unwrap();
+        let recorded = transcript_coverage_read_only(&dir, "empty")
+            .unwrap()
+            .unwrap();
+        assert!(transcript_coverage_matches(&[], recorded));
+        assert_eq!(recorded.segment_count, 0);
+        assert_eq!(
+            get_session_meta(&dir, "empty")
+                .unwrap()
+                .processing_state
+                .as_deref(),
+            Some("done")
+        );
+        add_segment(&dir, "empty", 0, "empty_seg0.wav", 0, Some(1.0)).unwrap();
+        let meta = get_session_meta(&dir, "empty").unwrap();
+        assert!(!transcript_coverage_matches(&meta.segments, recorded));
+        assert_eq!(meta.processing_state.as_deref(), Some("none"));
+    }
+
+    #[test]
+    fn transcription_completion_never_exposes_a_referenceless_legacy_job() {
+        let root = tempdir().unwrap();
+        let dir = root.path().join(".margins");
+        create_session(&dir, "meet", &Local::now(), "meet.md").unwrap();
+        add_segment(&dir, "meet", 0, "meet_seg0.wav", 0, Some(1.0)).unwrap();
+        let job = begin_processing_job(
+            &dir,
+            "meet",
+            "transcribe:meet",
+            "transcribe_session",
+            "audio-r1",
+        )
+        .unwrap();
+        update_processing_job(
+            &dir,
+            &job.job_id,
+            job.attempt,
+            "running",
+            Some(0.5),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let coverage =
+            transcript_coverage(&get_session_meta(&dir, "meet").unwrap().segments).unwrap();
+        let result_ref = ".margins/artifacts/meet/transcript.md";
+        register_processed_transcript(&dir, "meet", result_ref, coverage).unwrap();
+
+        // Force the interval between artifact registration and job completion.
+        // The session's done projection must not create a second, referenceless
+        // legacy job while the real ASR job is still running.
+        assert!(get_processing_job(&dir, "legacy:meet").unwrap().is_none());
+        let interim = latest_processing_job(&dir, "meet").unwrap().unwrap();
+        assert_eq!(interim.job_id, job.job_id);
+        assert_eq!(interim.status, "running");
+        assert!(interim.result_ref.is_none());
+        assert!(update_processing_job(
+            &dir,
+            &job.job_id,
+            job.attempt,
+            "complete",
+            Some(1.0),
+            None,
+            None,
+            None,
+        )
+        .is_err());
+
+        // Already-migrated databases can retain a synthetic row. A future UTC
+        // timestamp reproduces the Mac's lexical local/UTC sort reversal.
+        let conn = Connection::open(database_path(&dir)).unwrap();
+        conn.execute(
+            "INSERT INTO session_processing_jobs (job_id, session_name, operation, input_revision, attempt, status, progress, result_ref, updated_at) VALUES ('legacy:meet', 'meet', 'legacy_note', 'legacy-session-columns', 0, 'complete', 1.0, NULL, '2099-01-01T00:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+        let still_running = latest_processing_job(&dir, "meet").unwrap().unwrap();
+        assert_eq!(still_running.job_id, job.job_id);
+        assert_eq!(still_running.status, "running");
+
+        let completed = update_processing_job(
+            &dir,
+            &job.job_id,
+            job.attempt,
+            "complete",
+            Some(1.0),
+            Some(result_ref),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(completed.result_ref.as_deref(), Some(result_ref));
+        let observed = latest_processing_job(&dir, "meet").unwrap().unwrap();
+        assert_eq!(observed.status, "complete");
+        assert_eq!(observed.result_ref.as_deref(), Some(result_ref));
+    }
+
+    #[test]
+    fn old_coverage_receipts_upgrade_as_complete() {
+        let root = tempdir().unwrap();
+        let dir = root.path().join(".margins");
+        create_session(&dir, "meet", &Local::now(), "meet.md").unwrap();
+        add_segment(&dir, "meet", 0, "meet_seg0.wav", 0, Some(1.0)).unwrap();
+        let conn = Connection::open(database_path(&dir)).unwrap();
+        conn.execute_batch(
+            "DROP TABLE session_transcript_coverage;
+             CREATE TABLE session_transcript_coverage (
+                 session_name TEXT PRIMARY KEY NOT NULL,
+                 segment_count INTEGER NOT NULL,
+                 max_segment_index INTEGER NOT NULL,
+                 covered_until_ms INTEGER NOT NULL
+             );
+             INSERT INTO session_transcript_coverage VALUES ('meet', 1, 0, 1000);",
+        )
+        .unwrap();
+        drop(conn);
+        open_db(&dir).unwrap();
+        assert_eq!(
+            transcript_coverage_read_only(&dir, "meet").unwrap(),
+            Some(TranscriptCoverage {
+                segment_count: 1,
+                max_segment_index: 0,
+                covered_until_ms: 1_000,
+                finished_segment_count: 1,
+            })
+        );
+    }
 
     #[test]
     fn finalized_capture_is_ended_and_remains_listed() {

@@ -9,6 +9,7 @@ use crate::providers::parakeet::{
 };
 use anyhow::{anyhow, bail, Context, Result};
 use block2::RcBlock;
+use fs4::fs_std::FileExt;
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::AnyThread;
@@ -27,6 +28,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::slice;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 pub const SAMPLE_RATE: u32 = 16_000;
@@ -43,6 +45,18 @@ const V2_PREPROCESSOR_BAD_RANGE: &str =
 const V2_PREPROCESSOR_SAFE_RANGE: &str =
     "(\"RangeDims\", {{\"audio_signal\", [[1, 1], [257, 240000]]}})";
 static PREPROCESSOR_STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
+static COREML_DIAGNOSTIC_SINK: OnceLock<fn(&str)> = OnceLock::new();
+
+/// Route provider diagnostics through the embedding application's log sink.
+pub fn set_coreml_diagnostic_sink(sink: fn(&str)) {
+    let _ = COREML_DIAGNOSTIC_SINK.set(sink);
+}
+
+fn coreml_diagnostic(message: &str) {
+    if let Some(sink) = COREML_DIAGNOSTIC_SINK.get() {
+        sink(message);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FluidCoreMlModelVersion {
@@ -128,10 +142,10 @@ impl FluidCoreMlBundle {
         let source_preprocessor = root.join("Preprocessor.mlmodelc");
         let preprocessor = if version == FluidCoreMlModelVersion::V2 {
             runtime_v2_preprocessor(&source_preprocessor).unwrap_or_else(|error| {
-                eprintln!(
+                coreml_diagnostic(&format!(
                     "CoreML v2 preprocessor cache unavailable ({error:#}); using original {}",
                     source_preprocessor.display()
-                );
+                ));
                 source_preprocessor.clone()
             })
         } else {
@@ -191,8 +205,24 @@ impl FluidCoreMlBundle {
 /// only: keep the actual input flexible, make the real padded input the default,
 /// and raise the theoretical lower bound past the 256-sample reflect pad. The
 /// shared FluidAudio cache remains read-only; the small derived bundle lives in
-/// the per-user temporary directory and is content-addressed to the source.
+/// a per-user cache and is content-addressed to the source.
 fn runtime_v2_preprocessor(source: &Path) -> Result<PathBuf> {
+    let cache_root = std::env::var_os("MARGINS_COREML_PREPROCESSOR_CACHE_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("margins-coreml-preprocessors-v1"));
+    runtime_v2_preprocessor_in(source, &cache_root)
+}
+
+fn runtime_v2_preprocessor_in(source: &Path, cache_root: &Path) -> Result<PathBuf> {
+    runtime_v2_preprocessor_in_before_lock(source, cache_root, || {})
+}
+
+fn runtime_v2_preprocessor_in_before_lock(
+    source: &Path,
+    cache_root: &Path,
+    before_lock: impl FnOnce(),
+) -> Result<PathBuf> {
     let model_mil = source.join("model.mil");
     let model_text = fs::read_to_string(&model_mil)
         .with_context(|| format!("could not read CoreML preprocessor {}", model_mil.display()))?;
@@ -209,13 +239,24 @@ fn runtime_v2_preprocessor(source: &Path) -> Result<PathBuf> {
     }
 
     let source_hash = hash_directory(source)?;
-    let cache_root = std::env::temp_dir().join("margins-coreml-preprocessors-v1");
     let final_dir = cache_root.join(format!("{source_hash:016x}"));
     let final_model = final_dir.join("Preprocessor.mlmodelc");
-    if has_safe_v2_shape(&final_model) {
+    if valid_cached_v2_preprocessor(source, &final_model) {
         return Ok(final_model);
     }
     fs::create_dir_all(&cache_root)?;
+
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(cache_root.join(format!(".{source_hash:016x}.lock")))?;
+    before_lock();
+    lock.lock_exclusive()?;
+    let _lock = PreprocessorCacheLock(lock);
+    if valid_cached_v2_preprocessor(source, &final_model) {
+        return Ok(final_model);
+    }
 
     let ordinal = PREPROCESSOR_STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
     let staging_dir = cache_root.join(format!(
@@ -234,17 +275,102 @@ fn runtime_v2_preprocessor(source: &Path) -> Result<PathBuf> {
         return Err(error);
     }
 
-    match fs::rename(&staging_dir, &final_dir) {
-        Ok(()) => Ok(final_model),
-        Err(_) if has_safe_v2_shape(&final_model) => {
+    let previous_dir = cache_root.join(format!(
+        ".{source_hash:016x}.previous-{}-{ordinal}",
+        std::process::id()
+    ));
+    let had_previous = final_dir.exists();
+    if had_previous {
+        if let Err(error) = fs::rename(&final_dir, &previous_dir) {
             let _ = fs::remove_dir_all(&staging_dir);
+            return Err(error).context("could not stage invalid CoreML preprocessor cache");
+        }
+    }
+    match fs::rename(&staging_dir, &final_dir) {
+        Ok(()) => {
+            if had_previous {
+                let _ = remove_cache_path(&previous_dir);
+            }
+            Ok(final_model)
+        }
+        Err(_) if valid_cached_v2_preprocessor(source, &final_model) => {
+            let _ = fs::remove_dir_all(&staging_dir);
+            if had_previous {
+                let _ = remove_cache_path(&previous_dir);
+            }
             Ok(final_model)
         }
         Err(error) => {
             let _ = fs::remove_dir_all(&staging_dir);
+            if had_previous {
+                let _ = fs::rename(&previous_dir, &final_dir);
+            }
             Err(error).context("could not activate corrected CoreML preprocessor")
         }
     }
+}
+
+struct PreprocessorCacheLock(fs::File);
+
+impl Drop for PreprocessorCacheLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
+fn remove_cache_path(path: &Path) -> std::io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path),
+        Ok(_) => fs::remove_file(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn valid_cached_v2_preprocessor(source: &Path, cached: &Path) -> bool {
+    if !has_safe_v2_shape(cached) {
+        return false;
+    }
+    fn source_files_present(source: &Path, cached: &Path) -> bool {
+        let Ok(entries) = fs::read_dir(source) else {
+            return false;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else { return false };
+            let source_path = entry.path();
+            let cached_path = cached.join(entry.file_name());
+            let Ok(kind) = entry.file_type() else {
+                return false;
+            };
+            if kind.is_dir() {
+                if !cached_path.is_dir() || !source_files_present(&source_path, &cached_path) {
+                    return false;
+                }
+            } else if kind.is_file() {
+                let Ok(actual) = fs::metadata(&cached_path) else {
+                    return false;
+                };
+                if !actual.is_file() {
+                    return false;
+                }
+                let name = entry.file_name();
+                if name.as_os_str() != std::ffi::OsStr::new("model.mil")
+                    && name.as_os_str() != std::ffi::OsStr::new("metadata.json")
+                {
+                    let Ok(expected) = fs::metadata(&source_path) else {
+                        return false;
+                    };
+                    if actual.len() != expected.len() {
+                        return false;
+                    }
+                }
+            } else {
+                return false;
+            }
+        }
+        true
+    }
+    source_files_present(source, cached)
 }
 
 fn patch_v2_preprocessor_shape(preprocessor: &Path) -> Result<()> {
@@ -1014,11 +1140,17 @@ impl margins_core::AsrBackend for CoreMlAsrBackend {
         &self,
         request: margins_core::AsrRequest,
     ) -> std::result::Result<margins_core::AsrResult, margins_core::TranscriptError> {
-        if request.sample_rate_hz != SAMPLE_RATE || request.samples.is_empty() {
+        if request.sample_rate_hz != SAMPLE_RATE {
             return Err(margins_core::TranscriptError {
                 code: margins_core::TranscriptErrorCode::InvalidAudio,
-                message: "CoreML ASR requires non-empty mono 16 kHz f32 PCM".into(),
+                message: "CoreML ASR requires mono 16 kHz f32 PCM".into(),
                 retryable: false,
+            });
+        }
+        if request.samples.is_empty() {
+            return Ok(margins_core::AsrResult {
+                words: Vec::new(),
+                detected_language: None,
             });
         }
         let mut backend =
@@ -1788,6 +1920,54 @@ impl StereoCoreMlAsrSession {
             mic: CoreMlAsrSession::new(mic_asr, config.clone()),
             system: CoreMlAsrSession::new(system_asr, config),
         }
+    }
+}
+
+impl margins_core::AsrStreamDecoder for CoreMlAsrSession {
+    fn append_audio(&mut self, mono_16k: &[f32]) {
+        CoreMlAsrSession::append_audio(self, mono_16k);
+    }
+
+    fn update_until(
+        &mut self,
+        end_ms: u64,
+    ) -> std::result::Result<margins_core::AsrStreamUpdate, margins_core::TranscriptError> {
+        CoreMlAsrSession::update_until(self, end_ms)
+            .map(coreml_stream_update)
+            .map_err(coreml_stream_error)
+    }
+
+    fn finish_until(
+        &mut self,
+        end_ms: u64,
+    ) -> std::result::Result<margins_core::AsrStreamUpdate, margins_core::TranscriptError> {
+        CoreMlAsrSession::finish_until(self, end_ms)
+            .map(coreml_stream_update)
+            .map_err(coreml_stream_error)
+    }
+}
+
+fn coreml_stream_update(update: StreamingTranscriptUpdate) -> margins_core::AsrStreamUpdate {
+    let convert = |word: WordTiming| margins_core::TranscriptWord {
+        start_ms: word.start_ms,
+        end_ms: word.end_ms,
+        text: word.text,
+        speaker: None,
+        confidence_per_mille: None,
+    };
+    margins_core::AsrStreamUpdate {
+        committed: update.committed.into_iter().map(convert).collect(),
+        hypothesis: update.hypothesis.into_iter().map(convert).collect(),
+        decoded_until_ms: update.decoded_until_ms,
+        committed_until_ms: update.committed_until_ms,
+    }
+}
+
+fn coreml_stream_error(error: anyhow::Error) -> margins_core::TranscriptError {
+    margins_core::TranscriptError {
+        code: margins_core::TranscriptErrorCode::InferenceFailed,
+        message: error.to_string(),
+        retryable: false,
     }
 }
 
@@ -2874,10 +3054,8 @@ fn f16_to_f32(bits: u16) -> f32 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn derives_safe_v2_preprocessor_without_mutating_shared_assets() {
-        let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("Preprocessor.mlmodelc");
+    fn make_v2_source(root: &Path) -> PathBuf {
+        let source = root.join("Preprocessor.mlmodelc");
         fs::create_dir_all(source.join("weights")).unwrap();
         fs::write(
             source.join("model.mil"),
@@ -2890,8 +3068,15 @@ mod tests {
         )
         .unwrap();
         fs::write(source.join("weights/weight.bin"), b"shape-test").unwrap();
+        source
+    }
 
-        let derived = runtime_v2_preprocessor(&source).unwrap();
+    #[test]
+    fn derives_safe_v2_preprocessor_without_mutating_shared_assets() {
+        let root = tempfile::tempdir().unwrap();
+        let source = make_v2_source(root.path());
+
+        let derived = runtime_v2_preprocessor_in(&source, &root.path().join("cache")).unwrap();
 
         assert_ne!(derived, source);
         assert!(has_safe_v2_shape(&derived));
@@ -2903,6 +3088,77 @@ mod tests {
         assert!(metadata.contains("[[1, 1], [257, 240000]]"));
         assert!(metadata.contains("MultiArray (Float32 1 × 240000)"));
         assert!(metadata.contains("\"shape\" : \"[1, 240000]\""));
+    }
+
+    #[test]
+    fn repairs_partial_existing_preprocessor_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let source = make_v2_source(root.path());
+        let cache_root = root.path().join("cache");
+        let hash = hash_directory(&source).unwrap();
+        let final_dir = cache_root.join(format!("{hash:016x}"));
+        let cached = final_dir.join("Preprocessor.mlmodelc");
+        fs::create_dir_all(cached.join("analytics")).unwrap();
+        fs::create_dir_all(cached.join("weights")).unwrap();
+        fs::write(cached.join("analytics/incomplete"), b"stale").unwrap();
+
+        let derived = runtime_v2_preprocessor_in(&source, &cache_root).unwrap();
+
+        assert_eq!(derived, cached);
+        assert!(valid_cached_v2_preprocessor(&source, &derived));
+        assert!(!derived.join("analytics/incomplete").exists());
+        assert_eq!(
+            fs::read(derived.join("weights/weight.bin")).unwrap(),
+            b"shape-test"
+        );
+        fs::remove_file(derived.join("weights/weight.bin")).unwrap();
+        fs::write(derived.join("stale.marker"), b"partial").unwrap();
+        let repaired = runtime_v2_preprocessor_in(&source, &cache_root).unwrap();
+        assert_eq!(repaired, derived);
+        assert!(valid_cached_v2_preprocessor(&source, &repaired));
+        assert!(!repaired.join("stale.marker").exists());
+    }
+
+    #[test]
+    fn accepts_valid_cache_installed_while_waiting_for_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let source = make_v2_source(root.path());
+        let cache_root = root.path().join("cache");
+        fs::create_dir_all(&cache_root).unwrap();
+        let hash = hash_directory(&source).unwrap();
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(cache_root.join(format!(".{hash:016x}.lock")))
+            .unwrap();
+        lock.lock_exclusive().unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel();
+        let worker_source = source.clone();
+        let worker_cache = cache_root.clone();
+        let worker = std::thread::spawn(move || {
+            runtime_v2_preprocessor_in_before_lock(&worker_source, &worker_cache, || {
+                ready_tx.send(()).unwrap();
+                go_rx.recv().unwrap();
+            })
+        });
+        ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let final_model = cache_root
+            .join(format!("{hash:016x}"))
+            .join("Preprocessor.mlmodelc");
+        fs::create_dir_all(final_model.parent().unwrap()).unwrap();
+        copy_directory(&source, &final_model).unwrap();
+        patch_v2_preprocessor_shape(&final_model).unwrap();
+        fs::write(final_model.join("winner.marker"), b"keep").unwrap();
+        go_tx.send(()).unwrap();
+        FileExt::unlock(&lock).unwrap();
+
+        assert_eq!(worker.join().unwrap().unwrap(), final_model);
+        assert_eq!(
+            fs::read(final_model.join("winner.marker")).unwrap(),
+            b"keep"
+        );
     }
 
     #[test]

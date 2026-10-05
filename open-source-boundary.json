@@ -52,7 +52,9 @@
         "crates/public/margins-cli/tests/catalyst_status.rs",
         "crates/public/margins-cli/tests/fixtures/google-oauth-client.json",
         "crates/public/margins-cli/tests/multipart_parity.rs",
-        "crates/public/margins-cli/tests/standalone.rs"
+        "crates/public/margins-cli/tests/standalone.rs",
+        "crates/public/margins-cli/src/commands/application.rs",
+        "crates/public/margins-cli/src/commands/remote.rs"
       ],
       "required_files": [
         "crates/public/margins-cli/Cargo.toml",
@@ -88,9 +90,55 @@
         "crates/public/margins-cli/tests/catalyst_status.rs",
         "crates/public/margins-cli/tests/fixtures/google-oauth-client.json",
         "crates/public/margins-cli/tests/multipart_parity.rs",
-        "crates/public/margins-cli/tests/standalone.rs"
+        "crates/public/margins-cli/tests/standalone.rs",
+        "crates/public/margins-cli/src/commands/application.rs",
+        "crates/public/margins-cli/src/commands/remote.rs"
       ],
-      "minimum_files": 34
+      "minimum_files": 36
+    },
+    {
+      "name": "margins-meeting-protocol-crate",
+      "description": "Portable public margins-meeting-protocol crate and contract tests.",
+      "include": [
+        "crates/public/margins-meeting-protocol/Cargo.toml",
+        "crates/public/margins-meeting-protocol/LICENSE",
+        "crates/public/margins-meeting-protocol/README.md",
+        "crates/public/margins-meeting-protocol/src/lib.rs",
+        "crates/public/margins-meeting-protocol/tests/fixtures/meeting-live-v1.json",
+        "crates/public/margins-meeting-protocol/tests/json_contract.rs",
+        "crates/public/margins-meeting-protocol/tests/roundtrip.rs"
+      ],
+      "required_files": [
+        "crates/public/margins-meeting-protocol/Cargo.toml",
+        "crates/public/margins-meeting-protocol/LICENSE",
+        "crates/public/margins-meeting-protocol/README.md",
+        "crates/public/margins-meeting-protocol/src/lib.rs",
+        "crates/public/margins-meeting-protocol/tests/fixtures/meeting-live-v1.json",
+        "crates/public/margins-meeting-protocol/tests/json_contract.rs",
+        "crates/public/margins-meeting-protocol/tests/roundtrip.rs"
+      ],
+      "minimum_files": 7
+    },
+    {
+      "name": "margins-meeting-runtime-crate",
+      "description": "Portable public margins-meeting-runtime crate and contract tests.",
+      "include": [
+        "crates/public/margins-meeting-runtime/Cargo.toml",
+        "crates/public/margins-meeting-runtime/LICENSE",
+        "crates/public/margins-meeting-runtime/README.md",
+        "crates/public/margins-meeting-runtime/src/lib.rs",
+        "crates/public/margins-meeting-runtime/tests/concurrent_races.rs",
+        "crates/public/margins-meeting-runtime/tests/runtime_state_machine.rs"
+      ],
+      "required_files": [
+        "crates/public/margins-meeting-runtime/Cargo.toml",
+        "crates/public/margins-meeting-runtime/LICENSE",
+        "crates/public/margins-meeting-runtime/README.md",
+        "crates/public/margins-meeting-runtime/src/lib.rs",
+        "crates/public/margins-meeting-runtime/tests/concurrent_races.rs",
+        "crates/public/margins-meeting-runtime/tests/runtime_state_machine.rs"
+      ],
+      "minimum_files": 6
     },
     {
       "name": "margins-store-crate",
@@ -99,29 +147,33 @@
         "crates/public/margins-store/Cargo.toml",
         "crates/public/margins-store/LICENSE",
         "crates/public/margins-store/README.md",
-        "crates/public/margins-store/src/index.rs",
         "crates/public/margins-store/src/legacy.rs",
         "crates/public/margins-store/src/lib.rs",
         "crates/public/margins-store/src/sqlite.rs",
-        "crates/public/margins-store/tests/index_query.rs",
         "crates/public/margins-store/tests/legacy_compatibility.rs",
         "crates/public/margins-store/tests/public_graph.rs",
-        "crates/public/margins-store/tests/repository_contract.rs"
+        "crates/public/margins-store/tests/repository_contract.rs",
+        "crates/public/margins-store/src/authority.rs",
+        "crates/public/margins-store/src/meeting_runtime.rs",
+        "crates/public/margins-store/tests/application_records.rs",
+        "crates/public/margins-store/tests/meeting_runtime_sqlite.rs"
       ],
       "required_files": [
         "crates/public/margins-store/Cargo.toml",
         "crates/public/margins-store/LICENSE",
         "crates/public/margins-store/README.md",
-        "crates/public/margins-store/src/index.rs",
         "crates/public/margins-store/src/legacy.rs",
         "crates/public/margins-store/src/lib.rs",
         "crates/public/margins-store/src/sqlite.rs",
-        "crates/public/margins-store/tests/index_query.rs",
         "crates/public/margins-store/tests/legacy_compatibility.rs",
         "crates/public/margins-store/tests/public_graph.rs",
-        "crates/public/margins-store/tests/repository_contract.rs"
+        "crates/public/margins-store/tests/repository_contract.rs",
+        "crates/public/margins-store/src/authority.rs",
+        "crates/public/margins-store/src/meeting_runtime.rs",
+        "crates/public/margins-store/tests/application_records.rs",
+        "crates/public/margins-store/tests/meeting_runtime_sqlite.rs"
       ],
-      "minimum_files": 11
+      "minimum_files": 13
     },
     {
       "name": "margins-workflows-crate",
@@ -155,7 +207,6 @@
         "crates/public/margins-workflows/src/note_artifacts.rs",
         "crates/public/margins-workflows/src/processing.rs",
         "crates/public/margins-workflows/src/project.rs",
-        "crates/public/margins-workflows/src/publish.rs",
         "crates/public/margins-workflows/src/session_index.rs",
         "crates/public/margins-workflows/src/transcript_view.rs",
         "crates/public/margins-workflows/src/workspace.rs",
@@ -183,7 +234,12 @@
         "crates/public/margins-workflows/tests/integrations.rs",
         "crates/public/margins-workflows/tests/multipart_parity.rs",
         "crates/public/margins-workflows/tests/public_graph.rs",
-        "crates/public/margins-workflows/tests/standalone.rs"
+        "crates/public/margins-workflows/tests/standalone.rs",
+        "crates/public/margins-workflows/examples/remote_opus_transport.rs",
+        "crates/public/margins-workflows/src/remote_workspace.rs",
+        "crates/public/margins-workflows/src/workspace_service.rs",
+        "crates/public/margins-workflows/tests/remote_workspace.rs",
+        "crates/public/margins-workflows/tests/workspace_service.rs"
       ],
       "required_files": [
         "crates/public/margins-workflows/Cargo.toml",
@@ -214,7 +270,6 @@
         "crates/public/margins-workflows/src/note_artifacts.rs",
         "crates/public/margins-workflows/src/processing.rs",
         "crates/public/margins-workflows/src/project.rs",
-        "crates/public/margins-workflows/src/publish.rs",
         "crates/public/margins-workflows/src/session_index.rs",
         "crates/public/margins-workflows/src/transcript_view.rs",
         "crates/public/margins-workflows/src/workspace.rs",
@@ -242,9 +297,14 @@
         "crates/public/margins-workflows/tests/integrations.rs",
         "crates/public/margins-workflows/tests/multipart_parity.rs",
         "crates/public/margins-workflows/tests/public_graph.rs",
-        "crates/public/margins-workflows/tests/standalone.rs"
+        "crates/public/margins-workflows/tests/standalone.rs",
+        "crates/public/margins-workflows/examples/remote_opus_transport.rs",
+        "crates/public/margins-workflows/src/remote_workspace.rs",
+        "crates/public/margins-workflows/src/workspace_service.rs",
+        "crates/public/margins-workflows/tests/remote_workspace.rs",
+        "crates/public/margins-workflows/tests/workspace_service.rs"
       ],
-      "minimum_files": 57
+      "minimum_files": 61
     },
     {
       "name": "margins-core-crate",
@@ -298,6 +358,9 @@
         "crates/public/margins-media/src/diarization.rs",
         "crates/public/margins-media/src/info.rs",
         "crates/public/margins-media/src/lib.rs",
+        "crates/public/margins-media/src/model_registry/coreml.rs",
+        "crates/public/margins-media/src/model_registry/mod.rs",
+        "crates/public/margins-media/src/model_registry/parakeet.rs",
         "crates/public/margins-media/src/providers/coreml.rs",
         "crates/public/margins-media/src/providers/mod.rs",
         "crates/public/margins-media/src/providers/parakeet.rs",
@@ -318,6 +381,9 @@
         "crates/public/margins-media/src/diarization.rs",
         "crates/public/margins-media/src/info.rs",
         "crates/public/margins-media/src/lib.rs",
+        "crates/public/margins-media/src/model_registry/coreml.rs",
+        "crates/public/margins-media/src/model_registry/mod.rs",
+        "crates/public/margins-media/src/model_registry/parakeet.rs",
         "crates/public/margins-media/src/providers/coreml.rs",
         "crates/public/margins-media/src/providers/mod.rs",
         "crates/public/margins-media/src/providers/parakeet.rs",
@@ -330,7 +396,7 @@
         "crates/public/margins-media/tests/model_adapters.rs",
         "crates/public/margins-media/tests/public_graph.rs"
       ],
-      "minimum_files": 18
+      "minimum_files": 21
     },
     {
       "name": "repository-shell",
@@ -417,9 +483,79 @@
         "tests/fixture_openai_server.py"
       ],
       "minimum_files": 5
+    },
+    {
+      "name": "margins-server-crate",
+      "description": "Public loopback Workspace HTTP server and BB browser capture adapter.",
+      "include": [
+        "crates/public/margins-server/Cargo.toml",
+        "crates/public/margins-server/contracts/browser-snapshot.v3.json",
+        "crates/public/margins-server/contracts/workspace-responses.v1.json",
+        "crates/public/margins-server/LICENSE",
+        "crates/public/margins-server/README.md",
+        "crates/public/margins-server/src/asr.rs",
+        "crates/public/margins-server/src/auth.rs",
+        "crates/public/margins-server/src/browser.rs",
+        "crates/public/margins-server/src/http.rs",
+        "crates/public/margins-server/src/lib.rs",
+        "crates/public/margins-server/src/main.rs",
+        "crates/public/margins-server/src/webm.rs",
+        "crates/public/margins-server/src/windows_atomic_replace.rs",
+        "crates/public/margins-server/tests/asr_http.rs",
+        "crates/public/margins-server/tests/browser_http.rs",
+        "crates/public/margins-server/tests/protocol_contract.rs",
+        "crates/public/margins-server/vendor/matroska-demuxer/Cargo.toml",
+        "crates/public/margins-server/vendor/matroska-demuxer/Cargo.toml.orig",
+        "crates/public/margins-server/vendor/matroska-demuxer/LICENSE-APACHE",
+        "crates/public/margins-server/vendor/matroska-demuxer/LICENSE-MIT",
+        "crates/public/margins-server/vendor/matroska-demuxer/LICENSE-ZLIB",
+        "crates/public/margins-server/vendor/matroska-demuxer/PATCHES.md",
+        "crates/public/margins-server/vendor/matroska-demuxer/README.md",
+        "crates/public/margins-server/vendor/matroska-demuxer/rustfmt.toml",
+        "crates/public/margins-server/vendor/matroska-demuxer/src/block.rs",
+        "crates/public/margins-server/vendor/matroska-demuxer/src/ebml.rs",
+        "crates/public/margins-server/vendor/matroska-demuxer/src/element_id.rs",
+        "crates/public/margins-server/vendor/matroska-demuxer/src/enums.rs",
+        "crates/public/margins-server/vendor/matroska-demuxer/src/error.rs",
+        "crates/public/margins-server/vendor/matroska-demuxer/src/lib.rs"
+      ],
+      "required_files": [
+        "crates/public/margins-server/Cargo.toml",
+        "crates/public/margins-server/contracts/browser-snapshot.v3.json",
+        "crates/public/margins-server/contracts/workspace-responses.v1.json",
+        "crates/public/margins-server/LICENSE",
+        "crates/public/margins-server/README.md",
+        "crates/public/margins-server/src/asr.rs",
+        "crates/public/margins-server/src/auth.rs",
+        "crates/public/margins-server/src/browser.rs",
+        "crates/public/margins-server/src/http.rs",
+        "crates/public/margins-server/src/lib.rs",
+        "crates/public/margins-server/src/main.rs",
+        "crates/public/margins-server/src/webm.rs",
+        "crates/public/margins-server/src/windows_atomic_replace.rs",
+        "crates/public/margins-server/tests/asr_http.rs",
+        "crates/public/margins-server/tests/browser_http.rs",
+        "crates/public/margins-server/tests/protocol_contract.rs",
+        "crates/public/margins-server/vendor/matroska-demuxer/Cargo.toml",
+        "crates/public/margins-server/vendor/matroska-demuxer/Cargo.toml.orig",
+        "crates/public/margins-server/vendor/matroska-demuxer/LICENSE-APACHE",
+        "crates/public/margins-server/vendor/matroska-demuxer/LICENSE-MIT",
+        "crates/public/margins-server/vendor/matroska-demuxer/LICENSE-ZLIB",
+        "crates/public/margins-server/vendor/matroska-demuxer/PATCHES.md",
+        "crates/public/margins-server/vendor/matroska-demuxer/README.md",
+        "crates/public/margins-server/vendor/matroska-demuxer/rustfmt.toml",
+        "crates/public/margins-server/vendor/matroska-demuxer/src/block.rs",
+        "crates/public/margins-server/vendor/matroska-demuxer/src/ebml.rs",
+        "crates/public/margins-server/vendor/matroska-demuxer/src/element_id.rs",
+        "crates/public/margins-server/vendor/matroska-demuxer/src/enums.rs",
+        "crates/public/margins-server/vendor/matroska-demuxer/src/error.rs",
+        "crates/public/margins-server/vendor/matroska-demuxer/src/lib.rs"
+      ],
+      "minimum_files": 23
     }
   ],
   "deny_paths": [
+    "integrations/margins-codex/**",
     "desktop/**",
     "packages/**",
     "crates/private/**",

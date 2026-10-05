@@ -143,6 +143,14 @@ fn render_vault_meetings(
         .map_err(CliError::from_anyhow)?;
         line(
             stdout,
+            format_args!(
+                "    <capture_state>{}</capture_state>",
+                xml_escape_text(&meeting.capture_state)
+            ),
+        )
+        .map_err(CliError::from_anyhow)?;
+        line(
+            stdout,
             format_args!("    <source>{}</source>", xml_escape_text(&meeting.source)),
         )
         .map_err(CliError::from_anyhow)?;
@@ -170,6 +178,31 @@ pub fn transcript(
         meeting_id,
     )
     .map_err(CliError::from_anyhow)?;
+    let producer_state =
+        margins_store::SqliteWorkspaceAuthorityStorage::session_producer_state_read_only(
+            &margins_dir,
+            &transcript.session_name,
+        )
+        .map_err(CliError::from_anyhow)?;
+    let active = !transcript.terminal && producer_state.as_deref() == Some("active");
+    let live = transcript.live || active;
+    let remote_checkpoint = transcript
+        .source_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with("_remote.live-transcript.json"));
+    let incomplete = !transcript.terminal
+        && !live
+        && transcript.view != "pending"
+        && producer_state.is_none()
+        && !remote_checkpoint;
+    let presented_view = if incomplete {
+        "incomplete"
+    } else if !transcript.terminal && !live && (producer_state.is_some() || remote_checkpoint) {
+        "pending"
+    } else {
+        transcript.view
+    };
     let memo_path = margins_workflows::artifacts::artifact_registry_disk_path(
         work_dir,
         &margins_dir,
@@ -181,12 +214,14 @@ pub fn transcript(
         let report = TranscriptJson {
             meeting_id: &transcript.session_name,
             body: &transcript.body,
-            view: transcript.view,
+            view: presented_view,
             decoded_until_ms: transcript.decoded_until_ms,
+            captured_until_ms: transcript.captured_until_ms,
             committed_until_ms: transcript.committed_until_ms,
             updated_at_unix_ms: transcript.updated_at_unix_ms,
-            live: transcript.live,
+            live,
             terminal: transcript.terminal,
+            capture_state: &transcript.capture_state,
             title: &transcript.title,
             started_at: &transcript.started_at,
             created_at: &transcript.created_at,
@@ -204,13 +239,26 @@ pub fn transcript(
     line(
         stdout,
         format_args!(
-            "<margins_transcript meeting_id=\"{}\" view=\"{}\">",
+            "<margins_transcript meeting_id=\"{}\" view=\"{}\" terminal=\"{}\" incomplete=\"{}\" live=\"{}\" captured_until_ms=\"{}\" decoded_until_ms=\"{}\">",
             xml_escape_attr(&transcript.session_name),
-            transcript.view
+            presented_view,
+            transcript.terminal,
+            incomplete,
+            live,
+            transcript.captured_until_ms,
+            transcript.decoded_until_ms,
         ),
     )
     .map_err(CliError::from_anyhow)?;
     line(stdout, format_args!("  <metadata>")).map_err(CliError::from_anyhow)?;
+    line(
+        stdout,
+        format_args!(
+            "    <capture_state>{}</capture_state>",
+            xml_escape_text(&transcript.capture_state)
+        ),
+    )
+    .map_err(CliError::from_anyhow)?;
     line(
         stdout,
         format_args!(
@@ -299,10 +347,12 @@ struct TranscriptJson<'a> {
     body: &'a str,
     view: &'a str,
     decoded_until_ms: u64,
+    captured_until_ms: u64,
     committed_until_ms: u64,
     updated_at_unix_ms: u64,
     live: bool,
     terminal: bool,
+    capture_state: &'a str,
     title: &'a str,
     started_at: &'a str,
     created_at: &'a str,

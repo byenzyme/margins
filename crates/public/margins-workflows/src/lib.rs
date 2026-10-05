@@ -12,7 +12,6 @@ pub mod local_recall;
 pub mod note_artifacts;
 pub mod processing;
 pub mod project;
-pub mod publish;
 pub mod session_index;
 pub mod transcript_view;
 pub mod workspace;

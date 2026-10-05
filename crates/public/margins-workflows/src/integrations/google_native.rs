@@ -1026,6 +1026,13 @@ fn listen_for_oauth_callback(
     loop {
         match listener.accept() {
             Ok((mut stream, _)) => {
+                // macOS/BSD accepted sockets inherit the listener's non-blocking
+                // mode; a callback whose bytes have not arrived yet would fail
+                // with WouldBlock. Read it in blocking mode with a bound.
+                stream
+                    .set_nonblocking(false)
+                    .map_err(|error| GoogleNativeError::OAuth(error.to_string()))?;
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
                 let mut buffer = [0_u8; 8192];
                 let read = stream
                     .read(&mut buffer)

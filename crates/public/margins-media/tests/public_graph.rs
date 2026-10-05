@@ -29,6 +29,9 @@ fn portable_sources_do_not_reference_private_capture_or_desktop_types() {
         include_str!("../src/diarization.rs"),
         include_str!("../src/info.rs"),
         include_str!("../src/lib.rs"),
+        include_str!("../src/model_registry/mod.rs"),
+        include_str!("../src/model_registry/coreml.rs"),
+        include_str!("../src/model_registry/parakeet.rs"),
         include_str!("../src/providers/coreml.rs"),
         include_str!("../src/providers/mod.rs"),
         include_str!("../src/providers/parakeet.rs"),
@@ -62,7 +65,7 @@ fn model_feature_graph_is_exact() {
     for edge in [
         "parakeet-onnx = [\"dep:libloading\", \"dep:ndarray\", \"dep:ort\", \"dep:realfft\"]",
         "parakeet-onnx-dynamic = [\"parakeet-onnx\", \"ort/load-dynamic\"]",
-        "coreml-asr = [\"dep:block2\", \"dep:objc2\", \"dep:objc2-core-ml\", \"dep:objc2-foundation\"]",
+        "coreml-asr = [\"dep:block2\", \"dep:fs4\", \"dep:objc2\", \"dep:objc2-core-ml\", \"dep:objc2-foundation\"]",
         "polyvoice-diarization = [\"dep:polyvoice\"]",
         "polyvoice-coreml = [\"polyvoice-diarization\", \"polyvoice/coreml\"]",
     ] {
@@ -84,6 +87,7 @@ fn public_module_exports_are_allowlisted() {
             "audio",
             "diarization",
             "info",
+            "model_registry",
             "providers",
             "timeline",
             "transcript"

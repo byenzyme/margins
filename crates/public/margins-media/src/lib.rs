@@ -9,6 +9,7 @@
 pub mod audio;
 pub mod diarization;
 pub mod info;
+pub mod model_registry;
 pub mod providers;
 pub mod timeline;
 pub mod transcript;

@@ -42,6 +42,8 @@ class RepositoryPolicyTests(unittest.TestCase):
         )
         leaks: list[str] = []
         for path in sources:
+            if not path.is_file():
+                continue  # Mixed-source CLI entrypoint is absent in a public export.
             text = path.read_text(encoding="utf-8")
             for match in sinks.finditer(text):
                 opening = text.find("(", match.end())
@@ -147,8 +149,11 @@ class RepositoryPolicyTests(unittest.TestCase):
             for name in (
                 "margins-core",
                 "margins-media",
+                "margins-meeting-protocol",
+                "margins-meeting-runtime",
                 "margins-store",
                 "margins-workflows",
+                "margins-server",
                 "margins-cli",
             )
         }
@@ -159,15 +164,16 @@ class RepositoryPolicyTests(unittest.TestCase):
         readme = (REPO_ROOT / "public-repository/README.md").read_text(
             encoding="utf-8"
         )
-        normalized_readme = " ".join(readme.split())
+        policy = (REPO_ROOT / "OPEN_SOURCE.md").read_text(encoding="utf-8")
+        normalized_policy = " ".join(policy.split())
         for required in (
-            "fail-closed allowlist",
-            "OPEN_SOURCE.md",
+            "fail-closed literal allowlist",
+            "Export discipline",
             "sensitive personal data",
-            "does not claim that any crate has been published",
-            "do not grant trademark rights",
+            "does not imply that every crate name is published",
+            "does not grant rights to Margins trademarks",
         ):
-            self.assertIn(required, normalized_readme)
+            self.assertIn(required, normalized_policy)
         self.assertNotIn("cpal::", readme)
         self.assertNotIn("CoreAudio", readme)
 
@@ -253,6 +259,10 @@ class RepositoryPolicyTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, validation)
 
+    @unittest.skipUnless(
+        (REPO_ROOT / "public-repository" / "Cargo.toml").is_file(),
+        "mixed-source documentation paths are absent in a public export",
+    )
     def test_public_docs_keep_setup_separate_from_distillation(self) -> None:
         setup = (
             REPO_ROOT
@@ -455,34 +465,35 @@ class RepositoryPolicyTests(unittest.TestCase):
         ):
             self.assertNotIn(omitted, capability_source)
 
-    def test_meeting_protocol_and_runtime_are_excluded_from_the_public_surface(
+    def test_meeting_protocol_and_runtime_are_exact_and_standalone_tested(
         self,
     ) -> None:
         manifest = json.loads(
             (REPO_ROOT / "open-source-boundary.json").read_text(encoding="utf-8")
         )
-        scope_names = {scope["name"] for scope in manifest["scopes"]}
-        self.assertNotIn("meeting-protocol-crate", scope_names)
-        self.assertNotIn("meeting-runtime-crate", scope_names)
-
-        selected = {
-            path
-            for scope in manifest["scopes"]
-            for path in scope["required_files"]
-        }
-        for path in selected:
-            self.assertNotIn("margins-meeting-protocol", path)
-            self.assertNotIn("margins-meeting-runtime", path)
+        for crate in ("margins-meeting-protocol", "margins-meeting-runtime"):
+            scope = next(
+                scope for scope in manifest["scopes"] if scope["name"] == f"{crate}-crate"
+            )
+            crate_root = REPO_ROOT / "crates" / "public" / crate
+            expected = {
+                path.relative_to(REPO_ROOT).as_posix()
+                for path in crate_root.rglob("*")
+                if path.is_file()
+            }
+            self.assertEqual(set(scope["include"]), expected)
+            self.assertEqual(set(scope["required_files"]), expected)
+            self.assertEqual(scope["minimum_files"], len(expected))
 
         workflow = (
             REPO_ROOT / ".github/workflows/open-source-boundary.yml"
         ).read_text(encoding="utf-8")
         self.assertIn('cp -R . "$build_export"', workflow)
-        self.assertNotIn("margins-meeting-protocol", workflow)
-        self.assertNotIn("margins-meeting-runtime", workflow)
         for crate in (
             "margins-core",
             "margins-media",
+            "margins-meeting-protocol",
+            "margins-meeting-runtime",
             "margins-store",
             "margins-workflows",
             "margins-cli",
@@ -503,12 +514,14 @@ class RepositoryPolicyTests(unittest.TestCase):
             "crates/public/margins-store/Cargo.toml",
             "crates/public/margins-store/LICENSE",
             "crates/public/margins-store/README.md",
-            "crates/public/margins-store/src/index.rs",
+            "crates/public/margins-store/src/authority.rs",
             "crates/public/margins-store/src/legacy.rs",
             "crates/public/margins-store/src/lib.rs",
+            "crates/public/margins-store/src/meeting_runtime.rs",
             "crates/public/margins-store/src/sqlite.rs",
-            "crates/public/margins-store/tests/index_query.rs",
+            "crates/public/margins-store/tests/application_records.rs",
             "crates/public/margins-store/tests/legacy_compatibility.rs",
+            "crates/public/margins-store/tests/meeting_runtime_sqlite.rs",
             "crates/public/margins-store/tests/public_graph.rs",
             "crates/public/margins-store/tests/repository_contract.rs",
         }
@@ -541,6 +554,28 @@ class RepositoryPolicyTests(unittest.TestCase):
         self.assertIn("margins-workflows", workflow)
         self.assertIn('forbidden dependency in $crate no-default graph', workflow)
 
+    def test_public_server_scope_is_exact_and_standalone_tested(self) -> None:
+        manifest = json.loads(
+            (REPO_ROOT / "open-source-boundary.json").read_text(encoding="utf-8")
+        )
+        scope = next(
+            scope for scope in manifest["scopes"] if scope["name"] == "margins-server-crate"
+        )
+        crate_root = REPO_ROOT / "crates/public/margins-server"
+        expected = {
+            path.relative_to(REPO_ROOT).as_posix()
+            for path in crate_root.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(set(scope["include"]), expected)
+        self.assertEqual(set(scope["required_files"]), expected)
+        self.assertEqual(scope["minimum_files"], len(expected))
+
+        workflow = (REPO_ROOT / ".github/workflows/open-source-boundary.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("margins-server", workflow)
+
     def test_public_cargo_graph_has_no_private_edges(self) -> None:
         public_root = (REPO_ROOT / "crates" / "public").resolve()
         manifests = sorted(public_root.glob("*/Cargo.toml"))
@@ -558,15 +593,33 @@ class RepositoryPolicyTests(unittest.TestCase):
         allowed_first_party = {
             "margins-core": set(),
             "margins-media": {"margins-core"},
-            "margins-store": {"margins-core"},
+            "margins-meeting-protocol": set(),
+            "margins-meeting-runtime": {"margins-meeting-protocol"},
+            "margins-store": {
+                "margins-core",
+                "margins-meeting-protocol",
+                "margins-meeting-runtime",
+            },
             "margins-workflows": {
                 "margins-core",
                 "margins-media",
+                "margins-meeting-protocol",
+                "margins-meeting-runtime",
                 "margins-store",
+            },
+            "margins-server": {
+                "margins-core",
+                "margins-media",
+                "margins-meeting-protocol",
+                "margins-meeting-runtime",
+                "margins-store",
+                "margins-workflows",
+                "matroska-demuxer",
             },
             "margins-cli": {
                 "margins-core",
                 "margins-media",
+                "margins-meeting-protocol",
                 "margins-store",
                 "margins-workflows",
             },
@@ -656,16 +709,19 @@ class RepositoryPolicyTests(unittest.TestCase):
             self.assertIn("margins::cli::main_entry_from_env", root_main)
 
     def test_margins_skill_uses_the_standalone_rust_cli(self) -> None:
-        skill = (REPO_ROOT / "skills/margins/SKILL.md").read_text(encoding="utf-8")
+        source_skill = REPO_ROOT / "skills/margins-public/SKILL.md"
+        if not source_skill.is_file():
+            source_skill = REPO_ROOT / "skills/margins/SKILL.md"
+        skill = source_skill.read_text(encoding="utf-8")
         for command in (
-            "margins recent",
-            "margins transcript",
-            "margins artifacts",
-            "margins process",
-            "margins transcribe",
+            'command -v margins || command -v margins-public',
+            '"$MARGINS_CLI" --workspace "<workspace-id>" recent',
+            '"$MARGINS_CLI" --workspace "<workspace-id>" transcript latest',
+            '"$MARGINS_CLI" --workspace "<workspace-id>" artifacts latest',
+            '"$MARGINS_CLI" --workspace "<workspace-id>" transcribe',
         ):
             self.assertIn(command, skill)
-        self.assertIn("do not inspect or modify `.margins/sessions.sqlite`", skill)
+        self.assertIn("Do not modify Margins state directly", skill)
         for legacy in ("margins.py", "python3", "ffmpeg", "ffprobe"):
             self.assertNotIn(legacy, skill)
         self.assertFalse((REPO_ROOT / "skills/margins/scripts/margins.py").exists())
@@ -688,6 +744,9 @@ class RepositoryPolicyTests(unittest.TestCase):
             "crates/public/margins-media/src/diarization.rs",
             "crates/public/margins-media/src/info.rs",
             "crates/public/margins-media/src/lib.rs",
+            "crates/public/margins-media/src/model_registry/coreml.rs",
+            "crates/public/margins-media/src/model_registry/mod.rs",
+            "crates/public/margins-media/src/model_registry/parakeet.rs",
             "crates/public/margins-media/src/providers/coreml.rs",
             "crates/public/margins-media/src/providers/mod.rs",
             "crates/public/margins-media/src/providers/parakeet.rs",

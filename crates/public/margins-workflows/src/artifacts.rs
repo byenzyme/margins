@@ -11,6 +11,42 @@ pub struct ArtifactView {
     pub artifact: SessionArtifact,
     pub disk_path: PathBuf,
     pub exists: bool,
+    /// Runtime chunks can produce a WAV when requested without keeping one on disk.
+    pub available: bool,
+}
+
+/// The only supported derived path for a native runtime audio artifact. The
+/// URI, kind, segment identity, and target path must all agree with its row.
+pub fn native_runtime_audio_export_path(
+    margins_dir: &Path,
+    artifact: &SessionArtifact,
+) -> Option<PathBuf> {
+    let _lane = native_runtime_audio_lane(artifact)?;
+    let session = &artifact.session_name;
+    confined_legacy_capture_disk_path(
+        margins_dir,
+        session,
+        &format!(".margins/{session}_seg{}.wav", artifact.ordinal),
+    )
+}
+
+/// Validate a chunk-backed audio artifact and return its individual lane.
+pub fn native_runtime_audio_lane(artifact: &SessionArtifact) -> Option<&str> {
+    let remainder = artifact.path.strip_prefix("meeting-runtime://")?;
+    let mut parts = remainder.split('/');
+    let (Some(session), Some(segment), Some(lane), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    if session != artifact.session_name
+        || segment != format!("{session}-seg-{}", artifact.ordinal)
+        || !matches!(lane, "mic" | "system")
+        || artifact.kind != format!("audio_{lane}_runtime")
+    {
+        return None;
+    }
+    Some(lane)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -224,23 +260,73 @@ pub fn list_artifacts(
     margins_dir: &Path,
     session_name: &str,
 ) -> Result<Vec<ArtifactView>> {
-    Ok(canonical::list_session_artifacts(margins_dir, session_name)?
+    let storage = margins_store::SqliteMeetingRuntimeStorage::open_read_only(margins_dir);
+    session_artifact_rows(margins_dir, session_name)?
         .into_iter()
         .map(|artifact| {
-            let disk_path = artifact_registry_disk_path(work_dir, margins_dir, &artifact.path);
+            let export_path = native_runtime_audio_export_path(margins_dir, &artifact);
+            let disk_path = export_path.clone().unwrap_or_else(|| {
+                artifact_registry_disk_path(work_dir, margins_dir, &artifact.path)
+            });
             let exists = confined_session_artifact_access_disk_path(
                 margins_dir,
                 &artifact.session_name,
                 &artifact.path,
             )
-            .is_some_and(|path| path.exists());
-            ArtifactView {
+            .is_some_and(|path| path.exists())
+                || export_path.as_ref().is_some_and(|path| path.exists());
+            let available = if let Some(lane) = native_runtime_audio_lane(&artifact) {
+                storage
+                    .native_lane_wav_size(&artifact.session_name, artifact.ordinal, lane)?
+                    .is_some()
+            } else {
+                exists
+            };
+            Ok(ArtifactView {
                 artifact,
                 disk_path,
                 exists,
-            }
+                available,
+            })
         })
-        .collect())
+        .collect()
+}
+
+/// Include read-time runtime audio rows for TUI captures finalized before
+/// their chunk-backed lanes were entered into the artifact registry.
+pub fn session_artifact_rows(
+    margins_dir: &Path,
+    session_name: &str,
+) -> Result<Vec<SessionArtifact>> {
+    let mut artifacts = canonical::list_session_artifacts_read_only(margins_dir, session_name)?;
+    if !canonical::database_path(margins_dir).is_file() {
+        return Ok(artifacts);
+    }
+    let storage = margins_store::SqliteMeetingRuntimeStorage::open_read_only(margins_dir);
+    for (ordinal, lane, created_at) in storage.native_runtime_artifact_lanes(session_name)? {
+        let kind = format!("audio_{lane}_runtime");
+        if artifacts
+            .iter()
+            .any(|artifact| artifact.kind == kind && artifact.ordinal == ordinal)
+        {
+            continue;
+        }
+        artifacts.push(SessionArtifact {
+            session_name: session_name.to_owned(),
+            kind,
+            ordinal,
+            path: format!("meeting-runtime://{session_name}/{session_name}-seg-{ordinal}/{lane}"),
+            retention_class: "durable".into(),
+            created_at,
+            expires_at: None,
+        });
+    }
+    artifacts.sort_by(|left, right| {
+        left.kind
+            .cmp(&right.kind)
+            .then(left.ordinal.cmp(&right.ordinal))
+    });
+    Ok(artifacts)
 }
 
 pub fn prune_expired_artifacts(

@@ -1301,6 +1301,9 @@ fn wait_for_callback(
                 if !peer.ip().is_loopback() {
                     continue;
                 }
+                // macOS/BSD accepted sockets inherit the listener's non-blocking
+                // mode; without this, a not-yet-arrived callback reads as empty.
+                let _ = stream.set_nonblocking(false);
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
                 let mut buffer = [0u8; 8192];
                 let count = stream.read(&mut buffer).unwrap_or(0);

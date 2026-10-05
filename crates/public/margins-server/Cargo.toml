@@ -1,0 +1,44 @@
+[package]
+name = "margins-server"
+version = "0.4.15"
+edition = "2021"
+license = "Apache-2.0"
+description = "Workspace HTTP service and BB browser capture adapter for Margins"
+repository = "https://github.com/byenzyme/margins"
+readme = "README.md"
+
+[features]
+default = []
+parakeet-asr = ["margins-media/parakeet-onnx-dynamic", "margins-media/model-download"]
+coreml-asr = ["margins-media/coreml-asr", "margins-media/model-download"]
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.7", features = ["multipart"] }
+chrono = "0.4"
+dirs = "6"
+hound = "3.5"
+matroska-demuxer = { path = "vendor/matroska-demuxer" }
+margins-core = { path = "../margins-core" }
+margins-media = { path = "../margins-media" }
+margins-meeting-protocol = { path = "../margins-meeting-protocol" }
+margins-meeting-runtime = { path = "../margins-meeting-runtime" }
+margins-store = { path = "../margins-store" }
+margins-workflows = { path = "../margins-workflows" }
+rand = "0.8"
+ropus = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tower-http = { version = "0.5", features = ["cors"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+
+[[bin]]
+name = "margins-server"
+path = "src/main.rs"

@@ -1,6 +1,6 @@
 [package]
 name = "margins-cli"
-version = "0.4.14"
+version = "0.4.15"
 edition = "2021"
 license = "Apache-2.0"
 description = "Standalone public command-line interface for Margins"
@@ -17,8 +17,8 @@ path = "src/main.rs"
 
 [features]
 default = []
-coreml-asr = ["margins-media/coreml-asr"]
-parakeet-onnx = ["margins-media/parakeet-onnx"]
+coreml-asr = ["margins-media/coreml-asr", "margins-media/model-download"]
+parakeet-onnx = ["margins-media/parakeet-onnx", "margins-media/model-download"]
 polyvoice-diarization = ["margins-media/polyvoice-diarization"]
 
 [dependencies]

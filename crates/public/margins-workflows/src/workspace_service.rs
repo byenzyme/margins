@@ -1,0 +1,2130 @@
+//! Shared in-process Workspace authority semantics.
+//!
+//! Local callers use this module directly. HTTP, SSH, BB, and Shortcut
+//! adapters authenticate/frame around the same methods; no local call is
+//! required to serialize itself or start a service.
+
+use crate::workspace::{ResolvedWorkspace, WorkspaceBinding};
+use anyhow::{bail, Context, Result};
+use fs4::fs_std::FileExt;
+use margins_core::SessionRepository;
+use margins_meeting_protocol::{
+    decode_opus_packet_blocks_v1, ArtifactId, AudioChunkV1, AudioCodecV1, AudioContainerV1,
+    AudioFormatV1, BeginCaptureGenerationV1, ClientMessageBodyV1, ClientMessageV1, DurationMillis,
+    InstanceId, LaneId, MessageId, ProtocolVersionV1, SequenceRangeV1, ServerMessageBodyV1,
+    SessionId, UnixMillis, WorkspaceArtifactV1, WorkspaceAttachV1, WorkspaceCapabilitiesV1,
+    WorkspaceCaptureGapV1, WorkspaceId, WorkspaceLimitsV1, WorkspaceMemoLineV1,
+    WorkspaceMemoReplaceV1, WorkspaceMemoUpdateV1, WorkspaceMemoV1,
+    WorkspaceNoteAssociationUpdateV1, WorkspaceNoteAssociationV1, WorkspaceProcessingJobV1,
+    WorkspaceRenameV1, WorkspaceSessionPageV1, WorkspaceSessionSummaryV1, WorkspaceSummaryV1,
+    WorkspaceTranscriptV1,
+};
+use margins_meeting_runtime::{
+    MeetingRuntime, MeetingRuntimeStorage, RuntimeResponseV1, StoredSegmentSummaryV1,
+};
+use margins_store::{
+    canonical, ImportReceipt, MemoWrite, SqliteMeetingRuntimeStorage, SqliteSessionRepository,
+    SqliteWorkspaceAuthorityStorage,
+};
+use rand::{distributions::Alphanumeric, Rng};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
+use std::fs::File;
+use std::io::Read;
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+
+pub const DEFAULT_MAX_CHUNK_BYTES: u64 = 1_048_576;
+// Sixteen 100 ms durable commands lets a two-lane sender catch up after one
+// slow SSH request without changing the local crash-loss or ACK boundary.
+pub const DEFAULT_MAX_IN_FLIGHT_CHUNKS: u32 = 16;
+pub const DEFAULT_MAX_EVENT_PAGE: u32 = 256;
+pub const DEFAULT_MAX_IMPORT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub const DEFAULT_SPOOL_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
+pub const MAX_LIVE_CHECKPOINT_BYTES: usize = 256 * 1024;
+
+pub const OP_WORKSPACE_READ: &str = "workspace.read";
+pub const OP_SESSION_READ: &str = "session.read";
+pub const OP_SESSION_CREATE: &str = "session.create";
+pub const OP_SESSION_WRITE: &str = "session.write";
+pub const OP_CAPTURE_WRITE: &str = "capture.write";
+pub const OP_MEMO_WRITE: &str = "memo.write";
+pub const OP_NOTE_ASSOCIATE: &str = "note.associate";
+pub const OP_JOB_READ: &str = "job.read";
+pub const OP_IMPORT_WRITE: &str = "import.write";
+pub const OP_IMPORT_RECEIPT: &str = "import.receipt";
+pub const OP_RECALL_QUERY: &str = "recall.query";
+
+/// A projection of durable recorder state; it contains no audio payloads or
+/// mutable registry state and can be reconstructed after a server restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureState {
+    pub input_finalized: bool,
+    pub expired_lease_finish: bool,
+    pub started_at_unix_ms: u64,
+    /// Browser clock at Start. The runtime start is the server receive time.
+    pub client_started_at_unix_ms: u64,
+    pub segments: Vec<StoredSegmentSummaryV1>,
+}
+
+fn browser_expired_lease_finish(session: &margins_meeting_runtime::StoredSessionV1) -> bool {
+    session.finalized_input().is_some_and(|(message_id, _)| {
+        message_id
+            .as_ref()
+            .starts_with("browser-lease-incomplete-finish-")
+    })
+}
+
+fn browser_client_clock_origin(session: &margins_meeting_runtime::StoredSessionV1) -> u64 {
+    session
+        .create()
+        .provenance
+        .hops
+        .iter()
+        .find(|hop| hop.producer == "bb-browser")
+        .and_then(|hop| hop.attributes.get("client_started_at_unix_ms"))
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(session.create().started_at_unix_ms.0)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacyBrowserAudioFormat {
+    Webm,
+    Wav,
+}
+
+/// A source left by browser captures made before MeetingRuntime owned audio.
+#[derive(Debug, Clone)]
+pub struct LegacyBrowserAudioSource {
+    pub path: PathBuf,
+    pub format: LegacyBrowserAudioFormat,
+    pub offset_ms: u64,
+}
+
+/// Preserve the typed storage conflict across the transport-neutral service.
+pub fn is_memo_revision_conflict(error: &anyhow::Error) -> bool {
+    error.is::<margins_store::MemoRevisionConflict>()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServicePrincipal {
+    pub id: String,
+    pub workspace_ids: BTreeSet<String>,
+    pub operations: BTreeSet<String>,
+}
+
+impl ServicePrincipal {
+    pub fn scoped(
+        id: impl Into<String>,
+        workspace_ids: impl IntoIterator<Item = String>,
+        operations: impl IntoIterator<Item = String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            workspace_ids: workspace_ids.into_iter().collect(),
+            operations: operations.into_iter().collect(),
+        }
+    }
+    pub fn full(id: impl Into<String>, workspace_id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            workspace_ids: [workspace_id.into()].into_iter().collect(),
+            operations: [
+                OP_WORKSPACE_READ,
+                OP_SESSION_READ,
+                OP_SESSION_CREATE,
+                OP_SESSION_WRITE,
+                OP_CAPTURE_WRITE,
+                OP_MEMO_WRITE,
+                OP_NOTE_ASSOCIATE,
+                OP_JOB_READ,
+                OP_IMPORT_WRITE,
+                OP_IMPORT_RECEIPT,
+                OP_RECALL_QUERY,
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        }
+    }
+
+    pub fn upload_only(id: impl Into<String>, workspace_id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            workspace_ids: [workspace_id.into()].into_iter().collect(),
+            operations: [OP_IMPORT_WRITE, OP_IMPORT_RECEIPT]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        }
+    }
+
+    pub fn require(&self, workspace_id: &str, operation: &str) -> Result<()> {
+        if !self.workspace_ids.contains(workspace_id) {
+            bail!("principal is not authorized for this Workspace");
+        }
+        if !self.operations.contains(operation) {
+            bail!("principal is not authorized for operation {operation}");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct CredentialFile {
+    schema: String,
+    records: Vec<CredentialRecord>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct CredentialRecord {
+    principal_id: String,
+    token_hash: String,
+    workspace_ids: Vec<String>,
+    operations: Vec<String>,
+    expires_at_unix_ms: Option<u64>,
+    revoked: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScopedCredentialStore {
+    path: PathBuf,
+}
+
+impl ScopedCredentialStore {
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
+        let store = Self { path: path.into() };
+        if let Some(parent) = store.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        Ok(store)
+    }
+
+    pub fn issue(
+        &self,
+        principal_id: &str,
+        workspace_ids: Vec<String>,
+        operations: Vec<String>,
+        ttl: Option<std::time::Duration>,
+    ) -> Result<String> {
+        if principal_id.trim().is_empty() || workspace_ids.is_empty() || operations.is_empty() {
+            bail!("credential requires principal, Workspace, and operation scopes");
+        }
+        let token = random_secret(64);
+        self.register(principal_id, &token, workspace_ids, operations, ttl)?;
+        Ok(token)
+    }
+
+    pub fn register(
+        &self,
+        principal_id: &str,
+        token: &str,
+        workspace_ids: Vec<String>,
+        operations: Vec<String>,
+        ttl: Option<std::time::Duration>,
+    ) -> Result<()> {
+        if token.is_empty()
+            || principal_id.trim().is_empty()
+            || workspace_ids.is_empty()
+            || operations.is_empty()
+        {
+            bail!("credential requires token, principal, Workspace, and operation scopes");
+        }
+        let expires_at_unix_ms = ttl.map(|ttl| unix_ms().saturating_add(ttl.as_millis() as u64));
+        self.mutate(|file| {
+            let token_hash = hash_secret(token);
+            if let Some(record) = file
+                .records
+                .iter()
+                .find(|record| record.token_hash == token_hash)
+            {
+                if !record.revoked
+                    && record.principal_id == principal_id
+                    && record.workspace_ids == workspace_ids
+                    && record.operations == operations
+                    && record.expires_at_unix_ms == expires_at_unix_ms
+                {
+                    return Ok(());
+                }
+                bail!("credential token is already registered with different scope");
+            }
+            file.records.push(CredentialRecord {
+                principal_id: principal_id.to_string(),
+                token_hash,
+                workspace_ids,
+                operations,
+                expires_at_unix_ms,
+                revoked: false,
+            });
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    pub fn authorize(&self, token: &str, workspace_id: &str) -> Result<ServicePrincipal> {
+        let file = self.read()?;
+        let hash = hash_secret(token);
+        let record = file
+            .records
+            .iter()
+            .find(|record| record.token_hash == hash)
+            .context("credential is invalid")?;
+        if record.revoked
+            || record
+                .expires_at_unix_ms
+                .is_some_and(|value| value <= unix_ms())
+        {
+            bail!("credential is revoked or expired");
+        }
+        if !record
+            .workspace_ids
+            .iter()
+            .any(|value| value == workspace_id)
+        {
+            bail!("credential is not authorized for this Workspace");
+        }
+        Ok(ServicePrincipal::scoped(
+            record.principal_id.clone(),
+            record.workspace_ids.clone(),
+            record.operations.clone(),
+        ))
+    }
+
+    pub fn revoke(&self, principal_id: &str) -> Result<usize> {
+        let mut count = 0;
+        self.mutate(|file| {
+            for record in &mut file.records {
+                if record.principal_id == principal_id && !record.revoked {
+                    record.revoked = true;
+                    count += 1;
+                }
+            }
+            Ok(())
+        })?;
+        Ok(count)
+    }
+
+    fn read(&self) -> Result<CredentialFile> {
+        match std::fs::read(&self.path) {
+            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(CredentialFile {
+                schema: "margins.credentials.v1".to_string(),
+                records: Vec::new(),
+            }),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn mutate(&self, action: impl FnOnce(&mut CredentialFile) -> Result<()>) -> Result<()> {
+        let lock_path = self.path.with_extension("lock");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        lock.lock_exclusive()?;
+        let mut file = self.read()?;
+        action(&mut file)?;
+        let bytes = serde_json::to_vec_pretty(&file)?;
+        let parent = self
+            .path
+            .parent()
+            .context("credential path has no parent")?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        use std::io::Write as _;
+        temporary.write_all(&bytes)?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(&self.path).map_err(|error| error.error)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SessionReservation {
+    pub response: RuntimeResponseV1,
+    pub producer_token: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceService {
+    instance_id: InstanceId,
+    workspace: ResolvedWorkspace,
+    capture_root: PathBuf,
+    margins_dir: PathBuf,
+    runtime: Arc<MeetingRuntime<SqliteMeetingRuntimeStorage>>,
+    authority: SqliteWorkspaceAuthorityStorage,
+    asr_available: Arc<std::sync::atomic::AtomicBool>,
+    deferred_asr_enabled: Arc<std::sync::atomic::AtomicBool>,
+    recall_available: bool,
+}
+
+impl WorkspaceService {
+    pub fn open(instance_id: impl Into<String>, workspace: ResolvedWorkspace) -> Result<Self> {
+        Self::open_with_capabilities(instance_id, workspace, false, false)
+    }
+
+    pub fn open_with_capabilities(
+        instance_id: impl Into<String>,
+        workspace: ResolvedWorkspace,
+        asr_available: bool,
+        recall_available: bool,
+    ) -> Result<Self> {
+        let capture_root = workspace.capture_store_dir()?;
+        std::fs::create_dir_all(&capture_root)?;
+        let margins_dir = capture_root.join(".margins");
+        std::fs::create_dir_all(&margins_dir)?;
+        let runtime_storage = SqliteMeetingRuntimeStorage::open(&margins_dir)?;
+        let authority = SqliteWorkspaceAuthorityStorage::open(&margins_dir)?;
+        Ok(Self {
+            instance_id: InstanceId(instance_id.into()),
+            workspace,
+            capture_root,
+            margins_dir,
+            runtime: Arc::new(MeetingRuntime::new(runtime_storage)),
+            authority,
+            asr_available: Arc::new(std::sync::atomic::AtomicBool::new(asr_available)),
+            deferred_asr_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            recall_available,
+        })
+    }
+
+    pub fn workspace_id(&self) -> &str {
+        &self.workspace.config.id
+    }
+
+    pub fn instance_id(&self) -> &str {
+        self.instance_id.as_ref()
+    }
+
+    pub fn capture_root(&self) -> &Path {
+        &self.capture_root
+    }
+
+    pub fn margins_dir(&self) -> &Path {
+        &self.margins_dir
+    }
+
+    pub fn asr_available(&self) -> bool {
+        self.asr_available
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Publish machine-level ASR readiness after the speech assets finish
+    /// installing. Cloned Workspace handles observe the same capability.
+    pub fn set_asr_available(&self, available: bool) {
+        self.asr_available
+            .store(available, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Keep finalized audio in the durable ASR queue while a supported server
+    /// downloads its machine-level model. Capability stays false until ready.
+    pub fn enable_deferred_asr(&self) {
+        self.deferred_asr_enabled
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn can_admit_asr(&self) -> bool {
+        self.asr_available()
+            || self
+                .deferred_asr_enabled
+                .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn capabilities(&self, principal: &ServicePrincipal) -> Result<WorkspaceCapabilitiesV1> {
+        principal.require(self.workspace_id(), OP_WORKSPACE_READ)?;
+        Ok(WorkspaceCapabilitiesV1 {
+            protocol_version: ProtocolVersionV1,
+            instance_id: self.instance_id.clone(),
+            workspace_id: WorkspaceId(self.workspace_id().to_string()),
+            limits: WorkspaceLimitsV1 {
+                max_chunk_bytes: DEFAULT_MAX_CHUNK_BYTES,
+                max_in_flight_chunks: DEFAULT_MAX_IN_FLIGHT_CHUNKS,
+                max_event_page: DEFAULT_MAX_EVENT_PAGE,
+                max_import_bytes: DEFAULT_MAX_IMPORT_BYTES,
+                spool_reserve_bytes: DEFAULT_SPOOL_RESERVE_BYTES,
+            },
+            capture_formats: vec![
+                AudioFormatV1 {
+                    codec: AudioCodecV1::Opus,
+                    container: AudioContainerV1::PacketStream,
+                    sample_rate_hz: crate::remote_workspace::NATIVE_REMOTE_RATE_HZ,
+                    channel_count: 1,
+                },
+                AudioFormatV1 {
+                    codec: AudioCodecV1::Opus,
+                    container: AudioContainerV1::Webm,
+                    sample_rate_hz: 48_000,
+                    channel_count: 1,
+                },
+            ],
+            operations: principal
+                .operations
+                .iter()
+                .filter(|operation| self.recall_available || operation.as_str() != OP_RECALL_QUERY)
+                .cloned()
+                .collect(),
+            asr_available: self.asr_available(),
+            recall_available: self.recall_available,
+        })
+    }
+
+    pub fn summary(&self, principal: &ServicePrincipal) -> Result<WorkspaceSummaryV1> {
+        principal.require(self.workspace_id(), OP_WORKSPACE_READ)?;
+        Ok(WorkspaceSummaryV1 {
+            instance_id: self.instance_id.clone(),
+            workspace_id: WorkspaceId(self.workspace_id().to_string()),
+            display_name: self
+                .workspace
+                .config
+                .name
+                .clone()
+                .unwrap_or_else(|| self.workspace_id().to_string()),
+            source_ids: self.workspace.config.bindings.keys().cloned().collect(),
+            source_freshness: "explicit_sync_required".to_string(),
+        })
+    }
+
+    pub fn recall(
+        &self,
+        principal: &ServicePrincipal,
+        query: &str,
+        source: Option<&str>,
+    ) -> Result<crate::local_recall::LocalRecallOutput> {
+        principal.require(self.workspace_id(), OP_RECALL_QUERY)?;
+        if !self.recall_available {
+            bail!("recall capability is unavailable on this instance");
+        }
+        crate::local_recall::search(&self.workspace, query, source)
+    }
+
+    pub fn reserve_session(
+        &self,
+        principal: &ServicePrincipal,
+        command: ClientMessageV1,
+    ) -> Result<SessionReservation> {
+        self.reserve_session_inner(principal, command, random_secret(48))
+    }
+
+    /// Reserve with a producer identity supplied by a trusted capture
+    /// adapter. Browser owners use a cryptographically random UUIDv4 so a
+    /// lost start response can be retried without a second registry.
+    pub fn reserve_session_with_producer_token(
+        &self,
+        principal: &ServicePrincipal,
+        command: ClientMessageV1,
+        producer_token: &str,
+    ) -> Result<SessionReservation> {
+        if !is_uuid_v4(producer_token) {
+            bail!("capture producer token must be a secure UUIDv4");
+        }
+        self.reserve_session_inner(principal, command, producer_token.to_string())
+    }
+
+    fn reserve_session_inner(
+        &self,
+        principal: &ServicePrincipal,
+        command: ClientMessageV1,
+        producer_token: String,
+    ) -> Result<SessionReservation> {
+        principal.require(self.workspace_id(), OP_SESSION_CREATE)?;
+        if !matches!(command.body, ClientMessageBodyV1::CreateSession(_)) {
+            bail!("session reservation requires create_session");
+        }
+        if let ClientMessageBodyV1::CreateSession(create) = &command.body {
+            for lane in &create.lanes {
+                let format = &lane.format;
+                let opus = format.codec == AudioCodecV1::Opus
+                    && format.container == AudioContainerV1::PacketStream
+                    && format.channel_count == 1
+                    && format.sample_rate_hz == 16_000;
+                let browser_webm = format.codec == AudioCodecV1::Opus
+                    && format.container == AudioContainerV1::Webm
+                    && format.channel_count == 1
+                    && format.sample_rate_hz == 48_000;
+                let recoverable_pcm = format.codec == AudioCodecV1::PcmS16Le
+                    && format.container == AudioContainerV1::Raw
+                    && format.channel_count == 1
+                    && matches!(format.sample_rate_hz, 16_000 | 48_000);
+                if !opus && !browser_webm && !recoverable_pcm {
+                    bail!(
+                        "unsupported capture format for lane {}; use mono Opus packet stream at 16 kHz, mono Opus WebM at 48 kHz, or recovery PCM s16le at 16/48 kHz",
+                        lane.lane_id.as_ref()
+                    );
+                }
+            }
+        }
+        let session_id = command.session_id.clone();
+        let response = self
+            .runtime
+            .handle(command)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        self.authority
+            .reserve_producer(session_id.as_ref(), &principal.id, &producer_token)?;
+        self.authority
+            .set_current(&principal.id, self.workspace_id(), session_id.as_ref())?;
+        let memo_path = self.margins_dir.join(format!("{}.md", session_id.as_ref()));
+        if !memo_path.exists() {
+            atomic_empty_file(&memo_path)?;
+        }
+        Ok(SessionReservation {
+            response,
+            producer_token,
+        })
+    }
+
+    pub fn attach_session(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+        request: &WorkspaceAttachV1,
+    ) -> Result<SessionReservation> {
+        principal.require(self.workspace_id(), OP_SESSION_CREATE)?;
+        if request.request_id.len() < 20 || request.request_id.chars().any(char::is_whitespace) {
+            bail!("attach request identity must contain at least 20 non-space characters");
+        }
+        let command = ClientMessageV1 {
+            protocol_version: ProtocolVersionV1,
+            message_id: format!("attach-{}", request.request_id).into(),
+            session_id: session_id.clone(),
+            sent_at_unix_ms: request.requested_at_unix_ms,
+            body: ClientMessageBodyV1::BeginCaptureGeneration(BeginCaptureGenerationV1 {
+                prior_finalize_message_id: request.prior_finalize_message_id.clone(),
+                started_at_ms: request.started_at_ms,
+            }),
+        };
+        let response = self
+            .runtime
+            .handle(command)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        ensure_runtime_accepted(&response)?;
+        // The high-entropy request identity makes this deterministic across a
+        // lost response without storing a replayable producer secret in the
+        // application database.
+        let producer_token = format!(
+            "{:x}",
+            Sha256::digest(
+                format!(
+                    "margins.attach.v1\0{}\0{}\0{}\0{}\0{}",
+                    self.instance_id.as_ref(),
+                    self.workspace_id(),
+                    principal.id,
+                    session_id.as_ref(),
+                    request.request_id
+                )
+                .as_bytes()
+            )
+        );
+        self.authority
+            .reserve_producer(session_id.as_ref(), &principal.id, &producer_token)?;
+        self.authority
+            .set_current(&principal.id, self.workspace_id(), session_id.as_ref())?;
+        Ok(SessionReservation {
+            response,
+            producer_token,
+        })
+    }
+
+    pub fn execute_capture(
+        &self,
+        principal: &ServicePrincipal,
+        producer_token: &str,
+        command: ClientMessageV1,
+    ) -> Result<RuntimeResponseV1> {
+        principal.require(self.workspace_id(), OP_CAPTURE_WRITE)?;
+        if matches!(command.body, ClientMessageBodyV1::CreateSession(_)) {
+            bail!("create_session must use reservation");
+        }
+        self.authority.authorize_producer(
+            command.session_id.as_ref(),
+            &principal.id,
+            producer_token,
+        )?;
+        self.validate_capture_command(&command)?;
+        let finalized = matches!(command.body, ClientMessageBodyV1::FinalizeSession(_));
+        let session_id = command.session_id.clone();
+        let response = self
+            .runtime
+            .handle(command)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        ensure_runtime_accepted(&response)?;
+        if finalized
+            && response
+                .messages
+                .iter()
+                .any(|message| matches!(message.body, ServerMessageBodyV1::SessionFinalized(_)))
+        {
+            if self.can_admit_asr() {
+                // Admission is durable and precedes producer release. A lost
+                // finalize response can therefore be retried without ever
+                // leaving finalized audio in an unobservable processing gap.
+                self.admit_transcription_job(&session_id)?;
+            }
+            self.authority
+                .release_producer(session_id.as_ref(), &principal.id, producer_token)?;
+        }
+        Ok(response)
+    }
+
+    /// Keep the browser producer reservation alive while the page is present.
+    /// The timestamp lives in the same SQLite row as the owner capability.
+    pub fn touch_capture_producer(
+        &self,
+        principal: &ServicePrincipal,
+        producer_token: &str,
+        session_id: &SessionId,
+    ) -> Result<()> {
+        principal.require(self.workspace_id(), OP_CAPTURE_WRITE)?;
+        self.authority
+            .touch_producer(session_id.as_ref(), &principal.id, producer_token)
+    }
+
+    /// Claim browser reservations that have had no owner activity since the
+    /// cutoff. Claimed rows are returned again after a crash until released.
+    pub fn claim_expired_browser_producers(
+        &self,
+        principal: &ServicePrincipal,
+        cutoff_ms: i64,
+    ) -> Result<Vec<SessionId>> {
+        principal.require(self.workspace_id(), OP_CAPTURE_WRITE)?;
+        self.authority
+            .claim_expired_browser_producers(&principal.id, cutoff_ms)
+            .map(|sessions| sessions.into_iter().map(SessionId).collect())
+    }
+
+    /// Trusted server-only completion after the durable owner lease is
+    /// claimed. It cannot run for a live producer or an arbitrary session.
+    pub fn execute_expired_capture(
+        &self,
+        principal: &ServicePrincipal,
+        command: ClientMessageV1,
+    ) -> Result<RuntimeResponseV1> {
+        principal.require(self.workspace_id(), OP_CAPTURE_WRITE)?;
+        if matches!(command.body, ClientMessageBodyV1::CreateSession(_)) {
+            bail!("create_session must use reservation");
+        }
+        self.authority
+            .require_abandoned_producer(command.session_id.as_ref(), &principal.id)?;
+        self.validate_capture_command(&command)?;
+        let finalized = matches!(command.body, ClientMessageBodyV1::FinalizeSession(_));
+        let session_id = command.session_id.clone();
+        let response = self
+            .runtime
+            .handle(command)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        ensure_runtime_accepted(&response)?;
+        if finalized
+            && response
+                .messages
+                .iter()
+                .any(|message| matches!(message.body, ServerMessageBodyV1::SessionFinalized(_)))
+        {
+            if self.can_admit_asr() {
+                self.admit_transcription_job(&session_id)?;
+            }
+            self.authority
+                .release_abandoned_producer(session_id.as_ref(), &principal.id)?;
+        }
+        Ok(response)
+    }
+
+    /// Complete the outbox step if the server crashed after runtime finalize
+    /// but before releasing a claimed browser reservation.
+    pub fn release_expired_finalized_capture(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+    ) -> Result<()> {
+        principal.require(self.workspace_id(), OP_CAPTURE_WRITE)?;
+        self.authority
+            .require_abandoned_producer(session_id.as_ref(), &principal.id)?;
+        let stored = self
+            .runtime
+            .storage()
+            .load_session(session_id)?
+            .context("claimed browser capture has no runtime state")?;
+        if !stored.input_finalized() {
+            bail!("claimed browser capture is not finalized");
+        }
+        if self.can_admit_asr() {
+            self.admit_transcription_job(session_id)?;
+        }
+        self.authority
+            .release_abandoned_producer(session_id.as_ref(), &principal.id)
+    }
+
+    pub fn execute_audio_batch(
+        &self,
+        principal: &ServicePrincipal,
+        producer_token: &str,
+        session_id: &SessionId,
+        commands: Vec<ClientMessageV1>,
+    ) -> Result<Vec<RuntimeResponseV1>> {
+        principal.require(self.workspace_id(), OP_CAPTURE_WRITE)?;
+        if commands.is_empty() || commands.len() > DEFAULT_MAX_IN_FLIGHT_CHUNKS as usize {
+            bail!("audio chunk batch exceeds the advertised command bound");
+        }
+        self.authority
+            .authorize_producer(session_id.as_ref(), &principal.id, producer_token)?;
+        for command in &commands {
+            if command.session_id != *session_id
+                || !matches!(command.body, ClientMessageBodyV1::AudioChunk(_))
+            {
+                bail!("audio chunk batch crosses its session or operation boundary");
+            }
+            self.validate_capture_command(command)?;
+        }
+        commands
+            .into_iter()
+            .map(|command| self.execute_capture(principal, producer_token, command))
+            .collect()
+    }
+
+    fn validate_capture_command(&self, command: &ClientMessageV1) -> Result<()> {
+        if let ClientMessageBodyV1::AudioChunk(chunk) = &command.body {
+            if chunk.payload.len() as u64 > DEFAULT_MAX_CHUNK_BYTES {
+                bail!("audio chunk exceeds advertised maximum");
+            }
+            let format = self.capture_lane_format(&command.session_id, chunk.lane_id.as_ref())?;
+            match (format.codec, format.container, format.channel_count) {
+                (AudioCodecV1::PcmS16Le, AudioContainerV1::Raw, 1) => {
+                    if chunk.payload.len() % 2 != 0 {
+                        bail!("mono s16 PCM audio chunk has a partial sample");
+                    }
+                    let frames = chunk.payload.len() as u64 / 2;
+                    let expected_duration = frames
+                        .saturating_mul(1_000)
+                        .div_ceil(u64::from(format.sample_rate_hz));
+                    if frames == 0 || chunk.duration_ms.0 != expected_duration {
+                        bail!("mono s16 PCM audio chunk duration does not match its frames");
+                    }
+                }
+                (AudioCodecV1::Opus, AudioContainerV1::PacketStream, 1) => {
+                    let blocks =
+                        decode_opus_packet_blocks_v1(&chunk.payload).map_err(anyhow::Error::msg)?;
+                    if blocks.len() != 1 {
+                        bail!("each durable native Opus command must contain exactly one block");
+                    }
+                    let block = &blocks[0];
+                    let legacy_start = chunk
+                        .sequence
+                        .checked_mul(crate::remote_workspace::NATIVE_OPUS_CHECKPOINT_FRAMES as u64);
+                    let current_start = chunk
+                        .sequence
+                        .checked_mul(crate::remote_workspace::NATIVE_OPUS_NETWORK_FRAMES as u64);
+                    if !matches!(
+                        (legacy_start, current_start),
+                        (Some(legacy), Some(current))
+                            if block.source_start_frame == legacy
+                                || block.source_start_frame == current
+                    ) {
+                        bail!("native Opus block source start does not match its sequence");
+                    }
+                    if chunk.sequence == 0 {
+                        if !block.stream_start || block.pre_skip_48k == 0 {
+                            bail!("native Opus sequence zero is missing START/pre-skip");
+                        }
+                    } else if block.stream_start || block.pre_skip_48k != 0 {
+                        bail!("native Opus continuation repeats START/pre-skip");
+                    }
+                    if !block.stream_end
+                        && u64::from(block.source_frame_count)
+                            != block.packets.len() as u64 * u64::from(block.frame_samples)
+                    {
+                        bail!(
+                            "non-terminal native Opus block does not fully represent its packets"
+                        );
+                    }
+                    let frame_end = block
+                        .source_start_frame
+                        .checked_add(u64::from(block.source_frame_count))
+                        .context("native Opus source end overflowed")?;
+                    let expected_duration = frame_end
+                        .saturating_mul(1_000)
+                        .div_ceil(u64::from(format.sample_rate_hz))
+                        .saturating_sub(
+                            block
+                                .source_start_frame
+                                .saturating_mul(1_000)
+                                .div_ceil(u64::from(format.sample_rate_hz)),
+                        )
+                        .max(1);
+                    if chunk.duration_ms.0 != expected_duration {
+                        bail!("native Opus audio chunk duration does not match its source frames");
+                    }
+                }
+                (AudioCodecV1::Opus, AudioContainerV1::Webm, 1) => {
+                    // MediaRecorder fragments are opaque at the authority
+                    // boundary. The decoder validates the assembled stream
+                    // after its ordered chunks are durably finalized.
+                    if chunk.payload.is_empty() {
+                        bail!("WebM audio chunk must not be empty");
+                    }
+                }
+                _ => bail!("audio chunk uses an unsupported declared lane format"),
+            }
+        }
+        Ok(())
+    }
+
+    pub fn current(&self, principal: &ServicePrincipal) -> Result<Option<SessionId>> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        Ok(self
+            .authority
+            .current(&principal.id, self.workspace_id())?
+            .map(SessionId))
+    }
+
+    pub fn active_sessions(&self, principal: &ServicePrincipal) -> Result<WorkspaceSessionPageV1> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        let sessions = self
+            .authority
+            .active_session_ids()?
+            .into_iter()
+            .map(|id| self.session_summary(&id))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(WorkspaceSessionPageV1 {
+            sessions,
+            next_cursor: None,
+        })
+    }
+
+    pub fn session(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+    ) -> Result<WorkspaceSessionSummaryV1> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        self.session_summary(session_id.as_ref())
+    }
+
+    /// Permanently discard a finished capture and its local source material.
+    /// Linked notes live in the Home Source and are deliberately untouched.
+    pub fn discard_session(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+    ) -> Result<()> {
+        principal.require(self.workspace_id(), OP_SESSION_WRITE)?;
+        let name = session_id.as_ref();
+        if name.is_empty()
+            || name.len() > 200
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            bail!("invalid session ID");
+        }
+        let meta = canonical::get_session_meta(&self.margins_dir, name)?;
+        // A prior interrupted deletion has already passed this check and left
+        // a tombstone. Permit retry so the remaining files can be reaped.
+        if !canonical::is_session_tombstoned(&self.margins_dir, name)? {
+            if !self.session_summary(name)?.input_finalized {
+                bail!("stop and save this meeting before discarding it");
+            }
+            canonical::begin_delete_session(&self.margins_dir, name)?;
+        }
+        let recording_dir = self.margins_dir.join("recordings");
+        if let Ok(metadata) = std::fs::symlink_metadata(&recording_dir) {
+            if metadata.file_type().is_symlink() {
+                bail!("session recording directory is a symlink");
+            }
+        }
+        for segment in &meta.segments {
+            if segment
+                .wav_path
+                .starts_with(&format!(".margins/artifacts/{name}/"))
+            {
+                let path = crate::artifacts::confined_session_artifact_registry_disk_path(
+                    &self.margins_dir,
+                    name,
+                    &segment.wav_path,
+                )
+                .context("recording segment path is not confined to this session")?;
+                remove_session_file(&path)?;
+                continue;
+            }
+            let path = Path::new(&segment.wav_path);
+            let filename = path
+                .file_name()
+                .and_then(|part| part.to_str())
+                .unwrap_or("");
+            let ordinal = filename
+                .strip_prefix(&format!("{name}_seg"))
+                .and_then(|part| part.strip_suffix(".wav"));
+            if !ordinal.is_some_and(|value| {
+                !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+            }) {
+                bail!("recording segment path is not confined to this session");
+            }
+            let expected = format!(".margins/recordings/{filename}");
+            let legacy = format!(".margins/{filename}");
+            if segment.wav_path != expected && segment.wav_path != legacy {
+                bail!("recording segment path is not confined to this session");
+            }
+            let disk_path = if segment.wav_path == expected {
+                recording_dir.join(filename)
+            } else {
+                self.margins_dir.join(filename)
+            };
+            remove_session_file(&disk_path)?;
+        }
+        remove_session_file(&recording_dir.join(format!("{name}_upload.webm")))?;
+        for suffix in [
+            ".md",
+            "_transcript.json",
+            "_live_transcript_snapshot.json",
+            "_aligned.md",
+            "_capture_context.md",
+            "_grounding.json",
+        ] {
+            remove_session_file(&self.margins_dir.join(format!("{name}{suffix}")))?;
+        }
+        let artifact_root = self.margins_dir.join("artifacts");
+        let artifact_dir = artifact_root.join(name);
+        if let Ok(metadata) = std::fs::symlink_metadata(&artifact_root) {
+            if metadata.file_type().is_symlink() {
+                bail!("session artifact root is a symlink");
+            }
+        }
+        match std::fs::symlink_metadata(&artifact_dir) {
+            Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&artifact_dir)?,
+            Ok(_) => bail!("session artifact directory is not a directory"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        self.runtime.storage().delete_session_blobs(name)?;
+        canonical::finalize_delete_session(&self.margins_dir, name)?;
+        Ok(())
+    }
+
+    /// A provisional CoreML view from the active capture producer. Audio and
+    /// final ONNX transcription remain authoritative; this view is replaceable.
+    pub fn publish_live_checkpoint(
+        &self,
+        principal: &ServicePrincipal,
+        producer_token: &str,
+        session_id: &SessionId,
+        checkpoint: &Value,
+    ) -> Result<()> {
+        principal.require(self.workspace_id(), OP_CAPTURE_WRITE)?;
+        self.authority.authorize_active_producer(
+            session_id.as_ref(),
+            &principal.id,
+            producer_token,
+        )?;
+        let name = session_id.as_ref();
+        if name.len() > 200
+            || name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            bail!("invalid checkpoint session ID");
+        }
+        let bytes = serde_json::to_vec(checkpoint)?;
+        if bytes.len() > MAX_LIVE_CHECKPOINT_BYTES {
+            bail!("live checkpoint exceeds size limit");
+        }
+        let decoded = checkpoint
+            .get("decoded_until_ms")
+            .and_then(Value::as_u64)
+            .context("live checkpoint lacks decoded watermark")?;
+        let committed = checkpoint
+            .get("committed_until_ms")
+            .and_then(Value::as_u64)
+            .context("live checkpoint lacks committed watermark")?;
+        if checkpoint.get("version").and_then(Value::as_u64) != Some(2)
+            || checkpoint
+                .get("terminal")
+                .and_then(Value::as_bool)
+                .is_none()
+            || committed > decoded
+            || decoded > 12 * 60 * 60 * 1_000
+        {
+            bail!("invalid live checkpoint watermarks or version");
+        }
+        let words = checkpoint
+            .get("transcripts")
+            .and_then(Value::as_array)
+            .filter(|entries| entries.len() == 1)
+            .and_then(|entries| entries[0].get("words"))
+            .cloned()
+            .context("live checkpoint lacks transcript words")?;
+        let words: Vec<margins_media::transcript::TranscriptWordEntry> =
+            serde_json::from_value(words).context("invalid live checkpoint words")?;
+        if words.len() > 10_000
+            || words.iter().any(|word| {
+                word.channel > 1
+                    || word.start_ms > word.end_ms
+                    || word.end_ms > decoded
+                    || word.text.len() > 512
+            })
+        {
+            bail!("invalid live checkpoint word timeline");
+        }
+        let lock_path = self.margins_dir.join(format!("{name}_remote_live.lock"));
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(lock_path)?;
+        lock.lock_exclusive()?;
+        let path = self
+            .margins_dir
+            .join(format!("{name}_remote.live-transcript.json"));
+        if let Ok(previous) = std::fs::read(&path) {
+            if let Ok(previous) = serde_json::from_slice::<Value>(&previous) {
+                let old_decoded = previous
+                    .get("decoded_until_ms")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let old_committed = previous
+                    .get("committed_until_ms")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                if decoded < old_decoded || committed < old_committed {
+                    bail!("live checkpoint watermarks cannot move backwards");
+                }
+            }
+        }
+        let mut staged = tempfile::NamedTempFile::new_in(&self.margins_dir)?;
+        use std::io::Write as _;
+        staged.write_all(&bytes)?;
+        staged.write_all(b"\n")?;
+        staged.as_file().sync_all()?;
+        staged.persist(&path).map_err(|error| error.error)?;
+        std::fs::File::open(&self.margins_dir)?.sync_all()?;
+        Ok(())
+    }
+
+    pub fn sessions(
+        &self,
+        principal: &ServicePrincipal,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<WorkspaceSessionPageV1> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        let limit = limit.clamp(1, 100);
+        // Empty reservations are retained for audit/retry but are not ordinary
+        // meetings. A segment or registered artifact makes the session visible.
+        let all = canonical::list_sessions(&self.margins_dir)?
+            .into_iter()
+            .filter(|session| {
+                session.segment_count > 0
+                    || canonical::list_session_artifacts(&self.margins_dir, &session.name)
+                        .is_ok_and(|artifacts| !artifacts.is_empty())
+            })
+            .collect::<Vec<_>>();
+        let start = after
+            .and_then(|cursor| all.iter().position(|session| session.name == cursor))
+            .map_or(0, |position| position + 1);
+        let page = all.iter().skip(start).take(limit).collect::<Vec<_>>();
+        let next_cursor = (start + page.len() < all.len())
+            .then(|| page.last().map(|session| session.name.clone()))
+            .flatten();
+        let sessions = page
+            .into_iter()
+            .map(|session| self.session_summary(&session.name))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(WorkspaceSessionPageV1 {
+            sessions,
+            next_cursor,
+        })
+    }
+
+    fn session_summary(&self, session_id: &str) -> Result<WorkspaceSessionSummaryV1> {
+        let session = canonical::list_sessions(&self.margins_dir)?
+            .into_iter()
+            .find(|value| value.name == session_id)
+            .context("session not found")?;
+        let meta = canonical::get_session_meta(&self.margins_dir, session_id)?;
+        let runtime = self
+            .runtime
+            .storage()
+            .load_session(&SessionId(session_id.to_string()))?;
+        let input_finalized = if let Some(runtime) = runtime.as_ref() {
+            runtime.input_finalized()
+        } else {
+            // Legacy/imported sessions predate runtime finalization. A paused
+            // runtime segment can have a duration while the session remains
+            // open for Resume, so these projections apply only without one.
+            (!meta.segments.is_empty()
+                && meta
+                    .segments
+                    .iter()
+                    .all(|segment| segment.duration_secs.is_some()))
+                || canonical::list_session_artifacts(&self.margins_dir, session_id)?
+                    .iter()
+                    .any(|artifact| artifact.kind == "original_audio")
+        };
+        let finalized_input = runtime.as_ref().and_then(|value| value.finalized_input());
+        let capture_duration_ms = finalized_input.map(|(_, ended)| DurationMillis(ended.0));
+        let capture_finalize_message_id = finalized_input.map(|(message, _)| message.clone());
+        let capture_lanes = runtime
+            .as_ref()
+            .map(|session| session.create().lanes.clone())
+            .unwrap_or_default();
+        let mut capture_gaps = runtime
+            .as_ref()
+            .map(|session| {
+                session
+                    .discontinuities()
+                    .map(|gap| WorkspaceCaptureGapV1 {
+                        segment_id: gap.segment_id.0.clone(),
+                        start_sequence: gap.sequence_range.start,
+                        end_exclusive: gap.sequence_range.end_exclusive,
+                        reason: serde_json::to_value(gap.reason)
+                            .ok()
+                            .and_then(|value| value.as_str().map(str::to_string))
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        starts_at_ms: Some(gap.starts_at_ms),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        capture_gaps.extend(
+            canonical::list_processing_gaps(&self.margins_dir, session_id)?
+                .into_iter()
+                .map(|gap| WorkspaceCaptureGapV1 {
+                    segment_id: gap.segment_id,
+                    start_sequence: gap.start_sequence,
+                    end_exclusive: gap.end_exclusive,
+                    reason: gap.reason,
+                    starts_at_ms: None,
+                }),
+        );
+        capture_gaps.sort_by(|left, right| {
+            (
+                &left.segment_id,
+                left.start_sequence,
+                left.end_exclusive,
+                &left.reason,
+            )
+                .cmp(&(
+                    &right.segment_id,
+                    right.start_sequence,
+                    right.end_exclusive,
+                    &right.reason,
+                ))
+        });
+        capture_gaps.dedup();
+        let capture_incomplete = !capture_gaps.is_empty()
+            || runtime.as_ref().is_some_and(|session| {
+                session.finalized_reason().is_some_and(|reason| {
+                    reason != margins_meeting_protocol::SessionFinalizeReasonV1::Completed
+                })
+            });
+        Ok(WorkspaceSessionSummaryV1 {
+            session_id: SessionId(session_id.to_string()),
+            title: meta.title,
+            started_at: session.start_time,
+            capture_lanes,
+            segment_count: session.segment_count.max(0) as u64,
+            input_finalized,
+            capture_duration_ms,
+            capture_finalize_message_id,
+            capture_incomplete,
+            capture_gaps,
+            processing_state: meta.processing_state.unwrap_or_else(|| "none".to_string()),
+        })
+    }
+
+    pub fn events(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+        after: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<margins_meeting_protocol::ServerMessageV1>> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        let stored = self
+            .runtime
+            .storage()
+            .load_session(session_id)?
+            .context("session has no capture event stream")?;
+        let start = after.map_or(0, |value| value.saturating_add(1));
+        self.runtime.storage().load_events(
+            session_id,
+            SequenceRangeV1 {
+                start,
+                end_exclusive: stored.next_event_sequence(),
+            },
+            limit.min(DEFAULT_MAX_EVENT_PAGE as usize),
+        )
+    }
+
+    pub fn transcript(
+        &self,
+        principal: &ServicePrincipal,
+        requested: &str,
+    ) -> Result<WorkspaceTranscriptV1> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        let view = crate::transcript_view::load_transcript_view(
+            &self.capture_root,
+            &self.margins_dir,
+            requested,
+        )?;
+        // Remote producers publish provisional checkpoints without writing the
+        // CLI's process-local `current` file. The Workspace authority owns the
+        // active reservation, including across reader/producer principals.
+        let live = view.live
+            || (!view.terminal
+                && self
+                    .authority
+                    .active_session_ids()?
+                    .contains(&view.session_name));
+        Ok(WorkspaceTranscriptV1 {
+            session_id: SessionId(view.session_name),
+            body: view.body,
+            view: view.view.to_string(),
+            decoded_until_ms: view.decoded_until_ms,
+            committed_until_ms: view.committed_until_ms,
+            updated_at_unix_ms: view.updated_at_unix_ms,
+            live,
+            terminal: view.terminal,
+            source_artifact: view.source_path.to_string_lossy().into_owned(),
+        })
+    }
+
+    pub fn artifacts(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &str,
+    ) -> Result<Vec<WorkspaceArtifactV1>> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        let session_id = resolve_session_id(&self.margins_dir, session_id)?;
+        let storage = SqliteMeetingRuntimeStorage::open_read_only(&self.margins_dir);
+        crate::artifacts::session_artifact_rows(&self.margins_dir, &session_id)?
+            .into_iter()
+            .map(|artifact| {
+                let path = crate::artifacts::confined_session_artifact_access_disk_path(
+                    &self.margins_dir,
+                    &session_id,
+                    &artifact.path,
+                );
+                let size_bytes = if let Some(path) = path {
+                    path.metadata().ok().map(|value| value.len())
+                } else if let Some(lane) = crate::artifacts::native_runtime_audio_lane(&artifact) {
+                    storage.native_lane_wav_size(&session_id, artifact.ordinal, lane)?
+                } else {
+                    None
+                };
+                Ok(WorkspaceArtifactV1 {
+                    artifact_id: ArtifactId(format!(
+                        "{}:{}:{}",
+                        session_id, artifact.kind, artifact.ordinal
+                    )),
+                    session_id: SessionId(session_id.clone()),
+                    kind: artifact.kind,
+                    ordinal: artifact.ordinal,
+                    size_bytes,
+                    retention_class: artifact.retention_class,
+                    created_at: artifact.created_at,
+                })
+            })
+            .collect()
+    }
+
+    pub fn artifact_content(
+        &self,
+        principal: &ServicePrincipal,
+        artifact_id: &str,
+    ) -> Result<Vec<u8>> {
+        let mut file = self.artifact_content_file(principal, artifact_id)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Keep the temporary lane WAV alive until the caller finishes streaming.
+    /// The file has no permanent path and disappears when the handle closes.
+    pub fn artifact_content_file(
+        &self,
+        principal: &ServicePrincipal,
+        artifact_id: &str,
+    ) -> Result<File> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        let mut parts = artifact_id.rsplitn(3, ':');
+        let ordinal: i64 = parts.next().context("invalid artifact id")?.parse()?;
+        let kind = parts.next().context("invalid artifact id")?;
+        let session = parts.next().context("invalid artifact id")?;
+        let artifact = crate::artifacts::session_artifact_rows(&self.margins_dir, session)?
+            .into_iter()
+            .find(|value| value.kind == kind && value.ordinal == ordinal)
+            .context("artifact not found")?;
+        if let Some(lane) = crate::artifacts::native_runtime_audio_lane(&artifact) {
+            let storage = SqliteMeetingRuntimeStorage::open_read_only(&self.margins_dir);
+            return storage.temporary_native_lane_wav(session, ordinal, lane);
+        }
+        let path = crate::artifacts::confined_session_artifact_access_disk_path(
+            &self.margins_dir,
+            session,
+            &artifact.path,
+        )
+        .context("artifact path is outside its session scope")?;
+        Ok(File::open(path)?)
+    }
+
+    pub fn memo(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+    ) -> Result<WorkspaceMemoV1> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        ensure_session(&self.margins_dir, session_id.as_ref())?;
+        let memo = self.authority.memo(session_id.as_ref())?;
+        Ok(WorkspaceMemoV1 {
+            session_id: session_id.clone(),
+            revision: memo.revision,
+            lines: memo.lines.into_iter().map(memo_line).collect(),
+            mirror_stale: memo.mirror_stale,
+        })
+    }
+
+    pub fn update_memo(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+        request: &WorkspaceMemoUpdateV1,
+    ) -> Result<WorkspaceMemoV1> {
+        principal.require(self.workspace_id(), OP_MEMO_WRITE)?;
+        ensure_session(&self.margins_dir, session_id.as_ref())?;
+        let memo = self.authority.write_memo(
+            session_id.as_ref(),
+            &principal.id,
+            &request.request_id,
+            &request.expected_revision,
+            MemoWrite::PlainText {
+                observed_at_ms: request.observed_at_ms.0,
+                paused: request.paused,
+                text: &request.text,
+            },
+        )?;
+        Ok(WorkspaceMemoV1 {
+            session_id: session_id.clone(),
+            revision: memo.revision,
+            lines: memo.lines.into_iter().map(memo_line).collect(),
+            mirror_stale: memo.mirror_stale,
+        })
+    }
+
+    pub fn replace_memo(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+        request: &WorkspaceMemoReplaceV1,
+    ) -> Result<WorkspaceMemoV1> {
+        principal.require(self.workspace_id(), OP_MEMO_WRITE)?;
+        ensure_session(&self.margins_dir, session_id.as_ref())?;
+        let lines = request
+            .lines
+            .iter()
+            .cloned()
+            .map(timed_memo_line)
+            .collect::<Vec<_>>();
+        let memo = self.authority.write_memo(
+            session_id.as_ref(),
+            &principal.id,
+            &request.request_id,
+            &request.expected_revision,
+            MemoWrite::ReplaceLines(&lines),
+        )?;
+        Ok(WorkspaceMemoV1 {
+            session_id: session_id.clone(),
+            revision: memo.revision,
+            lines: memo.lines.into_iter().map(memo_line).collect(),
+            mirror_stale: memo.mirror_stale,
+        })
+    }
+
+    pub fn rename_session(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+        request: &WorkspaceRenameV1,
+    ) -> Result<WorkspaceSessionSummaryV1> {
+        principal.require(self.workspace_id(), OP_SESSION_WRITE)?;
+        ensure_session(&self.margins_dir, session_id.as_ref())?;
+        self.authority.rename_session(
+            session_id.as_ref(),
+            &principal.id,
+            &request.request_id,
+            &request.title,
+        )?;
+        self.session_summary(session_id.as_ref())
+    }
+
+    pub fn link_note(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+        request: &WorkspaceNoteAssociationUpdateV1,
+    ) -> Result<WorkspaceNoteAssociationV1> {
+        principal.require(self.workspace_id(), OP_NOTE_ASSOCIATE)?;
+        let source = self
+            .workspace
+            .config
+            .bindings
+            .get(&request.source_id)
+            .context("note Source is not declared in this Workspace")?;
+        if !matches!(source, WorkspaceBinding::NativeMarkdown { .. }) {
+            bail!("note associations require a native notes Source");
+        }
+        validate_relative_path(&request.relative_path)?;
+        self.authority
+            .link_note(
+                session_id.as_ref(),
+                &principal.id,
+                &request.request_id,
+                &request.source_id,
+                &request.relative_path,
+                request.observed_content_hash.as_deref(),
+                request.expected_revision,
+                request.bb_thread_id.as_deref(),
+                request.distilled_memo_revision.as_deref(),
+            )
+            .map(note_association)
+    }
+
+    pub fn note_association(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+    ) -> Result<Option<WorkspaceNoteAssociationV1>> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        canonical::get_note_association(&self.margins_dir, session_id.as_ref())
+            .map(|value| value.map(note_association))
+    }
+
+    pub fn unlink_note(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+        request_id: &str,
+        expected_revision: u64,
+    ) -> Result<()> {
+        principal.require(self.workspace_id(), OP_NOTE_ASSOCIATE)?;
+        self.authority.unlink_note(
+            session_id.as_ref(),
+            &principal.id,
+            request_id,
+            expected_revision,
+        )
+    }
+
+    pub fn latest_job(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+    ) -> Result<Option<WorkspaceProcessingJobV1>> {
+        principal.require(self.workspace_id(), OP_JOB_READ)?;
+        canonical::latest_processing_job(&self.margins_dir, session_id.as_ref())
+            .map(|value| value.map(processing_job))
+    }
+
+    pub fn capture_lane_format(
+        &self,
+        session_id: &SessionId,
+        lane_id: &str,
+    ) -> Result<AudioFormatV1> {
+        let session = self
+            .runtime
+            .storage()
+            .load_session(session_id)?
+            .context("session has no capture authority state")?;
+        session
+            .create()
+            .lanes
+            .iter()
+            .find(|lane| lane.lane_id.as_ref() == lane_id)
+            .map(|lane| lane.format.clone())
+            .context("capture lane was not declared")
+    }
+
+    /// Reconstruct acknowledged sequence ranges and segment closes directly
+    /// from the runtime store. No browser process memory is consulted.
+    pub fn capture_state(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+    ) -> Result<CaptureState> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        let stored = self
+            .runtime
+            .storage()
+            .load_session(session_id)?
+            .context("session has no capture authority state")?;
+        Ok(CaptureState {
+            input_finalized: stored.input_finalized(),
+            expired_lease_finish: browser_expired_lease_finish(&stored),
+            started_at_unix_ms: stored.create().started_at_unix_ms.0,
+            client_started_at_unix_ms: browser_client_clock_origin(&stored),
+            segments: stored.segment_summaries(),
+        })
+    }
+
+    pub fn capture_chunk_end_before(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+        segment_id: &str,
+        lane_id: &LaneId,
+        sequence: u64,
+    ) -> Result<Option<u64>> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        self.runtime
+            .storage()
+            .latest_chunk_end_before(session_id, segment_id, lane_id, sequence)
+    }
+
+    pub fn capture_chunk_metadata(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+        segment_id: &str,
+        lane_id: &LaneId,
+        sequence: u64,
+    ) -> Result<Option<AudioChunkV1>> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        self.runtime
+            .storage()
+            .audio_chunk_metadata(session_id, segment_id, lane_id, sequence)
+    }
+
+    /// Owner-scoped version for browser capture routes. The producer token is
+    /// checked against the durable authority row before exposing state.
+    pub fn capture_state_for_producer(
+        &self,
+        principal: &ServicePrincipal,
+        producer_token: &str,
+        session_id: &SessionId,
+    ) -> Result<CaptureState> {
+        principal.require(self.workspace_id(), OP_CAPTURE_WRITE)?;
+        self.authority
+            .authorize_producer(session_id.as_ref(), &principal.id, producer_token)?;
+        self.capture_state(principal, session_id)
+    }
+
+    /// Reopen a browser producer against persisted state before opening its
+    /// lane after a process or transport loss. This also returns the bounded
+    /// runtime replay, including the durable acknowledgement watermark.
+    pub fn recover_capture_for_producer(
+        &self,
+        principal: &ServicePrincipal,
+        producer_token: &str,
+        session_id: &SessionId,
+        message_id: MessageId,
+    ) -> Result<(CaptureState, RuntimeResponseV1)> {
+        principal.require(self.workspace_id(), OP_CAPTURE_WRITE)?;
+        self.authority
+            .authorize_producer(session_id.as_ref(), &principal.id, producer_token)?;
+        let (stored, replay) = self
+            .runtime
+            .recorder()
+            // Recovery IDs are deterministic across retries. The envelope
+            // timestamp must be stable because it is part of the command
+            // fingerprint; zero is valid for this transport-generated query.
+            .recover(session_id, message_id, UnixMillis(0), None)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        Ok((
+            CaptureState {
+                input_finalized: stored.input_finalized(),
+                expired_lease_finish: browser_expired_lease_finish(&stored),
+                started_at_unix_ms: stored.create().started_at_unix_ms.0,
+                client_started_at_unix_ms: browser_client_clock_origin(&stored),
+                segments: stored.segment_summaries(),
+            },
+            replay,
+        ))
+    }
+
+    /// Check a durable command receipt without replaying or mutating capture.
+    /// Browser resume uses a deterministic message ID so a restarted adapter
+    /// can distinguish "paused" from "resumed but awaiting its first chunk".
+    pub fn capture_command_recorded(
+        &self,
+        principal: &ServicePrincipal,
+        producer_token: &str,
+        session_id: &SessionId,
+        message_id: &MessageId,
+    ) -> Result<bool> {
+        principal.require(self.workspace_id(), OP_CAPTURE_WRITE)?;
+        self.authority
+            .authorize_producer(session_id.as_ref(), &principal.id, producer_token)?;
+        let storage = self.runtime.storage();
+        let receipts = storage.load_command_receipts(session_id, message_id)?;
+        for receipt in receipts {
+            let end = receipt.response_range.end_exclusive;
+            if end == 0 {
+                continue;
+            }
+            let events = storage.load_events(
+                session_id,
+                SequenceRangeV1 {
+                    start: end - 1,
+                    end_exclusive: end,
+                },
+                1,
+            )?;
+            if events
+                .iter()
+                .any(|event| !matches!(event.body, ServerMessageBodyV1::CommandRejected(_)))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Idempotently admit the ASR-only job for the current finalized capture
+    /// revision. A completed job for the same revision is never reset.
+    pub fn legacy_browser_audio_source(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+    ) -> Result<Option<LegacyBrowserAudioSource>> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        if self.runtime.storage().load_session(session_id)?.is_some() {
+            return Ok(None);
+        }
+        legacy_browser_audio_source(&self.margins_dir, session_id.as_ref())
+    }
+
+    /// A decode failure is durable session evidence, including after restart.
+    pub fn record_processing_gap(
+        &self,
+        session_id: &SessionId,
+        segment_id: &str,
+        start_sequence: u64,
+        end_exclusive: u64,
+        reason: &str,
+    ) -> Result<()> {
+        canonical::record_processing_gap(
+            &self.margins_dir,
+            session_id.as_ref(),
+            segment_id,
+            start_sequence,
+            end_exclusive,
+            reason,
+        )
+    }
+
+    pub fn capture_segment_sequence_boundary(
+        &self,
+        session_id: &SessionId,
+        segment_id: &str,
+        lane_id: &str,
+    ) -> Result<Option<u64>> {
+        let Some(stored) = self.runtime.storage().load_session(session_id)? else {
+            return Ok(None);
+        };
+        Ok(stored
+            .segment_summaries()
+            .into_iter()
+            .find(|segment| segment.segment_id.as_ref() == segment_id)
+            .and_then(|segment| segment.close)
+            .and_then(|close| {
+                close
+                    .command
+                    .lane_boundaries
+                    .into_iter()
+                    .find(|boundary| boundary.lane_id.as_ref() == lane_id)
+                    .map(|boundary| boundary.next_sequence)
+            }))
+    }
+
+    pub fn admit_transcription_job(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<WorkspaceProcessingJobV1> {
+        if !self.can_admit_asr() {
+            bail!("ASR capability is unavailable on this instance");
+        }
+        let stored = self.runtime.storage().load_session(session_id)?;
+        let input_revision = if let Some(stored) = stored {
+            if !stored.input_finalized() {
+                bail!("transcription can begin only after durable input finalization");
+            }
+            format!("meeting:{}", stored.revision())
+        } else {
+            let source = legacy_browser_audio_source(&self.margins_dir, session_id.as_ref())?
+                .context("session has no capture authority state or legacy browser audio")?;
+            let metadata = std::fs::metadata(&source.path)?;
+            let modified_ns = metadata
+                .modified()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            format!(
+                "legacy-browser:{:?}:{}:{modified_ns}",
+                source.format,
+                metadata.len()
+            )
+        };
+        let job_id = format!("transcribe:{}", session_id.as_ref());
+        if let Some(current) = canonical::get_processing_job(&self.margins_dir, &job_id)? {
+            if current.input_revision == input_revision && current.status == "complete" {
+                return Ok(processing_job(current));
+            }
+        }
+        canonical::begin_processing_job(
+            &self.margins_dir,
+            session_id.as_ref(),
+            &job_id,
+            "transcribe_session",
+            &input_revision,
+        )
+        .map(processing_job)
+    }
+
+    pub fn request_transcription_job(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+    ) -> Result<WorkspaceProcessingJobV1> {
+        principal.require(self.workspace_id(), OP_SESSION_WRITE)?;
+        self.admit_transcription_job(session_id)
+    }
+
+    pub fn update_transcription_job(
+        &self,
+        job_id: &str,
+        attempt: u64,
+        status: &str,
+        progress: Option<f64>,
+        result_ref: Option<&str>,
+        failure: Option<&str>,
+    ) -> Result<WorkspaceProcessingJobV1> {
+        canonical::update_processing_job(
+            &self.margins_dir,
+            job_id,
+            attempt,
+            status,
+            progress,
+            result_ref,
+            failure,
+            failure.map(|_| "transcribe"),
+        )
+        .map(processing_job)
+    }
+
+    pub fn pending_transcription_jobs(&self) -> Result<Vec<WorkspaceProcessingJobV1>> {
+        canonical::pending_processing_jobs(&self.margins_dir, "transcribe_session")
+            .map(|jobs| jobs.into_iter().map(processing_job).collect())
+    }
+
+    pub fn import_finished_file(
+        &self,
+        principal: &ServicePrincipal,
+        upload_id: &str,
+        session_id: &str,
+        original_filename: &str,
+        title: Option<&str>,
+        bytes: &[u8],
+    ) -> Result<ImportReceipt> {
+        principal.require(self.workspace_id(), OP_IMPORT_WRITE)?;
+        if bytes.is_empty() || bytes.len() as u64 > DEFAULT_MAX_IMPORT_BYTES {
+            bail!("import body is empty or exceeds the advertised maximum");
+        }
+        if !canonical::session_exists(&self.margins_dir, session_id)? {
+            let now = chrono::Local::now();
+            canonical::create_session(
+                &self.margins_dir,
+                session_id,
+                &now,
+                &format!(".margins/{session_id}.md"),
+            )?;
+            if let Some(title) = title {
+                canonical::set_title(&self.margins_dir, session_id, Some(title.to_string()))?;
+            }
+        }
+        let receipt = self.authority.record_import(
+            upload_id,
+            &principal.id,
+            session_id,
+            original_filename,
+            bytes,
+        )?;
+        canonical::upsert_session_artifact(
+            &self.margins_dir,
+            session_id,
+            "original_audio",
+            0,
+            &receipt.stored_path,
+            "durable",
+            None,
+        )?;
+        Ok(receipt)
+    }
+
+    pub fn import_receipt(
+        &self,
+        principal: &ServicePrincipal,
+        upload_id: &str,
+    ) -> Result<Option<ImportReceipt>> {
+        principal.require(self.workspace_id(), OP_IMPORT_RECEIPT)?;
+        Ok(self
+            .authority
+            .import_receipt(&principal.id, upload_id)?
+            .filter(|_| principal.operations.contains(OP_IMPORT_RECEIPT)))
+    }
+
+    pub fn repository_record(
+        &self,
+        principal: &ServicePrincipal,
+        session_id: &SessionId,
+    ) -> Result<Option<margins_core::SessionRecord>> {
+        principal.require(self.workspace_id(), OP_SESSION_READ)?;
+        let repository_id = margins_core::SessionId(session_id.0.clone());
+        SqliteSessionRepository::open(&self.margins_dir)?
+            .get(&repository_id)
+            .map_err(Into::into)
+    }
+}
+
+fn ensure_runtime_accepted(response: &RuntimeResponseV1) -> Result<()> {
+    if let Some(rejection) = response
+        .messages
+        .iter()
+        .find_map(|message| match &message.body {
+            ServerMessageBodyV1::CommandRejected(rejection) => Some(rejection),
+            _ => None,
+        })
+    {
+        bail!(
+            "capture command rejected ({}): {}",
+            rejection.code,
+            rejection.message.as_deref().unwrap_or("no detail")
+        );
+    }
+    Ok(())
+}
+
+fn ensure_session(directory: &Path, session_id: &str) -> Result<()> {
+    if !canonical::session_exists(directory, session_id)? {
+        bail!("session not found");
+    }
+    Ok(())
+}
+
+fn legacy_browser_audio_source(
+    directory: &Path,
+    session_id: &str,
+) -> Result<Option<LegacyBrowserAudioSource>> {
+    let mut components = Path::new(session_id).components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        bail!("invalid legacy browser session name");
+    }
+    if !canonical::session_exists(directory, session_id)? {
+        return Ok(None);
+    }
+    let recordings = directory.join("recordings");
+    match std::fs::symlink_metadata(&recordings) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => bail!("legacy recordings directory is not a regular directory"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    // A finalized v0.4.14 browser session has this canonical WAV. Prefer it
+    // over a leftover upload from an interrupted cleanup.
+    let meta = canonical::get_session_meta(directory, session_id)?;
+    let expected_wav = format!(".margins/recordings/{session_id}_seg0.wav");
+    if let Some(segment) = meta.segments.iter().find(|segment| {
+        segment.segment_index == 0
+            && segment.wav_path == expected_wav
+            && segment.duration_secs.is_some()
+    }) {
+        let wav = recordings.join(format!("{session_id}_seg0.wav"));
+        if regular_nonempty_legacy_audio(&wav)? {
+            return Ok(Some(LegacyBrowserAudioSource {
+                path: wav,
+                format: LegacyBrowserAudioFormat::Wav,
+                offset_ms: segment.offset_ms.max(0) as u64,
+            }));
+        }
+    }
+    // Failed finalization retained the upload and recovery marker so a new
+    // server can still transcribe the durable browser audio prefix.
+    let webm = recordings.join(format!("{session_id}_upload.webm"));
+    if regular_nonempty_legacy_audio(&webm)? {
+        if std::fs::metadata(&webm)?.len() > 128 * 1024 * 1024 {
+            bail!("legacy browser WebM exceeds the decoder's 128 MiB limit");
+        }
+        return Ok(Some(LegacyBrowserAudioSource {
+            path: webm,
+            format: LegacyBrowserAudioFormat::Webm,
+            offset_ms: 0,
+        }));
+    }
+    // A recovery marker has no audio of its own. Give a precise error when
+    // its referenced upload disappeared, rather than admitting a doomed job.
+    for entry in std::fs::read_dir(&recordings)? {
+        let entry = entry?;
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".recovery.json")
+        {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 128 * 1024 {
+            continue;
+        }
+        let value: Value = match serde_json::from_slice(&std::fs::read(path)?) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if value.get("session_name").and_then(Value::as_str) == Some(session_id) {
+            bail!("legacy browser recovery manifest exists, but its WebM upload is missing");
+        }
+    }
+    Ok(None)
+}
+
+fn regular_nonempty_legacy_audio(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                bail!("legacy browser audio is not a regular file");
+            }
+            Ok(metadata.len() > 0)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn remove_session_file(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("failed to remove {}", path.display())),
+    }
+}
+
+fn resolve_session_id(directory: &Path, requested: &str) -> Result<String> {
+    match requested {
+        "latest" => crate::transcript_view::resolve_session_name(directory, "latest"),
+        "current" => bail!("current is principal-scoped; use the current operation"),
+        value => {
+            ensure_session(directory, value)?;
+            Ok(value.to_string())
+        }
+    }
+}
+
+fn validate_relative_path(value: &str) -> Result<()> {
+    let path = Path::new(value);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        bail!("note path must be Source-relative and cannot traverse");
+    }
+    Ok(())
+}
+
+fn memo_line(line: margins_core::TimedMemoLine) -> WorkspaceMemoLineV1 {
+    WorkspaceMemoLineV1 {
+        text: line.text,
+        created_secs: line.created_secs,
+        edited_secs: line.edited_secs,
+        draft_started_secs: line.draft_started_secs,
+        audio_pending_at_mark: line.audio_pending_at_mark,
+        block_ordinal: line.block_ordinal,
+    }
+}
+
+fn timed_memo_line(line: WorkspaceMemoLineV1) -> margins_core::TimedMemoLine {
+    margins_core::TimedMemoLine {
+        text: line.text,
+        created_secs: line.created_secs,
+        edited_secs: line.edited_secs,
+        draft_started_secs: line.draft_started_secs,
+        audio_pending_at_mark: line.audio_pending_at_mark,
+        block_ordinal: line.block_ordinal,
+    }
+}
+
+fn note_association(value: canonical::NoteAssociation) -> WorkspaceNoteAssociationV1 {
+    WorkspaceNoteAssociationV1 {
+        session_id: SessionId(value.session_name),
+        source_id: value.source_id,
+        relative_path: value.relative_path,
+        observed_content_hash: value.observed_content_hash,
+        revision: value.revision,
+        bb_thread_ids: value.bb_thread_ids,
+        distilled_memo_revision: value.distilled_memo_revision,
+    }
+}
+
+fn processing_job(value: canonical::ProcessingJob) -> WorkspaceProcessingJobV1 {
+    WorkspaceProcessingJobV1 {
+        job_id: value.job_id,
+        session_id: SessionId(value.session_name),
+        operation: value.operation,
+        input_revision: value.input_revision,
+        attempt: value.attempt,
+        status: value.status,
+        progress: value.progress,
+        result_ref: value.result_ref,
+        failure: value.failure,
+        failed_stage: value.failed_stage,
+    }
+}
+
+fn is_uuid_v4(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && [8, 13, 18, 23]
+            .into_iter()
+            .all(|index| bytes[index] == b'-')
+        && bytes[14] == b'4'
+        && matches!(bytes[19], b'8' | b'9' | b'a' | b'b' | b'A' | b'B')
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| [8, 13, 18, 23].contains(&index) || byte.is_ascii_hexdigit())
+}
+
+fn random_secret(length: usize) -> String {
+    rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(length)
+        .map(char::from)
+        .collect()
+}
+
+fn hash_secret(value: &str) -> String {
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
+fn atomic_empty_file(path: &Path) -> Result<()> {
+    let parent = path.parent().context("memo path has no parent")?;
+    let temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist_noclobber(path)
+        .map_err(|error| error.error)?;
+    Ok(())
+}

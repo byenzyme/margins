@@ -4,18 +4,20 @@ use crate::alignment::render_aligned_markdown;
 use crate::transcript_view::transcript_artifact_path;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Local};
+use fs4::fs_std::FileExt;
 use margins_core::{AsrBackend, AsrRequest, DiarizationBackend, DiarizationRequest, SpeakerId};
 use margins_media::audio::{
     downmix_to_mono, extract_channel, load_audio_any, resample_mono_linear, write_interleaved_wav,
     AudioBuffer,
 };
 use margins_media::transcript::{transcript_json, TranscriptWordEntry};
-use margins_store::canonical::{self, SESSION_ARTIFACT_KIND_TRANSCRIPT};
+use margins_store::canonical::{self, TranscriptCoverage};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap};
 use std::io::Write;
 use std::path::Component;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 #[derive(Debug, Clone)]
 pub struct ProcessRequest<'a> {
@@ -62,17 +64,77 @@ pub struct TranscribeResult {
     pub transcript_entries: usize,
 }
 
+/// Shared routing for channel-aware ASR. Explicit multi-speaker requests
+/// downmix before diarization, even when the source has two channels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioProcessingPolicy {
+    SplitChannels,
+    Mono,
+    DiarizeMono,
+}
+
+pub fn processing_policy(channels: u16, speakers: usize) -> Result<AudioProcessingPolicy> {
+    if channels == 0 {
+        bail!("audio must have at least one channel");
+    }
+    if speakers == 0 {
+        bail!("speaker count must be at least 1");
+    }
+    Ok(if speakers > 1 {
+        AudioProcessingPolicy::DiarizeMono
+    } else if channels >= 2 {
+        AudioProcessingPolicy::SplitChannels
+    } else {
+        AudioProcessingPolicy::Mono
+    })
+}
+
 pub fn process_session(
     request: ProcessRequest<'_>,
     asr: &dyn AsrBackend,
     diarization: Option<&dyn DiarizationBackend>,
 ) -> Result<ProcessResult> {
-    validate_speaker_request(request.speakers, diarization)?;
+    validate_speaker_request(request.speakers)?;
     validate_session_name(request.session_name)?;
     let meta = canonical::get_session_meta(request.margins_dir, request.session_name)?;
     if meta.segments.is_empty() {
         bail!("Session '{}' has no audio segments.", request.session_name);
     }
+    let coverage =
+        canonical::transcript_coverage(&meta.segments).context("session has no audio segments")?;
+    let unfinished = meta
+        .segments
+        .iter()
+        .filter(|segment| segment.duration_secs.is_none())
+        .collect::<Vec<_>>();
+    // An unfinished segment may be a crash remnant or one that is still being
+    // recorded. Hold the same local owner lock through registration, and honor
+    // the Workspace producer reservation for browser/native-bridge capture.
+    let _capture_owner = if unfinished.is_empty() {
+        None
+    } else {
+        if margins_store::SqliteWorkspaceAuthorityStorage::session_producer_state_read_only(
+            request.margins_dir,
+            request.session_name,
+        )?
+        .as_deref()
+            == Some("active")
+        {
+            bail!("session is still recording; finish capture before processing");
+        }
+        let path = request
+            .margins_dir
+            .join(format!("{}.capture.lock", request.session_name));
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        if !file.try_lock_exclusive()? {
+            bail!("session is still recording; finish capture before processing");
+        }
+        Some(file)
+    };
     // Validate metadata needed to render the result before invoking providers.
     // A malformed session must not replace an existing transcript JSON.
     let session_start = DateTime::parse_from_rfc3339(&meta.start_time)
@@ -82,6 +144,7 @@ pub fn process_session(
         .margins_dir
         .join(format!("{}_transcript.json", request.session_name));
     let mut entries = if request.align_only {
+        ensure_transcript_json_covers_segments(&transcript_path, &meta, coverage)?;
         read_transcript_entries(&transcript_path)?
     } else {
         Vec::new()
@@ -92,12 +155,26 @@ pub fn process_session(
     if !request.align_only {
         // Buffer the full result before the first transcript/artifact write.
         // Provider failures therefore leave existing durable output unchanged.
-        let mut segments = meta.segments.iter().collect::<Vec<_>>();
+        let mut segments = meta
+            .segments
+            .iter()
+            .filter(|segment| segment.duration_secs.is_some())
+            .collect::<Vec<_>>();
         segments.sort_by_key(|segment| segment.segment_index);
         for segment in segments {
             let path = resolve_input_path(request.work_dir, &segment.wav_path);
+            let exported = if !path.is_file() {
+                margins_store::SqliteMeetingRuntimeStorage::open(request.margins_dir)?
+                    .export_native_wav(request.session_name, segment.segment_index)?;
+                true
+            } else {
+                false
+            };
             let audio = load_audio_any(&path)
                 .with_context(|| format!("failed to decode session segment {}", path.display()))?;
+            if exported {
+                std::fs::remove_file(&path)?;
+            }
             let offset = segment.offset_ms.max(0) as u64;
             let (part, _, part_backends) = transcribe_audio_buffer(
                 &audio,
@@ -113,13 +190,32 @@ pub fn process_session(
         entries.sort_by_key(|entry| (entry.start_ms, entry.channel));
         replace_file_atomically(
             &transcript_path,
-            serde_json::to_string_pretty(&transcript_json(&entries))?.as_bytes(),
+            serde_json::to_string_pretty(&transcript_json_with_coverage(&entries, coverage))?
+                .as_bytes(),
         )?;
     }
 
     let memo_path = resolve_input_path(request.work_dir, &meta.notes_path);
     let memo = std::fs::read_to_string(memo_path).unwrap_or_default();
-    let aligned = render_aligned_markdown(request.session_name, &session_start, &memo, &entries);
+    let mut aligned =
+        render_aligned_markdown(request.session_name, &session_start, &memo, &entries);
+    if !unfinished.is_empty() {
+        aligned.push_str("\n## Incomplete audio\n\n");
+        for segment in &unfinished {
+            aligned.push_str(&format!(
+                "- Segment {} began at {} ms but did not finish; its audio was skipped.\n",
+                segment.segment_index, segment.offset_ms
+            ));
+            canonical::record_processing_gap(
+                request.margins_dir,
+                request.session_name,
+                &format!("segment-{}", segment.segment_index),
+                0,
+                0,
+                "unfinished segment skipped during offline processing",
+            )?;
+        }
+    }
     let local_aligned_path = request
         .margins_dir
         .join(format!("{}_aligned.md", request.session_name));
@@ -131,18 +227,15 @@ pub fn process_session(
     std::fs::create_dir_all(aligned_path.parent().expect("aligned path has parent"))?;
     replace_file_atomically(&aligned_path, aligned.as_bytes())?;
     let local_registry_path = format!(".margins/{}_aligned.md", request.session_name);
-    canonical::upsert_session_artifact(
+    canonical::register_processed_transcript(
         request.margins_dir,
         request.session_name,
-        SESSION_ARTIFACT_KIND_TRANSCRIPT,
-        0,
         &crate::archive::aligned_registry_path(
             request.work_dir,
             request.session_name,
             &local_registry_path,
         ),
-        "durable",
-        None,
+        coverage,
     )?;
     Ok(ProcessResult {
         session_name: request.session_name.to_string(),
@@ -159,12 +252,75 @@ pub fn process_session(
     })
 }
 
+fn transcript_json_with_coverage(
+    entries: &[TranscriptWordEntry],
+    coverage: TranscriptCoverage,
+) -> Value {
+    let mut value = transcript_json(entries);
+    value["input_segment_count"] = coverage.segment_count.into();
+    value["input_max_segment_index"] = coverage.max_segment_index.into();
+    value["covered_segment_count"] = coverage.finished_segment_count.into();
+    value["covered_until_ms"] = coverage.covered_until_ms.into();
+    value["finished_segment_count"] = coverage.finished_segment_count.into();
+    value
+}
+
+fn ensure_transcript_json_covers_segments(
+    path: &Path,
+    meta: &canonical::SessionMeta,
+    expected: TranscriptCoverage,
+) -> Result<()> {
+    let value: Value = serde_json::from_slice(&std::fs::read(path)?)?;
+    let count = value
+        .get("input_segment_count")
+        .or_else(|| value.get("covered_segment_count"))
+        .and_then(Value::as_i64);
+    let index = value
+        .get("input_max_segment_index")
+        .or_else(|| value.get("covered_max_segment_index"))
+        .and_then(Value::as_i64);
+    let end = value.get("covered_until_ms").and_then(Value::as_u64);
+    let finished = value
+        .get("finished_segment_count")
+        .and_then(Value::as_i64)
+        .or(count);
+    if let (Some(count), Some(index), Some(end), Some(finished)) = (count, index, end, finished) {
+        if (TranscriptCoverage {
+            segment_count: count,
+            max_segment_index: index,
+            covered_until_ms: end,
+            finished_segment_count: finished,
+        }) == expected
+        {
+            return Ok(());
+        }
+        bail!("transcript JSON predates newer audio; run margins process without --align-only");
+    }
+    // Older JSON has no coverage fields. Its modification time must be newer
+    // than every segment start before it can be safely realigned.
+    let modified_ns = std::fs::metadata(path)?
+        .modified()?
+        .duration_since(UNIX_EPOCH)?
+        .as_nanos();
+    if expected.finished_segment_count == expected.segment_count
+        && meta.segments.iter().all(|segment| {
+            DateTime::parse_from_rfc3339(&segment.started_at)
+                .ok()
+                .and_then(|started| started.timestamp_nanos_opt())
+                .is_some_and(|started_ns| modified_ns >= started_ns.max(0) as u128)
+        })
+    {
+        return Ok(());
+    }
+    bail!("transcript JSON may predate newer audio; run margins process without --align-only")
+}
+
 pub fn transcribe_audio(
     request: TranscribeRequest<'_>,
     asr: &dyn AsrBackend,
     diarization: Option<&dyn DiarizationBackend>,
 ) -> Result<TranscribeResult> {
-    validate_speaker_request(request.speakers, diarization)?;
+    validate_speaker_request(request.speakers)?;
     let source = load_audio_any(request.audio_path)
         .with_context(|| format!("failed to decode {}", request.audio_path.display()))?;
     let mut speaker_channels = HashMap::new();
@@ -200,9 +356,8 @@ pub fn transcribe_audio(
     let aligned_path =
         crate::archive::aligned_output_path(request.work_dir, &name, &local_aligned_path);
 
-    let mono = downmix_to_mono(&source)?;
-    let mono = resample_mono_linear(&mono, source.sample_rate, 16_000);
-    let duration = write_interleaved_wav(&audio_dest, &mono, 16_000, 1)?;
+    let (stored_samples, stored_channels) = prepare_import_audio(&source, request.speakers)?;
+    let duration = write_interleaved_wav(&audio_dest, &stored_samples, 16_000, stored_channels)?;
     canonical::create_session(request.margins_dir, &name, &request.started_at, &memo_rel)?;
     canonical::add_segment(request.margins_dir, &name, 0, &audio_rel, 0, Some(duration))?;
     if let Some(path) = request.memo_path {
@@ -225,7 +380,15 @@ pub fn transcribe_audio(
     }
     std::fs::write(
         &transcript_json_path,
-        serde_json::to_string_pretty(&transcript_json(&entries))?,
+        serde_json::to_string_pretty(&transcript_json_with_coverage(
+            &entries,
+            TranscriptCoverage {
+                segment_count: 1,
+                max_segment_index: 0,
+                covered_until_ms: (duration * 1_000.0).round() as u64,
+                finished_segment_count: 1,
+            },
+        ))?,
     )?;
     std::fs::create_dir_all(aligned_path.parent().expect("artifact path has parent"))?;
     std::fs::write(
@@ -238,14 +401,16 @@ pub fn transcribe_audio(
         ),
     )?;
     let local_registry_path = format!(".margins/artifacts/{name}/transcript.md");
-    canonical::upsert_session_artifact(
+    canonical::register_processed_transcript(
         request.margins_dir,
         &name,
-        SESSION_ARTIFACT_KIND_TRANSCRIPT,
-        0,
         &crate::archive::aligned_registry_path(request.work_dir, &name, &local_registry_path),
-        "durable",
-        None,
+        TranscriptCoverage {
+            segment_count: 1,
+            max_segment_index: 0,
+            covered_until_ms: (duration * 1_000.0).round() as u64,
+            finished_segment_count: 1,
+        },
     )?;
     Ok(TranscribeResult {
         session_name: name,
@@ -261,6 +426,26 @@ pub fn transcribe_audio(
     })
 }
 
+fn prepare_import_audio(audio: &AudioBuffer, speakers: usize) -> Result<(Vec<f32>, u16)> {
+    match processing_policy(audio.channels, speakers)? {
+        AudioProcessingPolicy::SplitChannels => {
+            let left = resample_mono_linear(&extract_channel(audio, 0)?, audio.sample_rate, 16_000);
+            let right =
+                resample_mono_linear(&extract_channel(audio, 1)?, audio.sample_rate, 16_000);
+            let interleaved = left
+                .into_iter()
+                .zip(right)
+                .flat_map(|(left, right)| [left, right])
+                .collect();
+            Ok((interleaved, 2))
+        }
+        AudioProcessingPolicy::Mono | AudioProcessingPolicy::DiarizeMono => {
+            let mono = resample_mono_linear(&downmix_to_mono(audio)?, audio.sample_rate, 16_000);
+            Ok((mono, 1))
+        }
+    }
+}
+
 fn transcribe_audio_buffer(
     audio: &AudioBuffer,
     speakers: usize,
@@ -270,7 +455,11 @@ fn transcribe_audio_buffer(
     session_offset_ms: u64,
 ) -> Result<(Vec<TranscriptWordEntry>, &'static str, BTreeSet<String>)> {
     let mut backends = BTreeSet::new();
-    if audio.channels >= 2 && speakers <= 1 {
+    let policy = processing_policy(audio.channels, speakers)?;
+    if policy == AudioProcessingPolicy::DiarizeMono && diarization.is_none() {
+        bail!("multi-speaker processing requires a diarization backend");
+    }
+    if policy == AudioProcessingPolicy::SplitChannels {
         let mut entries = Vec::new();
         for channel in 0..audio.channels.min(2) as usize {
             let mono =
@@ -300,7 +489,7 @@ fn transcribe_audio_buffer(
         language: None,
     })?;
     backends.insert(asr.backend_name().to_string());
-    if speakers <= 1 {
+    if policy == AudioProcessingPolicy::Mono {
         return Ok((
             result
                 .words
@@ -345,17 +534,192 @@ fn transcribe_audio_buffer(
     Ok((entries, "diarized_mono", backends))
 }
 
-fn validate_speaker_request(
-    speakers: usize,
-    diarization: Option<&dyn DiarizationBackend>,
-) -> Result<()> {
+fn validate_speaker_request(speakers: usize) -> Result<()> {
     if speakers == 0 {
         bail!("speaker count must be at least 1");
     }
-    if speakers > 1 && diarization.is_none() {
-        bail!("multi-speaker processing requires a diarization backend");
-    }
     Ok(())
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    use margins_core::{
+        AsrResult, DiarizationResult, SpeakerSegment, TranscriptError, TranscriptWord,
+    };
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct FakeAsr {
+        requests: Mutex<Vec<AsrRequest>>,
+    }
+
+    impl AsrBackend for FakeAsr {
+        fn transcribe(
+            &self,
+            request: AsrRequest,
+        ) -> std::result::Result<AsrResult, TranscriptError> {
+            let text = if request.samples[0] < 0.0 {
+                "system"
+            } else {
+                "mic"
+            };
+            self.requests.lock().unwrap().push(request.clone());
+            Ok(AsrResult {
+                words: [0, 100]
+                    .into_iter()
+                    .map(|start_ms| TranscriptWord {
+                        start_ms: request.session_offset_ms + start_ms,
+                        end_ms: request.session_offset_ms + start_ms + 100,
+                        text: text.into(),
+                        speaker: None,
+                        confidence_per_mille: None,
+                    })
+                    .collect(),
+                detected_language: None,
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeDiarizer(Mutex<Vec<DiarizationRequest>>);
+
+    impl DiarizationBackend for FakeDiarizer {
+        fn diarize(
+            &self,
+            request: DiarizationRequest,
+        ) -> std::result::Result<DiarizationResult, margins_core::DiarizationError> {
+            self.0.lock().unwrap().push(request.clone());
+            Ok(DiarizationResult {
+                segments: [
+                    SpeakerSegment {
+                        start_ms: request.session_offset_ms,
+                        end_ms: request.session_offset_ms + 100,
+                        speaker: SpeakerId::new("alice"),
+                    },
+                    SpeakerSegment {
+                        start_ms: request.session_offset_ms + 100,
+                        end_ms: request.session_offset_ms + 200,
+                        speaker: SpeakerId::new("bob"),
+                    },
+                ]
+                .into(),
+            })
+        }
+    }
+
+    #[test]
+    fn stereo_mic_system_stays_split_for_one_speaker() {
+        let asr = FakeAsr::default();
+        let diarizer = FakeDiarizer::default();
+        let audio = AudioBuffer {
+            samples: vec![0.5, -0.5, 0.5, -0.5],
+            sample_rate: 16_000,
+            channels: 2,
+        };
+        let (entries, mode, _) =
+            transcribe_audio_buffer(&audio, 1, &asr, Some(&diarizer), &mut HashMap::new(), 500)
+                .unwrap();
+        assert_eq!(mode, "stereo_channels");
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.channel)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 0, 1]
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["mic", "system", "mic", "system"]
+        );
+        assert_eq!(asr.requests.lock().unwrap().len(), 2);
+        assert!(diarizer.0.lock().unwrap().is_empty());
+        let (stored, channels) = prepare_import_audio(&audio, 1).unwrap();
+        assert_eq!(channels, 2);
+        assert_eq!(stored, audio.samples);
+    }
+
+    #[test]
+    fn stereo_explicit_three_speakers_downmixes_and_diarizes() {
+        let asr = FakeAsr::default();
+        let diarizer = FakeDiarizer::default();
+        let audio = AudioBuffer {
+            samples: vec![0.5, -0.5, 0.5, -0.5],
+            sample_rate: 16_000,
+            channels: 2,
+        };
+        let (entries, mode, _) =
+            transcribe_audio_buffer(&audio, 3, &asr, Some(&diarizer), &mut HashMap::new(), 500)
+                .unwrap();
+        assert_eq!(mode, "diarized_mono");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.channel)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(asr.requests.lock().unwrap().len(), 1);
+        let requests = diarizer.0.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].max_speakers, Some(3));
+        let (stored, channels) = prepare_import_audio(&audio, 3).unwrap();
+        assert_eq!(channels, 1);
+        assert_eq!(stored, vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn mono_single_speaker_downmixes_without_diarization() {
+        let asr = FakeAsr::default();
+        let diarizer = FakeDiarizer::default();
+        let audio = AudioBuffer {
+            samples: vec![0.5, 0.5],
+            sample_rate: 16_000,
+            channels: 1,
+        };
+        let (entries, mode, _) =
+            transcribe_audio_buffer(&audio, 1, &asr, Some(&diarizer), &mut HashMap::new(), 500)
+                .unwrap();
+        assert_eq!(mode, "mono");
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.channel)
+                .collect::<Vec<_>>(),
+            vec![0, 0]
+        );
+        assert_eq!(entries[0].start_ms, 500);
+        assert!(diarizer.0.lock().unwrap().is_empty());
+        assert_eq!(prepare_import_audio(&audio, 1).unwrap().1, 1);
+    }
+
+    #[test]
+    fn mono_multiple_speakers_uses_diarization_turns() {
+        let asr = FakeAsr::default();
+        let diarizer = FakeDiarizer::default();
+        let audio = AudioBuffer {
+            samples: vec![0.5, 0.5],
+            sample_rate: 16_000,
+            channels: 1,
+        };
+        let (entries, mode, _) =
+            transcribe_audio_buffer(&audio, 2, &asr, Some(&diarizer), &mut HashMap::new(), 500)
+                .unwrap();
+        assert_eq!(mode, "diarized_mono");
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.channel)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(diarizer.0.lock().unwrap().len(), 1);
+        assert_eq!(prepare_import_audio(&audio, 2).unwrap().1, 1);
+    }
 }
 
 fn validate_session_name(name: &str) -> Result<()> {

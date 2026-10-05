@@ -28,6 +28,15 @@ fn crate_builds_from_an_isolated_public_tree() {
     ] {
         copy_tree(&public_dir.join(name), &temp.path().join(name));
     }
+    // Keep the dependency versions under test when checking an isolated tree.
+    // Fresh offline resolution can reject a yanked transitive version that is
+    // valid in the repository's existing lockfile.
+    let repo_root = public_dir.parent().unwrap().parent().unwrap();
+    std::fs::copy(
+        repo_root.join("Cargo.lock"),
+        temp.path().join("margins-workflows/Cargo.lock"),
+    )
+    .unwrap();
     let manifest = temp.path().join("margins-workflows/Cargo.toml");
     let output = std::process::Command::new("cargo")
         .args([
