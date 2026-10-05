@@ -536,6 +536,22 @@
     }
 
     #[test]
+    fn idle_worker_cancelled_after_warmup_exits_cleanly() {
+        let mut harness = DecodeHarness::new();
+        let worker = harness.start_worker(None, Duration::from_millis(2));
+        std::thread::sleep(Duration::from_millis(50));
+        // LiveTranscriptWorker::cancel: flag first, then both channels close.
+        harness.cancel.store(true, Ordering::Release);
+        drop(harness.tx.take());
+        harness.finish_tx = mpsc::channel().0;
+        let run = worker.join().unwrap();
+
+        run.result
+            .expect("a closed queue after cancel is not a missing final duration");
+        assert!(!harness.checkpoint().exists());
+    }
+
+    #[test]
     fn unseen_segments_and_tails_are_decoded_from_durable_audio_on_the_session_timeline() {
         let mut harness = DecodeHarness::new();
         let durable = FakeDurable::default();

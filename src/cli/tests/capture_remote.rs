@@ -180,14 +180,42 @@
 
     #[cfg(feature = "audio-capture")]
     #[test]
-    fn remote_stop_retires_a_warming_live_worker_without_waiting_for_it() {
+    fn remote_stop_finalizes_without_waiting_for_a_warming_live_worker() {
+        use margins_workflows::remote_workspace::{
+            DurableTransferSpool, NativeRemoteLane, NativeRemoteTransfer,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let spool = DurableTransferSpool::create(
+            temp.path(),
+            "stop-latency",
+            "instance-a",
+            "https://example.test",
+            "workspace-a",
+            "session-a",
+            "producer-secret",
+            0,
+        )
+        .unwrap();
+        let mut transfer = NativeRemoteTransfer::new(spool);
+        transfer.begin_segment("native-seg".into(), 0).unwrap();
+        for lane in [NativeRemoteLane::Microphone, NativeRemoteLane::System] {
+            transfer.append_f32(lane, 16_000, &vec![0.0; 16_000]).unwrap();
+        }
+        transfer
+            .close_segment(margins_meeting_protocol::SegmentCloseReasonV1::Stop)
+            .unwrap();
+        let ended = transfer.last_closed_ended_at_ms().unwrap();
+
+        // The reported CoreML warmup outlasted the whole capture; audio sits
+        // queued for a decoder that is not ready yet.
         let warmup = std::time::Duration::from_secs(4);
-        let status = Arc::new(std::sync::atomic::AtomicU8::new(
-            crate::app::LIVE_TRANSCRIPTION_WARMING,
-        ));
-        let worker = LiveTranscriptWorker::start_simulated_warmup(status, warmup);
-        // Audio captured during warmup is queued for a decoder that is not
-        // ready yet, as in the reported 14.9 s CoreML warmup.
+        let worker = LiveTranscriptWorker::start_simulated_warmup(
+            Arc::new(std::sync::atomic::AtomicU8::new(
+                crate::app::LIVE_TRANSCRIPTION_WARMING,
+            )),
+            warmup,
+        );
         let sink = worker.sink_for_offset(0);
         sink.sender
             .send(crate::recorder::LiveAudioChunk {
@@ -201,35 +229,59 @@
             })
             .unwrap();
         drop(sink);
-        let done = Arc::new(AtomicBool::new(false));
-        let publisher_done = done.clone();
+        let publisher_done = Arc::new(AtomicBool::new(false));
+        let publisher_flag = publisher_done.clone();
         let publisher = RemoteCheckpointPublisher {
-            done,
+            done: publisher_done,
             join: Some(std::thread::spawn(move || {
-                while !publisher_done.load(Ordering::Acquire) {
+                while !publisher_flag.load(Ordering::Acquire) {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
             })),
         };
+        let uploader_done = Arc::new(AtomicBool::new(false));
+        let uploader_flag = uploader_done.clone();
+        let uploader = std::thread::spawn(move || {
+            while !uploader_flag.load(Ordering::Acquire) {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        });
+        let retirement = RemoteLiveRetirement::new();
 
         let stop = std::time::Instant::now();
-        let reaper = retire_remote_live_transcript(Some(worker), Some(publisher))
-            .expect("live threads are reaped in the background");
-        // Stop proceeds straight to sealing and finalizing the session.
-        let finalized_after = stop.elapsed();
+        let mut delivered = None;
+        stop_remote_capture(
+            transfer,
+            ended,
+            Some(worker),
+            Some(publisher),
+            &retirement,
+            &uploader_done,
+            uploader,
+            |_| Ok(()),
+            |spool| {
+                assert!(
+                    spool.manifest().finalize_command.is_some(),
+                    "delivery must carry the sealed finalize"
+                );
+                delivered = Some(stop.elapsed());
+                Ok(())
+            },
+        )
+        .unwrap();
+        let delivered = delivered.expect("Stop delivered the sealed session");
         assert!(
-            finalized_after < std::time::Duration::from_secs(1),
-            "Stop waited {finalized_after:?} for the live worker"
+            delivered < std::time::Duration::from_secs(1),
+            "Stop waited {delivered:?} for the live worker before finalizing"
         );
-        assert!(!reaper.is_finished(), "warmup is still in progress");
 
-        reaper.join().unwrap();
-        let retired_after = stop.elapsed();
-        assert!(retired_after >= warmup - std::time::Duration::from_millis(100));
-        assert!(
-            retired_after < warmup + std::time::Duration::from_secs(2),
-            "cancelled worker kept running after warmup: {retired_after:?}"
-        );
+        // A new capture may not stack a second model load on this one.
+        assert!(!retirement.ready_for_new_worker());
+        // A one-shot process gives up after its bounded exit wait.
+        assert!(!retirement.wait(std::time::Duration::from_millis(100)));
+        assert!(retirement.wait(warmup + std::time::Duration::from_secs(2)));
+        assert!(retirement.ready_for_new_worker());
+        assert!(stop.elapsed() >= warmup - std::time::Duration::from_millis(100));
     }
 
     #[cfg(feature = "audio-capture")]

@@ -69,15 +69,31 @@
         let decoded = value["decoded_until_ms"].as_u64().unwrap();
         assert_eq!(decoded, 10_300);
         let words = value["transcripts"][0]["words"].as_array().unwrap();
-        assert_eq!(words.len(), 3, "clamping keeps every committed word");
+        assert_eq!(words.len(), 2, "a word with no decoded audio is dropped");
         for word in words {
             let start = word["start_ms"].as_u64().unwrap();
             let end = word["end_ms"].as_u64().unwrap();
-            assert!(start <= end && end <= decoded, "{word}");
+            assert!(start < end && end <= decoded, "{word}");
         }
         assert_eq!(words[0]["end_ms"], 9_900);
+        assert_eq!(words[1]["start_ms"], 10_100);
         assert_eq!(words[1]["end_ms"], 10_300);
-        assert_eq!(words[2]["start_ms"], 10_300);
+    }
+
+    #[test]
+    fn words_ending_exactly_at_the_watermark_are_untouched() {
+        let entry = |start_ms, end_ms| margins_media::transcript::TranscriptWordEntry {
+            channel: 0,
+            start_ms,
+            end_ms,
+            text: " word".into(),
+        };
+        let words = vec![entry(0, 100), entry(100, 300)];
+        assert_eq!(clamp_words_to_watermark(words.clone(), 300), words);
+        assert_eq!(
+            clamp_words_to_watermark(vec![entry(250, 400), entry(300, 450)], 300),
+            vec![entry(250, 300)]
+        );
     }
 
     #[test]

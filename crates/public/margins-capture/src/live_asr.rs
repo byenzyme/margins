@@ -537,20 +537,11 @@ fn write_checkpoint(
             .iter()
             .map(crate::asr::WordTiming::from)
             .collect::<Vec<_>>();
-        let mut entries =
-            margins_media::transcript::words_to_transcript_entries(&timings, channel, offset_ms);
-        // The terminal TDT flush may commit a tail word whose token duration
-        // runs past the decoded audio. No word may end beyond the watermark
-        // this checkpoint claims; the Workspace service rejects such a
-        // checkpoint outright.
-        for entry in &mut entries {
-            entry.end_ms = entry.end_ms.min(decoded_until_ms);
-            entry.start_ms = entry.start_ms.min(entry.end_ms);
-        }
-        entries
+        margins_media::transcript::words_to_transcript_entries(&timings, channel, offset_ms)
     };
     let mut entries = to_entries(&mic.committed, 0);
     entries.extend(to_entries(&system.committed, 1));
+    let entries = clamp_words_to_watermark(entries, decoded_until_ms);
     let committed_until_ms = mic
         .committed_until_ms
         .min(system.committed_until_ms)
@@ -582,6 +573,51 @@ fn write_checkpoint(
         ),
     );
     Ok(())
+}
+
+/// Overruns beyond this are not token-duration rounding and are logged.
+#[cfg(any(test, all(feature = "coreml-asr", target_os = "macos")))]
+const WORD_OVERRUN_LOG_MS: u64 = 500;
+
+/// The terminal TDT flush may commit a tail word whose token duration runs
+/// past the decoded audio. No word may end beyond the watermark a checkpoint
+/// claims (the Workspace service rejects such a checkpoint outright), so
+/// overrunning ends are clamped. A word starting at or past the watermark has
+/// no decoded audio at all and is dropped. Large overruns and drops suggest an
+/// offset bug rather than rounding, so they are logged instead of hidden.
+#[cfg(any(test, all(feature = "coreml-asr", target_os = "macos")))]
+fn clamp_words_to_watermark(
+    entries: Vec<margins_media::transcript::TranscriptWordEntry>,
+    decoded_until_ms: u64,
+) -> Vec<margins_media::transcript::TranscriptWordEntry> {
+    let mut clamped = 0usize;
+    let mut dropped = 0usize;
+    let mut max_overrun_ms = 0u64;
+    let entries = entries
+        .into_iter()
+        .filter_map(|mut entry| {
+            if entry.start_ms >= decoded_until_ms && entry.end_ms > decoded_until_ms {
+                dropped += 1;
+                max_overrun_ms = max_overrun_ms.max(entry.end_ms - decoded_until_ms);
+                return None;
+            }
+            if entry.end_ms > decoded_until_ms {
+                clamped += 1;
+                max_overrun_ms = max_overrun_ms.max(entry.end_ms - decoded_until_ms);
+                entry.end_ms = decoded_until_ms;
+            }
+            Some(entry)
+        })
+        .collect();
+    if dropped > 0 || max_overrun_ms > WORD_OVERRUN_LOG_MS {
+        crate::cli_log::event(
+            "live_checkpoint_words_clamped",
+            format!(
+                "decoded_until_ms={decoded_until_ms} clamped={clamped} dropped={dropped} max_overrun_ms={max_overrun_ms}"
+            ),
+        );
+    }
+    entries
 }
 
 #[cfg(any(test, all(feature = "coreml-asr", target_os = "macos")))]
