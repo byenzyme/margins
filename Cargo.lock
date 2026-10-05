@@ -1298,6 +1298,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "enzyme-spec"
+version = "0.11.1"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2516,6 +2525,7 @@ dependencies = [
  "base64",
  "chrono",
  "dirs",
+ "enzyme-spec",
  "fs4",
  "globset",
  "keyring",
@@ -2536,6 +2546,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "similar",
  "tempfile",
  "tokio",
  "toml",

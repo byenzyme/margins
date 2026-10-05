@@ -2224,7 +2224,7 @@ pub fn preview_retention(
 ) -> Result<RetentionPreview> {
     validate_retention_target(target)?;
     let current = resolve_state_dir(&workspace.state_dir)?;
-    let revision = workspace_revision(&current.config)?;
+    let revision = workspace_revision(&current)?;
     let cutoffs = retention_cutoffs(&current, scope)?;
     let db_path = workspace.state_dir.join(DB_NAME);
     if !db_path.is_file() {
@@ -2327,7 +2327,7 @@ pub fn apply_retention(
     }
 
     let current = resolve_state_dir(&workspace.state_dir)?;
-    let actual_revision = workspace_revision(&current.config)?;
+    let actual_revision = workspace_revision(&current)?;
     if actual_revision != expected_revision {
         return Err(WorkspaceMutationError::RevisionConflict {
             expected: expected_revision.to_string(),

@@ -15,6 +15,7 @@ pub mod project;
 pub mod session_index;
 pub mod transcript_view;
 pub mod workspace;
+pub mod workspace_program;
 pub mod workspace_service;
 pub mod remote_workspace;
 

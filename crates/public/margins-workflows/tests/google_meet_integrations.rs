@@ -287,6 +287,6 @@ fn tombstoned_meet_documents_remain_purgeable_after_binding_removal() -> Result<
     let plan = preview_retention(&workspace, &target, RetentionScope::Tombstones)?;
     assert_eq!(plan.target.connector_id, GOOGLE_MEET_CONNECTOR_ID);
     assert_eq!(plan.counts.tombstoned_evidence, 1);
-    assert_eq!(workspace_revision(&workspace.config)?, plan.revision);
+    assert_eq!(workspace_revision(&workspace)?, plan.revision);
     Ok(())
 }

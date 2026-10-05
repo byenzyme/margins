@@ -1,14 +1,19 @@
 //! Workspace and source configuration owned by Margins.
 //!
-//! A workspace is the id-named memory boundary of one practice. Its config is
-//! deliberately not a serialized interpretation of that practice: it records
-//! only the Sources, read/write roles, retention, and attention corrections the
-//! runtime must remember. Richer understanding stays grounded in the Sources
-//! and in the setup conversation. Machine state lives at
-//! `<MARGINS_HOME>/workspaces/<id>`; content sources remain where their owners
-//! put them. A command may create the first, implicit home Source from a
+//! A workspace is the id-named memory boundary of one practice. Its whole
+//! configuration is one `.enzyme` program at `<MARGINS_HOME>/configs/<id>.enzyme`
+//! (`workspace "<id>" { … }`), parsed by `enzyme-spec`; see
+//! [`crate::workspace_program`]. The program records the Sources, the one
+//! create-note folder (Home), and the attention corrections the runtime must
+//! remember. Richer understanding stays grounded in the Sources and in the
+//! setup conversation. Machine state lives at `<MARGINS_HOME>/workspaces/<id>`
+//! and holds no configuration; content sources remain where their owners put
+//! them. A command may create the first, implicit home Source from a
 //! notes-bearing working directory under a strict isolation deny-list. Every
 //! Source beyond that home remains explicitly declared.
+//!
+//! A retired `workspaces/<id>/config.toml` is migrated to the program on first
+//! resolution (`config.toml.migrated` keeps the original).
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -21,10 +26,20 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+pub use crate::workspace_program::{program_sha256, WorkspaceProgram};
+use crate::workspace_program::{self as program_lang, FolderQualification};
+
 pub const WORKSPACES_DIR: &str = "workspaces";
-pub const WORKSPACE_CONFIG: &str = "config.toml";
-pub const WORKSPACE_PLAN_SCHEMA: &str = "margins.workspace.plan.v1";
-pub const WORKSPACE_APPLY_SCHEMA: &str = "margins.workspace.apply.v1";
+/// Directory of Workspace programs under `MARGINS_HOME`.
+pub const CONFIGS_DIR: &str = "configs";
+/// Optional shared custom profiles for every Workspace program.
+pub const SHARED_PROFILES_PROGRAM: &str = "profiles.enzyme";
+/// The retired per-Workspace TOML config, migrated on first resolution.
+pub const LEGACY_WORKSPACE_CONFIG: &str = "config.toml";
+pub const LEGACY_WORKSPACE_CONFIG_MIGRATED: &str = "config.toml.migrated";
+pub const WORKSPACE_PLAN_SCHEMA: &str = "margins.workspace.plan.v2";
+pub const WORKSPACE_APPLY_SCHEMA: &str = "margins.workspace.apply.v2";
+pub const WORKSPACE_MIGRATE_SCHEMA: &str = "margins.workspace.migrate.v1";
 const WORKSPACE_LOCK: &str = "config.lock";
 const WORKSPACE_RECEIPTS_DIR: &str = "workspace-receipts";
 const WORKSPACE_TRANSACTION: &str = "workspace-transaction.json";
@@ -463,7 +478,9 @@ pub struct WorkspaceEntityOptions {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspacePolicy {
-    #[serde(default = "default_excluded_folders")]
+    /// Folders left out of every Markdown root, beyond Enzyme's implicit
+    /// exclusions (`.git`, `node_modules`, …), which are never written.
+    #[serde(default)]
     pub excluded_folders: Vec<String>,
     #[serde(default)]
     pub excluded_tags: Vec<String>,
@@ -507,7 +524,7 @@ impl RetentionPolicy {
 impl Default for WorkspacePolicy {
     fn default() -> Self {
         Self {
-            excluded_folders: default_excluded_folders(),
+            excluded_folders: Vec::new(),
             excluded_tags: Vec::new(),
             entities: Vec::new(),
             excluded_entities: Vec::new(),
@@ -528,36 +545,53 @@ pub struct WorkspaceConfig {
     pub bindings: BTreeMap<String, WorkspaceBinding>,
 }
 
+/// One human-readable change in a Workspace plan, derived from the typed view
+/// diff. `update_program` covers changes the view does not model (learning
+/// settings, profiles, agent policies, formatting); the plan's `diff` is exact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum WorkspacePlanAction {
-    SetName {
-        before: Option<String>,
-        after: Option<String>,
-    },
     SetPolicy {
+        summary: String,
         before: WorkspacePolicy,
         after: WorkspacePolicy,
     },
-    SetRetentionPolicy {
-        before: RetentionPolicy,
-        after: RetentionPolicy,
-    },
     AddBinding {
+        summary: String,
         name: String,
         binding: WorkspaceBinding,
     },
     UpdateBinding {
+        summary: String,
         name: String,
         before: WorkspaceBinding,
         after: WorkspaceBinding,
     },
     RemoveBinding {
+        summary: String,
         name: String,
         binding: WorkspaceBinding,
     },
+    UpdateProgram {
+        summary: String,
+    },
 }
 
+impl WorkspacePlanAction {
+    pub fn summary(&self) -> &str {
+        match self {
+            Self::SetPolicy { summary, .. }
+            | Self::AddBinding { summary, .. }
+            | Self::UpdateBinding { summary, .. }
+            | Self::RemoveBinding { summary, .. }
+            | Self::UpdateProgram { summary } => summary,
+        }
+    }
+}
+
+/// A reviewed change from the current Workspace program to `desired_program`.
+/// `apply` writes exactly `desired_program`, and only while the current program
+/// still hashes to `base_revision`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspacePlan {
     pub schema_version: String,
@@ -565,7 +599,9 @@ pub struct WorkspacePlan {
     pub base_revision: String,
     pub plan_id: String,
     pub actions: Vec<WorkspacePlanAction>,
-    pub desired: WorkspaceConfig,
+    pub desired_program: String,
+    pub desired_sha256: String,
+    pub diff: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -593,7 +629,7 @@ pub struct WorkspaceApplyReceipt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct WorkspaceTransaction {
     receipt: WorkspaceApplyReceipt,
-    desired: WorkspaceConfig,
+    desired_program: String,
 }
 
 /// Holds the workspace config lock across an authoritative ledger revision
@@ -627,10 +663,16 @@ impl std::fmt::Display for WorkspaceMutationError {
 
 impl std::error::Error for WorkspaceMutationError {}
 
+/// One resolved Workspace. `program` is the source of truth; `config` is its
+/// derived, read-only typed view (plus machine-owned name and retention).
+/// Never persist `config`: mutate through [`add_source`], [`remove_source`],
+/// [`update_policy`], or a reviewed plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedWorkspace {
     pub config: WorkspaceConfig,
+    pub program: WorkspaceProgram,
     pub state_dir: PathBuf,
+    /// The program file, `<MARGINS_HOME>/configs/<id>.enzyme`.
     pub config_path: PathBuf,
     pub home_dir: PathBuf,
 }
@@ -864,33 +906,132 @@ pub fn default_workspace(margins_home: &Path) -> Result<Option<String>> {
 
 pub fn set_default_workspace(margins_home: &Path, id: &str) -> Result<()> {
     resolve_at(margins_home, id)?;
+    update_machine_config(margins_home, |table| {
+        machine_table(table, "workspace")?
+            .insert("default".to_string(), toml::Value::String(id.to_string()));
+        Ok(())
+    })
+}
+
+fn read_machine_config(margins_home: &Path) -> Result<toml::Table> {
+    let path = margins_home.join("config.toml");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(toml::Table::new()),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    if raw.trim().is_empty() {
+        return Ok(toml::Table::new());
+    }
+    toml::from_str(&raw).context("invalid machine config")
+}
+
+/// Read-modify-write the machine `config.toml` under the machine config lock.
+fn update_machine_config(
+    margins_home: &Path,
+    mutate: impl FnOnce(&mut toml::Table) -> Result<()>,
+) -> Result<()> {
     std::fs::create_dir_all(margins_home)?;
-    let config_path = margins_home.join("config.toml");
-    let lock_path = margins_home.join("config.lock");
     let lock = OpenOptions::new()
         .create(true)
         .write(true)
-        .open(lock_path)?;
+        .open(margins_home.join("config.lock"))?;
     lock.lock_exclusive()?;
-    let raw = std::fs::read_to_string(&config_path).unwrap_or_default();
-    let mut config: toml::Value = if raw.trim().is_empty() {
-        toml::Value::Table(Default::default())
-    } else {
-        toml::from_str(&raw).context("invalid machine config")?
-    };
-    let table = config
-        .as_table_mut()
-        .context("machine config must be a table")?;
-    let workspace = table
-        .entry("workspace")
-        .or_insert_with(|| toml::Value::Table(Default::default()));
-    workspace
-        .as_table_mut()
-        .context("machine workspace config must be a table")?
-        .insert("default".to_string(), toml::Value::String(id.to_string()));
+    let mut config = read_machine_config(margins_home)?;
+    mutate(&mut config)?;
     let rendered = toml::to_string_pretty(&config)?;
-    atomic_write(&config_path, rendered.as_bytes())?;
-    Ok(())
+    atomic_write(&margins_home.join("config.toml"), rendered.as_bytes())
+}
+
+fn machine_table<'a>(table: &'a mut toml::Table, key: &str) -> Result<&'a mut toml::Table> {
+    table
+        .entry(key.to_string())
+        .or_insert_with(|| toml::Value::Table(Default::default()))
+        .as_table_mut()
+        .with_context(|| format!("machine config [{key}] must be a table"))
+}
+
+/// Optional display name of a Workspace, kept in machine config
+/// `[workspace.names]` because the program names the Workspace by id only.
+pub fn workspace_display_name(margins_home: &Path, id: &str) -> Result<Option<String>> {
+    let config = read_machine_config(margins_home)?;
+    match config
+        .get("workspace")
+        .and_then(|workspace| workspace.get("names"))
+        .and_then(|names| names.get(id))
+    {
+        None => Ok(None),
+        Some(toml::Value::String(name)) => Ok(Some(name.clone())),
+        Some(_) => bail!("workspace.names.{id} must be a string"),
+    }
+}
+
+pub fn set_workspace_display_name(margins_home: &Path, id: &str, name: Option<&str>) -> Result<()> {
+    validate_id(id)?;
+    update_machine_config(margins_home, |table| {
+        let workspace = machine_table(table, "workspace")?;
+        match name {
+            Some(name) => {
+                machine_table(workspace, "names")?
+                    .insert(id.to_string(), toml::Value::String(name.to_string()));
+            }
+            None => {
+                if let Some(names) = workspace.get_mut("names").and_then(toml::Value::as_table_mut) {
+                    names.remove(id);
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Effective retention for one Workspace from machine config: `[retention.<id>]`
+/// when present, otherwise the global `[retention]` keys.
+pub fn retention_policy(margins_home: &Path, id: &str) -> Result<RetentionPolicy> {
+    let config = read_machine_config(margins_home)?;
+    let Some(retention) = config.get("retention") else {
+        return Ok(RetentionPolicy::default());
+    };
+    let table = retention
+        .as_table()
+        .context("machine config [retention] must be a table")?;
+    let selected = match table.get(id) {
+        Some(toml::Value::Table(specific)) => specific.clone(),
+        Some(_) => bail!("machine config retention.{id} must be a table"),
+        None => table
+            .iter()
+            .filter(|(_, value)| !value.is_table())
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    };
+    let policy: RetentionPolicy = toml::Value::Table(selected)
+        .try_into()
+        .context("invalid machine retention policy")?;
+    policy.validate()?;
+    Ok(policy)
+}
+
+/// Record a Workspace-specific retention override in machine config. A default
+/// policy removes the override so the global `[retention]` applies.
+pub fn set_workspace_retention(
+    margins_home: &Path,
+    id: &str,
+    policy: &RetentionPolicy,
+) -> Result<()> {
+    validate_id(id)?;
+    policy.validate()?;
+    update_machine_config(margins_home, |table| {
+        let retention = machine_table(table, "retention")?;
+        if *policy == RetentionPolicy::default() {
+            retention.remove(id);
+        } else {
+            retention.insert(id.to_string(), toml::Value::try_from(policy)?);
+        }
+        if retention.is_empty() {
+            table.remove("retention");
+        }
+        Ok(())
+    })
 }
 
 pub fn margins_home() -> Result<PathBuf> {
@@ -978,6 +1119,72 @@ pub fn workspace_state_dir(home: &Path, id: &str) -> Result<PathBuf> {
     Ok(home.join(WORKSPACES_DIR).join(id))
 }
 
+/// The Workspace program, `<MARGINS_HOME>/configs/<id>.enzyme`.
+pub fn workspace_program_path(home: &Path, id: &str) -> Result<PathBuf> {
+    validate_id(id)?;
+    Ok(home.join(CONFIGS_DIR).join(format!("{id}.enzyme")))
+}
+
+fn margins_home_of_state_dir(state_dir: &Path) -> Result<&Path> {
+    let workspaces = state_dir
+        .parent()
+        .context("workspace state directory has no parent")?;
+    if workspaces.file_name().and_then(|value| value.to_str()) != Some(WORKSPACES_DIR) {
+        bail!("workspace state directory must live under {WORKSPACES_DIR}/<id>");
+    }
+    workspaces
+        .parent()
+        .context("workspace state directory has no Margins home")
+}
+
+fn state_dir_id(state_dir: &Path) -> Result<&str> {
+    state_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .context("workspace state directory has no valid id")
+}
+
+fn program_path_of_state_dir(state_dir: &Path) -> Result<PathBuf> {
+    workspace_program_path(margins_home_of_state_dir(state_dir)?, state_dir_id(state_dir)?)
+}
+
+/// The program of a new Workspace with one Home and one captures store.
+fn initial_config(id: &str, home_notes: &Path, capture_store: &Path) -> WorkspaceConfig {
+    WorkspaceConfig {
+        id: id.to_string(),
+        name: None,
+        policy: WorkspacePolicy::default(),
+        retention: RetentionPolicy::default(),
+        bindings: BTreeMap::from([
+            (
+                "home".to_string(),
+                WorkspaceBinding::NativeMarkdown {
+                    path: home_notes.to_path_buf(),
+                    role: SourceRole::Home,
+                    note_folder: None,
+                },
+            ),
+            (
+                "captures".to_string(),
+                WorkspaceBinding::Captures {
+                    path: capture_store.to_path_buf(),
+                },
+            ),
+        ]),
+    }
+}
+
+/// Write a brand-new Workspace program; refuses to replace an existing one.
+fn write_new_program(margins_home: &Path, config: &WorkspaceConfig) -> Result<()> {
+    let path = workspace_program_path(margins_home, &config.id)?;
+    if path.exists() {
+        bail!("workspace '{}' already exists at {}", config.id, path.display());
+    }
+    let program = program_from_config(config, &program_lang::empty_program(&config.id), FolderQualification::Program)?;
+    validate_program(margins_home, &program)?;
+    atomic_write(&path, program.text().as_bytes())
+}
+
 pub fn create_workspace(
     margins_home: &Path,
     id: &str,
@@ -995,34 +1202,17 @@ pub fn create_workspace(
         );
     }
     let state_dir = workspace_state_dir(margins_home, id)?;
-    if state_dir.exists() {
+    let program_path = workspace_program_path(margins_home, id)?;
+    if state_dir.exists() || program_path.exists() {
         bail!("workspace '{id}' already exists at {}", state_dir.display());
     }
     std::fs::create_dir_all(state_dir.join("captures"))
         .with_context(|| format!("creating workspace state at {}", state_dir.display()))?;
-    let mut bindings = BTreeMap::new();
-    bindings.insert(
-        "home".to_string(),
-        WorkspaceBinding::NativeMarkdown {
-            path: home_notes.clone(),
-            role: SourceRole::Home,
-            note_folder: None,
-        },
-    );
-    bindings.insert(
-        "captures".to_string(),
-        WorkspaceBinding::Captures {
-            path: state_dir.join("captures"),
-        },
-    );
-    let config = WorkspaceConfig {
-        id: id.to_string(),
-        name: name.map(str::to_string),
-        policy: WorkspacePolicy::default(),
-        retention: RetentionPolicy::default(),
-        bindings,
-    };
-    write_config(&state_dir.join(WORKSPACE_CONFIG), &config)?;
+    let config = initial_config(id, &home_notes, &state_dir.join("captures"));
+    write_new_program(margins_home, &config)?;
+    if let Some(name) = name {
+        set_workspace_display_name(margins_home, id, Some(name))?;
+    }
     resolve_at(margins_home, id)
 }
 
@@ -1067,37 +1257,18 @@ pub fn ensure_service_workspace(
         return Ok(existing);
     }
     let state_dir = workspace_state_dir(margins_home, id)?;
-    if state_dir.exists() {
+    if state_dir.exists() || workspace_program_path(margins_home, id)?.exists() {
         bail!(
             "workspace '{id}' has incomplete state at {}; inspect it before retrying",
             state_dir.display()
         );
     }
     std::fs::create_dir_all(&state_dir)?;
-    let bindings = BTreeMap::from([
-        (
-            "home".to_string(),
-            WorkspaceBinding::NativeMarkdown {
-                path: home_notes.clone(),
-                role: SourceRole::Home,
-                note_folder: None,
-            },
-        ),
-        (
-            "captures".to_string(),
-            WorkspaceBinding::Captures {
-                path: capture_store,
-            },
-        ),
-    ]);
-    let config = WorkspaceConfig {
-        id: id.to_string(),
-        name: name.map(str::to_string),
-        policy: WorkspacePolicy::default(),
-        retention: RetentionPolicy::default(),
-        bindings,
-    };
-    write_config(&state_dir.join(WORKSPACE_CONFIG), &config)?;
+    let config = initial_config(id, &home_notes, &capture_store);
+    write_new_program(margins_home, &config)?;
+    if let Some(name) = name {
+        set_workspace_display_name(margins_home, id, Some(name))?;
+    }
     resolve_at(margins_home, id)
 }
 
@@ -1346,18 +1517,32 @@ fn canonical_or_absolute(path: &Path, cwd: &Path) -> PathBuf {
 
 pub fn resolve_at(margins_home: &Path, id: &str) -> Result<ResolvedWorkspace> {
     let state_dir = workspace_state_dir(margins_home, id)?;
-    let config_path = state_dir.join(WORKSPACE_CONFIG);
-    let raw = std::fs::read_to_string(&config_path)
-        .with_context(|| format!("workspace '{id}' not found at {}", config_path.display()))?;
-    let config: WorkspaceConfig = toml::from_str(&raw)
-        .with_context(|| format!("invalid workspace config {}", config_path.display()))?;
-    if config.id != id {
+    let program_path = workspace_program_path(margins_home, id)?;
+    if !program_path.exists() && state_dir.join(LEGACY_WORKSPACE_CONFIG).is_file() {
+        migrate_workspace(margins_home, id)?;
+    }
+    let text = std::fs::read_to_string(&program_path)
+        .with_context(|| format!("workspace '{id}' not found at {}", program_path.display()))?;
+    let program = WorkspaceProgram::parse(&text)
+        .with_context(|| format!("invalid workspace program {}", program_path.display()))?;
+    if program.id() != id {
         bail!(
-            "workspace directory '{id}' contains config for '{}'",
-            config.id
+            "workspace program {} declares workspace '{}', expected '{id}'",
+            program_path.display(),
+            program.id()
         );
     }
-    validate_config(&config)?;
+    resolved_from_program(margins_home, state_dir, program_path, program)
+}
+
+fn resolved_from_program(
+    margins_home: &Path,
+    state_dir: PathBuf,
+    config_path: PathBuf,
+    program: WorkspaceProgram,
+) -> Result<ResolvedWorkspace> {
+    let config = view_of(margins_home, &program)
+        .with_context(|| format!("invalid workspace program {}", config_path.display()))?;
     let home_dir = config
         .bindings
         .values()
@@ -1369,53 +1554,254 @@ pub fn resolve_at(margins_home: &Path, id: &str) -> Result<ResolvedWorkspace> {
             } => Some(path.clone()),
             _ => None,
         })
-        .context("workspace must declare exactly one notes source with role = 'home'")?;
+        .context("workspace must declare exactly one Home Markdown source")?;
     Ok(ResolvedWorkspace {
         config,
+        program,
         state_dir,
         config_path,
         home_dir,
     })
 }
 
-pub fn resolve_state_dir(state_dir: &Path) -> Result<ResolvedWorkspace> {
-    let id = state_dir
-        .file_name()
-        .and_then(|value| value.to_str())
-        .context("workspace state directory has no valid id")?;
-    let workspaces = state_dir
-        .parent()
-        .context("workspace state directory has no parent")?;
-    if workspaces.file_name().and_then(|value| value.to_str()) != Some(WORKSPACES_DIR) {
-        bail!("workspace state directory must live under {WORKSPACES_DIR}/<id>");
-    }
-    let margins_home = workspaces
-        .parent()
-        .context("workspace state directory has no Margins home")?;
-    resolve_at(margins_home, id)
+/// Derive and validate the typed view of a program, including machine-owned
+/// display name and retention, and validate the program language itself.
+fn view_of(margins_home: &Path, program: &WorkspaceProgram) -> Result<WorkspaceConfig> {
+    let id = program.id();
+    validate_id(id)?;
+    let config = program_lang::derive_view(
+        program,
+        workspace_display_name(margins_home, id)?,
+        retention_policy(margins_home, id)?,
+    )?;
+    validate_config(&config)?;
+    program_lang::validate_language(program, shared_profiles(margins_home)?.as_ref())?;
+    Ok(config)
 }
 
-pub fn list_workspaces(margins_home: &Path) -> Result<Vec<ResolvedWorkspace>> {
+fn validate_program(margins_home: &Path, program: &WorkspaceProgram) -> Result<WorkspaceConfig> {
+    view_of(margins_home, program)
+}
+
+/// The optional shared `configs/profiles.enzyme` program (profiles only).
+fn shared_profiles(margins_home: &Path) -> Result<Option<enzyme_spec::Program>> {
+    let path = margins_home.join(CONFIGS_DIR).join(SHARED_PROFILES_PROGRAM);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    let program = enzyme_spec::parse(&text)
+        .with_context(|| format!("invalid shared profiles {}", path.display()))?;
+    if !program.workspaces.is_empty()
+        || !program.vaults.is_empty()
+        || program.settings != enzyme_spec::Settings::default()
+        || program.learning != enzyme_spec::Learning::default()
+        || program.retrieval.is_some()
+    {
+        bail!("{} may only define profiles", path.display());
+    }
+    Ok(Some(program))
+}
+
+/// Render the program whose view is `config`, starting from `base` and
+/// preserving everything the view does not model.
+fn program_from_config(
+    config: &WorkspaceConfig,
+    base: &enzyme_spec::Program,
+    qualification: FolderQualification,
+) -> Result<WorkspaceProgram> {
+    validate_config(config)?;
+    let program = program_lang::reconcile(base, config, qualification)?;
+    WorkspaceProgram::from_program(program)
+}
+
+/// Convert a retired `config.toml` Workspace config to its program,
+/// deterministically. Name and retention are machine-owned and not part of the
+/// program; see [`migrate_workspace`].
+pub fn program_from_legacy_config(config: &WorkspaceConfig) -> Result<WorkspaceProgram> {
+    program_from_config(
+        config,
+        &program_lang::empty_program(&config.id),
+        FolderQualification::Legacy,
+    )
+}
+
+/// Result of migrating one retired `config.toml`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorkspaceMigration {
+    pub schema_version: String,
+    pub workspace_id: String,
+    /// `migrated`, `would_migrate` (dry run), or `already_migrated`.
+    pub status: String,
+    pub program_path: PathBuf,
+    pub program: String,
+    pub revision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legacy_backup: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retention_override: Option<RetentionPolicy>,
+}
+
+fn read_legacy_config(path: &Path) -> Result<WorkspaceConfig> {
+    let body = std::fs::read_to_string(path)
+        .with_context(|| format!("reading workspace config {}", path.display()))?;
+    toml::from_str(&body).with_context(|| format!("invalid workspace config {}", path.display()))
+}
+
+/// Preview the program a retired `config.toml` migrates to, without writing.
+pub fn preview_workspace_migration(margins_home: &Path, id: &str) -> Result<WorkspaceMigration> {
+    let state_dir = workspace_state_dir(margins_home, id)?;
+    let program_path = workspace_program_path(margins_home, id)?;
+    if program_path.exists() {
+        let program = std::fs::read_to_string(&program_path)?;
+        return Ok(WorkspaceMigration {
+            schema_version: WORKSPACE_MIGRATE_SCHEMA.to_string(),
+            workspace_id: id.to_string(),
+            status: "already_migrated".to_string(),
+            program_path,
+            revision: program_sha256(&program),
+            program,
+            legacy_backup: None,
+            retention_override: None,
+        });
+    }
+    let legacy = read_legacy_config(&state_dir.join(LEGACY_WORKSPACE_CONFIG))?;
+    if legacy.id != id {
+        bail!("workspace directory '{id}' contains config for '{}'", legacy.id);
+    }
+    let program = program_from_legacy_config(&legacy)?;
+    validate_program(margins_home, &program)?;
+    Ok(WorkspaceMigration {
+        schema_version: WORKSPACE_MIGRATE_SCHEMA.to_string(),
+        workspace_id: id.to_string(),
+        status: "would_migrate".to_string(),
+        program_path,
+        revision: program.sha256(),
+        program: program.text().to_string(),
+        legacy_backup: Some(state_dir.join(LEGACY_WORKSPACE_CONFIG_MIGRATED)),
+        retention_override: (legacy.retention != RetentionPolicy::default())
+            .then_some(legacy.retention),
+    })
+}
+
+/// Migrate a retired `workspaces/<id>/config.toml` to `configs/<id>.enzyme`.
+///
+/// Under the Workspace lock: convert deterministically, validate, move the
+/// display name and a non-default retention policy to machine config, write
+/// the program atomically, then rename the old file to `config.toml.migrated`.
+/// Idempotent: an existing program is never replaced.
+pub fn migrate_workspace(margins_home: &Path, id: &str) -> Result<WorkspaceMigration> {
+    let state_dir = workspace_state_dir(margins_home, id)?;
+    let _lock = lock_workspace(&state_dir)?;
+    let legacy_path = state_dir.join(LEGACY_WORKSPACE_CONFIG);
+    let program_path = workspace_program_path(margins_home, id)?;
+    if program_path.exists() {
+        // A concurrent resolver migrated first, or the program was authored
+        // directly. Retire a leftover legacy file without reinterpreting it.
+        let mut migration = preview_workspace_migration(margins_home, id)?;
+        if legacy_path.is_file() {
+            let backup = state_dir.join(LEGACY_WORKSPACE_CONFIG_MIGRATED);
+            if !backup.exists() {
+                std::fs::rename(&legacy_path, &backup)?;
+                sync_parent_directory(&backup)?;
+                migration.legacy_backup = Some(backup);
+            }
+        }
+        return Ok(migration);
+    }
+    let legacy = read_legacy_config(&legacy_path)?;
+    if legacy.id != id {
+        bail!("workspace directory '{id}' contains config for '{}'", legacy.id);
+    }
+    let program = program_from_legacy_config(&legacy)?;
+    // Machine-owned settings first: a crash before the program write leaves
+    // the legacy file authoritative and the migration simply runs again.
+    if legacy.name.is_some() && workspace_display_name(margins_home, id)? != legacy.name {
+        set_workspace_display_name(margins_home, id, legacy.name.as_deref())?;
+    }
+    if legacy.retention != RetentionPolicy::default() {
+        set_workspace_retention(margins_home, id, &legacy.retention)?;
+    }
+    validate_program(margins_home, &program)?;
+    atomic_write(&program_path, program.text().as_bytes())?;
+    let backup = state_dir.join(LEGACY_WORKSPACE_CONFIG_MIGRATED);
+    std::fs::rename(&legacy_path, &backup)
+        .with_context(|| format!("retiring {}", legacy_path.display()))?;
+    sync_parent_directory(&backup)?;
+    Ok(WorkspaceMigration {
+        schema_version: WORKSPACE_MIGRATE_SCHEMA.to_string(),
+        workspace_id: id.to_string(),
+        status: "migrated".to_string(),
+        program_path,
+        revision: program.sha256(),
+        program: program.text().to_string(),
+        legacy_backup: Some(backup),
+        retention_override: (legacy.retention != RetentionPolicy::default())
+            .then_some(legacy.retention),
+    })
+}
+
+/// Ids of every Workspace with a retired `config.toml` still to migrate.
+pub fn legacy_workspace_ids(margins_home: &Path) -> Result<Vec<String>> {
     let root = margins_home.join(WORKSPACES_DIR);
     if !root.exists() {
         return Ok(Vec::new());
     }
-    let mut entries = std::fs::read_dir(&root)
-        .with_context(|| format!("reading {}", root.display()))?
-        .collect::<std::io::Result<Vec<_>>>()?;
-    entries.sort_by_key(|entry| entry.file_name());
-    entries
-        .into_iter()
-        .filter(|entry| entry.path().is_dir())
-        .filter_map(|entry| entry.file_name().into_string().ok())
+    let mut ids = Vec::new();
+    for entry in std::fs::read_dir(&root).with_context(|| format!("reading {}", root.display()))? {
+        let entry = entry?;
+        let Ok(id) = entry.file_name().into_string() else {
+            continue;
+        };
+        if validate_id(&id).is_ok()
+            && entry.path().join(LEGACY_WORKSPACE_CONFIG).is_file()
+            && !workspace_program_path(margins_home, &id)?.exists()
+        {
+            ids.push(id);
+        }
+    }
+    ids.sort();
+    Ok(ids)
+}
+
+pub fn resolve_state_dir(state_dir: &Path) -> Result<ResolvedWorkspace> {
+    resolve_at(margins_home_of_state_dir(state_dir)?, state_dir_id(state_dir)?)
+}
+
+pub fn list_workspaces(margins_home: &Path) -> Result<Vec<ResolvedWorkspace>> {
+    let mut ids = std::collections::BTreeSet::new();
+    let configs = margins_home.join(CONFIGS_DIR);
+    if configs.exists() {
+        for entry in
+            std::fs::read_dir(&configs).with_context(|| format!("reading {}", configs.display()))?
+        {
+            let path = entry?.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("enzyme")
+                || !path.is_file()
+            {
+                continue;
+            }
+            if let Some(id) = path.file_stem().and_then(|value| value.to_str()) {
+                if path.file_name().and_then(|value| value.to_str()) != Some(SHARED_PROFILES_PROGRAM) {
+                    ids.insert(id.to_string());
+                }
+            }
+        }
+    }
+    ids.extend(legacy_workspace_ids(margins_home)?);
+    ids.into_iter()
         .map(|id| resolve_at(margins_home, &id))
         .collect()
 }
 
 /// Remove an unused Workspace declaration without touching any declared Source.
-/// A Workspace with state beyond its config needs an explicit migration first.
+/// A Workspace with state beyond its program needs an explicit migration first.
 pub fn remove_empty_workspace(margins_home: &Path, id: &str) -> Result<()> {
     let state_dir = workspace_state_dir(margins_home, id)?;
+    // Resolve (and migrate) before taking the machine lock: migration may
+    // record machine-owned settings under that same lock.
+    resolve_at(margins_home, id)?;
     let lock = OpenOptions::new()
         .create(true)
         .write(true)
@@ -1424,25 +1810,32 @@ pub fn remove_empty_workspace(margins_home: &Path, id: &str) -> Result<()> {
     if default_workspace(margins_home)?.as_deref() == Some(id) {
         bail!("cannot remove the machine's default Workspace");
     }
-    let metadata = std::fs::symlink_metadata(&state_dir)
+    let program_path = workspace_program_path(margins_home, id)?;
+    let program_metadata = std::fs::symlink_metadata(&program_path)
         .with_context(|| format!("Workspace {id} does not exist"))?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        bail!("Workspace state directory is not a plain directory");
+    if !program_metadata.is_file() || program_metadata.file_type().is_symlink() {
+        bail!("Workspace program is not a plain file");
     }
-    resolve_at(margins_home, id)?;
-    let config_path = state_dir.join(WORKSPACE_CONFIG);
-    let config_metadata = std::fs::symlink_metadata(&config_path)?;
-    if !config_metadata.is_file() || config_metadata.file_type().is_symlink() {
-        bail!("Workspace config is not a plain file");
-    }
-    for entry in std::fs::read_dir(&state_dir)? {
-        let entry = entry?;
-        if entry.file_name() != WORKSPACE_CONFIG {
-            bail!("Workspace has stored data; migrate or retain it before removal");
+    match std::fs::symlink_metadata(&state_dir) {
+        Ok(metadata) => {
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                bail!("Workspace state directory is not a plain directory");
+            }
+            for entry in std::fs::read_dir(&state_dir)? {
+                let name = entry?.file_name();
+                if name != WORKSPACE_LOCK && name != LEGACY_WORKSPACE_CONFIG_MIGRATED {
+                    bail!("Workspace has stored data; migrate or retain it before removal");
+                }
+            }
         }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).with_context(|| format!("reading {}", state_dir.display())),
     }
-    std::fs::remove_file(&config_path)?;
-    std::fs::remove_dir(&state_dir)?;
+    std::fs::remove_file(&program_path)?;
+    sync_parent_directory(&program_path)?;
+    if state_dir.exists() {
+        std::fs::remove_dir_all(&state_dir)?;
+    }
     Ok(())
 }
 
@@ -1497,6 +1890,8 @@ pub fn remove_source(workspace: &mut ResolvedWorkspace, name: &str) -> Result<Wo
     })
 }
 
+/// Replace the view-level attention policy. Readings that keep their entity
+/// keep their learning settings and inline profiles.
 pub fn update_policy(workspace: &mut ResolvedWorkspace, policy: WorkspacePolicy) -> Result<()> {
     mutate_workspace_config(workspace, |config| {
         config.policy = policy;
@@ -1504,16 +1899,22 @@ pub fn update_policy(workspace: &mut ResolvedWorkspace, policy: WorkspacePolicy)
     })
 }
 
-pub fn workspace_revision(config: &WorkspaceConfig) -> Result<String> {
-    let bytes = serde_json::to_vec(config).context("serializing canonical workspace revision")?;
+/// The Workspace revision: SHA-256 of the program bytes.
+pub fn workspace_revision(workspace: &ResolvedWorkspace) -> Result<String> {
+    Ok(workspace.program.sha256())
+}
+
+fn current_revision(state_dir: &Path) -> Result<String> {
+    let path = program_path_of_state_dir(state_dir)?;
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("reading workspace program {}", path.display()))?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
-/// Re-read the workspace config and reject an authoritative commit whose
+/// Re-read the workspace program and reject an authoritative commit whose
 /// desired-state revision changed while provider transport was in flight.
 pub fn require_workspace_revision(state_dir: &Path, expected_revision: &str) -> Result<()> {
-    let workspace = resolve_state_dir(state_dir)?;
-    let actual = workspace_revision(&workspace.config)?;
+    let actual = current_revision(state_dir)?;
     if actual != expected_revision {
         return Err(WorkspaceMutationError::RevisionConflict {
             expected: expected_revision.to_string(),
@@ -1537,44 +1938,128 @@ pub fn validate_mutation_request_id(request_id: &str) -> Result<()> {
     validate_request_id(request_id)
 }
 
+/// Plan the complete desired view `desired` against the current program,
+/// preserving every program statement the view does not model.
 pub fn plan_workspace_config(
-    current: &WorkspaceConfig,
+    workspace: &ResolvedWorkspace,
     desired: WorkspaceConfig,
 ) -> Result<WorkspacePlan> {
-    validate_config(&desired)?;
-    if desired.id != current.id {
+    let program = desired_program_from_config(workspace, &desired, FolderQualification::Program)?;
+    plan_workspace_program(workspace, program.text())
+}
+
+/// Plan a desired Workspace written in the retired `config.toml` shape. Older
+/// setup callers still produce it; it is converted with the migration rules
+/// onto the current program.
+pub fn plan_legacy_workspace_config(
+    workspace: &ResolvedWorkspace,
+    desired: WorkspaceConfig,
+) -> Result<WorkspacePlan> {
+    if desired.retention != workspace.config.retention {
+        return Err(WorkspaceMutationError::InvalidPlan(
+            "retention is machine configuration: set [retention] or [retention.<id>] in MARGINS_HOME/config.toml".to_string(),
+        )
+        .into());
+    }
+    if desired.name.is_some() && desired.name != workspace.config.name {
+        return Err(WorkspaceMutationError::InvalidPlan(
+            "a Workspace display name is machine configuration, not part of the desired program"
+                .to_string(),
+        )
+        .into());
+    }
+    let program = desired_program_from_config(workspace, &desired, FolderQualification::Legacy)?;
+    plan_workspace_program(workspace, program.text())
+}
+
+fn desired_program_from_config(
+    workspace: &ResolvedWorkspace,
+    desired: &WorkspaceConfig,
+    qualification: FolderQualification,
+) -> Result<WorkspaceProgram> {
+    if desired.id != workspace.config.id {
         return Err(WorkspaceMutationError::InvalidPlan(format!(
             "desired config id '{}' does not match workspace '{}'",
-            desired.id, current.id
+            desired.id, workspace.config.id
         ))
         .into());
     }
-    let mut actions = Vec::new();
-    if current.name != desired.name {
-        actions.push(WorkspacePlanAction::SetName {
-            before: current.name.clone(),
-            after: desired.name.clone(),
-        });
+    program_from_config(desired, workspace.program.program(), qualification)
+}
+
+/// Plan replacing the current program with `desired_program`, verbatim.
+pub fn plan_workspace_program(
+    workspace: &ResolvedWorkspace,
+    desired_program: &str,
+) -> Result<WorkspacePlan> {
+    let margins_home = margins_home_of_state_dir(&workspace.state_dir)?;
+    let desired = WorkspaceProgram::parse(desired_program).context("invalid desired program")?;
+    if desired.id() != workspace.config.id {
+        return Err(WorkspaceMutationError::InvalidPlan(format!(
+            "desired program declares workspace '{}', not '{}'",
+            desired.id(),
+            workspace.config.id
+        ))
+        .into());
     }
+    let desired_view = validate_program(margins_home, &desired)?;
+    let mut actions = view_actions(&workspace.config, &desired_view);
+    if workspace.program.text() != desired_program {
+        let explained = program_from_config(
+            &desired_view,
+            workspace.program.program(),
+            FolderQualification::Program,
+        )
+        .is_ok_and(|rendered| rendered.text() == desired_program);
+        if actions.is_empty() || !explained {
+            actions.push(WorkspacePlanAction::UpdateProgram {
+                summary: "Update program statements beyond sources and attention policy (learning settings, profiles, agent policies, or formatting); see diff".to_string(),
+            });
+        }
+    }
+    let base_revision = workspace.program.sha256();
+    let desired_sha256 = program_sha256(desired_program);
+    let diff = program_lang::unified_diff(
+        workspace.program.text(),
+        desired_program,
+        &format!("{CONFIGS_DIR}/{}.enzyme", workspace.config.id),
+    );
+    let plan_id = workspace_plan_id(
+        &workspace.config.id,
+        &base_revision,
+        &actions,
+        &desired_sha256,
+    )?;
+    Ok(WorkspacePlan {
+        schema_version: WORKSPACE_PLAN_SCHEMA.to_string(),
+        workspace_id: workspace.config.id.clone(),
+        base_revision,
+        plan_id,
+        actions,
+        desired_program: desired_program.to_string(),
+        desired_sha256,
+        diff,
+    })
+}
+
+fn view_actions(current: &WorkspaceConfig, desired: &WorkspaceConfig) -> Vec<WorkspacePlanAction> {
+    let mut actions = Vec::new();
     if current.policy != desired.policy {
         actions.push(WorkspacePlanAction::SetPolicy {
+            summary: policy_summary(&current.policy, &desired.policy),
             before: current.policy.clone(),
             after: desired.policy.clone(),
-        });
-    }
-    if current.retention != desired.retention {
-        actions.push(WorkspacePlanAction::SetRetentionPolicy {
-            before: current.retention.clone(),
-            after: desired.retention.clone(),
         });
     }
     for (name, binding) in &current.bindings {
         match desired.bindings.get(name) {
             None => actions.push(WorkspacePlanAction::RemoveBinding {
+                summary: format!("Remove {} source \"{name}\"", binding_label(binding)),
                 name: name.clone(),
                 binding: binding.clone(),
             }),
             Some(after) if after != binding => actions.push(WorkspacePlanAction::UpdateBinding {
+                summary: binding_change_summary(name, binding, after),
                 name: name.clone(),
                 before: binding.clone(),
                 after: after.clone(),
@@ -1585,29 +2070,130 @@ pub fn plan_workspace_config(
     for (name, binding) in &desired.bindings {
         if !current.bindings.contains_key(name) {
             actions.push(WorkspacePlanAction::AddBinding {
+                summary: format!(
+                    "Add {} source \"{name}\" ({})",
+                    binding_label(binding),
+                    binding_target(binding)
+                ),
                 name: name.clone(),
                 binding: binding.clone(),
             });
         }
     }
-    let base_revision = workspace_revision(current)?;
-    let plan_id = workspace_plan_id(&current.id, &base_revision, &actions, &desired)?;
-    Ok(WorkspacePlan {
-        schema_version: WORKSPACE_PLAN_SCHEMA.to_string(),
-        workspace_id: current.id.clone(),
-        base_revision,
-        plan_id,
-        actions,
-        desired,
-    })
+    actions
+}
+
+fn binding_label(binding: &WorkspaceBinding) -> &'static str {
+    match binding {
+        WorkspaceBinding::NativeMarkdown {
+            role: SourceRole::Home,
+            ..
+        } => "Home markdown",
+        WorkspaceBinding::NativeMarkdown { .. } => "markdown",
+        WorkspaceBinding::Captures { .. } => program_lang::SOURCE_CAPTURES,
+        WorkspaceBinding::Gmail { .. } => program_lang::SOURCE_GOOGLE_MAIL,
+        WorkspaceBinding::GoogleCalendar { .. } => program_lang::SOURCE_GOOGLE_CALENDAR,
+        WorkspaceBinding::GoogleMeet { .. } => program_lang::SOURCE_GOOGLE_MEET,
+        WorkspaceBinding::Granola { .. } => program_lang::SOURCE_GRANOLA,
+    }
+}
+
+fn binding_target(binding: &WorkspaceBinding) -> String {
+    binding
+        .local_path()
+        .map(|path| path.display().to_string())
+        .or_else(|| binding.google_account().map(str::to_string))
+        .unwrap_or_default()
+}
+
+fn binding_change_summary(name: &str, before: &WorkspaceBinding, after: &WorkspaceBinding) -> String {
+    let mut changes = Vec::new();
+    if before.local_path() != after.local_path() || before.google_account() != after.google_account() {
+        changes.push(format!("now {}", binding_target(after)));
+    }
+    if before.native_markdown_role() != after.native_markdown_role() {
+        changes.push(match after.native_markdown_role() {
+            Some(SourceRole::Home) => "becomes Home".to_string(),
+            _ => "no longer Home".to_string(),
+        });
+    }
+    if let (
+        WorkspaceBinding::NativeMarkdown { note_folder: old, .. },
+        WorkspaceBinding::NativeMarkdown { note_folder: new, role: SourceRole::Home, .. },
+    ) = (before, after)
+    {
+        if old != new {
+            changes.push(format!(
+                "new notes go to \"{}\"",
+                new.as_deref().map_or(".".to_string(), |folder| folder.display().to_string())
+            ));
+        }
+    }
+    if before.gmail_selector() != after.gmail_selector()
+        || before.calendar_selector() != after.calendar_selector()
+        || before.granola_selector() != after.granola_selector()
+    {
+        changes.push("collection window or query changes".to_string());
+    }
+    if changes.is_empty() {
+        changes.push("declaration changes".to_string());
+    }
+    format!("Change source \"{name}\": {}", changes.join("; "))
+}
+
+fn policy_summary(before: &WorkspacePolicy, after: &WorkspacePolicy) -> String {
+    fn entity_names(policy: &WorkspacePolicy) -> Vec<String> {
+        policy
+            .entities
+            .iter()
+            .flat_map(|entity| {
+                entity
+                    .entries()
+                    .into_iter()
+                    .map(|(name, _)| name.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+    fn delta(added_verb: &str, removed_verb: &str, before: &[String], after: &[String], parts: &mut Vec<String>) {
+        let added: Vec<&str> = after.iter().filter(|item| !before.contains(item)).map(String::as_str).collect();
+        let removed: Vec<&str> = before.iter().filter(|item| !after.contains(item)).map(String::as_str).collect();
+        if !added.is_empty() {
+            parts.push(format!("{added_verb} {}", added.join(", ")));
+        }
+        if !removed.is_empty() {
+            parts.push(format!("{removed_verb} {}", removed.join(", ")));
+        }
+    }
+    let mut parts = Vec::new();
+    let (before_entities, after_entities) = (entity_names(before), entity_names(after));
+    delta("learn questions from", "stop learning from", &before_entities, &after_entities, &mut parts);
+    if before_entities == after_entities && before.entities != after.entities {
+        parts.push("change reading profiles or linked-page expansion".to_string());
+    }
+    delta("leave out folders", "stop leaving out folders", &before.excluded_folders, &after.excluded_folders, &mut parts);
+    delta("leave out tags", "stop leaving out tags", &before.excluded_tags, &after.excluded_tags, &mut parts);
+    delta("leave out links", "stop leaving out links", &before.excluded_entities, &after.excluded_entities, &mut parts);
+    if parts.is_empty() {
+        parts.push("reorder readings or exclusions".to_string());
+    }
+    format!("Attention policy: {}", parts.join("; "))
 }
 
 pub fn apply_workspace_plan(
     workspace: &mut ResolvedWorkspace,
     plan: &WorkspacePlan,
 ) -> Result<WorkspaceApplyReceipt> {
+    if program_sha256(&plan.desired_program) != plan.desired_sha256 {
+        return Err(WorkspaceMutationError::InvalidPlan(
+            "workspace plan desired_program does not match desired_sha256".to_string(),
+        )
+        .into());
+    }
     let request_hash = workspace_apply_request_hash(plan)?;
     let request_id = format!("workspace-apply-{request_hash}");
+    let margins_home = margins_home_of_state_dir(&workspace.state_dir)?.to_path_buf();
+    let id = workspace.config.id.clone();
     let _lock = lock_workspace_ready(&workspace.state_dir)?;
     if let Some(mut receipt) = load_workspace_receipt(&workspace.state_dir, &request_id)? {
         if receipt.request_hash != request_hash {
@@ -1617,12 +2203,12 @@ pub fn apply_workspace_plan(
             .into());
         }
         receipt.replayed = true;
-        workspace.config = read_config(&workspace.config_path)?;
+        *workspace = load_resolved(&margins_home, &id)?;
         return Ok(receipt);
     }
 
-    let current = read_config(&workspace.config_path)?;
-    let actual_revision = workspace_revision(&current)?;
+    let current = load_resolved(&margins_home, &id)?;
+    let actual_revision = current.program.sha256();
     if actual_revision != plan.base_revision {
         return Err(WorkspaceMutationError::RevisionConflict {
             expected: plan.base_revision.clone(),
@@ -1630,7 +2216,7 @@ pub fn apply_workspace_plan(
         }
         .into());
     }
-    let rebuilt = plan_workspace_config(&current, plan.desired.clone())?;
+    let rebuilt = plan_workspace_program(&current, &plan.desired_program)?;
     if rebuilt != *plan {
         return Err(WorkspaceMutationError::InvalidPlan(
             "workspace plan content or plan_id is invalid".to_string(),
@@ -1638,16 +2224,15 @@ pub fn apply_workspace_plan(
         .into());
     }
 
-    let after_revision = workspace_revision(&plan.desired)?;
     let receipt = WorkspaceApplyReceipt {
         schema_version: WORKSPACE_APPLY_SCHEMA.to_string(),
         ok: true,
-        workspace_id: current.id,
+        workspace_id: id.clone(),
         request_id,
         request_hash,
         plan_id: plan.plan_id.clone(),
         before_revision: plan.base_revision.clone(),
-        after_revision,
+        after_revision: plan.desired_sha256.clone(),
         replayed: false,
         actions: plan
             .actions
@@ -1665,13 +2250,13 @@ pub fn apply_workspace_plan(
         &workspace.state_dir,
         &WorkspaceTransaction {
             receipt: receipt.clone(),
-            desired: plan.desired.clone(),
+            desired_program: plan.desired_program.clone(),
         },
     )?;
-    write_config(&workspace.config_path, &plan.desired)?;
+    atomic_write(&current.config_path, plan.desired_program.as_bytes())?;
     store_workspace_receipt(&workspace.state_dir, &receipt)?;
     clear_workspace_transaction(&workspace.state_dir)?;
-    workspace.config = plan.desired.clone();
+    *workspace = load_resolved(&margins_home, &id)?;
     Ok(receipt)
 }
 
@@ -1896,6 +2481,9 @@ fn validate_id(id: &str) -> Result<()> {
     {
         bail!("workspace id must use lowercase letters, digits, and internal hyphens");
     }
+    if id == "profiles" {
+        bail!("workspace id 'profiles' is reserved for configs/profiles.enzyme");
+    }
     Ok(())
 }
 
@@ -1914,34 +2502,62 @@ fn mutate_workspace_config<T>(
     workspace: &mut ResolvedWorkspace,
     mutate: impl FnOnce(&mut WorkspaceConfig) -> Result<T>,
 ) -> Result<T> {
+    let margins_home = margins_home_of_state_dir(&workspace.state_dir)?.to_path_buf();
+    let id = workspace.config.id.clone();
     let _lock = lock_workspace_ready(&workspace.state_dir)?;
-    let current = read_config(&workspace.config_path)?;
-    let mut desired = current.clone();
+    let current = load_resolved(&margins_home, &id)?;
+    let mut desired = current.config.clone();
     let value = mutate(&mut desired)?;
-    let plan = plan_workspace_config(&current, desired)?;
-    write_config(&workspace.config_path, &plan.desired)?;
-    workspace.config = plan.desired;
+    let program = program_from_config(
+        &desired,
+        current.program.program(),
+        FolderQualification::Program,
+    )?;
+    validate_program(&margins_home, &program)?;
+    if program != current.program {
+        atomic_write(&current.config_path, program.text().as_bytes())?;
+    }
+    *workspace = load_resolved(&margins_home, &id)?;
     Ok(value)
+}
+
+/// Load an already-migrated Workspace program. Used under the Workspace lock,
+/// where migration (which takes the same lock) must not run.
+fn load_resolved(margins_home: &Path, id: &str) -> Result<ResolvedWorkspace> {
+    let state_dir = workspace_state_dir(margins_home, id)?;
+    let program_path = workspace_program_path(margins_home, id)?;
+    let text = std::fs::read_to_string(&program_path)
+        .with_context(|| format!("reading workspace program {}", program_path.display()))?;
+    let program = WorkspaceProgram::parse(&text)
+        .with_context(|| format!("invalid workspace program {}", program_path.display()))?;
+    if program.id() != id {
+        bail!(
+            "workspace program {} declares workspace '{}', expected '{id}'",
+            program_path.display(),
+            program.id()
+        );
+    }
+    resolved_from_program(margins_home, state_dir, program_path, program)
 }
 
 fn workspace_plan_id(
     workspace_id: &str,
     base_revision: &str,
     actions: &[WorkspacePlanAction],
-    desired: &WorkspaceConfig,
+    desired_sha256: &str,
 ) -> Result<String> {
     #[derive(Serialize)]
     struct Identity<'a> {
         workspace_id: &'a str,
         base_revision: &'a str,
         actions: &'a [WorkspacePlanAction],
-        desired: &'a WorkspaceConfig,
+        desired_sha256: &'a str,
     }
     let bytes = serde_json::to_vec(&Identity {
         workspace_id,
         base_revision,
         actions,
-        desired,
+        desired_sha256,
     })
     .context("serializing canonical workspace plan identity")?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
@@ -1964,6 +2580,8 @@ fn validate_request_id(request_id: &str) -> Result<()> {
 }
 
 fn lock_workspace(state_dir: &Path) -> Result<File> {
+    std::fs::create_dir_all(state_dir)
+        .with_context(|| format!("creating workspace state at {}", state_dir.display()))?;
     let path = state_dir.join(WORKSPACE_LOCK);
     let file = OpenOptions::new()
         .create(true)
@@ -1980,15 +2598,6 @@ fn lock_workspace_ready(state_dir: &Path) -> Result<File> {
     let lock = lock_workspace(state_dir)?;
     recover_workspace_transaction(state_dir)?;
     Ok(lock)
-}
-
-fn read_config(path: &Path) -> Result<WorkspaceConfig> {
-    let body = std::fs::read_to_string(path)
-        .with_context(|| format!("reading workspace config {}", path.display()))?;
-    let config: WorkspaceConfig = toml::from_str(&body)
-        .with_context(|| format!("invalid workspace config {}", path.display()))?;
-    validate_config(&config)?;
-    Ok(config)
 }
 
 fn workspace_receipt_path(state_dir: &Path, request_id: &str) -> PathBuf {
@@ -2032,16 +2641,15 @@ fn recover_workspace_transaction(state_dir: &Path) -> Result<()> {
     let Some(transaction) = load_workspace_transaction(state_dir)? else {
         return Ok(());
     };
-    validate_config(&transaction.desired)?;
-    let expected_after = workspace_revision(&transaction.desired)?;
-    if expected_after != transaction.receipt.after_revision {
+    WorkspaceProgram::parse(&transaction.desired_program)
+        .context("pending workspace transaction has an invalid desired program")?;
+    if program_sha256(&transaction.desired_program) != transaction.receipt.after_revision {
         bail!("pending workspace transaction has an invalid desired revision");
     }
-    let config_path = state_dir.join(WORKSPACE_CONFIG);
-    let current = read_config(&config_path)?;
-    let current_revision = workspace_revision(&current)?;
+    let program_path = program_path_of_state_dir(state_dir)?;
+    let current_revision = current_revision(state_dir)?;
     if current_revision == transaction.receipt.before_revision {
-        write_config(&config_path, &transaction.desired)?;
+        atomic_write(&program_path, transaction.desired_program.as_bytes())?;
     } else if current_revision != transaction.receipt.after_revision {
         bail!(
             "pending workspace transaction cannot be recovered: expected revision {} or {}, found {}",
@@ -2088,11 +2696,6 @@ fn store_workspace_receipt(state_dir: &Path, receipt: &WorkspaceApplyReceipt) ->
     atomic_write(&path, &body)
 }
 
-fn write_config(path: &Path, config: &WorkspaceConfig) -> Result<()> {
-    let body = toml::to_string_pretty(config).context("serializing workspace config")?;
-    atomic_write(path, body.as_bytes())
-}
-
 fn atomic_write(path: &Path, body: &[u8]) -> Result<()> {
     if path
         .metadata()
@@ -2131,13 +2734,10 @@ fn sync_parent_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn default_excluded_folders() -> Vec<String> {
-    vec![".git".to_string(), "node_modules".to_string()]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     fn safe_tempdir() -> tempfile::TempDir {
         tempfile::Builder::new()
@@ -2243,10 +2843,11 @@ mod tests {
         assert_eq!(first.workspace.home_dir, notes.canonicalize().unwrap());
         assert_eq!(
             first.workspace.config_path,
-            margins_home.join("workspaces/client-notes/config.toml")
+            margins_home.join("configs/client-notes.enzyme")
         );
         let raw = std::fs::read_to_string(&first.workspace.config_path).unwrap();
-        assert!(raw.contains(&format!("path = {:?}", notes.canonicalize().unwrap())));
+        assert!(raw.contains(&format!("path {:?}", notes.canonicalize().unwrap())));
+        assert!(!first.workspace.state_dir.join("config.toml").exists());
 
         let second = resolve_or_create_workspace(&roots, None, &notes).unwrap();
         assert!(!second.created_implicitly);
@@ -2403,11 +3004,16 @@ mod tests {
                 assert!(binding.calendar_selector().is_none());
             }
         }
-        let config_toml = std::fs::read_to_string(&workspace.config_path).unwrap();
-        assert!(config_toml.contains("query = \"-in:spam -in:trash\""));
-        assert!(config_toml.contains("backfill_days = 365"));
-        assert!(config_toml.contains("lookback_days = 365"));
-        assert!(config_toml.contains("lookahead_days = 180"));
+        let program = std::fs::read_to_string(&workspace.config_path).unwrap();
+        assert!(program.contains(
+            "source google-mail \"work-mail\" { account \"owner@example.com\" }"
+        ));
+        assert!(program.contains(
+            "source google-calendar \"work-calendar\" { account \"owner@example.com\" }"
+        ));
+        // Defaults equal default_declaration() and are omitted.
+        assert!(!program.contains("backfill days"));
+        assert!(!program.contains("lookback days"));
         assert_eq!(
             workspace.google_dir("owner@example.com").unwrap(),
             margins_home.join("google/owner@example.com")
@@ -2579,32 +3185,36 @@ mod tests {
     }
 
     #[test]
-    fn config_roundtrip_uses_bindings_not_sources() {
+    fn program_roundtrip_declares_sources_and_home_policy() {
         let temp = tempfile::tempdir().unwrap();
         let margins_home = temp.path().join("state");
         let notes = temp.path().join("notes");
         std::fs::create_dir_all(&notes).unwrap();
         let workspace = create_workspace(&margins_home, "practice", None, &notes).unwrap();
         let raw = std::fs::read_to_string(&workspace.config_path).unwrap();
-        assert!(raw.contains("[bindings.home]"));
-        assert!(raw.contains("kind = \"notes\""));
-        assert!(raw.contains("[bindings.captures]"));
-        assert!(!raw.contains("[sources."));
+        assert!(raw.contains("workspace \"practice\" {"), "{raw}");
+        assert!(raw.contains("source markdown \"home\""), "{raw}");
+        assert!(raw.contains("source margins-captures \"captures\""), "{raw}");
+        assert!(raw.contains("remember in folder \".\" create note"), "{raw}");
+        assert!(!raw.contains("[bindings"));
 
-        let reparsed: WorkspaceConfig = toml::from_str(&raw).unwrap();
-        assert_eq!(reparsed, workspace.config);
+        let reparsed = WorkspaceProgram::parse(&raw).unwrap();
+        assert_eq!(reparsed, workspace.program);
+        assert_eq!(workspace_revision(&workspace).unwrap(), program_sha256(&raw));
+        assert_eq!(
+            program_lang::derive_view(&reparsed, None, RetentionPolicy::default()).unwrap(),
+            workspace.config
+        );
     }
 
     #[test]
-    fn workspace_entity_curation_matches_enzyme_shape() {
+    fn workspace_entity_curation_renders_readings() {
         let temp = tempfile::tempdir().unwrap();
         let margins_home = temp.path().join("state");
         let notes = temp.path().join("notes");
-        std::fs::create_dir_all(&notes).unwrap();
-        let mut config = create_workspace(&margins_home, "practice", None, &notes)
-            .unwrap()
-            .config;
-        config.policy.entities = vec![
+        std::fs::create_dir_all(notes.join("people")).unwrap();
+        let mut workspace = create_workspace(&margins_home, "practice", None, &notes).unwrap();
+        let entities = vec![
             WorkspaceEntity::simple("#enzyme"),
             WorkspaceEntity::with_options(
                 "folder:people",
@@ -2615,12 +3225,24 @@ mod tests {
                 },
             ),
         ];
+        update_policy(
+            &mut workspace,
+            WorkspacePolicy {
+                entities: entities.clone(),
+                ..WorkspacePolicy::default()
+            },
+        )
+        .unwrap();
 
-        let raw = toml::to_string_pretty(&config).unwrap();
-        assert!(raw.contains("entities = ["), "{raw}");
-        assert!(raw.contains("profile = \"relational\""), "{raw}");
-        assert!(raw.contains("expandable = true"), "{raw}");
-        assert_eq!(toml::from_str::<WorkspaceConfig>(&raw).unwrap(), config);
+        let raw = std::fs::read_to_string(&workspace.config_path).unwrap();
+        assert!(raw.contains("learn questions from tag \"enzyme\""), "{raw}");
+        assert!(
+            raw.contains(
+                "learn questions from folder \"people\"\n    including linked pages\n    about relational"
+            ),
+            "{raw}"
+        );
+        assert_eq!(workspace.config.policy.entities, entities);
     }
 
     #[test]
@@ -2779,8 +3401,8 @@ account = "owner@example.com"
         assert!(failed_add.unwrap_err().to_string().contains("overlap"));
         assert!(!workspace.config.bindings.contains_key("ref"));
         let on_disk = std::fs::read_to_string(&workspace.config_path).unwrap();
-        assert!(on_disk.contains("[bindings.mail]"));
-        assert!(!on_disk.contains("[bindings.ref]"));
+        assert!(on_disk.contains("source google-mail \"mail\""));
+        assert!(!on_disk.contains("\"ref\""));
 
         #[cfg(unix)]
         {
@@ -2932,6 +3554,13 @@ account = "owner@example.com"
             .contains("two Google Meet sources"));
     }
 
+    fn mail_binding() -> WorkspaceBinding {
+        WorkspaceBinding::Gmail {
+            account: "owner@example.com".to_string(),
+            gmail: GmailCollectionSelector::default_declaration(),
+        }
+    }
+
     #[test]
     fn workspace_plan_apply_derives_replay_identity_and_rejects_stale_plans() {
         let temp = tempfile::tempdir().unwrap();
@@ -2940,18 +3569,19 @@ account = "owner@example.com"
         std::fs::create_dir_all(&notes).unwrap();
         let mut workspace = create_workspace(&margins_home, "practice", None, &notes).unwrap();
         let mut desired = workspace.config.clone();
-        desired.name = Some("Client practice".to_string());
-        desired.bindings.insert(
-            "mail".to_string(),
-            WorkspaceBinding::Gmail {
-                account: "owner@example.com".to_string(),
-                gmail: GmailCollectionSelector::default_declaration(),
-            },
-        );
+        desired.policy.excluded_folders = vec!["archive".to_string()];
+        desired.bindings.insert("mail".to_string(), mail_binding());
 
-        let plan = plan_workspace_config(&workspace.config, desired).unwrap();
+        let plan = plan_workspace_config(&workspace, desired).unwrap();
         assert_eq!(plan.schema_version, WORKSPACE_PLAN_SCHEMA);
-        assert_eq!(plan.actions.len(), 2);
+        assert_eq!(plan.actions.len(), 2, "{:?}", plan.actions);
+        assert_eq!(plan.base_revision, workspace.program.sha256());
+        assert_eq!(plan.desired_sha256, program_sha256(&plan.desired_program));
+        assert!(plan.diff.contains("+  source google-mail \"mail\""), "{}", plan.diff);
+        assert!(plan
+            .actions
+            .iter()
+            .any(|action| action.summary().contains("leave out folders archive")));
         let receipt = apply_workspace_plan(&mut workspace, &plan).unwrap();
         assert!(!receipt.replayed);
         assert_eq!(receipt.schema_version, WORKSPACE_APPLY_SCHEMA);
@@ -2960,21 +3590,25 @@ account = "owner@example.com"
             receipt.request_id,
             format!("workspace-apply-{}", receipt.request_hash)
         );
-        assert_eq!(workspace.config.name.as_deref(), Some("Client practice"));
+        assert_eq!(receipt.after_revision, plan.desired_sha256);
+        assert_eq!(
+            std::fs::read_to_string(&workspace.config_path).unwrap(),
+            plan.desired_program
+        );
+        assert!(workspace.config.bindings.contains_key("mail"));
 
         let replay = apply_workspace_plan(&mut workspace, &plan).unwrap();
         assert!(replay.replayed);
         assert_eq!(replay.after_revision, receipt.after_revision);
 
-        let mut changed = workspace.config.clone();
-        changed.name = Some("Different plan".to_string());
-        let changed_plan = plan_workspace_config(&workspace.config, changed).unwrap();
-        let changed_receipt = apply_workspace_plan(&mut workspace, &changed_plan).unwrap();
-        assert_ne!(changed_receipt.request_id, receipt.request_id);
+        // Re-planning the applied program is a no-op.
+        let unchanged = plan_workspace_program(&workspace, workspace.program.text()).unwrap();
+        assert!(unchanged.actions.is_empty());
+        assert!(unchanged.diff.is_empty());
 
-        let stale_plan = plan_workspace_config(&workspace.config, {
+        let stale_plan = plan_workspace_config(&workspace, {
             let mut desired = workspace.config.clone();
-            desired.name = Some("Stale plan".to_string());
+            desired.policy.excluded_tags = vec!["private".to_string()];
             desired
         })
         .unwrap();
@@ -2990,6 +3624,74 @@ account = "owner@example.com"
     }
 
     #[test]
+    fn workspace_apply_refuses_altered_plans() {
+        let temp = tempfile::tempdir().unwrap();
+        let margins_home = temp.path().join("state");
+        let notes = temp.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        let mut workspace = create_workspace(&margins_home, "practice", None, &notes).unwrap();
+        let mut desired = workspace.config.clone();
+        desired.bindings.insert("mail".to_string(), mail_binding());
+        let plan = plan_workspace_config(&workspace, desired).unwrap();
+        let before = std::fs::read_to_string(&workspace.config_path).unwrap();
+        let invalid_plan = |error: anyhow::Error| {
+            error
+                .downcast_ref::<WorkspaceMutationError>()
+                .is_some_and(|error| matches!(error, WorkspaceMutationError::InvalidPlan(_)))
+        };
+
+        // Text altered without updating its digest.
+        let mut altered = plan.clone();
+        altered.desired_program = altered.desired_program.replace("owner@", "other@");
+        assert!(invalid_plan(apply_workspace_plan(&mut workspace, &altered).unwrap_err()));
+
+        // Text and digest altered consistently: the plan identity no longer matches.
+        altered.desired_sha256 = program_sha256(&altered.desired_program);
+        assert!(invalid_plan(apply_workspace_plan(&mut workspace, &altered).unwrap_err()));
+
+        // Reviewed summary or diff edited after review.
+        let mut altered = plan.clone();
+        altered.diff.push_str("+ something else\n");
+        assert!(invalid_plan(apply_workspace_plan(&mut workspace, &altered).unwrap_err()));
+        let mut altered = plan.clone();
+        altered.actions.clear();
+        assert!(invalid_plan(apply_workspace_plan(&mut workspace, &altered).unwrap_err()));
+
+        assert_eq!(std::fs::read_to_string(&workspace.config_path).unwrap(), before);
+        apply_workspace_plan(&mut workspace, &plan).unwrap();
+    }
+
+    #[test]
+    fn workspace_plan_keeps_language_features_and_reports_program_only_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let margins_home = temp.path().join("state");
+        let notes = temp.path().join("notes");
+        std::fs::create_dir_all(notes.join("people")).unwrap();
+        let mut workspace = create_workspace(&margins_home, "practice", None, &notes).unwrap();
+        let program = workspace.program.text().replace(
+            "  remember in folder",
+            "  learn questions from folder \"people\" about relationships {\n    sample by time\n  }\n\n  when asked {\n    \"Use grep for exact names.\"\n  }\n\n  remember in folder",
+        );
+        let plan = plan_workspace_program(&workspace, &program).unwrap();
+        assert!(plan
+            .actions
+            .iter()
+            .any(|action| matches!(action, WorkspacePlanAction::SetPolicy { .. })));
+        assert!(plan
+            .actions
+            .iter()
+            .any(|action| matches!(action, WorkspacePlanAction::UpdateProgram { .. })));
+        apply_workspace_plan(&mut workspace, &plan).unwrap();
+
+        // A view-level mutation preserves the statements the view cannot express.
+        add_source(&mut workspace, "mail", mail_binding()).unwrap();
+        let text = std::fs::read_to_string(&workspace.config_path).unwrap();
+        assert!(text.contains("sample by time"), "{text}");
+        assert!(text.contains("Use grep for exact names."), "{text}");
+        assert!(text.contains("about relationships"), "{text}");
+    }
+
+    #[test]
     fn workspace_apply_recovers_a_durable_prepared_transaction() {
         let temp = tempfile::tempdir().unwrap();
         let margins_home = temp.path().join("state");
@@ -2997,8 +3699,8 @@ account = "owner@example.com"
         std::fs::create_dir_all(&notes).unwrap();
         let mut workspace = create_workspace(&margins_home, "practice", None, &notes).unwrap();
         let mut desired = workspace.config.clone();
-        desired.name = Some("Recovered transaction".to_string());
-        let plan = plan_workspace_config(&workspace.config, desired.clone()).unwrap();
+        desired.bindings.insert("mail".to_string(), mail_binding());
+        let plan = plan_workspace_config(&workspace, desired).unwrap();
         let request_hash = workspace_apply_request_hash(&plan).unwrap();
         let request_id = format!("workspace-apply-{request_hash}");
         let receipt = WorkspaceApplyReceipt {
@@ -3009,7 +3711,7 @@ account = "owner@example.com"
             request_hash,
             plan_id: plan.plan_id.clone(),
             before_revision: plan.base_revision.clone(),
-            after_revision: workspace_revision(&desired).unwrap(),
+            after_revision: plan.desired_sha256.clone(),
             replayed: false,
             actions: plan
                 .actions
@@ -3023,20 +3725,204 @@ account = "owner@example.com"
                 })
                 .collect(),
         };
+        // A crash after journaling the transaction, before the program write.
         store_workspace_transaction(
             &workspace.state_dir,
-            &WorkspaceTransaction { receipt, desired },
+            &WorkspaceTransaction {
+                receipt,
+                desired_program: plan.desired_program.clone(),
+            },
         )
         .unwrap();
 
         let recovered = apply_workspace_plan(&mut workspace, &plan).unwrap();
         assert!(recovered.replayed);
+        assert!(workspace.config.bindings.contains_key("mail"));
         assert_eq!(
-            workspace.config.name.as_deref(),
-            Some("Recovered transaction")
+            std::fs::read_to_string(&workspace.config_path).unwrap(),
+            plan.desired_program
         );
         assert!(!workspace_transaction_path(&workspace.state_dir).exists());
         assert!(workspace_receipt_path(&workspace.state_dir, &request_id).is_file());
+    }
+
+    fn write_legacy(margins_home: &Path, id: &str, body: &str) -> PathBuf {
+        let state_dir = margins_home.join(WORKSPACES_DIR).join(id);
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let path = state_dir.join(LEGACY_WORKSPACE_CONFIG);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    fn legacy_home(notes: &Path, extra: &str) -> String {
+        format!(
+            "id = \"legacy\"\n\n[bindings.home]\nkind = \"notes\"\npath = {:?}\nrole = \"home\"\n{extra}",
+            notes
+        )
+    }
+
+    /// One retired config per binding kind; each must migrate to a program
+    /// whose view equals the legacy config's bindings.
+    #[test]
+    fn legacy_config_migrates_every_binding_kind() {
+        let temp = tempfile::tempdir().unwrap();
+        let notes = temp.path().join("notes");
+        let reference = temp.path().join("reference");
+        let captures = temp.path().join("captures");
+        for path in [&notes, &reference, &captures] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let fixtures = [
+            ("notes", format!("\n[bindings.ref]\nkind = \"notes\"\npath = {reference:?}\nrole = \"reference\"\n"), "source markdown \"ref\""),
+            ("captures", format!("\n[bindings.captures]\nkind = \"captures\"\npath = {captures:?}\n"), "source margins-captures \"captures\""),
+            ("google-mail", "\n[bindings.mail]\nkind = \"google-mail\"\naccount = \"me@example.com\"\n\n[bindings.mail.gmail]\nquery = \"label:clients\"\nbackfill_days = 90\n".to_string(), "backfill days 90"),
+            ("google-calendar", "\n[bindings.calendar]\nkind = \"google-calendar\"\naccount = \"me@example.com\"\n\n[bindings.calendar.calendar]\nlookback_days = 365\nlookahead_days = 30\n".to_string(), "lookahead days 30"),
+            ("google-meet", "\n[bindings.meet]\nkind = \"google-meet\"\naccount = \"me@example.com\"\n".to_string(), "source google-meet \"meet\" { account \"me@example.com\" }"),
+            ("granola", "\n[bindings.granola]\nkind = \"granola\"\naccount = \"me@example.com\"\n\n[bindings.granola.collection]\ntime_range = \"last_30_days\"\nworkspace_only = true\n".to_string(), "workspace only true"),
+        ];
+        for (kind, extra, expected) in fixtures {
+            let margins_home = temp.path().join(format!("home-{kind}"));
+            let legacy_text = legacy_home(&notes, &extra);
+            write_legacy(&margins_home, "legacy", &legacy_text);
+            let legacy: WorkspaceConfig = toml::from_str(&legacy_text).unwrap();
+
+            let preview = preview_workspace_migration(&margins_home, "legacy").unwrap();
+            assert_eq!(preview.status, "would_migrate");
+            assert!(preview.program.contains(expected), "{kind}: {}", preview.program);
+            assert!(!workspace_program_path(&margins_home, "legacy").unwrap().exists());
+
+            let workspace = resolve_at(&margins_home, "legacy").unwrap();
+            assert_eq!(workspace.program.text(), preview.program, "{kind}: dry run differs");
+            assert_eq!(workspace.config.bindings, legacy.bindings, "{kind}");
+            assert!(workspace
+                .state_dir
+                .join(LEGACY_WORKSPACE_CONFIG_MIGRATED)
+                .is_file());
+            assert!(!workspace.state_dir.join(LEGACY_WORKSPACE_CONFIG).exists());
+            let replanned = plan_workspace_program(&workspace, workspace.program.text()).unwrap();
+            assert!(replanned.actions.is_empty(), "{kind}");
+        }
+    }
+
+    #[test]
+    fn mixed_legacy_config_migrates_policy_retention_and_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let margins_home = temp.path().join("machine");
+        let notes = temp.path().join("notes");
+        let reference = temp.path().join("reference");
+        std::fs::create_dir_all(notes.join("people")).unwrap();
+        std::fs::create_dir_all(notes.join("inbox")).unwrap();
+        std::fs::create_dir_all(&reference).unwrap();
+        let legacy_text = format!(
+            r##"id = "legacy"
+name = "Client practice"
+
+[policy]
+excluded_folders = [".git", "node_modules", "archive"]
+excluded_tags = ["private"]
+excluded_entities = ["[[Noise Sender]]", "folder:old", "#draft"]
+entities = [
+  "#craft",
+  {{ "folder:people" = {{ profile = "relational", expandable = true }} }},
+  {{ "folder:reference/papers" = {{ profile = "decision_trace" }} }},
+]
+
+[retention]
+raw_cache_max_age_days = 30
+
+[bindings.home]
+kind = "notes"
+path = {notes:?}
+role = "home"
+note_folder = "inbox"
+
+[bindings.reference]
+kind = "notes"
+path = {reference:?}
+role = "reference"
+
+[bindings.mail]
+kind = "google-mail"
+account = "me@example.com"
+
+[bindings.mail.gmail]
+query = "-in:spam -in:trash"
+backfill_days = 365
+"##
+        );
+        write_legacy(&margins_home, "legacy", &legacy_text);
+
+        let migration = migrate_workspace(&margins_home, "legacy").unwrap();
+        assert_eq!(migration.status, "migrated");
+        let text = &migration.program;
+        assert!(text.contains("remember in folder \"inbox\" in source \"home\" create note"), "{text}");
+        assert!(text.contains("learn questions from tag \"craft\""), "{text}");
+        // Several Markdown roots: unqualified legacy folders meant the Home root.
+        assert!(text.contains("learn questions from folder \"home/people\"\n    including linked pages\n    about relational"), "{text}");
+        assert!(text.contains("learn questions from folder \"reference/papers\"\n    about decision_trace"), "{text}");
+        assert!(text.contains("leave out folders [\"archive\", \"old\"]"), "{text}");
+        assert!(text.contains("leave out tags [\"private\", \"draft\"]"), "{text}");
+        assert!(text.contains("leave out links [\"Noise Sender\"]"), "{text}");
+        assert!(!text.contains(".git"), "{text}");
+        assert!(!text.contains("backfill days"), "{text}");
+
+        let workspace = resolve_at(&margins_home, "legacy").unwrap();
+        assert_eq!(workspace.config.name.as_deref(), Some("Client practice"));
+        assert_eq!(workspace.config.retention.raw_cache_max_age_days, Some(30));
+        let machine = std::fs::read_to_string(margins_home.join("config.toml")).unwrap();
+        assert!(machine.contains("[retention.legacy]"), "{machine}");
+        assert_eq!(workspace.note_destination().unwrap(), notes.canonicalize().unwrap().join("inbox"));
+
+        // Idempotent: a second migration neither rewrites nor reinterprets.
+        let again = migrate_workspace(&margins_home, "legacy").unwrap();
+        assert_eq!(again.status, "already_migrated");
+        assert_eq!(again.program, migration.program);
+        assert!(plan_workspace_program(&workspace, workspace.program.text())
+            .unwrap()
+            .actions
+            .is_empty());
+        // A legacy desired TOML for the same settings plans to no view change.
+        let legacy: WorkspaceConfig = toml::from_str(&legacy_text).unwrap();
+        let mut legacy = legacy;
+        legacy.policy.excluded_folders.retain(|folder| folder != ".git" && folder != "node_modules");
+        let legacy_plan = plan_legacy_workspace_config(&workspace, legacy).unwrap();
+        assert!(
+            legacy_plan.actions.iter().all(|action| !matches!(action, WorkspacePlanAction::AddBinding { .. } | WorkspacePlanAction::RemoveBinding { .. })),
+            "{:?}",
+            legacy_plan.actions
+        );
+    }
+
+    #[test]
+    fn concurrent_resolution_migrates_once() {
+        use std::sync::{Arc, Barrier};
+
+        let temp = tempfile::tempdir().unwrap();
+        let margins_home = temp.path().join("machine");
+        let notes = temp.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        write_legacy(&margins_home, "legacy", &legacy_home(&notes, ""));
+        let barrier = Arc::new(Barrier::new(4));
+        let handles = (0..4)
+            .map(|_| {
+                let margins_home = margins_home.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    resolve_at(&margins_home, "legacy").unwrap().program.sha256()
+                })
+            })
+            .collect::<Vec<_>>();
+        let revisions = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(revisions.len(), 1);
+        assert_eq!(list_workspaces(&margins_home).unwrap().len(), 1);
+        assert!(margins_home
+            .join("workspaces/legacy")
+            .join(LEGACY_WORKSPACE_CONFIG_MIGRATED)
+            .is_file());
     }
 
     #[test]
@@ -3104,7 +3990,7 @@ account = "owner@example.com"
             panic!("home binding changed")
         };
         *note_folder = Some(PathBuf::from("inbox"));
-        let plan = plan_workspace_config(&workspace.config, desired).unwrap();
+        let plan = plan_workspace_config(&workspace, desired).unwrap();
         apply_workspace_plan(&mut workspace, &plan).unwrap();
         assert_eq!(
             resolve_at(&machine, "practice")
@@ -3113,7 +3999,7 @@ account = "owner@example.com"
                 .unwrap(),
             workspace.home_dir.join("inbox")
         );
-        assert!(plan_workspace_config(&workspace.config, {
+        assert!(plan_workspace_config(&workspace, {
             let mut invalid = workspace.config.clone();
             let WorkspaceBinding::NativeMarkdown { note_folder, .. } =
                 invalid.bindings.get_mut("home").unwrap()
@@ -3134,7 +4020,7 @@ account = "owner@example.com"
                 panic!()
             };
             *note_folder = Some(PathBuf::from("outside-link"));
-            assert!(plan_workspace_config(&workspace.config, invalid).is_err());
+            assert!(plan_workspace_config(&workspace, invalid).is_err());
         }
     }
 }
