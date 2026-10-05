@@ -578,36 +578,62 @@ pub fn reconcile(
     workspace.note_policies = vec![policy];
 
     // Readings: one per desired entity, reusing the existing AST when present.
+    // Each existing reading is reused at most once, preferring one whose
+    // options already match, so several readings of one entity (for example
+    // under two profiles) survive a mutation that does not touch them.
     let mut readings = Vec::new();
-    let mut seen = BTreeSet::new();
+    let mut used = vec![false; workspace.readings.len()];
+    let mut fresh = BTreeSet::new();
     for configured in &desired.policy.entities {
         for (entity_ref, options) in configured.entries() {
             let entity = normalize_entity_ref(entity_ref)?;
             if references_removed_source(&entity, &base_markdown, &removed) {
                 continue;
             }
-            let existing = workspace
-                .readings
-                .iter()
-                .find(|reading| !reading.pattern && reading.entity.eq_ignore_ascii_case(&entity))
-                .cloned();
             let qualified = qualify_folder(&entity, qualification, &base_markdown, &markdown, &home);
-            if !seen.insert(qualified.to_lowercase()) {
-                continue;
-            }
-            let mut reading = existing.unwrap_or_else(|| Reading {
-                entity: qualified.clone(),
-                profile: "auto".to_string(),
-                definition: None,
-                learning: Learning::default(),
-                include_linked_pages: false,
-                include_who_links: false,
-                pattern: false,
-            });
-            reading.entity = qualified;
             let desired_profile = options.and_then(|options| options.profile.clone());
             let desired_expandable = options.is_some_and(|options| options.expandable)
-                && enzyme_spec::split_entity(&reading.entity).0 == "folder";
+                && enzyme_spec::split_entity(&qualified).0 == "folder";
+            let candidates: Vec<usize> = workspace
+                .readings
+                .iter()
+                .enumerate()
+                .filter(|(index, reading)| {
+                    !used[*index] && !reading.pattern && reading.entity.eq_ignore_ascii_case(&entity)
+                })
+                .map(|(index, _)| index)
+                .collect();
+            let existing = candidates
+                .iter()
+                .copied()
+                .find(|index| {
+                    reading_options(&workspace.readings[*index])
+                        == (desired_profile.clone(), desired_expandable)
+                })
+                .or_else(|| candidates.first().copied());
+            // A new reading identical to one already kept is a duplicate in the
+            // desired view, not a second reading.
+            let key = (qualified.to_lowercase(), desired_profile.clone(), desired_expandable);
+            let first = fresh.insert(key);
+            let mut reading = match existing {
+                Some(index) => {
+                    used[index] = true;
+                    workspace.readings[index].clone()
+                }
+                None if !first => continue,
+                None => {
+                    Reading {
+                        entity: qualified.clone(),
+                        profile: "auto".to_string(),
+                        definition: None,
+                        learning: Learning::default(),
+                        include_linked_pages: false,
+                        include_who_links: false,
+                        pattern: false,
+                    }
+                }
+            };
+            reading.entity = qualified;
             let (current_profile, _) = reading_options(&reading);
             if current_profile != desired_profile {
                 reading.profile = desired_profile.unwrap_or_else(|| "auto".to_string());
@@ -1140,6 +1166,36 @@ workspace "practice" {
         assert_eq!(workspace.exclusions, vec!["archive", "old"]);
         assert_eq!(workspace.excluded_tags, vec!["draft"]);
         assert_eq!(workspace.excluded_links, vec!["Noise", "Plain"]);
+    }
+
+    #[test]
+    fn several_readings_of_one_entity_survive_unrelated_mutations() {
+        let base = parse(
+            "workspace \"w\" {\n  source markdown \"notes\" { path \"/abs/notes\" }\n  learn questions from folder \"people\" about relationships {\n    sample by time\n  }\n  learn questions from folder \"people\" about decisions\n  remember in folder \".\" create note\n}\n",
+        );
+        let edited = mutated(&base, |config| {
+            config.policy.excluded_folders.push("archive".into());
+        });
+        let readings = &edited.workspace().readings;
+        assert_eq!(readings.len(), 2, "{}", edited.text());
+        assert_eq!(readings[0].profile, "relationships");
+        assert!(edited.text().contains("sample by time"), "{}", edited.text());
+        assert_eq!(readings[1].profile, "decisions");
+
+        // Reordering the view keeps each reading's own settings.
+        let reordered = mutated(&edited, |config| config.policy.entities.reverse());
+        let readings = &reordered.workspace().readings;
+        assert_eq!(readings.len(), 2, "{}", reordered.text());
+        assert_eq!(readings[0].profile, "decisions");
+        assert_eq!(readings[1].profile, "relationships");
+        assert!(readings[1].learning != Learning::default(), "{}", reordered.text());
+
+        // An exact duplicate in a desired view is still one new reading.
+        let duplicated = mutated(&edited, |config| {
+            config.policy.entities.push(WorkspaceEntity::simple("#craft"));
+            config.policy.entities.push(WorkspaceEntity::simple("#craft"));
+        });
+        assert_eq!(duplicated.workspace().readings.len(), 3, "{}", duplicated.text());
     }
 
     #[test]
