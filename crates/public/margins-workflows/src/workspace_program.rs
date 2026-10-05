@@ -17,7 +17,7 @@ use crate::workspace::{
 use anyhow::{bail, ensure, Context, Result};
 use enzyme_spec::{
     HostField, HostSource, HostValue, Learning, MarkdownSource, NotePolicy, Program, Reading,
-    Source, SqliteSource, SqliteWho,
+    Source,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -269,7 +269,7 @@ fn reading_options(reading: &Reading) -> (Option<String>, bool) {
     (profile, reading.include_linked_pages)
 }
 
-fn host_binding(host: &HostSource) -> Result<WorkspaceBinding> {
+pub(crate) fn host_binding(host: &HostSource) -> Result<WorkspaceBinding> {
     let label = || format!("source {} {:?}", host.kind, host.name);
     let allowed: &[&str] = match host.kind.as_str() {
         SOURCE_CAPTURES => &[FIELD_PATH],
@@ -745,32 +745,19 @@ fn qualify_folder(
 // Validation
 // ---------------------------------------------------------------------------
 
-/// Validate a program through `enzyme_spec::resolve` after replacing every
-/// Margins host source with a placeholder of the native kind it lowers to.
-/// This checks readings, profiles, folder qualification, and exclusions with
-/// the same resolver the engine uses. `profiles` is the optional shared
-/// `configs/profiles.enzyme` program.
-pub fn validate_language(program: &WorkspaceProgram, profiles: Option<&Program>) -> Result<()> {
-    let mut lowered = program.program().clone();
-    lowered.lower_host_sources(|_, host| {
-        Ok(Some(Source::Sqlite(SqliteSource {
-            name: host.name.clone(),
-            db: "/margins/ledger.db".to_string(),
-            query: "select 1".to_string(),
-            id: vec!["id".to_string()],
-            document_ref: None,
-            who: SqliteWho::Columns {
-                columns: vec!["who".to_string()],
-            },
-            when: "when".to_string(),
-            what: vec!["what".to_string()],
-            where_columns: Vec::new(),
-            weight: None,
-            timestamp_unit: "milliseconds".to_string(),
-            timestamp_epoch: None,
-            filter: None,
-        })))
-    })?;
+/// Validate a program through `enzyme_spec::resolve` after the same host
+/// lowering the engine path uses ([`crate::workspace_lowering::lower_for_engine`]),
+/// so readings, profiles, folder qualification, and exclusions are checked by
+/// the engine's own resolver against the sources it will actually index.
+/// `ledger` is the Workspace's `ledger.db` (named, never opened); `profiles`
+/// is the optional shared `configs/profiles.enzyme` program.
+pub fn validate_language(
+    program: &WorkspaceProgram,
+    ledger: &Path,
+    profiles: Option<&Program>,
+) -> Result<()> {
+    let lowered =
+        crate::workspace_lowering::lower_for_engine(program.program(), ledger, chrono::Utc::now())?;
     let mut programs = vec![lowered];
     if let Some(profiles) = profiles {
         programs.push(profiles.clone());
@@ -936,7 +923,7 @@ workspace "practice" {
                 ),
             ]
         );
-        validate_language(&parse(ALL_KINDS), None).unwrap();
+        validate_language(&parse(ALL_KINDS), Path::new("/state/ledger.db"), None).unwrap();
     }
 
     #[test]
@@ -1072,7 +1059,7 @@ workspace "practice" {
         assert!(text.contains("learn questions from tags matching \"proj-*\""), "{text}");
         assert!(text.contains("\"Use grep for exact names.\""), "{text}");
         assert!(text.contains("\"A meeting ended.\""), "{text}");
-        validate_language(program, None).unwrap();
+        validate_language(program, Path::new("/state/ledger.db"), None).unwrap();
     }
 
     #[test]

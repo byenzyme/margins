@@ -1,17 +1,21 @@
+//! Margins' side of Workspace recall: turn a Workspace program into the
+//! host-lowered program the engine indexes, and map engine document refs back
+//! to Margins provenance (Sources, native paths, external records).
+//!
+//! The engine call itself lives in [`crate::recall_engine_seam`]; this module
+//! only produces plain data for it.
+
 use anyhow::{Context, Result};
+use margins_workflows::enzyme_spec;
 use margins_workflows::integrations::{EvidenceHandle, GoogleCalendarScope};
-use margins_workflows::workspace::{
-    calendar_collection_namespace, gmail_collection_namespace, granola_collection_namespace,
-    meet_collection_namespace, native_markdown_collection_namespace, ResolvedWorkspace, SourceKind,
-    SourceRole, WorkspaceBinding, WorkspaceEntity, WorkspaceEntityOptions,
-};
-use recall_engine::config::NotesRootConfig;
-use recall_engine::document::{DiscoveredFile, FileDiscovery};
+use margins_workflows::workspace::{ResolvedWorkspace, SourceKind, WorkspaceBinding};
+use margins_workflows::workspace_lowering::{lower_for_engine, sqlite_document_ref};
 use rusqlite::Connection;
-use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+
+use crate::recall_engine_seam::{self, EngineWorkspace};
 
 #[derive(Debug, Clone)]
 pub(crate) struct CatalogEntry {
@@ -22,11 +26,11 @@ pub(crate) struct CatalogEntry {
 
 #[derive(Debug)]
 pub(crate) struct WorkspaceCorpus {
-    _runtime: tempfile::TempDir,
-    pub virtual_home: PathBuf,
-    pub engine_config: PathBuf,
+    /// Exactly what the engine receives.
+    pub engine: EngineWorkspace,
     pub catalog: BTreeMap<String, CatalogEntry>,
     pub filesystem_documents: BTreeMap<String, PathBuf>,
+    /// Lowered SQLite source name -> database it reads.
     pub sqlite_sources: BTreeMap<String, PathBuf>,
     pub entity_selection_debug: EntitySelectionDebug,
     pub excluded_link_entities: BTreeSet<String>,
@@ -41,325 +45,170 @@ pub(crate) struct EntitySelectionDebug {
     pub correspondents_considered: usize,
 }
 
-#[derive(Clone, Serialize)]
-struct EngineConfig {
-    defaults: EngineDefaults,
-    workspaces: BTreeMap<String, EngineWorkspace>,
-}
-
-#[derive(Clone, Serialize)]
-struct EngineDefaults {
-    total_limit: usize,
-}
-
-#[derive(Clone, Serialize)]
-struct EngineWorkspace {
-    excluded_folders: Vec<String>,
-    excluded_tags: Vec<String>,
-    excluded_links: Vec<String>,
-    entities: Vec<WorkspaceEntity>,
-    sources: BTreeMap<String, EngineSource>,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(untagged)]
-enum EngineSource {
-    Notes {
-        path: PathBuf,
-        document_ref_prefix: String,
-        exclusions: Vec<String>,
-        writable: bool,
-    },
-    Sqlite {
-        db: PathBuf,
-        query: String,
-        roles: EngineRoles,
-        timestamp: EngineTimestamp,
-    },
-}
-
-#[derive(Clone, Serialize)]
-struct EngineRoles {
-    id: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    document_ref: Option<String>,
-    who: EngineWhoRole,
-    when: String,
-    what: Vec<String>,
-}
-
-#[derive(Clone, Serialize)]
-struct EngineWhoRole {
-    format: &'static str,
-    column: String,
-}
-
 pub(crate) const ENGINE_ENTITY_LIMIT: usize = 30;
 const EMPTY_LEDGER_SELECTION_SENTINEL: &str = "[[margins:empty-ledger-selection]]";
-const MANAGED_PROJECTION_TAG: &str = "margins-managed-projection";
 
-#[derive(Clone, Serialize)]
-struct EngineTimestamp {
-    unit: &'static str,
-}
-
-pub(crate) fn prepare(
-    workspace: &ResolvedWorkspace,
-    validate_sources: bool,
-) -> Result<WorkspaceCorpus> {
-    let runtime = tempfile::tempdir().context("creating ephemeral recall workspace")?;
-    let virtual_workspaces = runtime.path().join("workspaces");
-    std::fs::create_dir_all(&virtual_workspaces)?;
-    let virtual_home = virtual_workspaces.join(&workspace.config.id);
-    std::fs::create_dir_all(&virtual_home)?;
-
-    let mut sources = BTreeMap::new();
-    let mut catalog = BTreeMap::new();
-    let mut filesystem_documents = BTreeMap::new();
-    let mut sqlite_sources = BTreeMap::new();
-    let notes_roots = workspace
-        .config
-        .bindings
+/// Build the Workspace's engine input and provenance catalog.
+///
+/// The program is the Workspace's own program, host-lowered
+/// ([`lower_for_engine`]) and extended with Margins' hidden selection rules:
+/// when the program declares no readings, automatic correspondents and recent
+/// people notes become link readings, and correspondence noise becomes
+/// `leave out links`. None of it is written to the user's program file.
+///
+/// `for_indexing` additionally creates an empty ledger for declared ledger
+/// sources that have never synced (so their lowered queries run and return no
+/// rows) and preflights every lowered SQLite query.
+pub(crate) fn prepare(workspace: &ResolvedWorkspace, for_indexing: bool) -> Result<WorkspaceCorpus> {
+    let ledger = workspace.ledger_path();
+    let has_ledger_source = workspace.config.bindings.values().any(is_ledger_binding);
+    if for_indexing && has_ledger_source && !ledger.is_file() {
+        margins_workflows::integrations::IntegrationsStore::open(&workspace.state_dir)
+            .context("creating the Workspace ledger for declared sources")?;
+    }
+    let mut program = lower_for_engine(workspace.program.program(), &ledger, chrono::Utc::now())?;
+    // Margins' catalyst budget, independent of any machine Enzyme settings.
+    program.settings.total_limit = Some(ENGINE_ENTITY_LIMIT);
+    let entity_policy = catalyst_entity_policy(workspace)?;
+    {
+        let body = &mut program.workspaces[0];
+        if body.readings.is_empty() {
+            let mut readings = entity_policy
+                .automatic
+                .iter()
+                .map(|entity| link_reading(entity))
+                .collect::<Vec<_>>();
+            if has_ledger_source && readings.is_empty() {
+                // The engine treats an empty reading list as "no curated
+                // policy" and falls back to raw occurrence coverage. Without
+                // this sentinel a decode failure or all-noise mailbox would
+                // turn into broad catalyst generation.
+                readings.push(link_reading(EMPTY_LEDGER_SELECTION_SENTINEL));
+            }
+            body.readings = readings;
+        }
+        for link in &entity_policy.excluded_links {
+            if !body
+                .excluded_links
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(link))
+            {
+                body.excluded_links.push(link.clone());
+            }
+        }
+    }
+    let excluded_link_entities = program.workspaces[0]
+        .excluded_links
         .iter()
-        .filter_map(|(name, binding)| match binding {
-            WorkspaceBinding::NativeMarkdown { path, role, .. } => Some(
-                native_markdown_collection_namespace(path).map(|document_ref_prefix| {
-                    NotesRootConfig {
-                        name: name.clone(),
-                        path: path.clone(),
-                        document_ref_prefix: Some(document_ref_prefix),
-                        exclusions: workspace.config.policy.excluded_folders.clone(),
-                        writable: *role == SourceRole::Home,
-                    }
-                }),
-            ),
+        .map(|link| normalize_entity_ref(link))
+        .collect::<BTreeSet<_>>();
+    if let Some(margins_home) = workspace.state_dir.parent().and_then(Path::parent) {
+        if let Some(shared) = margins_workflows::workspace::shared_profiles(margins_home)? {
+            for (name, profile) in shared.profiles {
+                program.profiles.entry(name).or_insert(profile);
+            }
+        }
+    }
+    let sqlite_sources = program.workspaces[0]
+        .sources
+        .iter()
+        .filter_map(|source| match source {
+            enzyme_spec::Source::Sqlite(sqlite) => Some(sqlite.clone()),
             _ => None,
         })
-        .collect::<Result<Vec<_>>>()?;
-    let mut markdown_folder_entities = MarkdownFolderEntityIndex::default();
-    discover_markdown_roots(
-        &notes_roots,
-        &mut catalog,
-        &mut filesystem_documents,
-        &mut markdown_folder_entities,
-    )?;
-    for root in &notes_roots {
-        sources.insert(
-            root.name.clone(),
-            EngineSource::Notes {
-                path: root.path.clone(),
-                document_ref_prefix: root
-                    .document_ref_prefix
-                    .clone()
-                    .expect("Margins always assigns native Markdown document identity"),
-                exclusions: root.exclusions.clone(),
-                writable: root.writable,
+        .collect::<Vec<_>>();
+    if for_indexing {
+        validate_sqlite_sources(&sqlite_sources)?;
+    }
+    let engine = EngineWorkspace {
+        program_text: enzyme_spec::render_program(&program),
+        workspace: workspace.config.id.clone(),
+        state_dir: workspace.state_dir.clone(),
+    };
+
+    let mut catalog = BTreeMap::new();
+    let mut filesystem_documents = BTreeMap::new();
+    for document in recall_engine_seam::markdown_documents(&engine)? {
+        filesystem_documents.insert(document.source_ref.clone(), document.path.clone());
+        catalog.insert(
+            document.source_ref,
+            CatalogEntry {
+                source: document.source,
+                kind: SourceKind::Notes,
+                evidence: EvidenceHandle::NativeMarkdown {
+                    path: document.path.to_string_lossy().into_owned(),
+                },
             },
         );
     }
-
-    for binding in workspace.config.bindings.values() {
-        match binding {
-            WorkspaceBinding::Gmail { account, .. } => {
-                if !workspace.ledger_path().is_file() {
-                    continue;
-                }
-                let source_name = gmail_collection_namespace(account)?;
-                sqlite_sources.insert(source_name.clone(), workspace.ledger_path());
-                sources.insert(
-                    source_name.clone(),
-                    mail_thread_sqlite_source(
-                        &workspace.ledger_path(),
-                        "email",
-                        account,
-                        &source_name,
-                    ),
-                );
-            }
-            WorkspaceBinding::GoogleCalendar { account, calendar } => {
-                if !workspace.ledger_path().is_file() {
-                    continue;
-                }
-                let source_name = calendar_collection_namespace(account)?;
-                let scope = GoogleCalendarScope::for_selector(calendar, chrono::Utc::now())?;
-                sqlite_sources.insert(source_name.clone(), workspace.ledger_path());
-                sources.insert(
-                    source_name.clone(),
-                    calendar_event_sqlite_source(
-                        &workspace.ledger_path(),
-                        "gcal",
-                        account,
-                        &source_name,
-                        scope,
-                    ),
-                );
-            }
-            WorkspaceBinding::GoogleMeet { account } => {
-                if !workspace.ledger_path().is_file() {
-                    continue;
-                }
-                let source_name = meet_collection_namespace(account)?;
-                sqlite_sources.insert(source_name.clone(), workspace.ledger_path());
-                sources.insert(
-                    source_name.clone(),
-                    external_document_sqlite_source(
-                        &workspace.ledger_path(),
-                        "google_meet",
-                        account,
-                        &source_name,
-                        None,
-                    ),
-                );
-            }
-            WorkspaceBinding::Granola { account, .. } => {
-                if !workspace.ledger_path().is_file() {
-                    continue;
-                }
-                let source_name = granola_collection_namespace(account)?;
-                sqlite_sources.insert(source_name.clone(), workspace.ledger_path());
-                sources.insert(
-                    source_name.clone(),
-                    external_document_sqlite_source(
-                        &workspace.ledger_path(),
-                        "granola",
-                        account,
-                        &source_name,
-                        None,
-                    ),
-                );
-            }
-            _ => {}
-        }
-    }
     load_ledger_catalog(workspace, &mut catalog)?;
 
-    if validate_sources {
-        validate_sqlite_sources(&sources)?;
-    }
-    let mut entity_policy = catalyst_entity_policy(workspace, &markdown_folder_entities)?;
-    let has_ledger_source = workspace.config.bindings.values().any(|binding| {
-        matches!(
-            binding,
-            WorkspaceBinding::Gmail { .. }
-                | WorkspaceBinding::GoogleCalendar { .. }
-                | WorkspaceBinding::GoogleMeet { .. }
-                | WorkspaceBinding::Granola { .. }
-        )
-    });
-    if has_ledger_source && entity_policy.entities.is_empty() {
-        // The engine treats an empty configured list as "no curated policy"
-        // and falls back to raw occurrence coverage. A missing sentinel would
-        // therefore turn a decode failure or all-noise mailbox into broad
-        // catalyst generation.
-        entity_policy
-            .entities
-            .push(WorkspaceEntity::simple(EMPTY_LEDGER_SELECTION_SENTINEL));
-    }
-    let engine_excluded_links = workspace
-        .config
-        .policy
-        .excluded_entities
+    let curated = recall_engine_seam::curated_entities(&engine)?;
+    let sentinel = engine_entity_name(EMPTY_LEDGER_SELECTION_SENTINEL);
+    let selected_link_entities = curated
         .iter()
-        .filter_map(|entity| link_entity_name(entity))
-        .chain(entity_policy.excluded_links.iter().cloned())
-        .collect::<BTreeSet<_>>();
-    let selected_link_entities = entity_policy
-        .entities
-        .iter()
-        .flat_map(WorkspaceEntity::entries)
-        .filter_map(|(entity, _)| link_entity_name(entity))
+        .filter(|(_, kind)| kind == "link")
+        .map(|(name, _)| name.clone())
         .collect();
-    let selected_entity_names = entity_policy
-        .entities
-        .iter()
-        .flat_map(WorkspaceEntity::entries)
-        .filter(|(entity, _)| *entity != EMPTY_LEDGER_SELECTION_SENTINEL)
-        .filter_map(|(entity, _)| engine_entity_name(entity))
+    let selected_entity_names = curated
+        .into_iter()
+        .map(|(name, _)| name)
+        .filter(|name| Some(name) != sentinel.as_ref())
         .collect();
-    let config = EngineConfig {
-        defaults: EngineDefaults {
-            total_limit: ENGINE_ENTITY_LIMIT,
-        },
-        workspaces: BTreeMap::from([(
-            workspace.config.id.clone(),
-            EngineWorkspace {
-                excluded_folders: workspace
-                    .config
-                    .policy
-                    .excluded_folders
-                    .iter()
-                    .cloned()
-                    .chain(
-                        workspace
-                            .config
-                            .policy
-                            .excluded_entities
-                            .iter()
-                            .filter_map(|entity| prefixed_entity_name(entity, "folder:")),
-                    )
-                    .collect(),
-                excluded_tags: workspace
-                    .config
-                    .policy
-                    .excluded_tags
-                    .iter()
-                    .cloned()
-                    .chain(
-                        workspace
-                            .config
-                            .policy
-                            .excluded_entities
-                            .iter()
-                            .filter_map(|entity| prefixed_entity_name(entity, "#")),
-                    )
-                    .chain(std::iter::once(MANAGED_PROJECTION_TAG.to_string()))
-                    .collect(),
-                excluded_links: workspace
-                    .config
-                    .policy
-                    .excluded_entities
-                    .iter()
-                    .filter_map(|entity| link_entity_name(entity))
-                    .chain(entity_policy.excluded_links.iter().cloned())
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect(),
-                entities: entity_policy.entities.clone(),
-                sources,
-            },
-        )]),
-    };
-    let engine_config = runtime.path().join("config.toml");
-    std::fs::write(&engine_config, toml::to_string_pretty(&config)?)?;
     Ok(WorkspaceCorpus {
-        _runtime: runtime,
-        virtual_home,
-        engine_config,
+        engine,
         catalog,
         filesystem_documents,
-        sqlite_sources,
+        sqlite_sources: if ledger.is_file() {
+            sqlite_sources
+                .iter()
+                .map(|source| (source.name.clone(), PathBuf::from(&source.db)))
+                .collect()
+        } else {
+            BTreeMap::new()
+        },
         entity_selection_debug: entity_policy.debug,
-        excluded_link_entities: engine_excluded_links,
+        excluded_link_entities,
         selected_link_entities,
         selected_entity_names,
     })
 }
 
-/// Exhaust every configured SQLite query before recall-engine receives the
-/// existing index. A bad ledger view/reference query must not let a refresh
-/// prune documents before the source error is discovered.
-fn validate_sqlite_sources(sources: &BTreeMap<String, EngineSource>) -> Result<()> {
-    for (name, source) in sources {
-        let EngineSource::Sqlite { db, query, .. } = source else {
-            continue;
-        };
-        let connection =
-            Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .with_context(|| {
-                    format!("opening SQLite recall source {name} at {}", db.display())
-                })?;
+fn is_ledger_binding(binding: &WorkspaceBinding) -> bool {
+    matches!(
+        binding,
+        WorkspaceBinding::Gmail { .. }
+            | WorkspaceBinding::GoogleCalendar { .. }
+            | WorkspaceBinding::GoogleMeet { .. }
+            | WorkspaceBinding::Granola { .. }
+    )
+}
+
+fn link_reading(entity: &str) -> enzyme_spec::Reading {
+    enzyme_spec::Reading {
+        entity: entity.trim().to_string(),
+        profile: "auto".to_string(),
+        definition: None,
+        learning: enzyme_spec::Learning::default(),
+        include_linked_pages: false,
+        include_who_links: false,
+        pattern: false,
+    }
+}
+
+/// Exhaust every lowered SQLite query before the engine receives the existing
+/// index. A bad ledger query must not let a refresh prune documents before the
+/// source error is discovered.
+fn validate_sqlite_sources(sources: &[enzyme_spec::SqliteSource]) -> Result<()> {
+    for source in sources {
+        let name = &source.name;
+        let connection = Connection::open_with_flags(
+            &source.db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .with_context(|| format!("opening SQLite recall source {name} at {}", source.db))?;
         let mut statement = connection
-            .prepare(query)
+            .prepare(&source.query)
             .with_context(|| format!("preflighting SQLite recall source {name}"))?;
         let column_count = statement.column_count();
         let mut rows = statement
@@ -379,176 +228,34 @@ fn validate_sqlite_sources(sources: &BTreeMap<String, EngineSource>) -> Result<(
     Ok(())
 }
 
-fn discover_markdown_roots(
-    roots: &[NotesRootConfig],
-    catalog: &mut BTreeMap<String, CatalogEntry>,
-    filesystem: &mut BTreeMap<String, PathBuf>,
-    folders: &mut MarkdownFolderEntityIndex,
-) -> Result<()> {
-    for discovered in FileDiscovery::from_notes_roots(roots.to_vec()).discover_named()? {
-        let absolute = discovered.root_path.join(&discovered.relative_path);
-        folders.observe(&discovered);
-        let source_ref = discovered.source_ref;
-        filesystem.insert(source_ref.clone(), absolute.clone());
-        catalog.insert(
-            source_ref,
-            CatalogEntry {
-                source: discovered.root_name,
-                kind: SourceKind::Notes,
-                evidence: EvidenceHandle::NativeMarkdown {
-                    path: absolute.to_string_lossy().into_owned(),
-                },
-            },
-        );
-    }
-    Ok(())
-}
-
-#[derive(Debug, Default)]
-struct MarkdownFolderEntityIndex {
-    home_by_scan_spec: BTreeMap<String, BTreeSet<String>>,
-    indexed: BTreeSet<String>,
-}
-
-impl MarkdownFolderEntityIndex {
-    fn observe(&mut self, discovered: &DiscoveredFile) {
-        let relative = discovered
-            .relative_path
-            .to_string_lossy()
-            .replace('\\', "/");
-        let prefix = discovered
-            .source_ref
-            .strip_suffix(&relative)
-            .unwrap_or("")
-            .trim_end_matches('/');
-
-        let parent = discovered
-            .relative_path
-            .parent()
-            .map(|path| path.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_default();
-        if parent.is_empty() {
-            self.push(".", folder_identity(prefix, "."), discovered.writable);
-            return;
-        }
-
-        let mut current = String::new();
-        for component in parent.split('/').filter(|component| !component.is_empty()) {
-            if !current.is_empty() {
-                current.push('/');
-            }
-            current.push_str(&component.to_ascii_lowercase());
-            self.push(
-                &current,
-                folder_identity(prefix, &current),
-                discovered.writable,
-            );
-        }
-    }
-
-    fn push(&mut self, scan_spec_name: &str, indexed_name: String, writable: bool) {
-        let key = scan_spec_name.to_ascii_lowercase();
-        self.indexed.insert(indexed_name.clone());
-        if writable {
-            self.home_by_scan_spec
-                .entry(key)
-                .or_default()
-                .insert(indexed_name);
-        }
-    }
-
-    fn resolve_folder_ref(&self, entity_ref: &str) -> Result<Option<Vec<String>>> {
-        let Some(folder_name) = prefixed_entity_name(entity_ref, "folder:") else {
-            return Ok(None);
-        };
-        if self.indexed.contains(&folder_name) {
-            return Ok(Some(vec![format!("folder:{folder_name}")]));
-        }
-        // `scan` examines the Workspace home. Its unscoped `folder:*` specs
-        // therefore bind only to home Markdown identities; reference-source
-        // curation needs a source-qualified folder ref instead of fan-out.
-        let Some(matches) = self.home_by_scan_spec.get(&folder_name) else {
-            anyhow::bail!(
-                "configured folder entity {entity_ref:?} does not resolve to any indexed home Markdown source folder"
-            );
-        };
-        anyhow::ensure!(
-            matches.len() == 1,
-            "configured folder entity {entity_ref:?} is ambiguous across indexed home Markdown source folders"
-        );
-        Ok(Some(
-            matches
-                .iter()
-                .map(|indexed_name| format!("folder:{indexed_name}"))
-                .collect(),
-        ))
-    }
-}
-
-/// Interim adapter until the engine reads the Workspace program directly: with
-/// several Markdown sources, program folder readings are root-qualified
-/// (`folder:<source>/<path>`). Map a Home-qualified folder to the Home scan
-/// spec and another root's folder to its indexed identity.
-fn engine_folder_ref(workspace: &ResolvedWorkspace, entity: &str) -> Result<String> {
-    let markdown = workspace
-        .config
-        .bindings
-        .iter()
-        .filter_map(|(name, binding)| match binding {
-            WorkspaceBinding::NativeMarkdown { path, role, .. } => Some((name, path, *role)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let Some(folder) = prefixed_entity_name(entity, "folder:") else {
-        return Ok(entity.to_string());
-    };
-    if markdown.len() < 2 {
-        return Ok(entity.to_string());
-    }
-    let (root, rest) = folder.split_once('/').unwrap_or((folder.as_str(), "."));
-    let Some((_, path, role)) = markdown
-        .iter()
-        .find(|(name, _, _)| name.eq_ignore_ascii_case(root))
-    else {
-        return Ok(entity.to_string());
-    };
-    if *role == SourceRole::Home {
-        return Ok(format!("folder:{rest}"));
-    }
-    Ok(format!(
-        "folder:{}",
-        folder_identity(
-            &native_markdown_collection_namespace(path)?,
-            &rest.to_ascii_lowercase()
-        )
-    ))
-}
-
-fn folder_identity(source_prefix: &str, folder_name: &str) -> String {
-    match (source_prefix.is_empty(), folder_name == ".") {
-        (true, true) => ".".to_string(),
-        (true, false) => folder_name.to_string(),
-        (false, true) => source_prefix.to_ascii_lowercase(),
-        (false, false) => format!("{}/{folder_name}", source_prefix.to_ascii_lowercase()),
-    }
-}
-
-/// Freeze the Workspace's ordinary entity surface. Operational approval is not
-/// a corpus or catalyst-selection input. An explicit Workspace `entities` list
-/// is authoritative. Otherwise automatic correspondents are ranked by their
-/// rebuildable thread-association score, followed by native people-note
-/// entities. Every entry still flows through the engine's existing entity
-/// lookup, occurrence volume, era selection, and catalyst budgets.
+/// Automatic catalyst selection for a program that declares no readings.
+/// Operational approval is not a corpus or catalyst-selection input.
+/// Correspondents are ranked by their rebuildable thread-association score,
+/// followed by native people-note entities. Every entry still flows through
+/// the engine's entity lookup, occurrence volume, era selection, and budgets.
 struct CatalystEntityPolicy {
-    entities: Vec<WorkspaceEntity>,
+    automatic: Vec<String>,
     excluded_links: BTreeSet<String>,
     debug: EntitySelectionDebug,
 }
 
-fn catalyst_entity_policy(
-    workspace: &ResolvedWorkspace,
-    markdown_folders: &MarkdownFolderEntityIndex,
-) -> Result<CatalystEntityPolicy> {
+fn catalyst_entity_policy(workspace: &ResolvedWorkspace) -> Result<CatalystEntityPolicy> {
+    let curated = workspace.program.workspace().readings.clone();
+    if !curated.is_empty() {
+        return Ok(CatalystEntityPolicy {
+            automatic: Vec::new(),
+            excluded_links: BTreeSet::new(),
+            debug: EntitySelectionDebug {
+                selected: curated
+                    .iter()
+                    .filter(|reading| !reading.pattern)
+                    .map(|reading| (reading.entity.clone(), None))
+                    .collect(),
+                suppressed_count: 0,
+                correspondents_considered: 0,
+            },
+        });
+    }
     let excluded = workspace
         .config
         .policy
@@ -557,65 +264,15 @@ fn catalyst_entity_policy(
         .map(|entity| normalize_entity_ref(entity))
         .collect::<BTreeSet<_>>();
     let mut seen = BTreeSet::new();
-    let mut entities = Vec::new();
+    let mut automatic = Vec::new();
     let mut selected_debug = Vec::new();
-    fn push_entity(
-        entity: String,
-        options: Option<WorkspaceEntityOptions>,
-        weight: Option<u64>,
-        excluded: &BTreeSet<String>,
-        markdown_folders: &MarkdownFolderEntityIndex,
-        seen: &mut BTreeSet<String>,
-        entities: &mut Vec<WorkspaceEntity>,
-        selected_debug: &mut Vec<(String, Option<u64>)>,
-    ) -> Result<bool> {
-        let original_key = normalize_entity_ref(&entity);
-        if original_key.is_empty() || excluded.contains(&original_key) {
-            return Ok(false);
+    let mut push = |entity: String, weight: Option<u64>, automatic: &mut Vec<String>| {
+        let key = normalize_entity_ref(&entity);
+        if !key.is_empty() && !excluded.contains(&key) && seen.insert(key) {
+            selected_debug.push((entity.trim().to_string(), weight));
+            automatic.push(entity.trim().to_string());
         }
-        let values = markdown_folders
-            .resolve_folder_ref(&entity)?
-            .unwrap_or_else(|| vec![entity.trim().to_string()]);
-        let mut pushed = false;
-        for value in values {
-            let key = normalize_entity_ref(&value);
-            if !key.is_empty() && !excluded.contains(&key) && seen.insert(key) {
-                selected_debug.push((value.clone(), weight));
-                entities.push(match options.clone() {
-                    Some(options) => WorkspaceEntity::with_options(value, options),
-                    None => WorkspaceEntity::simple(value),
-                });
-                pushed = true;
-            }
-        }
-        Ok(pushed)
-    }
-
-    if !workspace.config.policy.entities.is_empty() {
-        for configured in &workspace.config.policy.entities {
-            for (entity, options) in configured.entries() {
-                push_entity(
-                    engine_folder_ref(workspace, entity)?,
-                    options.cloned(),
-                    None,
-                    &excluded,
-                    markdown_folders,
-                    &mut seen,
-                    &mut entities,
-                    &mut selected_debug,
-                )?;
-            }
-        }
-        return Ok(CatalystEntityPolicy {
-            entities,
-            excluded_links: BTreeSet::new(),
-            debug: EntitySelectionDebug {
-                selected: selected_debug,
-                suppressed_count: 0,
-                correspondents_considered: 0,
-            },
-        });
-    }
+    };
 
     let owner_identities = workspace
         .config
@@ -642,45 +299,27 @@ fn catalyst_entity_policy(
     }
     correspondents.retain(|entity| !owner_identities.contains(&entity.identity_key));
     for entity in correspondents {
-        if entities.len() >= ENGINE_ENTITY_LIMIT {
+        if automatic.len() >= ENGINE_ENTITY_LIMIT {
             break;
         }
-        push_entity(
-            entity.entity_ref(),
-            None,
-            Some(entity.weight),
-            &excluded,
-            markdown_folders,
-            &mut seen,
-            &mut entities,
-            &mut selected_debug,
-        )?;
+        push(entity.entity_ref(), Some(entity.weight), &mut automatic);
     }
     for person in margins_workflows::session_index::recent_people_candidates(
         &workspace.home_dir,
         "people",
         None,
     ) {
-        if entities.len() >= ENGINE_ENTITY_LIMIT {
+        if automatic.len() >= ENGINE_ENTITY_LIMIT {
             break;
         }
         let person = person.trim();
         if !person.is_empty() {
-            push_entity(
-                format!("[[{person}]]"),
-                None,
-                None,
-                &excluded,
-                markdown_folders,
-                &mut seen,
-                &mut entities,
-                &mut selected_debug,
-            )?;
+            push(format!("[[{person}]]"), None, &mut automatic);
         }
     }
     let suppressed_count = excluded_links.len();
     Ok(CatalystEntityPolicy {
-        entities,
+        automatic,
         excluded_links,
         debug: EntitySelectionDebug {
             selected: selected_debug,
@@ -696,194 +335,41 @@ fn normalize_entity_ref(value: &str) -> String {
 
 fn engine_entity_name(value: &str) -> Option<String> {
     let normalized = normalize_entity_ref(value);
-    if let Some(name) = normalized
-        .strip_prefix("[[")
-        .and_then(|name| name.strip_suffix("]]"))
-    {
-        return (!name.trim().is_empty()).then(|| name.trim().to_string());
-    }
-    for prefix in ["#", "folder:", "log:"] {
-        if let Some(name) = normalized.strip_prefix(prefix) {
-            return (!name.trim().is_empty()).then(|| name.trim().to_string());
-        }
-    }
-    (!normalized.is_empty()).then_some(normalized)
-}
-
-fn link_entity_name(value: &str) -> Option<String> {
-    let normalized = normalize_entity_ref(value);
     normalized
         .strip_prefix("[[")
-        .and_then(|value| value.strip_suffix("]]"))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
+        .and_then(|name| name.strip_suffix("]]"))
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
 }
 
-fn prefixed_entity_name(value: &str, prefix: &str) -> Option<String> {
-    normalize_entity_ref(value)
-        .strip_prefix(prefix)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
-/// Build one stable source row per authoritative Calendar event. The engine
-/// receives a generic document plus role-blind participant associations; it
-/// never reads Calendar projections or raw transport payloads.
-fn calendar_event_sqlite_source(
-    db: &Path,
-    connector: &str,
-    account: &str,
-    source_name: &str,
-    scope: GoogleCalendarScope,
-) -> EngineSource {
-    let document_ref_prefix = format!("sqlite:{source_name}/");
-    let query = format!(
-        "SELECT ce.source_id AS id, \
-         {} || lower(hex(CAST(ce.source_id AS BLOB))) AS document_ref, \
-         CAST(strftime('%s', ce.occurred_from) AS INTEGER) * 1000 AS occurred_at_ms, \
-         ce.title, ce.body_text AS body, \
-         COALESCE((SELECT json_group_array(participant) FROM ( \
-             SELECT COALESCE(NULLIF(ca.email, ''), ca.display_name) AS participant \
-             FROM calendar_event_attendees ca \
-             WHERE ca.connector_id = ce.connector_id \
-               AND ca.source_account = ce.source_account \
-               AND ca.source_id = ce.source_id \
-             ORDER BY ca.position, ca.attendee_key \
-         )), '[]') AS participants \
-         FROM calendar_event_evidence ce \
-         WHERE ce.connector_id = {} AND ce.source_account = {} \
-           AND ce.tombstoned_at IS NULL \
-           AND ce.occurred_from >= {} AND ce.occurred_from <= {}",
-        sql_string(&document_ref_prefix),
-        sql_string(connector),
-        sql_string(account),
-        sql_string(&scope.occurred_from.to_rfc3339()),
-        sql_string(&scope.occurred_to.to_rfc3339()),
-    );
-    EngineSource::Sqlite {
-        db: db.to_path_buf(),
-        query,
-        roles: EngineRoles {
-            id: vec!["id".to_string()],
-            document_ref: Some("document_ref".to_string()),
-            who: EngineWhoRole {
-                format: "json_array",
-                column: "participants".to_string(),
-            },
-            when: "occurred_at_ms".to_string(),
-            what: vec!["title".to_string(), "body".to_string()],
-        },
-        timestamp: EngineTimestamp { unit: "ms" },
+/// Markdown identity under the Workspace language: with one Markdown source
+/// refs are root-relative; with several they are `<source name>/<relative>`.
+/// Returns the declaring source name and the absolute path of a native ref.
+pub(crate) fn markdown_document(
+    workspace: &ResolvedWorkspace,
+    document_ref: &str,
+) -> Option<(String, PathBuf)> {
+    if document_ref.starts_with("sqlite:") {
+        return None;
     }
-}
-
-/// Build one stable source row per authoritative external evidence document.
-/// Google Meet is the first concrete consumer. Provider-specific
-/// attributes and raw transport payloads stay on the Margins side of the
-/// boundary; Enzyme receives only generic document fields and role-blind
-/// participant associations.
-fn external_document_sqlite_source(
-    db: &Path,
-    connector: &str,
-    account: &str,
-    source_name: &str,
-    occurred_from: Option<chrono::DateTime<chrono::Utc>>,
-) -> EngineSource {
-    let document_ref_prefix = format!("sqlite:{source_name}/");
-    let time_predicate = occurred_from
-        .map(|occurred_from| {
-            format!(
-                " AND ed.occurred_at >= {}",
-                sql_string(&occurred_from.to_rfc3339())
-            )
+    let markdown = workspace
+        .config
+        .bindings
+        .iter()
+        .filter_map(|(name, binding)| match binding {
+            WorkspaceBinding::NativeMarkdown { path, .. } => Some((name, path)),
+            _ => None,
         })
-        .unwrap_or_default();
-    let query = format!(
-        "SELECT ed.source_id AS id, \
-         {} || lower(hex(CAST(ed.source_id AS BLOB))) AS document_ref, \
-         CAST(strftime('%s', ed.occurred_at) AS INTEGER) * 1000 AS occurred_at_ms, \
-         ed.title, ed.body_text AS body, \
-         COALESCE((SELECT json_group_array(participant) FROM ( \
-             SELECT COALESCE(NULLIF(ep.email, ''), ep.display_name) AS participant \
-             FROM external_document_participants ep \
-             WHERE ep.connector_id = ed.connector_id \
-               AND ep.source_account = ed.source_account \
-               AND ep.source_id = ed.source_id \
-               AND ep.ambiguous = 0 \
-             ORDER BY ep.position, ep.participant_key \
-         )), '[]') AS participants \
-         FROM external_document_evidence ed \
-         WHERE ed.connector_id = {} AND ed.source_account = {} \
-           AND ed.tombstoned_at IS NULL{}",
-        sql_string(&document_ref_prefix),
-        sql_string(connector),
-        sql_string(account),
-        time_predicate,
-    );
-    EngineSource::Sqlite {
-        db: db.to_path_buf(),
-        query,
-        roles: EngineRoles {
-            id: vec!["id".to_string()],
-            document_ref: Some("document_ref".to_string()),
-            who: EngineWhoRole {
-                format: "json_array",
-                column: "participants".to_string(),
-            },
-            when: "occurred_at_ms".to_string(),
-            what: vec!["title".to_string(), "body".to_string()],
-        },
-        timestamp: EngineTimestamp { unit: "ms" },
-    }
-}
-
-/// Build one stable source row per materialized email thread.
-fn mail_thread_sqlite_source(
-    db: &Path,
-    connector: &str,
-    account: &str,
-    source_name: &str,
-) -> EngineSource {
-    let document_ref_prefix = format!("sqlite:{source_name}/");
-    let query = format!(
-        "SELECT te.thread_id AS id, \
-         {} || lower(hex(CAST(te.thread_id AS BLOB))) AS document_ref, \
-         CAST(strftime('%s', te.occurred_to) AS INTEGER) * 1000 AS occurred_at_ms, \
-         te.body_text AS body, \
-         COALESCE((
-             SELECT json_group_array(ordered.participant)
-             FROM (
-                 SELECT DISTINCT pt.participant
-                 FROM participant_threads pt
-                 WHERE pt.connector_id = te.connector_id
-                   AND pt.source_account = te.source_account
-                   AND pt.thread_id = te.thread_id
-                 ORDER BY pt.participant
-             ) ordered
-         ), '[]') AS participants \
-         FROM thread_evidence te \
-         WHERE te.connector_id = {} AND te.source_account = {} \
-           AND te.tombstoned_at IS NULL",
-        sql_string(&document_ref_prefix),
-        sql_string(connector),
-        sql_string(account),
-    );
-    EngineSource::Sqlite {
-        db: db.to_path_buf(),
-        query,
-        roles: EngineRoles {
-            id: vec!["id".to_string()],
-            document_ref: Some("document_ref".to_string()),
-            who: EngineWhoRole {
-                format: "json_array",
-                column: "participants".to_string(),
-            },
-            when: "occurred_at_ms".to_string(),
-            what: vec!["body".to_string()],
-        },
-        timestamp: EngineTimestamp { unit: "ms" },
+        .collect::<Vec<_>>();
+    match markdown.as_slice() {
+        [] => None,
+        [(name, path)] => Some(((*name).clone(), path.join(document_ref))),
+        many => {
+            let (root, relative) = document_ref.split_once('/')?;
+            many.iter()
+                .find(|(name, _)| name.as_str() == root)
+                .map(|(name, path)| ((*name).clone(), path.join(relative)))
+        }
     }
 }
 
@@ -924,9 +410,8 @@ fn load_ledger_catalog(
         }) else {
             continue;
         };
-        let document_ref = external_document_ref(name, binding, &source_id)?;
         catalog.insert(
-            document_ref,
+            sqlite_document_ref(name, &source_id),
             CatalogEntry {
                 source: name.clone(),
                 kind: binding.kind(),
@@ -975,7 +460,7 @@ fn load_ledger_catalog(
             continue;
         }
         catalog.insert(
-            external_document_ref(name, binding, &source_id)?,
+            sqlite_document_ref(name, &source_id),
             CatalogEntry {
                 source: name.clone(),
                 kind: binding.kind(),
@@ -1008,7 +493,7 @@ fn load_ledger_catalog(
             continue;
         };
         catalog.insert(
-            external_document_ref(name, binding, &source_id)?,
+            sqlite_document_ref(name, &source_id),
             CatalogEntry {
                 source: name.clone(),
                 kind: binding.kind(),
@@ -1038,41 +523,6 @@ fn external_evidence(
     }
 }
 
-fn external_document_ref(
-    binding_name: &str,
-    binding: &WorkspaceBinding,
-    id: &str,
-) -> Result<String> {
-    match binding {
-        WorkspaceBinding::Gmail { account, .. } => Ok(sqlite_exact_document_ref(
-            &gmail_collection_namespace(account)?,
-            id,
-        )),
-        WorkspaceBinding::GoogleCalendar { account, .. } => Ok(sqlite_exact_document_ref(
-            &calendar_collection_namespace(account)?,
-            id,
-        )),
-        WorkspaceBinding::GoogleMeet { account } => Ok(sqlite_exact_document_ref(
-            &meet_collection_namespace(account)?,
-            id,
-        )),
-        WorkspaceBinding::Granola { account, .. } => Ok(sqlite_exact_document_ref(
-            &granola_collection_namespace(account)?,
-            id,
-        )),
-        _ => anyhow::bail!("binding {binding_name:?} has no external evidence document ref"),
-    }
-}
-
-fn sqlite_exact_document_ref(source_name: &str, id: &str) -> String {
-    let encoded_id = id
-        .as_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("sqlite:{source_name}/{encoded_id}")
-}
-
 fn binding_matches_external_document(
     binding: &WorkspaceBinding,
     connector: &str,
@@ -1097,10 +547,6 @@ pub(crate) fn path_modified_ms(path: &Path) -> Option<i64> {
         .map(|duration| duration.as_millis() as i64)
 }
 
-fn sql_string(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1110,6 +556,8 @@ mod tests {
         ConnectorCtx, CurationObservation, IntegrationsStore, KindCounts, ParticipantThread,
         RawItemDraft, ThreadEvidence, EMAIL_CONNECTOR_ID,
     };
+    use margins_workflows::workspace::{SourceRole, WorkspaceEntity, WorkspaceEntityOptions};
+    use margins_workflows::workspace_lowering::MANAGED_PROJECTION_TAG;
     use std::collections::BTreeMap;
 
     fn add_google_sources_for_test(
@@ -1156,8 +604,29 @@ mod tests {
             .unwrap();
     }
 
+    fn engine_program(corpus: &WorkspaceCorpus) -> enzyme_spec::Workspace {
+        enzyme_spec::parse(&corpus.engine.program_text)
+            .unwrap()
+            .workspaces
+            .remove(0)
+    }
+
+    fn readings(corpus: &WorkspaceCorpus) -> Vec<String> {
+        engine_program(corpus)
+            .readings
+            .into_iter()
+            .map(|reading| reading.entity)
+            .collect()
+    }
+
+    fn set_entities(workspace: &mut ResolvedWorkspace, entities: Vec<WorkspaceEntity>) {
+        let mut policy = workspace.config.policy.clone();
+        policy.entities = entities;
+        margins_workflows::workspace::update_policy(workspace, policy).unwrap();
+    }
+
     #[test]
-    fn native_document_refs_survive_binding_rename_and_second_root() {
+    fn markdown_document_identity_follows_the_workspace_language() {
         let temp = tempfile::tempdir().unwrap();
         let margins_home = temp.path().join("margins");
         let notes = temp.path().join("notes");
@@ -1169,52 +638,53 @@ mod tests {
         let mut workspace =
             margins_workflows::workspace::create_workspace(&margins_home, "practice", None, &notes)
                 .unwrap();
-
-        let first = prepare(&workspace, false)
-            .unwrap()
-            .filesystem_documents
-            .keys()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        assert_eq!(first.len(), 1);
-        let home_ref = first.iter().next().unwrap().clone();
-        assert!(home_ref.starts_with("markdown_"));
-
-        let home_binding = workspace.config.bindings.remove("home").unwrap();
-        workspace
+        let home_name = workspace
             .config
             .bindings
-            .insert("renamed-home".to_string(), home_binding);
-        let renamed = prepare(&workspace, false)
-            .unwrap()
-            .filesystem_documents
-            .keys()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        assert_eq!(renamed, first);
+            .iter()
+            .find(|(_, binding)| matches!(binding, WorkspaceBinding::NativeMarkdown { .. }))
+            .map(|(name, _)| name.clone())
+            .unwrap();
 
+        // One Markdown source: root-relative refs.
+        let single = prepare(&workspace, false).unwrap();
+        assert_eq!(
+            single.filesystem_documents.keys().collect::<Vec<_>>(),
+            ["home.md"]
+        );
+        assert_eq!(single.catalog["home.md"].source, home_name);
+        assert_eq!(
+            markdown_document(&workspace, "home.md"),
+            Some((home_name.clone(), notes.join("home.md")))
+        );
+
+        // Several Markdown sources: refs are qualified by the source name.
         margins_workflows::workspace::add_source(
             &mut workspace,
             "research",
             WorkspaceBinding::NativeMarkdown {
-                path: reference,
+                path: reference.clone(),
                 role: SourceRole::Reference,
                 note_folder: None,
             },
         )
         .unwrap();
-        let expanded = prepare(&workspace, false)
-            .unwrap()
-            .filesystem_documents
-            .keys()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        assert_eq!(expanded.len(), 2);
-        assert!(expanded.contains(&home_ref));
+        let multi = prepare(&workspace, false).unwrap();
+        let home_ref = format!("{home_name}/home.md");
+        assert_eq!(
+            multi.filesystem_documents.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from([home_ref.clone(), "research/reference.md".to_string()])
+        );
+        assert_eq!(multi.catalog["research/reference.md"].source, "research");
+        assert_eq!(
+            markdown_document(&workspace, "research/reference.md"),
+            Some(("research".to_string(), reference.join("reference.md")))
+        );
+        assert_eq!(markdown_document(&workspace, "sqlite:mail/00"), None);
     }
 
     #[test]
-    fn managed_projection_tag_remains_excluded_after_binding_removal() {
+    fn managed_projection_tag_is_a_hidden_lowering_rule() {
         let temp = tempfile::tempdir().unwrap();
         let margins_home = temp.path().join("margins");
         let notes = temp.path().join("notes");
@@ -1224,18 +694,17 @@ mod tests {
                 .unwrap();
 
         let corpus = prepare(&workspace, false).unwrap();
-        let config: toml::Value =
-            toml::from_str(&std::fs::read_to_string(&corpus.engine_config).unwrap()).unwrap();
-        let excluded = config["workspaces"]["practice"]["excluded_tags"]
-            .as_array()
-            .unwrap();
-        assert!(excluded
-            .iter()
-            .any(|value| value.as_str() == Some(MANAGED_PROJECTION_TAG)));
+        assert!(engine_program(&corpus)
+            .excluded_tags
+            .contains(&MANAGED_PROJECTION_TAG.to_string()));
+        assert!(!workspace.program.text().contains(MANAGED_PROJECTION_TAG));
+        assert!(!std::fs::read_to_string(&workspace.config_path)
+            .unwrap()
+            .contains(MANAGED_PROJECTION_TAG));
     }
 
     #[test]
-    fn workspace_folder_entity_curation_resolves_to_native_markdown_identity() {
+    fn folder_reading_resolves_through_the_engine_with_profile() {
         let temp = tempfile::tempdir().unwrap();
         let margins_home = temp.path().join("margins");
         let notes = temp.path().join("notes");
@@ -1244,43 +713,30 @@ mod tests {
         let mut workspace =
             margins_workflows::workspace::create_workspace(&margins_home, "practice", None, &notes)
                 .unwrap();
-        workspace.config.policy.entities = vec![WorkspaceEntity::with_options(
-            "folder:people",
-            WorkspaceEntityOptions {
-                profile: Some("relational".to_string()),
-                expandable: true,
-                children: Vec::new(),
-            },
-        )];
+        set_entities(
+            &mut workspace,
+            vec![WorkspaceEntity::with_options(
+                "folder:people",
+                WorkspaceEntityOptions {
+                    profile: Some("relational".to_string()),
+                    expandable: true,
+                    children: Vec::new(),
+                },
+            )],
+        );
 
         let corpus = prepare(&workspace, false).unwrap();
-        let folder_identity = format!(
-            "{}/people",
-            native_markdown_collection_namespace(&workspace.home_dir).unwrap()
-        );
-        let loaded = recall_engine::config::EnzymeConfig::load_at(
-            &corpus.virtual_home,
-            &corpus.engine_config,
-        )
-        .unwrap()
-        .unwrap();
-        let preferences = loaded.parse_preferences();
-
-        assert_eq!(preferences.entities.len(), 1);
-        assert_eq!(preferences.entities[0].name, folder_identity);
+        assert_eq!(readings(&corpus), ["folder:people"]);
+        assert!(engine_program(&corpus).readings[0].include_linked_pages);
         assert_eq!(
-            preferences
-                .entity_profiles
-                .get(&folder_identity)
-                .map(String::as_str),
-            Some("relational")
+            corpus.selected_entity_names,
+            BTreeSet::from(["people".to_string()])
         );
-        assert!(preferences.expandable_entities.contains(&folder_identity));
-        assert!(corpus.selected_entity_names.contains(&folder_identity));
+        assert!(corpus.selected_link_entities.is_empty());
     }
 
     #[test]
-    fn workspace_folder_entity_curation_targets_home_when_reference_source_matches() {
+    fn folder_reading_is_root_qualified_with_several_markdown_sources() {
         let temp = tempfile::tempdir().unwrap();
         let margins_home = temp.path().join("margins");
         let home = temp.path().join("home");
@@ -1296,84 +752,22 @@ mod tests {
             &mut workspace,
             "reference",
             WorkspaceBinding::NativeMarkdown {
-                path: reference.clone(),
-                role: SourceRole::Reference,
-                note_folder: None,
-            },
-        )
-        .unwrap();
-        workspace.config.policy.entities = vec![WorkspaceEntity::with_options(
-            "folder:people",
-            WorkspaceEntityOptions {
-                profile: Some("relational".to_string()),
-                expandable: true,
-                children: Vec::new(),
-            },
-        )];
-
-        let corpus = prepare(&workspace, false).unwrap();
-        let expected = BTreeSet::from([format!(
-            "{}/people",
-            native_markdown_collection_namespace(&workspace.home_dir).unwrap()
-        )]);
-
-        assert_eq!(corpus.selected_entity_names, expected);
-        let loaded = recall_engine::config::EnzymeConfig::load_at(
-            &corpus.virtual_home,
-            &corpus.engine_config,
-        )
-        .unwrap()
-        .unwrap();
-        let preferences = loaded.parse_preferences();
-        assert_eq!(
-            preferences
-                .entities
-                .iter()
-                .map(|entity| entity.name.clone())
-                .collect::<BTreeSet<_>>(),
-            expected
-        );
-        for identity in expected {
-            assert_eq!(
-                preferences
-                    .entity_profiles
-                    .get(&identity)
-                    .map(String::as_str),
-                Some("relational")
-            );
-            assert!(preferences.expandable_entities.contains(&identity));
-        }
-    }
-
-    #[test]
-    fn workspace_folder_entity_curation_rejects_reference_only_unscoped_folder() {
-        let temp = tempfile::tempdir().unwrap();
-        let margins_home = temp.path().join("margins");
-        let home = temp.path().join("home");
-        let reference = temp.path().join("reference");
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::create_dir_all(reference.join("people")).unwrap();
-        std::fs::write(home.join("home.md"), "# Home").unwrap();
-        std::fs::write(reference.join("people/Bob.md"), "# Bob").unwrap();
-        let mut workspace =
-            margins_workflows::workspace::create_workspace(&margins_home, "practice", None, &home)
-                .unwrap();
-        margins_workflows::workspace::add_source(
-            &mut workspace,
-            "reference",
-            WorkspaceBinding::NativeMarkdown {
                 path: reference,
                 role: SourceRole::Reference,
                 note_folder: None,
             },
         )
         .unwrap();
-        workspace.config.policy.entities = vec![WorkspaceEntity::simple("folder:people")];
+        set_entities(
+            &mut workspace,
+            vec![WorkspaceEntity::simple("folder:reference/people")],
+        );
 
-        let error = prepare(&workspace, false).unwrap_err().to_string();
-        assert!(
-            error.contains("does not resolve to any indexed home Markdown source folder"),
-            "{error}"
+        let corpus = prepare(&workspace, false).unwrap();
+        assert_eq!(readings(&corpus), ["folder:reference/people"]);
+        assert_eq!(
+            corpus.selected_entity_names,
+            BTreeSet::from(["reference/people".to_string()])
         );
     }
 
@@ -1475,12 +869,14 @@ mod tests {
             .unwrap();
 
         let corpus = prepare(&workspace, true).unwrap();
-        let config = std::fs::read_to_string(&corpus.engine_config).unwrap();
-        assert!(config.contains("[[human@client.test]]"));
-        assert!(!config.contains("[[client.test]]"));
-        assert!(config.contains("[[Note Curated]]"));
-        assert!(config.contains("newsletter@noise.test"));
-        assert!(!config.contains("[[noise.test]]"));
+        let selected = readings(&corpus);
+        assert!(selected.contains(&"[[human@client.test]]".to_string()), "{selected:?}");
+        assert!(!selected.contains(&"[[client.test]]".to_string()));
+        assert!(selected.contains(&"[[Note Curated]]".to_string()));
+        assert!(!selected.contains(&"[[newsletter@noise.test]]".to_string()));
+        let excluded = engine_program(&corpus).excluded_links;
+        assert!(excluded.contains(&"newsletter@noise.test".to_string()), "{excluded:?}");
+        assert!(!selected.contains(&"[[noise.test]]".to_string()));
     }
 
     #[test]
@@ -1613,26 +1009,13 @@ mod tests {
             .unwrap();
 
         let corpus = prepare(&workspace, true).unwrap();
-        let config: toml::Value =
-            toml::from_str(&std::fs::read_to_string(&corpus.engine_config).unwrap()).unwrap();
-        let workspace_config = &config["workspaces"]["round8"];
-        let entities = workspace_config["entities"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|value| value.as_str().unwrap())
-            .collect::<Vec<_>>();
         assert_eq!(
-            entities,
+            readings(&corpus),
             vec!["[[bob.shared@outlook.com]]", "[[dkshared@gmail.com]]"],
-            "the exact engine entity list is weighted human correspondence only"
+            "the exact engine reading list is weighted human correspondence only"
         );
-        let excluded_links = workspace_config["excluded_links"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|value| value.as_str().unwrap())
-            .collect::<BTreeSet<_>>();
+        let body = engine_program(&corpus);
+        let excluded_links = body.excluded_links.iter().cloned().collect::<BTreeSet<_>>();
         for excluded in [
             "owner@example.com",
             "ci_activity@noreply.github.com",
@@ -1647,30 +1030,30 @@ mod tests {
                 "missing hard exclusion {excluded}"
             );
         }
-        assert_eq!(config["defaults"]["total_limit"].as_integer(), Some(30));
-        let mail_source = gmail_collection_namespace("owner@example.com").unwrap();
-        let mail_roles = &workspace_config["sources"][mail_source.as_str()]["roles"];
-        assert_eq!(mail_roles["who"]["format"].as_str(), Some("json_array"));
-        assert_eq!(mail_roles["who"]["column"].as_str(), Some("participants"));
+        let program = enzyme_spec::parse(&corpus.engine.program_text).unwrap();
+        assert_eq!(program.settings.total_limit, Some(ENGINE_ENTITY_LIMIT));
+        let mail = body
+            .sources
+            .iter()
+            .find_map(|source| match source {
+                enzyme_spec::Source::Sqlite(sqlite) if sqlite.name == "google-mail" => {
+                    Some(sqlite.clone())
+                }
+                _ => None,
+            })
+            .expect("google-mail lowers to a SQLite source of the same name");
         assert_eq!(
-            mail_roles["what"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|value| value.as_str().unwrap())
-                .collect::<Vec<_>>(),
-            vec!["body"]
+            mail.who,
+            enzyme_spec::SqliteWho::JsonArray {
+                column: "participants".to_string()
+            }
         );
-        assert!(mail_roles.get("weight").is_none());
-        let mail_query = workspace_config["sources"][mail_source.as_str()]["query"]
-            .as_str()
-            .unwrap();
-        assert!(!mail_query.contains("sampling_score"));
-        assert!(!mail_query.contains(" AS title"));
+        assert_eq!(mail.what, vec!["body"]);
+        assert!(mail.weight.is_none());
+        assert!(!mail.query.contains("sampling_score"));
+        assert!(!mail.query.contains(" AS title"));
         assert!(
-            !std::fs::read_to_string(&corpus.engine_config)
-                .unwrap()
-                .contains("who_00"),
+            !corpus.engine.program_text.contains("who_00"),
             "the fixed participant-column bridge must stay deleted"
         );
         assert_eq!(corpus.entity_selection_debug.selected.len(), 2);
@@ -1714,32 +1097,17 @@ mod tests {
 
         let corpus = prepare(&workspace, true).unwrap();
         assert_eq!(corpus.entity_selection_debug.correspondents_considered, 0);
-        let config: toml::Value =
-            toml::from_str(&std::fs::read_to_string(&corpus.engine_config).unwrap()).unwrap();
-        assert_eq!(
-            config["workspaces"]["cache-only"]["entities"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|value| value.as_str().unwrap())
-                .collect::<Vec<_>>(),
-            vec![EMPTY_LEDGER_SELECTION_SENTINEL]
-        );
-        let loaded = recall_engine::config::EnzymeConfig::load_at(
-            &corpus.virtual_home,
-            &corpus.engine_config,
-        )
-        .unwrap()
-        .unwrap();
+        assert_eq!(readings(&corpus), vec![EMPTY_LEDGER_SELECTION_SENTINEL]);
         assert!(
-            loaded.has_curated_entities(),
+            !recall_engine_seam::curated_entities(&corpus.engine)
+                .unwrap()
+                .is_empty(),
             "the internal sentinel must prevent engine coverage fallback"
         );
-        let excluded = config["workspaces"]["cache-only"]["excluded_links"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|value| value.as_str().unwrap())
+        assert!(corpus.selected_entity_names.is_empty());
+        let excluded = engine_program(&corpus)
+            .excluded_links
+            .into_iter()
             .collect::<BTreeSet<_>>();
         assert!(excluded.contains("owner.round9@gmail.com"));
         assert!(excluded.contains("ownerround9@gmail.com"));

@@ -38,12 +38,13 @@ fn execute_scan(workspace: &ResolvedWorkspace) -> Result<ScanSuggestion> {
         &workspace.home_dir,
         &workspace.config.policy.excluded_folders,
     )?;
-    let suggestion = build_scan_suggestion(
+    let mut suggestion = build_scan_suggestion(
         &workspace.home_dir,
         &workspace.config_path,
         &workspace.config.policy,
         &docs,
     )?;
+    suggestion.current_config.program = Some(workspace.program.text().to_string());
     Ok(suggestion)
 }
 
@@ -236,6 +237,10 @@ struct SampleFile {
 struct CurrentConfigSummary {
     status: String,
     config_path: Option<String>,
+    /// The Workspace program text (`configs/<id>.enzyme`), the source of
+    /// truth the fields below are derived from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    program: Option<String>,
     has_curated_entities: bool,
     entities: Vec<WorkspaceEntity>,
     excluded_folders: Vec<String>,
@@ -440,6 +445,7 @@ fn current_config_summary(config_path: &Path, policy: &WorkspacePolicy) -> Curre
     CurrentConfigSummary {
         status: "configured".to_string(),
         config_path: Some(config_path.to_string_lossy().to_string()),
+        program: None,
         has_curated_entities: !policy.entities.is_empty(),
         entities: policy.entities.clone(),
         excluded_folders: policy.excluded_folders.clone(),

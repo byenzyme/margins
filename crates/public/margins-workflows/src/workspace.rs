@@ -1575,7 +1575,11 @@ fn view_of(margins_home: &Path, program: &WorkspaceProgram) -> Result<WorkspaceC
         retention_policy(margins_home, id)?,
     )?;
     validate_config(&config)?;
-    program_lang::validate_language(program, shared_profiles(margins_home)?.as_ref())?;
+    program_lang::validate_language(
+        program,
+        &margins_home.join(WORKSPACES_DIR).join(id).join("ledger.db"),
+        shared_profiles(margins_home)?.as_ref(),
+    )?;
     Ok(config)
 }
 
@@ -1584,7 +1588,7 @@ fn validate_program(margins_home: &Path, program: &WorkspaceProgram) -> Result<W
 }
 
 /// The optional shared `configs/profiles.enzyme` program (profiles only).
-fn shared_profiles(margins_home: &Path) -> Result<Option<enzyme_spec::Program>> {
+pub fn shared_profiles(margins_home: &Path) -> Result<Option<enzyme_spec::Program>> {
     let path = margins_home.join(CONFIGS_DIR).join(SHARED_PROFILES_PROGRAM);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,

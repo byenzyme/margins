@@ -18,10 +18,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use recall_engine::kernel::{
-    ensure_searchable_sync, Bridged, Generator, SearchIndex, SearchOptions,
-};
-use recall_engine::llm::ConfigProvider;
+use recall_engine::kernel::{Bridged, SearchIndex};
 use recall_engine::search::context::TopCatalyst;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -33,11 +30,8 @@ use margins_workflows::integrations::{
     EvidenceFreshness, EvidenceHandle, FreshnessStatus, GoogleCalendarScope,
     GOOGLE_MEET_MATERIALIZATION_FINGERPRINT,
 };
-use margins_workflows::workspace::{
-    calendar_collection_namespace, gmail_collection_namespace, granola_collection_namespace,
-    meet_collection_namespace, native_markdown_collection_namespace, ResolvedWorkspace, SourceKind,
-    WorkspaceBinding,
-};
+use margins_workflows::workspace::{ResolvedWorkspace, SourceKind, WorkspaceBinding};
+use margins_workflows::workspace_lowering::sqlite_document_ref_prefix;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 /// A vault with fewer than this many notes is not worth indexing: recall would
@@ -79,7 +73,7 @@ pub fn workspace_source_refresh_staleness(
         .filter_map(|(name, binding)| {
             let (engine_source_name, materialization_receipt) = match binding {
                 WorkspaceBinding::Gmail { account, gmail } => Some((
-                    gmail_collection_namespace(account),
+                    Ok::<_, anyhow::Error>(name.clone()),
                     Some((
                         "email",
                         account.as_str(),
@@ -88,7 +82,7 @@ pub fn workspace_source_refresh_staleness(
                     )),
                 )),
                 WorkspaceBinding::GoogleCalendar { account, calendar } => Some((
-                    calendar_collection_namespace(account),
+                    Ok::<_, anyhow::Error>(name.clone()),
                     Some((
                         "gcal",
                         account.as_str(),
@@ -101,7 +95,7 @@ pub fn workspace_source_refresh_staleness(
                     )),
                 )),
                 WorkspaceBinding::GoogleMeet { account } => Some((
-                    meet_collection_namespace(account),
+                    Ok::<_, anyhow::Error>(name.clone()),
                     Some((
                         "google_meet",
                         account.as_str(),
@@ -113,7 +107,7 @@ pub fn workspace_source_refresh_staleness(
                     account,
                     collection,
                 } => Some((
-                    granola_collection_namespace(account),
+                    Ok::<_, anyhow::Error>(name.clone()),
                     Some((
                         "granola",
                         account.as_str(),
@@ -222,19 +216,18 @@ pub fn workspace_status_recall(
     if !index_path.is_file() {
         return margins_workflows::local_recall::status(workspace);
     }
-    let database = recall_engine::db::Database::open_existing_compatible(&index_path)
+    let documents = crate::recall_engine_seam::indexed_document_count(&index_path)
         .with_context(|| format!("opening recall status index {}", index_path.display()))?;
     Ok(margins_workflows::local_recall::LocalRecallStatus {
         schema_version: "margins.indexed-recall.v1".to_string(),
         available: true,
         mode: "indexed".to_string(),
-        documents: database.get_document_count()? as usize,
+        documents,
     })
 }
 
 pub const RECALL_UNAVAILABLE_MESSAGE: &str =
     "Recall unavailable: no usable generator is configured. Run `margins setup`.";
-static GENERATOR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub struct RecallOutput {
     pub query: String,
@@ -343,8 +336,7 @@ pub fn recall(
     }
 
     let db_path = workspace.recall_path();
-    let Some(index) = recall_engine::kernel::open_existing_sync(&workspace.home_dir, &db_path)?
-    else {
+    let Some(index) = crate::recall_engine_seam::open(&db_path)? else {
         return Ok(empty("unavailable", "not_established", 0));
     };
     let freshness =
@@ -578,89 +570,36 @@ fn catalog_entry_for_document_ref(
     workspace: &ResolvedWorkspace,
     document_ref: &str,
 ) -> Result<CatalogEntry> {
+    if let Some((source, path)) = crate::workspace_recall::markdown_document(workspace, document_ref)
+    {
+        return Ok(CatalogEntry {
+            source,
+            kind: SourceKind::Notes,
+            evidence: EvidenceHandle::NativeMarkdown {
+                path: path.to_string_lossy().into_owned(),
+            },
+        });
+    }
     for (name, binding) in &workspace.config.bindings {
-        match binding {
-            WorkspaceBinding::NativeMarkdown { path, .. } => {
-                let namespace = native_markdown_collection_namespace(path)?;
-                let prefix = format!("{namespace}/");
-                if let Some(relative) = document_ref.strip_prefix(&prefix) {
-                    return Ok(CatalogEntry {
-                        source: name.clone(),
-                        kind: binding.kind(),
-                        evidence: EvidenceHandle::NativeMarkdown {
-                            path: path.join(relative).to_string_lossy().into_owned(),
-                        },
-                    });
-                }
-            }
-            WorkspaceBinding::Gmail { account, .. } => {
-                if document_ref_source_matches(document_ref, &gmail_collection_namespace(account)?)
-                {
-                    let source_id = sqlite_document_ref_source_id(document_ref);
-                    return Ok(CatalogEntry {
-                        source: name.clone(),
-                        kind: binding.kind(),
-                        evidence: external_evidence_for_hit(
-                            workspace,
-                            "email",
-                            account,
-                            source_id.as_deref(),
-                        )?,
-                    });
-                }
-            }
-            WorkspaceBinding::GoogleCalendar { account, .. } => {
-                if document_ref_source_matches(
-                    document_ref,
-                    &calendar_collection_namespace(account)?,
-                ) {
-                    let source_id = sqlite_document_ref_source_id(document_ref);
-                    return Ok(CatalogEntry {
-                        source: name.clone(),
-                        kind: binding.kind(),
-                        evidence: external_evidence_for_hit(
-                            workspace,
-                            "gcal",
-                            account,
-                            source_id.as_deref(),
-                        )?,
-                    });
-                }
-            }
-            WorkspaceBinding::GoogleMeet { account } => {
-                if document_ref_source_matches(document_ref, &meet_collection_namespace(account)?) {
-                    let source_id = sqlite_document_ref_source_id(document_ref);
-                    return Ok(CatalogEntry {
-                        source: name.clone(),
-                        kind: binding.kind(),
-                        evidence: external_evidence_for_hit(
-                            workspace,
-                            "google_meet",
-                            account,
-                            source_id.as_deref(),
-                        )?,
-                    });
-                }
-            }
-            WorkspaceBinding::Granola { account, .. } => {
-                if document_ref_source_matches(
-                    document_ref,
-                    &granola_collection_namespace(account)?,
-                ) {
-                    let source_id = sqlite_document_ref_source_id(document_ref);
-                    return Ok(CatalogEntry {
-                        source: name.clone(),
-                        kind: binding.kind(),
-                        evidence: external_evidence_for_hit(
-                            workspace,
-                            "granola",
-                            account,
-                            source_id.as_deref(),
-                        )?,
-                    });
-                }
-            }
-            WorkspaceBinding::Captures { .. } => {}
+        let (connector, account) = match binding {
+            WorkspaceBinding::Gmail { account, .. } => ("email", account),
+            WorkspaceBinding::GoogleCalendar { account, .. } => ("gcal", account),
+            WorkspaceBinding::GoogleMeet { account } => ("google_meet", account),
+            WorkspaceBinding::Granola { account, .. } => ("granola", account),
+            WorkspaceBinding::NativeMarkdown { .. } | WorkspaceBinding::Captures { .. } => continue,
+        };
+        if document_ref_source_matches(document_ref, name) {
+            let source_id = sqlite_document_ref_source_id(document_ref);
+            return Ok(CatalogEntry {
+                source: name.clone(),
+                kind: binding.kind(),
+                evidence: external_evidence_for_hit(
+                    workspace,
+                    connector,
+                    account,
+                    source_id.as_deref(),
+                )?,
+            });
         }
     }
     Ok(CatalogEntry {
@@ -676,40 +615,24 @@ fn source_name_for_document_ref(
     workspace: &ResolvedWorkspace,
     document_ref: &str,
 ) -> Option<String> {
+    if let Some((source, _)) = crate::workspace_recall::markdown_document(workspace, document_ref) {
+        return Some(source);
+    }
     workspace
         .config
         .bindings
         .iter()
-        .find_map(|(name, binding)| {
-            let matches = match binding {
-                WorkspaceBinding::NativeMarkdown { path, .. } => {
-                    let namespace = native_markdown_collection_namespace(path).ok()?;
-                    document_ref.starts_with(&format!("{namespace}/"))
-                }
-                WorkspaceBinding::Gmail { account, .. } => document_ref_source_matches(
-                    document_ref,
-                    &gmail_collection_namespace(account).ok()?,
-                ),
-                WorkspaceBinding::GoogleCalendar { account, .. } => document_ref_source_matches(
-                    document_ref,
-                    &calendar_collection_namespace(account).ok()?,
-                ),
-                WorkspaceBinding::GoogleMeet { account } => document_ref_source_matches(
-                    document_ref,
-                    &meet_collection_namespace(account).ok()?,
-                ),
-                WorkspaceBinding::Granola { account, .. } => document_ref_source_matches(
-                    document_ref,
-                    &granola_collection_namespace(account).ok()?,
-                ),
-                WorkspaceBinding::Captures { .. } => false,
-            };
-            matches.then(|| name.clone())
+        .find(|(name, binding)| {
+            !matches!(
+                binding,
+                WorkspaceBinding::NativeMarkdown { .. } | WorkspaceBinding::Captures { .. }
+            ) && document_ref_source_matches(document_ref, name)
         })
+        .map(|(name, _)| name.clone())
 }
 
 fn document_ref_source_matches(document_ref: &str, source_name: &str) -> bool {
-    document_ref.starts_with(&format!("sqlite:{source_name}/"))
+    document_ref.starts_with(&sqlite_document_ref_prefix(source_name))
 }
 
 fn sqlite_document_ref_source_id(document_ref: &str) -> Option<String> {
@@ -912,7 +835,7 @@ pub fn ensure_usable_generator() -> Result<()> {
     ensure_usable_generator_at(&home)
 }
 
-fn ensure_usable_generator_at(home: &Path) -> Result<()> {
+pub(crate) fn ensure_usable_generator_at(home: &Path) -> Result<()> {
     let status = margins_workflows::catalyst::selected_status(home);
     match status.mode {
         margins_workflows::catalyst::CatalystMode::Hosted => {
@@ -939,71 +862,6 @@ fn local_generator_installed() -> bool {
 #[cfg(not(feature = "recall-local-model"))]
 fn local_generator_installed() -> bool {
     false
-}
-
-/// Resolve one generator through Enzyme's embedder-owned-home policy. Resolution
-/// owns its Tokio runtime on a worker so the synchronous CLI, desktop blocking
-/// lane, and server lane do not inherit one another's runtime requirements.
-/// Any failure is terminal for product indexing; there is no generator-free retry.
-fn resolve_generator_policy(home: &Path) -> Result<Generator> {
-    ensure_usable_generator_at(home)?;
-    let status = margins_workflows::catalyst::selected_status(home);
-    let hosted_bundle = (status.mode == margins_workflows::catalyst::CatalystMode::Hosted)
-        .then(|| crate::hosted_credentials::cached_bundle_for_generation(home))
-        .transpose()?
-        .flatten();
-    let home = home.to_path_buf();
-    let result = std::thread::spawn(move || {
-        struct RestoreGeneratorEnv {
-            values: Vec<(&'static str, Option<std::ffi::OsString>)>,
-        }
-        impl Drop for RestoreGeneratorEnv {
-            fn drop(&mut self) {
-                for (name, value) in self.values.drain(..) {
-                    match value {
-                        Some(value) => std::env::set_var(name, value),
-                        None => std::env::remove_var(name),
-                    }
-                }
-            }
-        }
-        let guard = GENERATOR_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let names = [
-            "OPENAI_API_KEY",
-            "OPENAI_BASE_URL",
-            "OPENAI_MODEL",
-            "OPENROUTER_API_KEY",
-            "OPENROUTER_BASE_URL",
-            "OPENROUTER_MODEL",
-        ];
-        let previous = names
-            .into_iter()
-            .map(|name| (name, std::env::var_os(name)))
-            .collect::<Vec<_>>();
-        for name in names {
-            std::env::remove_var(name);
-        }
-        if let Some(bundle) = hosted_bundle.as_ref() {
-            std::env::set_var("OPENROUTER_API_KEY", &bundle.api_key);
-            std::env::set_var("OPENROUTER_BASE_URL", &bundle.base_url);
-            std::env::set_var("OPENROUTER_MODEL", &bundle.model);
-        }
-        let _restore_env = RestoreGeneratorEnv { values: previous };
-        let _env_guard = guard;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("starting recall credential resolver runtime")?;
-        runtime.block_on(Generator::resolve_in(&home))
-    })
-    .join();
-
-    match result {
-        Ok(result) => result.context("resolving configured recall generator"),
-        Err(_) => anyhow::bail!("recall generator resolution worker panicked"),
-    }
 }
 
 fn margins_home() -> Result<PathBuf> {
@@ -1674,9 +1532,7 @@ pub fn provision_workspace_for_init(workspace: &ResolvedWorkspace) -> Result<Ini
 
 pub fn open_workspace(workspace: &ResolvedWorkspace) -> Result<Option<SearchHandle>> {
     let corpus = crate::workspace_recall::prepare(workspace, false)?;
-    let Some(index) =
-        recall_engine::kernel::open_existing_sync(&corpus.virtual_home, &workspace.recall_path())?
-    else {
+    let Some(index) = crate::recall_engine_seam::open(&workspace.recall_path())? else {
         return Ok(None);
     };
     let freshness = require_retrieval_freshness(
@@ -1700,36 +1556,19 @@ fn provision_workspace_inner(workspace: &ResolvedWorkspace) -> Result<(SearchHan
     std::fs::create_dir_all(&workspace.state_dir)
         .with_context(|| format!("creating workspace state {}", workspace.state_dir.display()))?;
     let corpus = crate::workspace_recall::prepare(workspace, true)?;
-    let db_path = workspace.recall_path();
-    let first_build = !db_path.exists();
-    reconcile_link_catalysts(
-        &db_path,
-        &corpus.selected_link_entities,
-        &corpus.excluded_link_entities,
+    let provisioned = crate::recall_engine_seam::provision(
+        &corpus.engine,
+        crate::recall_engine_seam::ProvisionRequest {
+            max_bridged_entities: MAX_BRIDGED_ENTITIES
+                .max(corpus.entity_selection_debug.selected.len()),
+            selected_link_entities: corpus.selected_link_entities.clone(),
+            excluded_link_entities: corpus.excluded_link_entities.clone(),
+            generator_home: margins_home()?,
+        },
     )?;
-    let catalysts_before = catalyst_ids_by_entity(&db_path)?;
-    let max_bridged_entities =
-        MAX_BRIDGED_ENTITIES.max(corpus.entity_selection_debug.selected.len());
-    let options = SearchOptions {
-        config_path: Some(corpus.engine_config.clone()),
-        excluded_folders: workspace.config.policy.excluded_folders.clone(),
-        full_reindex: first_build,
-        ..SearchOptions::new(&corpus.virtual_home, &db_path)
-            .with_max_bridged_entities(max_bridged_entities)
-    };
-    let generator = resolve_generator_policy(&margins_home()?)?;
-    let hosted_generator = !matches!(generator.provider(), ConfigProvider::Local);
-    let index = ensure_searchable_sync(options, Some(generator))
-        .context("indexing and generating recall catalysts")?;
+    let hosted_generation_calls = provisioned.hosted_generation_calls;
+    let index = provisioned.index;
     let catalysts_after = catalyst_ids_from_index(&index)?;
-    let hosted_generation_calls = if hosted_generator {
-        catalysts_after
-            .iter()
-            .filter(|(entity, ids)| catalysts_before.get(*entity) != Some(*ids))
-            .count()
-    } else {
-        0
-    };
     let materialization = entity_materialization_debug(&corpus, &index, &catalysts_after)?;
     let readiness = catalyst_readiness(&index, &corpus.selected_entity_names)?;
     let status = classify_init_status(index.bridged, readiness);
@@ -1863,14 +1702,6 @@ fn correspondent_selection_debug_message(
     )
 }
 
-fn catalyst_ids_by_entity(db_path: &Path) -> Result<BTreeMap<String, BTreeSet<String>>> {
-    if !db_path.is_file() {
-        return Ok(BTreeMap::new());
-    }
-    let database = recall_engine::db::Database::open(db_path)?;
-    catalyst_ids(&database)
-}
-
 fn catalyst_ids_from_index(index: &SearchIndex) -> Result<BTreeMap<String, BTreeSet<String>>> {
     catalyst_ids(index.database())
 }
@@ -1886,33 +1717,6 @@ fn catalyst_ids(
             .insert(catalyst.id);
     }
     Ok(result)
-}
-
-fn reconcile_link_catalysts(
-    db_path: &Path,
-    selected: &BTreeSet<String>,
-    excluded: &BTreeSet<String>,
-) -> Result<()> {
-    if !db_path.is_file() {
-        return Ok(());
-    }
-    let database = recall_engine::db::Database::open(db_path)?;
-    let existing_links = database.query_read(
-        "SELECT DISTINCT entity FROM catalysts
-         WHERE json_extract(metadata, '$.entity_type') = 'link'",
-        Vec::new(),
-        |row| row.get::<String>(0),
-    )?;
-    for entity in existing_links
-        .into_iter()
-        .filter(|entity| !selected.contains(entity))
-        .chain(excluded.iter().cloned())
-        .collect::<BTreeSet<_>>()
-    {
-        database.delete_catalysts_for_entity(&entity, "link")?;
-        database.delete_catalyst_entity_hash(&entity, "link")?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -2051,8 +1855,8 @@ mod tests {
         }
         drop(connection);
 
-        reconcile_link_catalysts(
-            &db_path,
+        crate::recall_engine_seam::reconcile_link_catalysts(
+            &recall_engine::db::Database::open(&db_path).unwrap(),
             &BTreeSet::from(["dk@example.test".to_string()]),
             &BTreeSet::from(["owner@example.test".to_string()]),
         )
@@ -2164,7 +1968,7 @@ mod tests {
             format!("http://{}/llm/free-config", listener.local_addr().unwrap()),
         );
 
-        let generator = resolve_generator_policy(home.path()).unwrap();
+        let generator = crate::recall_engine_seam::resolve_generator(home.path()).unwrap();
 
         assert_eq!(generator.model(), "fixture-cached-model");
         assert!(matches!(
@@ -2297,14 +2101,6 @@ mod tests {
             topic_name: Some("Decision".into()),
             relevance_score: 0.9,
             contribution_count: 1,
-            evidence_anchors: vec![recall_engine::models::EvidenceAnchor {
-                anchor_id: "E1".into(),
-                source_ref: "people/jane.md".into(),
-                occurrence_ids: vec![7],
-                timestamp_ms: 1,
-                chunk_index: Some(0),
-                quote: "receipt remains inline in text".into(),
-            }],
         }];
         let json: serde_json::Value =
             serde_json::from_str(&render_recall_json(&output).unwrap()).unwrap();
@@ -2361,7 +2157,6 @@ mod tests {
             topic_name: None,
             relevance_score: 0.9,
             contribution_count: 1,
-            evidence_anchors: Vec::new(),
         }];
 
         assert_eq!(
@@ -2395,7 +2190,6 @@ mod tests {
             topic_name: None,
             relevance_score: 0.9,
             contribution_count: 1,
-            evidence_anchors: Vec::new(),
         }];
 
         let tree = render_recall_tree(&output, 20);
@@ -2535,15 +2329,8 @@ mod tests {
                 Vec::new(),
             )
             .unwrap();
-        let document_ref = format!(
-            "sqlite:{}/{}",
-            gmail_collection_namespace(account).unwrap(),
-            "thread-123"
-                .as_bytes()
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        );
+        let document_ref =
+            margins_workflows::workspace_lowering::sqlite_document_ref("mail", "thread-123");
 
         let entry = catalog_entry_for_document_ref(&workspace, &document_ref).unwrap();
 

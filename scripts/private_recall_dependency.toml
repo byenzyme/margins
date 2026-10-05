@@ -1,3 +1,3 @@
 # Applied only by scripts/with-private-recall to official build checkouts.
-# The commit's crates/enzyme-core tree equals the retired vendored engine tree.
-recall-engine = { git = "https://github.com/byenzyme/enzyme-rust.git", rev = "d92f9e52ffddbe318ed2d6797cde2d821985c61a", package = "enzyme-core", features = ["embedder-compat"], optional = true }
+# enzyme-rust branch margins/workspace-language: the in-memory Workspace program API.
+recall-engine = { git = "https://github.com/byenzyme/enzyme-rust.git", rev = "2a1f175312b72f8d4ad1b1a1abec76b8d1e7f669", package = "enzyme-core", features = ["embedder-compat"], optional = true }

@@ -22,6 +22,8 @@ pub mod recall;
 #[cfg(feature = "recall")]
 pub mod scan;
 #[cfg(feature = "recall")]
+mod recall_engine_seam;
+#[cfg(feature = "recall")]
 mod setup_compile;
 #[cfg(feature = "recall")]
 mod workspace_recall;
