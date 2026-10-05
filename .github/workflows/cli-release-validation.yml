@@ -55,7 +55,7 @@ jobs:
           # Runs on main: a saved cache would hold private enzyme-rust source
           # restorable by any run, including fork pull requests. Never cache.
           cache: "false"
-          enzyme-rust-read-token: ${{ secrets.ENZYME_RUST_READ_TOKEN }}
+          enzyme-rust-deploy-key: ${{ secrets.ENZYME_RUST_DEPLOY_KEY }}
           google-oauth-client-json: ${{ secrets.MARGINS_GOOGLE_OAUTH_CLIENT_JSON }}
           apple-certificate-base64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           apple-certificate-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
