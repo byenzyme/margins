@@ -452,8 +452,28 @@ fn search_index(
             } else {
                 Vec::new()
             };
-            let exact_hits = filter_recall_hits(workspace, exact_hits, source_filter);
+            let mut exact_hits = filter_recall_hits(workspace, exact_hits, source_filter);
             let catalyst_hits = filter_recall_hits(workspace, catalyst_hits, source_filter);
+            // An exact hit that also has catalyst provenance below the result
+            // cut keeps that provenance rather than surfacing as a bare literal.
+            let missing = exact_hits
+                .iter()
+                .filter(|exact| !catalyst_hits.iter().any(|hit| hit.path == exact.path))
+                .count();
+            if missing > 0 && index.document_count > search_limit {
+                let deep = index.catalyst_search_response(query, index.document_count)?;
+                for exact in &mut exact_hits {
+                    if catalyst_hits.iter().any(|hit| hit.path == exact.path) {
+                        continue;
+                    }
+                    if let Some(hit) = deep.results.iter().find(|hit| hit.file_path == exact.path) {
+                        exact.score = hit.similarity;
+                        exact.content = hit.content.clone();
+                        exact.via_catalyst_id = hit.via_catalyst_id.clone();
+                        exact.via_catalyst_text = hit.via_catalyst_text.clone();
+                    }
+                }
+            }
             let hits = merge_exact_and_catalyst_hits(exact_hits, catalyst_hits);
             debug_strategy("catalyst");
             Ok((
