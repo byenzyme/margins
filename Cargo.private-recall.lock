@@ -2665,7 +2665,7 @@ dependencies = [
 
 [[package]]
 name = "margins"
-version = "0.4.15"
+version = "0.4.16"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2729,7 +2729,7 @@ dependencies = [
 
 [[package]]
 name = "margins-cli"
-version = "0.4.15"
+version = "0.4.16"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2813,7 +2813,7 @@ dependencies = [
 
 [[package]]
 name = "margins-server"
-version = "0.4.15"
+version = "0.4.16"
 dependencies = [
  "anyhow",
  "axum",
