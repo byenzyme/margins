@@ -1,7 +1,8 @@
 import type { PluginContentScriptContext } from "@get-bb/plugin-sdk/app";
 import { fetchJsonWithDeadline } from "../../../desktop/src/lib/bounded-fetch.js";
-import { IrrecoverableAudioLossError, WebDurableUploadQueue, bindDurableMediaRecorder, stopMediaRecorderWithDeadline } from "../../../desktop/src/lib/web-durable-upload.js";
+import { IrrecoverableAudioLossError, WebDurableUploadQueue, bindDurableMediaRecorder, stopMediaRecorderWithDeadline, type DurableChunkUpload, type WebChunkTiming, type WebDurableUploadOptions } from "../../../desktop/src/lib/web-durable-upload.js";
 import { acquireWebMicrophone, selectWebRecorderMimeType, webMicrophoneSupported } from "../../../desktop/src/lib/web-microphone-permission.js";
+import { BrowserChunkStore } from "./browser-chunk-store.js";
 import { CAPTURE_DISCONNECT_GRACE_MS, type ClientCapabilities, type HostError, type PanelState } from "./contracts.js";
 
 const CLIENT_KEY = "margins.bb.client.v1";
@@ -37,6 +38,29 @@ interface LocalCapture extends StoredCapture {
 }
 
 type Subscriber = () => void;
+
+/** Copies each admitted chunk into reload-durable storage at the moment its
+ * sequence is assigned. Chunks the queue refuses (backpressure) are not
+ * persisted: their sequence is already counted as lost. */
+class PersistentUploadQueue extends WebDurableUploadQueue {
+  constructor(
+    upload: DurableChunkUpload,
+    onFailure: (error: Error) => void,
+    options: WebDurableUploadOptions,
+    private readonly persist: (sequence: number, chunk: Blob, timing: WebChunkTiming) => void,
+  ) {
+    super(upload, onFailure, options);
+  }
+
+  override enqueue(chunk: Blob, timing?: WebChunkTiming): void {
+    const sequence = this.expectedNextSequence;
+    const queued = this.pendingCount;
+    super.enqueue(chunk, timing);
+    // enqueue() is synchronous and the worker cannot shift before its first
+    // await, so growth means this exact Blob was admitted at `sequence`.
+    if (timing && this.pendingCount > queued) this.persist(sequence, chunk, timing);
+  }
+}
 
 export class ReachabilityDeadline {
   private lastAcknowledgedAt = Date.now();
@@ -210,6 +234,9 @@ export interface BrowserCaptureDependencies {
   supportsMime(candidate: string): boolean;
   heartbeatMs: number;
   disconnectGraceMs: number;
+  /** Reload-durable retention for unacknowledged chunks. Absent or null keeps
+   * memory-only retention. */
+  chunkStore?: BrowserChunkStore | null;
 }
 
 const defaultDependencies: BrowserCaptureDependencies = {
@@ -221,6 +248,7 @@ const defaultDependencies: BrowserCaptureDependencies = {
   supportsMime: candidate => MediaRecorder.isTypeSupported(candidate),
   heartbeatMs: 2_000,
   disconnectGraceMs: CAPTURE_DISCONNECT_GRACE_MS,
+  chunkStore: new BrowserChunkStore(),
 };
 
 export class BrowserCaptureOwner {
@@ -314,22 +342,11 @@ export class BrowserCaptureOwner {
     const mime = selectWebRecorderMimeType(this.dependencies.supportsMime);
     const recorder = this.dependencies.createRecorder(stream, mime);
     const uploadErrors: Error[] = [];
-    const uploads = new WebDurableUploadQueue(async (chunk, sequence, signal, timing) => {
+    const chunkStore = this.dependencies.chunkStore;
+    const uploads = new PersistentUploadQueue(async (chunk, sequence, signal, timing) => {
       if (!timing) throw new Error("Browser audio capture timestamps are missing");
-      const bytes = new Uint8Array(await chunk.arrayBuffer());
-      const value = await fetchJsonWithDeadline<{ ok: boolean; error?: string | { message?: string } }>(
-        `/api/v1/plugins/${encodeURIComponent(this.pluginId!)}/http/capture/chunk`,
-        {
-        method: "POST", signal, headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          sessionId: stored.sessionId, client: detectClientCapabilities(),
-          sequence, bytesBase64: base64(bytes),
-          capturedStartUnixMs: timing.capturedStartUnixMs,
-          capturedEndUnixMs: timing.capturedEndUnixMs,
-        }),
-        },
-      );
-      if (!value.ok) throw new Error(typeof value.error === "string" ? value.error : value.error?.message || "Audio upload failed");
+      await this.postChunk(stored.sessionId, new Uint8Array(await chunk.arrayBuffer()), sequence, timing, signal);
+      void chunkStore?.acknowledge(stored.sessionId, sequence);
       const nextSequence = Math.max(stored.nextSequence, sequence + 1);
       stored.nextSequence = nextSequence;
       const current = this.capture;
@@ -354,7 +371,9 @@ export class BrowserCaptureOwner {
       writeStored(persisted?.sessionId === stored.sessionId
         ? { ...persisted, expectedNextSequence: nextSequence }
         : stored);
-    } });
+    } }, (sequence, chunk, timing) => {
+      void chunkStore?.persist(stored.sessionId, sequence, chunk, timing);
+    });
     bindDurableMediaRecorder(recorder, uploads, segmentStartedUnixMs);
     const generation = ++this.generation;
     const reachability = new ReachabilityDeadline(this.dependencies.disconnectGraceMs, () => {
@@ -395,6 +414,78 @@ export class BrowserCaptureOwner {
     this.emit();
   }
 
+  private async postChunk(sessionId: string, bytes: Uint8Array, sequence: number, timing: WebChunkTiming, signal?: AbortSignal) {
+    if (!this.pluginId) throw new Error("Margins is still loading");
+    const value = await fetchJsonWithDeadline<{ ok: boolean; error?: string | { message?: string } }>(
+      `/api/v1/plugins/${encodeURIComponent(this.pluginId)}/http/capture/chunk`,
+      {
+      method: "POST", signal, headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sessionId, client: detectClientCapabilities(),
+        sequence, bytesBase64: base64(bytes),
+        capturedStartUnixMs: timing.capturedStartUnixMs,
+        capturedEndUnixMs: timing.capturedEndUnixMs,
+      }),
+      },
+    );
+    if (!value.ok) throw new Error(typeof value.error === "string" ? value.error : value.error?.message || "Audio upload failed");
+  }
+
+  /** After a reload the in-memory queue is gone, but chunks persisted before
+   * their acknowledgement can still be delivered. Identical bytes for an
+   * already-durable sequence are accepted idempotently by the server. Stops at
+   * the first failure so later bytes stay retained for another attempt; the
+   * server's sequence fence decides what is actually missing. */
+  private async flushPersisted(sessionId: string): Promise<{ found: Set<number>; delivered: Set<number> }> {
+    const found = new Set<number>();
+    const delivered = new Set<number>();
+    const store = this.dependencies.chunkStore;
+    if (!store) return { found, delivered };
+    const chunks = await store.pending(sessionId);
+    for (const chunk of chunks) found.add(chunk.sequence);
+    for (const chunk of chunks) {
+      if (!await this.uploadPersisted(chunk.sessionId, chunk.sequence, chunk)) break;
+      delivered.add(chunk.sequence);
+    }
+    return { found, delivered };
+  }
+
+  private async uploadPersisted(sessionId: string, sequence: number, chunk: { bytes: ArrayBuffer; timing: WebChunkTiming }) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await this.postChunk(sessionId, new Uint8Array(chunk.bytes), sequence, chunk.timing);
+        await this.dependencies.chunkStore?.acknowledge(sessionId, sequence);
+        return true;
+      } catch { /* retry once; failure leaves the bytes retained */ }
+    }
+    return false;
+  }
+
+  /** Replay one server-reported missing sequence from memory or, after a
+   * reload, from persisted storage. */
+  private async resendGap(sessionId: string, sequence: number, pending: LocalCapture | null) {
+    if (pending?.uploads.canReplay(sequence)) return pending.uploads.resend(sequence);
+    const persisted = (await this.dependencies.chunkStore?.pending(sessionId))?.find((chunk) => chunk.sequence === sequence);
+    if (!persisted) {
+      if (pending) return pending.uploads.resend(sequence);
+      throw new IrrecoverableAudioLossError("The missing chunk is unavailable in this browser; recording is incomplete.");
+    }
+    if (!await this.uploadPersisted(sessionId, sequence, persisted)) {
+      throw new Error(`Browser audio sequence ${sequence} could not be retried`);
+    }
+  }
+
+  private async hasPersisted(sessionId: string, sequence: number) {
+    const store = this.dependencies.chunkStore;
+    if (!store) return false;
+    return (await store.pending(sessionId)).some((chunk) => chunk.sequence === sequence);
+  }
+
+  /** A finalized recording no longer needs any retained bytes. */
+  private forgetPersisted(sessionId: string) {
+    void this.dependencies.chunkStore?.forgetSession(sessionId);
+  }
+
   /** MediaRecorder emits a complete, independently decodable WebM stream only
    * after stop. Keep the stop promise so Pause and Stop cannot stop it twice. */
   private stopSegment(current: LocalCapture): Promise<Error | null> {
@@ -415,6 +506,7 @@ export class BrowserCaptureOwner {
     current.stream.getTracks().forEach((track) => track.stop());
     void current.uploads.close().catch(() => undefined);
     current.uploads.releaseRetained();
+    this.forgetPersisted(current.sessionId);
     this.endedRecordingId = current.sessionId;
     writeStored(null);
     this.acceptPanel(current.sessionId, state);
@@ -435,6 +527,7 @@ export class BrowserCaptureOwner {
           sessionId: stored.sessionId, client, operationId: id(),
         });
         if (snapshot.state === "saving" || snapshot.state === "saved") {
+          this.forgetPersisted(stored.sessionId);
           this.endedRecordingId = stored.sessionId;
           writeStored(null);
           this.acceptPanel(stored.sessionId, snapshot);
@@ -452,6 +545,10 @@ export class BrowserCaptureOwner {
         const shouldRecord = stored.pendingControl?.kind === "resume" || !stored.paused;
         const stream = await this.dependencies.acquireMicrophone();
         try {
+          // Deliver bytes retained across the reload into the segment they
+          // belong to before rotating it; only what is still missing after
+          // this becomes a declared gap.
+          await this.flushPersisted(stored.sessionId);
           if (snapshot.state === "recording") {
             const paused = await this.dependencies.rpc<PanelState>(this.pluginId, "pause", {
               sessionId: stored.sessionId, client, operationId: id(),
@@ -677,31 +774,42 @@ export class BrowserCaptureOwner {
     const stored = readStored();
     if (!stored || stored.pendingControl?.kind !== "stop") return;
     const pending = this.pendingCapture?.sessionId === stored.sessionId ? this.pendingCapture : null;
+    // Without this page's queue (after a reload), deliver what IndexedDB kept.
+    const persisted = pending ? null : await this.flushPersisted(stored.sessionId);
     if (stored.stopDrainError) {
       if (!stored.stopDrainError.retryable) return this.incompleteStopPanel(stored, stored.stopDrainError);
-      if (!pending || pending.uploads.recoverablePendingCount === 0) {
-        const error = { ...stored.stopDrainError, retryable: false,
-          message: `${stored.stopDrainError.message} The missing audio is unavailable in this browser.`,
-        };
-        stored.stopDrainError = error;
+      if (persisted && persisted.found.size > 0) {
+        // The server's sequence fence in Stop decides whether anything is
+        // still missing; a reported gap stays retryable while its bytes remain.
+        stored.stopDrainError = undefined;
         writeStored(stored);
-        return this.incompleteStopPanel(stored, error);
-      }
-      try {
-        await pending.uploads.retryPending();
-      } catch (cause) {
-        const error = { code: "browser_audio_drain_incomplete", message: cause instanceof Error ? cause.message : String(cause),
-          retryable: !(cause instanceof IrrecoverableAudioLossError) && !pending.uploads.hasIrrecoverableLoss };
-        stored.stopDrainError = error;
+      } else {
+        if (!pending || pending.uploads.recoverablePendingCount === 0) {
+          const error = { ...stored.stopDrainError, retryable: false,
+            message: `${stored.stopDrainError.message} The missing audio is unavailable in this browser.`,
+          };
+          stored.stopDrainError = error;
+          writeStored(stored);
+          return this.incompleteStopPanel(stored, error);
+        }
+        try {
+          await pending.uploads.retryPending();
+        } catch (cause) {
+          const error = { code: "browser_audio_drain_incomplete", message: cause instanceof Error ? cause.message : String(cause),
+            retryable: !(cause instanceof IrrecoverableAudioLossError) && !pending.uploads.hasIrrecoverableLoss };
+          stored.stopDrainError = error;
+          writeStored(stored);
+          return this.incompleteStopPanel(stored, error);
+        }
+        stored.nextSequence = Math.max(stored.nextSequence, pending.nextSequence);
+        stored.stopDrainError = undefined;
         writeStored(stored);
-        return this.incompleteStopPanel(stored, error);
       }
-      stored.nextSequence = Math.max(stored.nextSequence, pending.nextSequence);
-      stored.stopDrainError = undefined;
-      writeStored(stored);
     }
     if (stored.stopGapError) {
-      if (!pending || stored.stopGapSequence === undefined) {
+      if (stored.stopGapSequence === undefined
+        || !pending && !persisted?.delivered.has(stored.stopGapSequence)
+          && !await this.hasPersisted(stored.sessionId, stored.stopGapSequence)) {
         const error = {
           ...stored.stopGapError,
           message: `${stored.stopGapError.message} The missing chunk is unavailable in this browser; recording is incomplete.`,
@@ -712,7 +820,9 @@ export class BrowserCaptureOwner {
         return this.incompleteStopPanel(stored, error);
       }
       try {
-        await pending.uploads.resend(stored.stopGapSequence);
+        if (!persisted?.delivered.has(stored.stopGapSequence)) {
+          await this.resendGap(stored.sessionId, stored.stopGapSequence, pending);
+        }
       } catch (cause) {
         const message = cause instanceof Error ? cause.message : String(cause);
         const error = { code: "browser_chunk_gap", message,
@@ -752,6 +862,7 @@ export class BrowserCaptureOwner {
           retryable: true,
         });
       }
+      this.forgetPersisted(stored.sessionId);
       this.endedRecordingId = stored.sessionId;
       writeStored(null);
       if (this.pendingCapture?.sessionId === stored.sessionId) {
@@ -796,6 +907,7 @@ export class BrowserCaptureOwner {
       projectId: stored.projectId, client: detectClientCapabilities(),
     });
     if (state.state !== "saved" || state.lastSessionId !== stored.sessionId) return null;
+    this.forgetPersisted(stored.sessionId);
     this.endedRecordingId = stored.sessionId;
     writeStored(null);
     if (this.pendingCapture?.sessionId === stored.sessionId) {
@@ -834,6 +946,7 @@ export class BrowserCaptureOwner {
         }
       : stored;
     if (state.error === null && state.state === "saved" && !recovery.stopDrainError && !recovery.stopGapError) {
+      this.forgetPersisted(recovery.sessionId);
       this.endedRecordingId = recovery.sessionId;
       writeStored(null);
       if (this.pendingCapture?.sessionId === recovery.sessionId) {
@@ -852,9 +965,10 @@ export class BrowserCaptureOwner {
       message: "Margins did not confirm that the recording finished. Try again with the retained Stop operation.",
       retryable: true,
     };
-    const error: HostError = state.error?.code === "browser_audio_empty"
-      || recovery.stopGapSequence !== undefined
-        && !this.pendingCapture?.uploads.canReplay(recovery.stopGapSequence)
+    const gapReplayable = recovery.stopGapSequence === undefined
+      || this.pendingCapture?.uploads.canReplay(recovery.stopGapSequence)
+      || await this.hasPersisted(recovery.sessionId, recovery.stopGapSequence);
+    const error: HostError = state.error?.code === "browser_audio_empty" || !gapReplayable
       ? { ...rawError, retryable: false } : rawError;
     if (state.error?.code === "browser_audio_empty") recovery.stopDrainError = error;
     if (recovery.stopGapError) recovery.stopGapError = { ...recovery.stopGapError, retryable: error.retryable };
