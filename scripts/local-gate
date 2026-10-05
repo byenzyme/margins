@@ -12,6 +12,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 LANE = ROOT / "scripts" / "cargo-lane"
+PRIVATE_RECALL_WRAPPER = ROOT / "scripts" / "with-private-recall"
 BB_PLUGIN = ROOT / "integrations/bb-plugin-margins"
 BB_PLUGIN_DIST = "integrations/bb-plugin-margins/dist"
 ROOT_PACKAGES = {
@@ -64,10 +65,24 @@ class Gate:
         self.passed: list[str] = []
         self.skipped: list[str] = []
 
-    def run(self, label: str, command: list[str], *, cwd: Path = ROOT, env=None) -> None:
+    def run(
+        self,
+        label: str,
+        command: list[str],
+        *,
+        cwd: Path = ROOT,
+        env=None,
+        quiet_stdout: bool = False,
+    ) -> None:
         print(f"\n==> {label}", flush=True)
         try:
-            result = subprocess.run(command, cwd=cwd, env=env, check=False)
+            result = subprocess.run(
+                command,
+                cwd=cwd,
+                env=env,
+                check=False,
+                stdout=subprocess.DEVNULL if quiet_stdout else None,
+            )
         except OSError as exc:
             print(f"local-gate: {exc}", file=sys.stderr)
             raise GateFailure(label, 127) from exc
@@ -101,6 +116,24 @@ def normalize_input(raw: str) -> str:
     if ".." in path.parts:
         raise ValueError(f"path must stay inside this checkout: {raw}")
     return path.as_posix().removeprefix("./").rstrip("/")
+
+
+def cargo_graph_changed(inputs: list[str]) -> bool:
+    return any(
+        Path(normalize_input(raw)).name in {"Cargo.toml", "Cargo.lock", "Cargo.private-recall.lock"}
+        for raw in inputs
+    )
+
+
+def check_private_composition_lock(gate: Gate) -> None:
+    command = ["cargo", "metadata", "--locked", "--format-version", "1"]
+    if os.environ.get("MARGINS_PRIVATE_RECALL_ACTIVE") != "1":
+        command.insert(0, str(PRIVATE_RECALL_WRAPPER))
+    gate.run(
+        "verify private recall manifest and lock",
+        command,
+        quiet_stdout=True,
+    )
 
 
 def quick_selection(inputs: list[str]) -> tuple[list[str], bool, bool]:
@@ -168,6 +201,8 @@ def check_shipped_linux(gate: Gate, *, cli_already_built: bool = False) -> None:
 
 
 def quick(gate: Gate, inputs: list[str]) -> None:
+    if cargo_graph_changed(inputs):
+        check_private_composition_lock(gate)
     packages, parked_desktop, bb_plugin = quick_selection(inputs)
     if packages:
         args = ["test", "--locked", "--no-default-features"]
@@ -186,6 +221,7 @@ def quick(gate: Gate, inputs: list[str]) -> None:
 def linux(gate: Gate) -> None:
     if os.environ.get("MARGINS_PRIVATE_RECALL_ACTIVE") != "1":
         raise ValueError("linux recall gate requires scripts/with-private-recall")
+    check_private_composition_lock(gate)
     check_bb_plugin(gate)
     gate.cargo(
         "portable workspace and private composition tests",
