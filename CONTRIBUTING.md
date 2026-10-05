@@ -41,8 +41,10 @@ offline with `scripts/cargo-lane shared -- cargo metadata --no-deps --locked
 --no-default-features --locked --offline`. The root `Cargo.lock` has no private
 git source. Official builds use `scripts/with-private-recall` and the pinned
 `Cargo.private-recall.lock`; this requires read access to the private
-`byenzyme/enzyme-rust` repository. See the
-[official CLI release](docs/official-cli-release.md).
+`byenzyme/enzyme-rust` repository. The wrapper defaults
+`CARGO_NET_GIT_FETCH_WITH_CLI=true` so Cargo uses the git CLI's configured SSH,
+deploy key, or token credentials; an explicitly supplied value is preserved.
+See the [official CLI release](docs/official-cli-release.md).
 
 Format Rust changes with `scripts/cargo-lane shared -- cargo fmt --all`.
 Test the smallest affected crate while iterating, then run the affected crate

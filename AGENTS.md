@@ -127,6 +127,11 @@ scripts/with-private-recall scripts/local-gate linux
 scripts/with-private-recall scripts/local-gate macos
 ```
 
+`scripts/with-private-recall` defaults `CARGO_NET_GIT_FETCH_WITH_CLI=true`, so
+private enzyme-rust fetches use credentials already available to the git CLI.
+An explicitly supplied value is preserved. Release CI sets the variable
+directly before invoking the wrapper.
+
 `quick` accepts changed paths or Cargo package names. It tests affected root
 workspace crates and their reverse dependents, then checks shipped binaries.
 BB plugin paths also run its typecheck, tests, build, and committed `dist/`

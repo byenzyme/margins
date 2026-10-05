@@ -23,4 +23,7 @@ if [[ -f "$repo_root/Cargo.private-recall.lock" ]]; then
   cp "$repo_root/Cargo.private-recall.lock" "$repo_root/Cargo.lock"
 fi
 export MARGINS_PRIVATE_RECALL_ACTIVE=1
+if [[ -z "${CARGO_NET_GIT_FETCH_WITH_CLI+x}" ]]; then
+  export CARGO_NET_GIT_FETCH_WITH_CLI=true
+fi
 "$@"
