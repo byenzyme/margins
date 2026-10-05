@@ -20,6 +20,7 @@ COPIED = (
     "Cargo.lock",
     "Cargo.private-recall.lock",
 )
+SUBSTITUTED = {"Cargo.toml", "Cargo.lock"}
 PROBE = 'printf "%s\\n" "${MARGINS_BUILD_DIRTY-unset}"; git status --porcelain'
 
 
@@ -28,11 +29,23 @@ class WithPrivateRecallDirtyTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.repo = Path(self.temp.name)
+        # Under an outer with-private-recall (the linux gate), the checkout's
+        # manifest is already substituted; use the committed one instead.
+        outer_wrapper = os.environ.get("MARGINS_PRIVATE_RECALL_ACTIVE") == "1"
         for relative in COPIED:
             source = REPO_ROOT / relative
-            if source.exists():
-                target = self.repo / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
+            if not source.exists():
+                continue
+            target = self.repo / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if outer_wrapper and relative in SUBSTITUTED:
+                target.write_bytes(
+                    subprocess.run(
+                        ["git", "show", f"HEAD:{relative}"],
+                        cwd=REPO_ROOT, check=True, capture_output=True,
+                    ).stdout
+                )
+            else:
                 shutil.copy2(source, target)
         self.git("init", "-q")
         self.git("add", "-A")
@@ -42,10 +55,21 @@ class WithPrivateRecallDirtyTests(unittest.TestCase):
         )
 
     def git(self, *args: str) -> None:
-        subprocess.run(["git", *args], cwd=self.repo, check=True)
+        subprocess.run(["git", *args], cwd=self.repo, env=self.base_env(), check=True)
+
+    @staticmethod
+    def base_env() -> dict[str, str]:
+        # Hermetic git: no caller repo, hooks, or user/system configuration.
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("GIT_") and key != "MARGINS_BUILD_DIRTY"
+        }
+        environment.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        return environment
 
     def run_wrapper(self, **env: str) -> tuple[str, str]:
-        environment = {k: v for k, v in os.environ.items() if k != "MARGINS_BUILD_DIRTY"}
+        environment = self.base_env()
         environment.update(env)
         result = subprocess.run(
             [str(self.repo / "scripts/with-private-recall"), "bash", "-c", PROBE],
@@ -82,7 +106,7 @@ class WithPrivateRecallDirtyTests(unittest.TestCase):
     def git_status(self) -> str:
         return subprocess.run(
             ["git", "status", "--porcelain"],
-            cwd=self.repo, check=True, capture_output=True, text=True,
+            cwd=self.repo, env=self.base_env(), check=True, capture_output=True, text=True,
         ).stdout
 
 

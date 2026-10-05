@@ -123,6 +123,7 @@ mode is required.
 ```bash
 scripts/local-gate quick src/cli.rs crates/public/margins-workflows
 scripts/local-gate quick integrations/bb-plugin-margins/src
+scripts/local-gate quick scripts/cargo-lane scripts/with-private-recall
 scripts/local-gate public
 scripts/with-private-recall scripts/local-gate linux
 # On the attached Mac host:
@@ -137,9 +138,15 @@ directly before invoking the wrapper.
 `quick` accepts changed paths or Cargo package names. It tests affected root
 workspace crates and their reverse dependents, then checks shipped binaries.
 BB plugin paths also run its typecheck, tests, build, and committed `dist/`
-check; `desktop/` paths are reported as parked. `public` builds and tests the
+check; `desktop/` paths are reported as parked. Script and test-script paths
+run their hermetic script tests (`SCRIPT_TESTS` in `scripts/local-gate`, for
+example `scripts/cargo-lane` runs `tests/test_cargo_lane.py`); changing
+`scripts/local-gate` runs all of them. `tests/test_*.py` and `tests/test_*.sh`
+edits alone do not trigger Rust tests. Script tests must stay fast and use only
+temp directories and temp git repos. `public` builds and tests the
 root workspace with default features disabled and no private git source in its
-manifest or lockfile.
+manifest or lockfile. `public` and `linux` both run every script test
+(`tests/test_*.py` plus the listed shell fixtures).
 `linux` runs the full portable recall suite, the isolated
 Google onboarding fixture, setup rollout contracts, BB plugin checks, and shipped
 Linux binary checks. `macos` runs the native private and public composition suites and checks
