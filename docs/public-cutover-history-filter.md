@@ -18,8 +18,8 @@ benchmarks remain at the exact pinned private enzyme-rust commit.
 ## Scan results before replay
 
 `scripts/local-gate scan 54a7a9d7c..HEAD` reports hits per commit and does
-not print matched values. Against the 185 reachable commits in this checkout,
-the scan found 109 added-line hits across six commits:
+not print matched values. Against the 246 reachable commits in this checkout,
+the scan found 119 added-line hits across eight commits:
 
 | Commit | Location | Hits | Disposition |
 | --- | --- | ---: | --- |
@@ -29,11 +29,13 @@ the scan found 109 added-line hits across six commits:
 | `c954f879b70e` | Remote workspace report | 1 path | Replace personal home prefix in replayed commits |
 | `f0117844d395` | Native bridge test code | 1 email | Synthetic fixture |
 | `fd392a611237` | Fresh onboarding script | 1 email | Synthetic fixture |
+| `580acc15c047` | Vendored Matroska manifests | 2 emails | Public upstream author attribution |
+| `c469b962f79b` | Diagnostic evidence and cutover report | 8 emails | Reviewed synthetic fixtures/evidence |
 
 The current tree was also scanned after removing the embedded OAuth JSON and
 vendored engine. It has **zero unreviewed secret-shaped hits and zero personal
-home-path hits**. The 646 email matches comprise 555 obvious synthetic-domain
-addresses and 91 reviewed matches in unit tests, fixture and diagnostic
+home-path hits**. The 628 email matches comprise 539 obvious synthetic-domain
+addresses and 89 reviewed matches in unit tests, fixture and diagnostic
 snapshots, public vendor sender examples, third-party package attribution, and
 one icon filename false positive. Two OpenAI-shaped strings are synthetic
 test cases in `tests/test_workspace_setup_rollout_review.sh`. The retained

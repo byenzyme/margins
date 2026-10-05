@@ -120,8 +120,10 @@ binary_path() {
 require_origin() {
   local origin
   origin="$(cd "$REPO_ROOT" && git remote get-url origin)"
-  [ "$origin" = "https://github.com/byenzyme/margins-desktop.git" ] || \
-    die "unexpected origin: $origin"
+  case "$origin" in
+    https://github.com/byenzyme/margins-desktop.git|https://github.com/byenzyme/margins.git) ;;
+    *) die "unexpected origin: $origin" ;;
+  esac
   log "origin=$origin"
 }
 

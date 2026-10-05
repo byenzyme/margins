@@ -33,18 +33,19 @@ if SERVER_MANIFEST.exists():
 # Keep this map in sync when a root workspace crate adds a local dependency.
 REVERSE_DEPENDENTS = {
     "enzyme-core": {"margins"},
-    "margins-cli": {"margins"},
+    "margins-capture": {"margins"},
+    "margins-cli": {"margins", "margins-capture"},
     "margins-core": {
-        "margins", "margins-cli", "margins-media", "margins-server",
+        "margins", "margins-capture", "margins-cli", "margins-media", "margins-server",
         "margins-store", "margins-workflows",
     },
-    "margins-media": {"margins", "margins-cli", "margins-server", "margins-workflows"},
+    "margins-media": {"margins", "margins-capture", "margins-cli", "margins-server", "margins-workflows"},
     "margins-meeting-protocol": {
-        "margins", "margins-cli", "margins-meeting-runtime",
+        "margins", "margins-capture", "margins-cli", "margins-meeting-runtime",
         "margins-server", "margins-store", "margins-workflows",
     },
-    "margins-meeting-runtime": {"margins", "margins-server", "margins-store", "margins-workflows"},
-    "margins-store": {"margins", "margins-cli", "margins-server", "margins-workflows"},
+    "margins-meeting-runtime": {"margins", "margins-capture", "margins-server", "margins-store", "margins-workflows"},
+    "margins-store": {"margins", "margins-capture", "margins-cli", "margins-server", "margins-workflows"},
     "margins-workflows": {"margins", "margins-cli", "margins-server"},
 }
 USAGE = "usage: scripts/local-gate quick <paths-or-crates>... | public | linux | macos | scan [git-range]"

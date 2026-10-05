@@ -6,7 +6,11 @@ use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 #[cfg(feature = "audio-capture")]
 use std::path::PathBuf;
-#[cfg(any(test, feature = "audio-capture", all(feature = "coreml-asr", target_os = "macos")))]
+#[cfg(any(
+    test,
+    feature = "audio-capture",
+    all(feature = "coreml-asr", target_os = "macos")
+))]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicU8, Ordering};
 #[cfg(feature = "audio-capture")]

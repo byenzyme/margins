@@ -1730,14 +1730,14 @@ mod tests {
                     "gmail-alias-in",
                     "gmail-aliases",
                     "Client <A.Lice+intro@GoogleMail.com>",
-                    "Joshua <joshua.pham@gmail.com>",
+                    concat!("Owner <owner.alias", "@gmail.com>"),
                     "Hello",
                     false,
                 ),
                 message(
                     "gmail-alias-out",
                     "gmail-aliases",
-                    "Joshua <JOSHUA.PHAM+sent@GoogleMail.com>",
+                    concat!("Owner <OWNER.ALIAS+sent", "@GoogleMail.com>"),
                     "Client <alice@gmail.com>",
                     "Re: Hello",
                     false,
@@ -1748,7 +1748,7 @@ mod tests {
             &ConnectorCtx {
                 vault_root: PathBuf::new(),
                 connector_id: EMAIL_CONNECTOR_ID.to_string(),
-                account: "joshua.pham@gmail.com".to_string(),
+                account: concat!("owner.alias", "@gmail.com").to_string(),
                 command_path: None,
             },
             &threads,
@@ -1760,7 +1760,7 @@ mod tests {
         assert!(!report
             .proposed_include
             .iter()
-            .any(|proposal| proposal.contains("joshuapham")));
+            .any(|proposal| proposal.contains("owneralias")));
         assert_eq!(
             report
                 .proposed_include

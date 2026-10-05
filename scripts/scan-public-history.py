@@ -91,7 +91,7 @@ def scan_history(revision_range: str) -> list[dict]:
             if line.startswith("+++ b/"):
                 path = line[6:]
             elif line.startswith("@@"):
-                found = re.search(r"\\+(\\d+)", line)
+                found = re.search(r"\+(\d+)", line)
                 line_number = int(found.group(1)) if found else 0
             elif line.startswith("+") and not line.startswith("+++"):
                 if path is not None:

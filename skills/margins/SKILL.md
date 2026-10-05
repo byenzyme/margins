@@ -35,8 +35,10 @@ When a BB message carries `<margins-context-v1>`, use its exact `workspaceId`,
 resolve `latest` or query a local CLI, which may point at another store. Read
 `context`, `memo`, and `transcript` with `margins_bb_meeting_read`, continuing
 from `nextOffset` until each part is complete. Use the returned Home Source and
-destination for the note. If the transcript is pending or contains only a memo
-checkpoint, wait for spoken timeline lines before treating it as complete.
+destination for the note. If the transcript is pending, wait for the server's
+transcript. A memo-only checkpoint has no usable spoken timeline. Use a full
+transcript only when it is terminal; do not write a final note from an active
+live meeting.
 
 After saving an approved note under the returned Home Source, call
 `margins_bb_note_link` with the same pinned IDs and memo revision, the returned
@@ -85,11 +87,15 @@ already names a note, show it to the user before replacing or duplicating it.
 For a TUI session started with `margins new`, the memo contains timestamped
 lines captured while the user listened. Preserve the raw memo, including later
 untimed reflections; do not rewrite it as a finished note. Capture may still be
-finishing transcription after the TUI closes. If the transcript is live or
-incomplete, wait for its terminal spoken timeline. A full transcript rendered
-from a terminal `*.live-transcript.json` checkpoint is usable; do not re-run ASR
-solely because an aligned Markdown file is absent. If speaker labels are generic,
-ask for identities before attributing claims to named people.
+finishing transcription after the TUI closes. For `view="pending"`, wait for
+the server transcript. Use a `view="full"` body only when `terminal="true"`;
+a terminal `*.live-transcript.json` checkpoint is usable without re-running ASR.
+For other non-live results with `incomplete="true"` or `terminal="false"`,
+run `process` once, then read the transcript again. If it remains incomplete,
+disclose the gap and do not present its partial body as complete. Do not process
+an active live meeting for a final note. Memo-only bodies without spoken timeline
+lines are not usable transcripts. If speaker labels are generic, ask for
+identities before attributing claims to named people.
 
 If the transcript command has no usable body, ask Margins which files belong to
 the same session. Use the same `latest` or stable session id as above:
@@ -107,10 +113,10 @@ Run `recent` only when the user needs to browse or disambiguate sessions:
 Use these commands rather than searching hidden Margins files for artifacts.
 If a registered recording has no usable transcript after capture finishes and
 `capabilities` reports audio processing, run `"$MARGINS_CLI" --workspace
-"<workspace-id>" process "<session-id>"` once. Use `--align-only` only when the
-user asks to rebuild alignment from an existing transcript. If no session exists
-and the user has not supplied other evidence, ask for a transcript, memo, text,
-or supported audio file.
+"<workspace-id>" process "<session-id>"` once, then read the transcript again.
+Use `--align-only` only when the user asks to rebuild alignment from an existing
+transcript. If no session exists and the user has not supplied other evidence,
+ask for a transcript, memo, text, or supported audio file.
 
 ### Explicitly supplied evidence
 

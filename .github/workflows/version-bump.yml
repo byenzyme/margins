@@ -31,6 +31,7 @@ jobs:
           perl -0pi -e 's/^(name = "margins"\nversion = ")[^"]+/${1}'"$VERSION"'/m' Cargo.toml
           perl -0pi -e 's/^(name = "margins-cli"\nversion = ")[^"]+/${1}'"$VERSION"'/m' crates/public/margins-cli/Cargo.toml
           perl -0pi -e 's/^(name = "margins-server"\nversion = ")[^"]+/${1}'"$VERSION"'/m' crates/public/margins-server/Cargo.toml
+          perl -0pi -e 's/(margins-cli = \{ version = ")[^"]+/${1}'"$VERSION"'/' crates/public/margins-capture/Cargo.toml
           scripts/cargo-lane shared -- cargo update -p margins -p margins-cli -p margins-server
 
       - name: Refresh private recall composition lockfile
@@ -51,7 +52,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Cargo.toml Cargo.lock Cargo.private-recall.lock \
-            crates/public/margins-cli/Cargo.toml crates/public/margins-server/Cargo.toml
+            crates/public/margins-cli/Cargo.toml crates/public/margins-server/Cargo.toml \
+            crates/public/margins-capture/Cargo.toml
           git commit -m "Release v${VERSION}"
           git tag "v${VERSION}"
           git push origin main --tags
