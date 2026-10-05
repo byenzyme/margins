@@ -34769,17 +34769,19 @@ async function previewWorkspaceSetup(target, dataDir, homeInput, noteFolderInput
     ...noteFolder ? ["--note-folder", noteFolder] : [],
     "--json"
   ], 12e4, 2e6));
-  if (compiled.schema_version !== "margins.workspace.compile.v1" || typeof compiled.desired_toml !== "string" || !["jev", "automatic_fallback", "empty"].includes(compiled.mode || "")) {
+  if (compiled.schema_version !== "margins.workspace.compile.v2" || typeof compiled.desired_program !== "string" || !["jev", "automatic_fallback", "empty"].includes(compiled.mode || "")) {
     throw new Error("Margins returned an invalid Workspace proposal.");
   }
   const previewId = randomUUID2();
   const plansDir = join3(dataDir, "setup-plans");
   await mkdir3(plansDir, { recursive: true, mode: 448 });
-  const desiredFile = join3(plansDir, `${previewId}.desired.toml`);
-  await writeFile2(desiredFile, compiled.desired_toml, { mode: 384, flag: "wx" });
+  const desiredFile = join3(plansDir, `${previewId}.desired.enzyme`);
+  await writeFile2(desiredFile, compiled.desired_program, { mode: 384, flag: "wx" });
   const planJson = await cli(["--workspace", workspaceId, "workspace", "plan", "--desired", desiredFile, "--json"]);
   const plan = JSON.parse(planJson);
-  if (plan.workspace_id !== workspaceId || !Array.isArray(plan.actions)) throw new Error("Margins returned an invalid Workspace plan.");
+  if (plan.schema_version !== "margins.workspace.plan.v2" || plan.workspace_id !== workspaceId || !Array.isArray(plan.actions) || plan.desired_program !== compiled.desired_program) {
+    throw new Error("Margins returned an invalid Workspace plan.");
+  }
   await writeFile2(join3(plansDir, `${previewId}.plan.json`), planJson, { mode: 384, flag: "wx" });
   return {
     previewId,

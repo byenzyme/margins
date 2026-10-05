@@ -349,16 +349,26 @@ pub(crate) fn compile(workspace: &ResolvedWorkspace, note_folder: Option<&str>) 
             }
         }
     }
-    let plan =
-        margins_workflows::workspace::plan_workspace_config(&workspace.config, desired.clone())?;
+    // Scan specs are Home-relative (`folder:<path>`), the same reading rule
+    // as a retired config: plan them through the migration qualification.
+    let plan = margins_workflows::workspace::plan_legacy_workspace_config(workspace, desired)?;
+    let selected_entities = margins_workflows::workspace_program::derive_view(
+        &margins_workflows::workspace::WorkspaceProgram::parse(&plan.desired_program)?,
+        None,
+        Default::default(),
+    )?
+    .policy
+    .entities;
     Ok(json!({
-        "schema_version": "margins.workspace.compile.v1",
+        "schema_version": "margins.workspace.compile.v2",
         "workspace_id": workspace.config.id,
         "mode": mode,
         "warning": warning,
         "files_scanned": evidence["files"],
-        "selected_entities": desired.policy.entities,
-        "desired_toml": toml::to_string_pretty(&desired)?,
+        "selected_entities": selected_entities,
+        "desired_program": plan.desired_program,
+        "desired_sha256": plan.desired_sha256,
+        "diff": plan.diff,
         "actions": plan.actions,
     }))
 }

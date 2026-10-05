@@ -1603,10 +1603,9 @@ mod tests {
 
         assert_eq!(value["files"], 2);
         assert!(value["entities"].is_array());
-        assert_eq!(
-            value["excluded_folders"],
-            serde_json::json!([".git", "node_modules"])
-        );
+        // Enzyme's implicit exclusions (.git, node_modules, …) are never
+        // part of Workspace policy, so a default policy proposes none.
+        assert_eq!(value["excluded_folders"], serde_json::json!([]));
         assert_eq!(value["schema_version"], "scan.v2");
         assert_eq!(value["summary"]["file_count"], 2);
         assert!(value["top_entities"]
@@ -2190,10 +2189,10 @@ mod tests {
         );
         assert!(!refs.contains(&"[[alice]]".to_string()), "{refs:?}");
         let raw = std::fs::read_to_string(&workspace.config_path).unwrap();
-        let persisted: margins_workflows::workspace::WorkspaceConfig =
-            toml::from_str(&raw).unwrap();
-        assert!(persisted.policy.entities.is_empty());
-        assert!(!raw.contains("folder:readwise"));
+        let persisted =
+            margins_workflows::workspace::resolve_at(home.path(), "practice").unwrap();
+        assert!(persisted.config.policy.entities.is_empty());
+        assert!(!raw.contains("readwise"));
         assert!(!home.path().join("config.toml").exists());
     }
 

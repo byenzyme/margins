@@ -201,7 +201,7 @@ uncertain or the user wants Margins to keep adapting. Never turn every scan
 candidate into configuration, invent an entity, or configure a structure that does
 not exist.
 
-The agent owns this derivation. Do not ask the user to design `[policy].entities`,
+The agent owns this derivation. Do not ask the user to design readings,
 choose between automatic and explicit attention in the abstract, or repeat a
 priority they already expressed. Propose the minimum concrete configuration that
 follows from the recognized account, translate its consequences—including when an
@@ -220,17 +220,21 @@ self-contained expansion evidence. If the user requested a specific curation and
 the evidence does not support it, say so and keep the request unresolved rather
 than declaring setup complete.
 
-When a setting is needed, read and copy the complete config at
-`current_config.config_path`. Do not reconstruct it from the scan summary. Change
-only the confirmed setting, save a complete desired-state TOML file, and compile it:
+When a setting is needed, read and copy the complete Workspace program at
+`current_config.config_path` (`$MARGINS_HOME/configs/<id>.enzyme`, one
+`workspace "<id>" { … }` block). Do not reconstruct it from the scan summary.
+Change only the confirmed statement, keep every other statement exactly as
+written, save the complete desired program to a `.enzyme` file, and compile it:
 
 ```bash
 margins --workspace practice workspace plan \
-  --desired /tmp/margins-workspace-desired.toml --json \
+  --desired /tmp/margins-workspace-desired.enzyme --json \
   > /tmp/margins-workspace-plan.json
 ```
 
-If `actions` is empty, explain that no settings need to change and skip apply.
+The plan shows `actions` (one plain-language `summary` each) and an exact `diff`
+of the program. If `actions` is empty, explain that no settings need to change and
+skip apply.
 Otherwise, show the user-visible consequences and apply the saved plan unchanged in
 the same turn. Do not ask for a second “apply this plan” confirmation: the opening
 setup request plus recognition of the grounded account already authorize these
@@ -246,7 +250,7 @@ Apply derives its revision check and retry identity from the plan. It rejects a
 stale or altered plan and commits atomically.
 
 If the user corrects the understanding before apply, return to the complete desired
-config, change only that correction, and run `workspace plan --desired` again. Show
+program, change only that correction, and run `workspace plan --desired` again. Show
 the fresh consequences and apply that fresh plan. Never hand-edit plan JSON.
 
 Only apply settings that are narrow consequences of the recognized account. A
@@ -367,23 +371,35 @@ is present.
 ## Evidence reference: entities and catalyst profiles
 
 An entity is an existing thread—such as a folder, tag, linked note, or running
-log—that Margins can build recall catalysts around. A non-empty `[policy].entities`
-list is the exact stable attention surface: Margins selects those entities instead
-of appending automatic choices. An empty list leaves attention adaptive.
+log—that Margins can build recall catalysts around. In the Workspace program each
+one is a `learn questions from …` reading. Any readings form the exact stable
+attention surface: Margins selects those entities instead of appending automatic
+choices. No readings leave attention adaptive.
 
-Use exactly the spellings surfaced by scan:
+Translate the scan spellings exactly: `folder:<path>` → `folder "<path>"`,
+`#<tag>` → `tag "<tag>"`, `[[<linked name>]]` → `link "<linked name>"`,
+`log:<name>` → `log "<name>"`. A reading may add `about <profile>` or, for a
+folder, `including linked pages`:
 
-```toml
-[policy]
-entities = [
-  "#enzyme",
-  { "folder:people" = { profile = "relational", expandable = true } },
-]
+```enzyme
+workspace "practice" {
+  source markdown "home" { path "/Users/me/notes" }
+
+  learn questions from tag "enzyme"
+  learn questions from folder "people"
+    including linked pages
+    about relational
+  leave out folders ["templates"]
+
+  remember in folder "inbox" create note
+}
 ```
 
-Valid simple forms are `folder:<path>`, `#<tag>`, `[[<linked name>]]`, and
-`log:<name>`. An entity may also have a `profile` or, for a folder,
-`expandable = true`.
+When the Workspace declares more than one Markdown source, folder readings start
+with the source name (`folder "home/people"`) and the one
+`remember in folder … create note` names its source (`in source "home"`).
+`remember in folder` is where Margins writes notes (`"."` is the source root);
+a Workspace has exactly one. Exclusions are `leave out folders|tags|links [...]`.
 
 A catalyst profile changes the kinds of questions Margins develops for an entity;
 it is not a weight or an importance score. Use `available_profiles` as the
@@ -402,12 +418,12 @@ representative notes make the posture clear:
 
 Leave an ambiguous entity without a profile.
 
-Use `expandable = true` only for a folder whose `folder_page_entities` and
+Use `including linked pages` only for a folder whose `folder_page_entities` and
 `folder_stats` show real child pages that the user wants treated as separate
 threads. Prefer `entity_curation_candidates[].expansion` when present:
-`mode = "automatic"` or `expands_automatically = true` means `expandable = true`
-is redundant in config; `mode = "explicit_available"` means real child pages
-exist below the automatic threshold and `expandable = true` is available only if
+`mode = "automatic"` or `expands_automatically = true` means `including linked
+pages` is redundant; `mode = "explicit_available"` means real child pages
+exist below the automatic threshold and `including linked pages` is available only if
 the user wants those child pages treated as separate threads.
 `mode = "not_applicable"` means there is no supported folder expansion to
 configure. Never persist the child links themselves merely because they live in

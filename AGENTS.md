@@ -329,7 +329,7 @@ The boundary as it actually stands:
 | Recall database | Uncrossed. `$MARGINS_HOME/workspaces/<id>/index.db`. |
 | Local model *files* | Intentionally shared at `~/.enzyme/models/`. |
 | Model selection | Machine-level Margins config. |
-| Excluded folders | Workspace policy in `$MARGINS_HOME/workspaces/<id>/config.toml`. |
+| Excluded folders | Workspace program `leave out folders` in `$MARGINS_HOME/configs/<id>.enzyme`. |
 
 Margins builds an ephemeral engine configuration from those declarations; it
 does not discover Enzyme policy or Sources from cwd.

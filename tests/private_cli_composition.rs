@@ -501,10 +501,12 @@ fn workspace_status_implicitly_creates_fresh_notes_once() {
         first_json["source_refresh_staleness"],
         serde_json::json!({})
     );
-    let config_path = margins_home.join("workspaces/fresh-notes/config.toml");
+    let config_path = margins_home.join("configs/fresh-notes.enzyme");
     assert!(config_path.is_file());
-    let config: margins_workflows::workspace::WorkspaceConfig =
-        toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert!(!margins_home.join("workspaces/fresh-notes/config.toml").exists());
+    let config = margins_workflows::workspace::resolve_at(&margins_home, "fresh-notes")
+        .unwrap()
+        .config;
     assert!(matches!(
         &config.bindings["home"],
         margins_workflows::workspace::WorkspaceBinding::NativeMarkdown { path, .. }
@@ -924,7 +926,12 @@ fn official_workspace_scan_is_full_evidence_for_agent_compiled_apply() {
     let applied =
         margins_workflows::workspace::resolve_workspace(&margins_home, Some("practice"), &notes)
             .unwrap();
-    assert_eq!(applied.config, plan.desired);
+    assert_eq!(applied.program.text(), plan.desired_program);
+    assert!(applied
+        .config
+        .policy
+        .excluded_folders
+        .contains(&"templates".to_string()));
 }
 
 #[test]

@@ -1,6 +1,6 @@
 # Workspace configuration in the Enzyme workspace language
 
-Status: in progress (2026-10-05). Decided by Joshua: adopt the `.enzyme`
+Status: in progress (2026-10-05); public side implemented (see below). Decided by Joshua: adopt the `.enzyme`
 workspace language as the single Workspace configuration format; make
 `enzyme-spec` a public crate (prepared, not published); deliver as draft PRs.
 
@@ -124,7 +124,47 @@ without writing.
   it.
 - `enzyme-spec` is self-contained and ready to publish as a public crate.
 
+## Margins implementation (public side)
+
+- `margins_workflows::workspace_program` owns the program: `WorkspaceProgram`
+  (text + AST), `derive_view` (program → the read-only `WorkspaceConfig` view the
+  rest of Margins reads), and `reconcile` (edit the AST toward a desired view,
+  keeping every statement the view cannot express: learning settings, inline and
+  shared profiles, name patterns, `when asked`, create-note conditions and
+  guidance). Only Markdown and the five Margins host kinds are accepted; unknown
+  host fields are errors.
+- `ResolvedWorkspace { program, config, … }`: `config_path` is the program file;
+  `workspace_revision` hashes its bytes. Display names live in machine config
+  `[workspace.names]`.
+- Language validation lowers host sources to placeholder SQLite sources and runs
+  `enzyme_spec::resolve` with the optional `configs/profiles.enzyme`, so readings,
+  profiles, folder qualification and exclusions are checked by the engine's own
+  resolver. The real ledger lowering belongs to the engine path.
+- Plan JSON is `margins.workspace.plan.v2`: `workspace_id`, `base_revision`,
+  `plan_id`, `actions` (each with a `summary`; `update_program` when the change is
+  outside the typed view), `desired_program`, `desired_sha256`, `diff`. A legacy
+  `.toml` desired file is converted with the migration rules onto the current
+  program. `workspace compile` emits `margins.workspace.compile.v2` with
+  `desired_program` (no `desired_toml`).
+- Migration also runs explicitly: `margins workspace migrate [--dry-run] [--json]`.
+  Enzyme's implicit folder exclusions (`.git`, `node_modules`, …) are not written.
+  With several Markdown sources, unqualified legacy folder references are
+  qualified with the Home source name.
+
 ## Open items
 
-- Publish `enzyme-spec` publicly (repository, license choice). Until then the
-  public Margins build resolves it through a local override; see the PR.
+- Publish `enzyme-spec` publicly (repository, license choice). Until then
+  `margins-workflows` depends on it by path
+  (`../../../../enzyme-rust-worktrees/margins-workspace-language/crates/enzyme-spec`),
+  because Cargo must fetch a git source before a `[patch]` can replace it. On
+  publication, switch to
+  `enzyme-spec = { git = "https://github.com/byenzyme/enzyme-spec", tag = "v0.1.0" }`,
+  run `cargo update -p enzyme-spec` for `Cargo.lock` and
+  `Cargo.private-recall.lock`, and drop the path rewrite in
+  `crates/public/margins-workflows/tests/standalone.rs`.
+- Shell E2E harnesses that read `workspaces/<id>/config.toml` or expect
+  `plan.v1` (`scripts/e2e-fresh-onboarding.sh`, `scripts/e2e-fresh-workspace-setup.sh`,
+  `scripts/e2e-official-hosted-workspace-setup.sh`, `scripts/core-product-smoke.sh`,
+  `scripts/workspace-setup-rollout-review.py`, `tests/test_setup_e2e_lanes.sh`,
+  `tests/test_e2e_fresh_onboarding.sh`, `tests/test_workspace_setup_rollout_review.sh`)
+  still need to move to `configs/<id>.enzyme` and `plan.v2`.

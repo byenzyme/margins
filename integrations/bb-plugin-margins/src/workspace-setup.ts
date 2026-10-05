@@ -100,21 +100,27 @@ export async function previewWorkspaceSetup(
     "--workspace", workspaceId, "workspace", "compile",
     ...(noteFolder ? ["--note-folder", noteFolder] : []), "--json",
   ], 120_000, 2_000_000)) as {
-    schema_version?: string; desired_toml?: string; mode?: WorkspaceSetupPreview["mode"];
+    schema_version?: string; desired_program?: string; mode?: WorkspaceSetupPreview["mode"];
     warning?: string | null; files_scanned?: number; selected_entities?: unknown;
   };
-  if (compiled.schema_version !== "margins.workspace.compile.v1" || typeof compiled.desired_toml !== "string"
+  if (compiled.schema_version !== "margins.workspace.compile.v2" || typeof compiled.desired_program !== "string"
     || !["jev", "automatic_fallback", "empty"].includes(compiled.mode || "")) {
     throw new Error("Margins returned an invalid Workspace proposal.");
   }
   const previewId = randomUUID();
   const plansDir = join(dataDir, "setup-plans");
   await mkdir(plansDir, { recursive: true, mode: 0o700 });
-  const desiredFile = join(plansDir, `${previewId}.desired.toml`);
-  await writeFile(desiredFile, compiled.desired_toml, { mode: 0o600, flag: "wx" });
+  // The complete desired Workspace program (`workspace "<id>" { … }`).
+  const desiredFile = join(plansDir, `${previewId}.desired.enzyme`);
+  await writeFile(desiredFile, compiled.desired_program, { mode: 0o600, flag: "wx" });
   const planJson = await cli(["--workspace", workspaceId, "workspace", "plan", "--desired", desiredFile, "--json"]);
-  const plan = JSON.parse(planJson) as { schema_version?: string; workspace_id?: string; actions?: unknown[] };
-  if (plan.workspace_id !== workspaceId || !Array.isArray(plan.actions)) throw new Error("Margins returned an invalid Workspace plan.");
+  const plan = JSON.parse(planJson) as {
+    schema_version?: string; workspace_id?: string; actions?: unknown[]; desired_program?: string;
+  };
+  if (plan.schema_version !== "margins.workspace.plan.v2" || plan.workspace_id !== workspaceId
+    || !Array.isArray(plan.actions) || plan.desired_program !== compiled.desired_program) {
+    throw new Error("Margins returned an invalid Workspace plan.");
+  }
   await writeFile(join(plansDir, `${previewId}.plan.json`), planJson, { mode: 0o600, flag: "wx" });
   return {
     previewId, workspaceId, homeRoot, destination: noteFolder ? resolve(homeRoot, noteFolder) : homeRoot,
