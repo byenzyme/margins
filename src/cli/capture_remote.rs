@@ -90,6 +90,7 @@ struct RemoteSpoolWorkerIo<T> {
     receiver: mpsc::Receiver<crate::recorder::LiveAudioChunk>,
     handoff: mpsc::Receiver<RemoteSpoolHandoff<T>>,
     queued_samples: Arc<std::sync::atomic::AtomicU64>,
+    mic_duration_us: Arc<std::sync::atomic::AtomicU64>,
     memory_max_samples: u64,
 }
 
@@ -230,6 +231,7 @@ fn run_remote_spool_worker<T: RemoteAudioSpool>(
         receiver,
         handoff,
         queued_samples,
+        mic_duration_us,
         memory_max_samples,
     } = io;
     fn append<T: RemoteAudioSpool>(
@@ -304,6 +306,8 @@ fn run_remote_spool_worker<T: RemoteAudioSpool>(
                 }
             };
             let count = chunk.samples.len() as u64;
+            let mic_duration = (chunk.channel == LiveAudioChannel::Mic && chunk.sample_rate != 0)
+                .then(|| count.saturating_mul(1_000_000) / u64::from(chunk.sample_rate));
             let stored = match target.as_mut() {
                 Some(target) => append(target, &chunk),
                 None if handoff.is_some() => pending.push(chunk),
@@ -311,6 +315,12 @@ fn run_remote_spool_worker<T: RemoteAudioSpool>(
             };
             queued_samples.fetch_sub(count, Ordering::Relaxed);
             stored?;
+            // Count each captured chunk as it first leaves the recorder queue.
+            // Replaying pending audio into the transfer/live tee must not move
+            // the clock, and live ASR may be absent or may drop this chunk.
+            if let Some(duration) = mic_duration {
+                mic_duration_us.fetch_add(duration, Ordering::Relaxed);
+            }
         }
     })();
     (target.map(|target| target.transfer), result)
@@ -427,6 +437,7 @@ struct OpenedRemoteSegment<R, T> {
     recorder: Option<R>,
     stop: Arc<AtomicBool>,
     sink: crate::recorder::LiveAudioSink,
+    mic_duration_us: Arc<std::sync::atomic::AtomicU64>,
     handoff: mpsc::Sender<RemoteSpoolHandoff<T>>,
     worker: std::thread::JoinHandle<(Option<T>, Result<()>)>,
 }
@@ -439,6 +450,7 @@ fn spawn_remote_segment<R, T: RemoteAudioSpool + Send + 'static>(
     use std::sync::atomic::AtomicU64;
     let stop = Arc::new(AtomicBool::new(false));
     let queued_samples = Arc::new(AtomicU64::new(0));
+    let mic_duration_us = Arc::new(AtomicU64::new(0));
     let (sender, receiver) = mpsc::channel();
     let sink = crate::recorder::LiveAudioSink {
         sender,
@@ -463,6 +475,7 @@ fn spawn_remote_segment<R, T: RemoteAudioSpool + Send + 'static>(
         receiver,
         handoff: handoff_receiver,
         queued_samples,
+        mic_duration_us: mic_duration_us.clone(),
         memory_max_samples: REMOTE_PENDING_MEMORY_SAMPLES,
     };
     let worker_stop = stop.clone();
@@ -481,6 +494,7 @@ fn spawn_remote_segment<R, T: RemoteAudioSpool + Send + 'static>(
         recorder: Some(recorder),
         stop,
         sink,
+        mic_duration_us,
         handoff,
         worker,
     })
@@ -610,6 +624,7 @@ impl<R: RemoteSegmentRecorder, T> Drop for PreopenedRemoteSegment<'_, R, T> {
             recorder,
             stop,
             sink,
+            mic_duration_us: _,
             handoff,
             worker,
         } = segment;
@@ -1022,7 +1037,7 @@ fn run_remote_native_capture(
                 format!("open_ms={}", start_requested.elapsed().as_millis()),
             );
             if let (Some(controller), Some(recorder)) = (&controller, &segment.recorder) {
-                controller.capturing(&segment.sink, recorder);
+                controller.capturing(&segment.sink, &segment.mic_duration_us, recorder);
             }
             first_open = Some((fell_back, note));
             let report_unsent: Box<dyn Fn(&Path) + '_> = match &controller {
@@ -1306,6 +1321,7 @@ fn run_remote_native_capture(
             recorder,
             stop,
             sink,
+            mic_duration_us,
             handoff,
             worker,
         } = opened;
@@ -1398,9 +1414,13 @@ fn run_remote_native_capture(
         }
         if let Some(controller) = &controller {
             match &recorder {
-                Some(recorder) => {
-                    controller.recording(&session_id, &active_transfer_id, &sink, recorder)
-                }
+                Some(recorder) => controller.recording(
+                    &session_id,
+                    &active_transfer_id,
+                    &sink,
+                    &mic_duration_us,
+                    recorder,
+                ),
                 // Paused or stopped before the session existed; keep that state.
                 None => controller.session_ready(&session_id, &active_transfer_id),
             }
@@ -1886,11 +1906,16 @@ fn remote_live_checkpoint_failure(error: &anyhow::Error) -> (&'static str, Strin
             "reason=session_finalized".into(),
         );
     }
-    let code = message.split_once(": ").map(|(code, _)| code).filter(|code| {
-        !code.is_empty()
-            && code.len() <= 64
-            && code.bytes().all(|byte| byte.is_ascii_lowercase() || byte == b'_')
-    });
+    let code = message
+        .split_once(": ")
+        .map(|(code, _)| code)
+        .filter(|code| {
+            !code.is_empty()
+                && code.len() <= 64
+                && code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        });
     let detail = if let Some(code) = code {
         let reason = if message.contains("word timeline") {
             " reason=word_timeline"

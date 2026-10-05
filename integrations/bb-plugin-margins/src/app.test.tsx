@@ -3,6 +3,7 @@ import { fireEvent, waitFor, within } from "@testing-library/dom";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { browserCaptureOwner } from "./browser-capture.js";
+import { nativeBridgeOwner, type NativeStatus } from "./native-bridge-client.js";
 import type { PanelState } from "./contracts.js";
 
 const app = await loadPluginApp(() => import("../app.js"));
@@ -20,6 +21,19 @@ function panel(changes: Partial<PanelState> = {}): PanelState {
 afterEach(() => { vi.restoreAllMocks(); sessionStorage.clear(); });
 
 describe("Margins recording panel", () => {
+  it("uses bridge duration for a 48 kHz mic and keeps old-helper sample fallback", () => {
+    const status = { state: "recording", sessionId: "native-1", microphoneSamples: 528_000,
+      microphoneDurationMs: 11_000, micPeak: 0.2 } as NativeStatus;
+    const current = vi.spyOn(nativeBridgeOwner, "status", "get").mockReturnValue(status);
+    const overlay = renderSlot(app.appOverlays[0]!, {}, { context: { threadId: "thr-other" } });
+    const screen = within(overlay.container);
+    expect(screen.getByText("Recording · 0:11")).toBeTruthy();
+    overlay.lifecycle.unmount();
+    current.mockReturnValue({ ...status, microphoneDurationMs: undefined, microphoneSamples: 16_000 });
+    const legacy = renderSlot(app.appOverlays[0]!, {}, { context: { threadId: "thr-other" } });
+    expect(within(legacy.container).getByText("Recording · 0:01")).toBeTruthy();
+    legacy.lifecycle.unmount();
+  });
   it("registers Meetings navigation, a sidebar level, persistent status, and one compact thread panel", () => {
     expect(app.contentScripts).toHaveLength(1);
     expect(app.appOverlays).toMatchObject([{ id: "recording-status" }]);

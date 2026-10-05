@@ -3,7 +3,7 @@ import { definePluginApp, useBbContext, useBbNavigate, useRpc } from "@get-bb/pl
 import { AlertCircle, Pause, Play, Square } from "lucide-react";
 import type { marginsRpcContract } from "../server.js";
 import { browserCaptureOwner } from "./browser-capture.js";
-import { nativeBridgeOwner, type CaptureAuthority, type NativeStatus } from "./native-bridge-client.js";
+import { nativeBridgeOwner, nativeMicrophoneDurationMs, type CaptureAuthority, type NativeStatus } from "./native-bridge-client.js";
 import { MeetingLevelDot, MeetingsAccessory, MeetingsPage, rememberStopAck } from "./meetings-page.js";
 import { MarginsThreadTab } from "./thread-tab.js";
 
@@ -89,7 +89,7 @@ function RecordingOverlay() {
   const paused = status === "paused";
   const recording = status === "recording";
   const noAudio = recording && (nativeLive ? nativeBridgeOwner.noAudioWarning : browserCaptureOwner.noAudioWarning);
-  const seconds = nativeLive ? Math.floor((native!.microphoneSamples || 0) / 16_000) : Math.floor(browserCaptureOwner.elapsedMs / 1_000);
+  const seconds = nativeLive ? Math.floor(nativeMicrophoneDurationMs(native!) / 1_000) : Math.floor(browserCaptureOwner.elapsedMs / 1_000);
   const elapsed = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
   async function control(action: "pause" | "resume" | "stop") {
     setBusy(true);
