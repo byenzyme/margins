@@ -362,10 +362,12 @@
         let (sender, receiver) = mpsc::channel();
         let (handoff, handoff_receiver) = mpsc::channel();
         let queued = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mic_duration_us = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let io = RemoteSpoolWorkerIo {
             receiver,
             handoff: handoff_receiver,
             queued_samples: queued.clone(),
+            mic_duration_us: mic_duration_us.clone(),
             // Two chunks fit in memory; the rest spill.
             memory_max_samples: 480 * 2,
         };
@@ -382,6 +384,7 @@
             (queued != 0).then(|| format!("{queued} samples queued"))
         })
         .unwrap();
+        assert_eq!(mic_duration_us.load(Ordering::Relaxed), 60_000);
         let spool = FakeRemoteSpool::default();
         handoff
             .send(RemoteSpoolHandoff {
@@ -392,6 +395,7 @@
         drop(sender);
         worker.join().unwrap().1.unwrap();
         assert_eq!(*spool.appended.lock().unwrap(), expected_interleaved(6));
+        assert_eq!(mic_duration_us.load(Ordering::Relaxed), 60_000);
     }
 
     #[test]
@@ -406,6 +410,7 @@
                     receiver,
                     handoff: handoff_receiver,
                     queued_samples: queued,
+                    mic_duration_us: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                     memory_max_samples: REMOTE_PENDING_MEMORY_SAMPLES,
                 })
             }

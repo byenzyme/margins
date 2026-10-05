@@ -3,7 +3,7 @@ import { experimental_FileLink as FileLink, useBbContext, useBbNavigate, useReal
 import { Pause } from "lucide-react";
 import type { marginsRpcContract } from "../server.js";
 import { browserCaptureOwner, detectClientCapabilities } from "./browser-capture.js";
-import { nativeBridgeOwner } from "./native-bridge-client.js";
+import { nativeBridgeOwner, nativeMicrophoneDurationMs } from "./native-bridge-client.js";
 import type { PanelState, WorkspaceMeeting, WorkspaceMeetingSummary } from "./contracts.js";
 import type { WorkspaceSetupPreview } from "./workspace-setup.js";
 
@@ -386,7 +386,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     try {
       const native = nativeBridgeOwner.status;
       const elapsed = native?.sessionId === sessionId
-        ? elapsedLabel((native.microphoneSamples || 0) / 16)
+        ? elapsedLabel(nativeMicrophoneDurationMs(native))
         : elapsedLabel(browserCaptureOwner.elapsedMs);
       if (native?.sessionId && native.sessionId === sessionId) await nativeBridgeOwner.control(action);
       else if (browserCaptureOwner.active || action === "stop" && browserCaptureOwner.hasPendingStop) {
@@ -395,8 +395,8 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
       } else throw new Error("Open the bb window with this recorder to control its microphone.");
       await refresh();
       if (action === "stop" && sessionId) {
-        rememberStopAck(sessionId, elapsed);
         const latest = await rpc.call("readWorkspaceMeeting", { projectId, sessionId });
+        rememberStopAck(sessionId, elapsed);
         if (latest.ok && latest.meeting && !dirty.current) {
           rememberMeeting(`${projectId}/${sessionId}`, latest.meeting);
           setMeeting(latest.meeting); setDraft(latest.meeting.notepad.text);
@@ -761,7 +761,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
                 {selected.inputFinalized && <button className="margins-inline-action" onClick={() => { setTitleDraft(meeting.title || `Meeting · ${meetingTime(meeting.startedAt)}`); setEditingTitle(true); }}>Rename</button>}</>}
           </div>
           <p className="margins-meeting-details">{selected.inputFinalized
-            ? stopAck?.sessionId === selected.sessionId ? `Saved · ${stopAck.elapsed} recorded` : `Saved${selected.durationMs !== null && selected.durationMs !== undefined ? ` · ${elapsedLabel(selected.durationMs)}` : ""}`
+            ? stopAck?.sessionId === selected.sessionId ? `Saved · ${selected.durationMs != null ? elapsedLabel(selected.durationMs) : stopAck.elapsed} recorded` : `Saved${selected.durationMs !== null && selected.durationMs !== undefined ? ` · ${elapsedLabel(selected.durationMs)}` : ""}`
             : "Recording"}
             {!selected.inputFinalized && selected.audioSource && ` · ${selected.audioSource}`}
             {selected.workspaceName && ` · ${selected.inputFinalized ? selected.workspaceName : `Workspace: ${selected.workspaceName}`}`}
