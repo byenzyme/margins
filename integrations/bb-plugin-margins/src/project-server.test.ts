@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { marginsHome, pendingWorkspaceSetupMarker, ProjectMarginsTransport, ProjectServerManager, readAsrRuntimeConfig, resolveWorkspaceId, workspaceInstanceDir, workspaceOptions, workspacePaths } from "./project-server.js";
@@ -186,7 +186,8 @@ describe("ProjectServerManager remote adapter", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
   it("previews only existing notes confined to the selected Workspace Home", async () => {
-    const root = await mkdtemp(join(tmpdir(), "margins-bb-note-preview-"));
+    // Canonical root: macOS tmpdir() is behind the /var -> /private/var symlink, and note paths are realpath-confined.
+    const root = await realpath(await mkdtemp(join(tmpdir(), "margins-bb-note-preview-")));
     try {
       const vault = join(root, "vault");
       await mkdir(join(vault, "inbox"), { recursive: true });

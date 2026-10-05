@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyWorkspaceSetup, previewWorkspaceSetup } from "./workspace-setup.js";
@@ -14,7 +14,8 @@ afterEach(() => {
 
 describe("Workspace setup", () => {
   it("discovers an Obsidian project, compiles a proposal, and applies the exact reviewed plan", async () => {
-    const root = await mkdtemp(join(tmpdir(), "margins-setup-"));
+    // Canonical root: macOS tmpdir() is behind the /var -> /private/var symlink, and setup reports realpaths.
+    const root = await realpath(await mkdtemp(join(tmpdir(), "margins-setup-")));
     try {
       const vault = join(root, "notes");
       await mkdir(join(vault, ".obsidian"), { recursive: true });

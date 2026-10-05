@@ -641,11 +641,11 @@ try {
   }
   if (!macLane) try { command("docker", ["rm", "-f", chromeName]); } catch { /* already stopped */ }
   // Snapshot every descendant first: bb-spawned recorders outlive a killed parent.
-  const table = processTable();
-  const owned = new Map(table.filter((entry) => [bbProcess?.pid, chromeProcess?.pid].includes(entry.pid)).map((entry) => [entry.pid, entry.command]));
+  const snapshot = processTable();
+  const owned = new Map(snapshot.filter((entry) => [bbProcess?.pid, chromeProcess?.pid].includes(entry.pid)).map((entry) => [entry.pid, entry.command]));
   for (let grew = true; grew;) {
     grew = false;
-    for (const entry of table) if (owned.has(entry.ppid) && !owned.has(entry.pid)) { owned.set(entry.pid, entry.command); grew = true; }
+    for (const entry of snapshot) if (owned.has(entry.ppid) && !owned.has(entry.pid)) { owned.set(entry.pid, entry.command); grew = true; }
   }
   if (chromeProcess?.exitCode === null) try { process.kill(-chromeProcess.pid, "SIGTERM"); } catch { /* already exited */ }
   if (bbProcess) { bbProcess.kill("SIGINT"); await new Promise((resolve) => setTimeout(resolve, 1200)); if (bbProcess.exitCode === null) bbProcess.kill("SIGKILL"); }
