@@ -21,9 +21,11 @@ The Codex plugin is parked outside core; see
   results. Separate posture, context, decision policy, rendering, and protocol;
   preserve assembled prompts; and label causal claims honestly.
 - The canonical repository remote is
-  `https://github.com/byenzyme/margins-desktop.git`. Work in the checkout bb
-  provides and verify `git remote get-url origin` before building; do not switch
-  to a nearby clone merely because it has existing artifacts.
+  `https://github.com/byenzyme/margins.git` (public). The former private
+  `byenzyme/margins-desktop` repository is a read-only archive of pre-cutover
+  history; never open PRs or push there. Work in the checkout bb provides and
+  verify `git remote get-url origin` before building; do not switch to a nearby
+  clone merely because it has existing artifacts.
 - Coordinate Rust and Tauri builds through `scripts/cargo-lane`; it derives the
   canonical per-host target from Git's common directory, reports the current
   build owner, and prevents bb worktrees on the same machine from entering the
