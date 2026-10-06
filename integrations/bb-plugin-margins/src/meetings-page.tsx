@@ -12,6 +12,7 @@ const LAST_PROJECT_KEY = "margins.bb.meetings-project";
 const STOP_ACK_KEY = "margins.bb.stop-ack";
 const STOP_ACK_EVENT = "margins:stop-saved";
 const UNSAVED_MEMO_KEY = "margins.bb.unsaved-memo";
+const RESTORE_CONFLICT = "the meeting memo already had text when these edits were made";
 const openedMeetings = new Map<string, WorkspaceMeeting>();
 const openedSummaries = new Map<string, WorkspaceMeetingSummary>();
 function rememberMeeting(key: string, value: WorkspaceMeeting) {
@@ -186,6 +187,8 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   const meetingRef = useRef(meeting);
   meetingRef.current = meeting;
   const selectedIdRef = useRef(selectedId);
+  /** Session whose restored text must not be saved over its non-empty memo. */
+  const restoreConflict = useRef<string | null>(null);
   selectedIdRef.current = selectedId;
   const latestDraft = useRef(draft);
   const revision = useRef(meeting?.notepad.revision || "");
@@ -341,8 +344,12 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
         if (unsaved && unsaved.text !== result.meeting.notepad.text) {
           // Retry against the revision the text was written on, so a memo
           // changed elsewhere is reported as a conflict, not overwritten.
-          dirty.current = true; revision.current = unsaved.revision;
-          latestDraft.current = unsaved.text; setDraft(unsaved.text);
+          // Text typed before the memo loaded has no base: it may only
+          // replace an empty memo.
+          dirty.current = true; latestDraft.current = unsaved.text; setDraft(unsaved.text);
+          revision.current = unsaved.revision || result.meeting.notepad.revision;
+          restoreConflict.current = !unsaved.revision && result.meeting.notepad.text ? selectedId : null;
+          if (restoreConflict.current) memoSaveFailed(new Error(RESTORE_CONFLICT));
         } else if (!dirty.current) {
           if (unsaved) forgetUnsavedMemo(`${projectId}/${selectedId}`);
           setDraft(result.meeting.notepad.text);
@@ -402,7 +409,9 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   async function saveMemo() {
     if (saveLoop.current) return saveLoop.current;
     const meeting = meetingRef.current;
-    if (!dirty.current || !meeting || !projectId || !revision.current) return;
+    if (!dirty.current || !meeting || !projectId) return;
+    if (restoreConflict.current === meeting.sessionId) throw new Error(RESTORE_CONFLICT);
+    if (!revision.current) return;
     const sessionId = meeting.sessionId;
     const loop = (async () => {
       while (dirty.current) {
@@ -456,6 +465,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     if (!result?.ok || !result.meeting) { if (result && !result.ok) setMessage(result.error.message); return; }
     forgetUnsavedMemo(`${projectId}/${sessionId}`);
     rememberMeeting(`${projectId}/${sessionId}`, result.meeting);
+    if (restoreConflict.current === sessionId) restoreConflict.current = null;
     dirty.current = false; revision.current = result.meeting.notepad.revision;
     latestDraft.current = result.meeting.notepad.text;
     setMeeting(result.meeting); setDraft(result.meeting.notepad.text); setMessage("");

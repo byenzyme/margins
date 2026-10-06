@@ -441,6 +441,38 @@ describe("Meetings Mac recorder choice", () => {
       { projectId: "proj-mac", sessionId: "fresh-open", expectedRevision: "rev", text: "Typed before the refresh" });
   });
 
+  it("restores text typed before the memo loaded onto an empty memo, and saves it", async () => {
+    mocks.meetings = [saved("unloaded-empty", "Empty")];
+    sessionStorage.setItem("margins.bb.unsaved-memo.proj-mac/unloaded-empty", JSON.stringify({ text: "Early note", revision: "" }));
+    renderLikeBb("proj-mac/unloaded-empty");
+    await waitFor(() => expect(mocks.call).toHaveBeenCalledWith("saveWorkspaceMemo",
+      { projectId: "proj-mac", sessionId: "unloaded-empty", expectedRevision: "rev", text: "Early note" }));
+    await waitFor(() => expect(sessionStorage.getItem("margins.bb.unsaved-memo.proj-mac/unloaded-empty")).toBeNull());
+    expect(screen.queryByText(/could not be saved/)).toBeNull();
+  });
+
+  it("does not save text typed before the memo loaded over a memo that has text", async () => {
+    mocks.meetings = [saved("unloaded-full", "Full")];
+    sessionStorage.setItem("margins.bb.unsaved-memo.proj-mac/unloaded-full", JSON.stringify({ text: "Early note", revision: "" }));
+    mocks.call.mockImplementation((async (method: string, input?: { sessionId?: string; text?: string }) => {
+      if (method === "readWorkspaceMeeting") return { ok: true, meeting: { ...saved("unloaded-full", "Full"), notepad: { revision: "rev", text: "Existing" } } };
+      return defaultCall(method, input);
+    }) as unknown as typeof defaultCall);
+    renderLikeBb("proj-mac/unloaded-full");
+    expect(await screen.findByText(/already had text/)).toBeTruthy();
+    expect(screen.getByLabelText("Meeting memo pad")).toHaveProperty("value", "Early note");
+    fireEvent.change(screen.getByLabelText("Meeting memo pad"), { target: { value: "Early note, more" } });
+    fireEvent.blur(screen.getByLabelText("Meeting memo pad"));
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(mocks.call).not.toHaveBeenCalledWith("saveWorkspaceMemo", expect.anything());
+    expect(screen.getByLabelText("Unsaved memo text")).toHaveProperty("value", "Early note, more");
+    fireEvent.click(screen.getByRole("button", { name: "Load saved version" }));
+    await waitFor(() => expect(screen.getByLabelText("Meeting memo pad")).toHaveProperty("value", "Existing"));
+    fireEvent.change(screen.getByLabelText("Meeting memo pad"), { target: { value: "Existing, edited" } });
+    await waitFor(() => expect(mocks.call).toHaveBeenCalledWith("saveWorkspaceMemo",
+      { projectId: "proj-mac", sessionId: "unloaded-full", expectedRevision: "rev", text: "Existing, edited" }));
+  });
+
   it("offers the saved memo when a restored memo conflicts", async () => {
     mocks.meetings = [saved("conflicted", "Conflicted")];
     sessionStorage.setItem("margins.bb.unsaved-memo.proj-mac/conflicted", JSON.stringify({ text: "Mine", revision: "old" }));
