@@ -28,6 +28,12 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ "$(id -u)" == 0 ]]; then
+  # Mode 000 does not stop root, so the auth.json canary (item 5) would prove
+  # nothing. Run the gate as an ordinary user.
+  echo "isolation: FAIL: run as a non-root user; root can read the mode-000 auth.json canary" >&2
+  exit 1
+fi
 : "${MARGINS_E2E_BIN:?set MARGINS_E2E_BIN to a margins binary built with recall}"
 MARGINS_BIN="$(cd "$(dirname "$MARGINS_E2E_BIN")" && pwd)/$(basename "$MARGINS_E2E_BIN")"
 ENZYME_BIN="$("$REPO_ROOT/scripts/enzyme-bin")"
@@ -239,7 +245,11 @@ assert_tmp_clean "3-4 after setup, init, recall"
 [[ ! -e "$NOTES/.enzyme" ]] || fail "notes/.enzyme exists"
 [[ ! -e "$HOME/.enzyme/api-cache" ]] || fail "~/.enzyme/api-cache exists"
 pass "3-4 confinement"
-pass "5 auth.json unreadable (mode 000) and poisoned parent ENZYME_HOME, nothing failed or fell back"
+# Item 5 is covered two ways: auth.json is mode 000 for this non-root user
+# (any read would fail the command), and the parent ENZYME_HOME holds an
+# unparseable program (any use of it would fail to resolve). Every command
+# above succeeded and every generator request reached the fixture.
+pass "5 auth.json unreadable (mode 000, non-root) and poisoned parent ENZYME_HOME overridden; nothing failed or fell back"
 
 # --- 6. Background worker ----------------------------------------------------
 EPOCH_BEFORE="$(ENZYME_HOME="$MARGINS_HOME" "$ENZYME_BIN" --workspace practice status --json \
@@ -252,6 +262,8 @@ margins --workspace practice workspace plan --desired "$MOCK_DIR/desired-2.enzym
 margins --workspace practice workspace apply --plan "$MOCK_DIR/plan-2.json" --json > /dev/null
 margins --workspace practice sync --json > "$MOCK_DIR/sync.json" 2> "$MOCK_DIR/sync.err" \
   || { cat "$MOCK_DIR/sync.err" >&2; fail "margins sync"; }
+grep -q 'engine refresh background_spawned=true' "$MOCK_DIR/sync.err" \
+  || { cat "$MOCK_DIR/sync.err" >&2; fail "sync did not spawn a background catalyst worker"; }
 EPOCH_AFTER=""
 for _ in $(seq 1 600); do
   EPOCH_AFTER="$(ENZYME_HOME="$MARGINS_HOME" "$ENZYME_BIN" --workspace practice status --json \
@@ -259,12 +271,25 @@ for _ in $(seq 1 600); do
   [[ -n "$EPOCH_AFTER" && "$EPOCH_AFTER" != "$EPOCH_BEFORE" ]] && break
   sleep 0.1
 done
-[[ -n "$EPOCH_AFTER" && "$EPOCH_AFTER" != "$EPOCH_BEFORE" ]] || fail "no background epoch completed"
-# The worker has released the workspace's refresh lock.
-for _ in $(seq 1 100); do
-  if ! pgrep -f "$MARGINS_HOME" >/dev/null 2>&1; then break; fi
-  sleep 0.1
-done
+[[ -n "$EPOCH_AFTER" && "$EPOCH_AFTER" != "$EPOCH_BEFORE" ]] \
+  || fail "the background worker did not complete an epoch within 60s"
+# The worker holds the workspace's refresh.lock while it builds; wait until
+# it has let go, so the snapshot cannot race a live worker.
+python3 - "$MARGINS_HOME/workspaces/practice/refresh.lock" <<'PY' \
+  || fail "the background worker still holds refresh.lock after 30s"
+import fcntl, sys, time
+deadline = time.time() + 30
+with open(sys.argv[1], "a") as handle:
+    while True:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(handle, fcntl.LOCK_UN)
+            break
+        except BlockingIOError:
+            if time.time() > deadline:
+                sys.exit(1)
+            time.sleep(0.1)
+PY
 AFTER_WORKER="$MOCK_DIR/after-worker.json"
 snapshot "$AFTER_WORKER"
 assert_confined "$BEFORE" "$AFTER_WORKER" "6 after the background worker"
@@ -272,44 +297,89 @@ assert_tmp_clean "6 after the background worker"
 pass "6 background worker $EPOCH_AFTER inherited the isolation"
 
 # --- 7. An index built by the in-process Margins -----------------------------
+# Markdown notes plus a Gmail source (tests/fixtures/inprocess-index). The
+# expected outcome is pinned: the CLI reuses the index; Markdown documents
+# keep their rows (no re-embedding); ledger documents move once from the
+# in-process `sqlite:mail/<hex(id)>` refs to the engine's
+# `sqlite:mail/<sha256>` refs.
+# TODO(E4): once kind templates can emit `document ref` with {source}, the
+# kinds keep the hex refs and ledger documents must keep their rows too.
 LEGACY_STATE="$MARGINS_HOME/workspaces/legacy"
+sed "s|@NOTES@|$LEGACY_NOTES|" "$FIXTURE/program.enzyme.in" > "$MOCK_DIR/legacy.enzyme"
 if [[ -n "${MARGINS_LEGACY_INPROCESS_BIN:-}" ]]; then
-  "$MARGINS_LEGACY_INPROCESS_BIN" workspace new legacy --home "$LEGACY_NOTES" --json >/dev/null
+  LEGACY="$MARGINS_LEGACY_INPROCESS_BIN"
   # The #13-era binary predates margins-sources.enzyme; it lowers in process.
   mv "$MARGINS_HOME/configs/margins-sources.enzyme" "$MOCK_DIR/sources.keep"
-  "$MARGINS_LEGACY_INPROCESS_BIN" --workspace legacy init >/dev/null 2>&1 || fail "legacy in-process init"
+  "$LEGACY" workspace new legacy --home "$LEGACY_NOTES" --json >/dev/null
+  "$LEGACY" --workspace legacy workspace plan --desired "$MOCK_DIR/legacy.enzyme" --json > "$MOCK_DIR/legacy-plan.json"
+  "$LEGACY" --workspace legacy workspace apply --plan "$MOCK_DIR/legacy-plan.json" --json >/dev/null
+  "$LEGACY" --workspace legacy init >/dev/null 2>&1 || true   # creates the ledger
+  python3 "$FIXTURE/seed_ledger.py" "$LEGACY_STATE/ledger.db"
+  "$LEGACY" --workspace legacy init >/dev/null 2>&1 || fail "legacy in-process init"
   mv "$MOCK_DIR/sources.keep" "$MARGINS_HOME/configs/margins-sources.enzyme"
   LEGACY_SOURCE="live #13-era binary"
 else
   margins workspace new legacy --home "$LEGACY_NOTES" --json >/dev/null
+  margins --workspace legacy workspace plan --desired "$MOCK_DIR/legacy.enzyme" --json > "$MOCK_DIR/legacy-plan.json"
+  margins --workspace legacy workspace apply --plan "$MOCK_DIR/legacy-plan.json" --json >/dev/null
   gzip -dc "$FIXTURE/enzyme.db.gz" > "$LEGACY_STATE/enzyme.db"
+  gzip -dc "$FIXTURE/ledger.db.gz" > "$LEGACY_STATE/ledger.db"
   cp "$FIXTURE/index.identity" "$LEGACY_STATE/index.identity"
   LEGACY_SOURCE="tests/fixtures/inprocess-index"
 fi
 [[ -f "$LEGACY_STATE/index.identity" ]] || fail "legacy index has no in-process identity marker"
+docs() {
+  python3 - "$LEGACY_STATE/enzyme.db" "$1" <<'PY'
+import json, sqlite3, sys
+rows = sqlite3.connect(sys.argv[1]).execute("SELECT source_ref, id, content_hash FROM docs").fetchall()
+json.dump({ref: [doc_id, digest] for ref, doc_id, digest in rows}, open(sys.argv[2], "w"))
+PY
+}
+docs "$MOCK_DIR/legacy-docs-before.json"
+REQUESTS_BEFORE="$(cat "$MOCK_DIR/count")"
 margins --workspace legacy init > /dev/null 2> "$MOCK_DIR/legacy-1.err" \
   || { cat "$MOCK_DIR/legacy-1.err" >&2; fail "init over the in-process index"; }
-if grep -q 'engine index reuse reason=in_process_index' "$MOCK_DIR/legacy-1.err"; then
-  LEGACY_OUTCOME="reused"
-elif grep -q 'engine index rebuild' "$MOCK_DIR/legacy-1.err"; then
-  LEGACY_OUTCOME="rebuilt once"
-else
-  cat "$MOCK_DIR/legacy-1.err" >&2; fail "init did not say whether it reused or rebuilt the index"
-fi
+grep -q 'engine index reuse reason=in_process_index' "$MOCK_DIR/legacy-1.err" \
+  || { cat "$MOCK_DIR/legacy-1.err" >&2; fail "the CLI did not reuse the in-process index"; }
+LEGACY_REQUESTS=$(( $(cat "$MOCK_DIR/count") - REQUESTS_BEFORE ))
 [[ ! -e "$LEGACY_STATE/index.identity" ]] || fail "in-process identity marker left behind"
+docs "$MOCK_DIR/legacy-docs-after.json"
+python3 - "$MOCK_DIR/legacy-docs-before.json" "$MOCK_DIR/legacy-docs-after.json" <<'PY' \
+  || fail "the transition did not keep the pinned document outcome"
+import hashlib, json, struct, sys
+before, after = (json.load(open(p)) for p in sys.argv[1:3])
+def engine_ref(name, record_id):
+    digest = hashlib.sha256(
+        struct.pack("<Q", len(name)) + name.encode()
+        + json.dumps([{"type": "text", "value": record_id}], separators=(",", ":")).encode()
+    ).hexdigest()
+    return f"sqlite:{name}/{digest}"
+markdown = {ref: row for ref, row in before.items() if not ref.startswith("sqlite:")}
+assert markdown and all(after.get(ref) == row for ref, row in markdown.items()), \
+    "Markdown documents were re-indexed"
+ids = [f"relay-thread-{index}" for index in range(4)]
+hex_refs = {f"sqlite:mail/{record.encode().hex()}" for record in ids}
+assert {ref for ref in before if ref.startswith("sqlite:")} == hex_refs, before.keys()
+assert {ref for ref in after if ref.startswith("sqlite:")} == {engine_ref("mail", record) for record in ids}, after.keys()
+PY
 margins --workspace legacy init > /dev/null 2> "$MOCK_DIR/legacy-2.err" || fail "second init"
 ! grep -q 'engine index rebuild\|in_process_index\|first_build' "$MOCK_DIR/legacy-2.err" \
   || fail "the transition repeated on the second init"
 LEGACY_PHRASE="$(cat "$FIXTURE/phrase.txt")"
 margins --workspace legacy recall "$LEGACY_PHRASE" > "$MOCK_DIR/legacy-recall.json"
-python3 - "$MOCK_DIR/legacy-recall.json" "$(cat "$FIXTURE/phrase-ref.txt")" <<'PY' \
+margins --workspace legacy recall --source mail "$(cat "$FIXTURE/mail-phrase.txt")" > "$MOCK_DIR/legacy-mail.json"
+python3 - "$MOCK_DIR/legacy-recall.json" "$(cat "$FIXTURE/phrase-ref.txt")" "$MOCK_DIR/legacy-mail.json" <<'PY' \
   || fail "recall over the transitioned index"
 import json, sys
 recall = json.load(open(sys.argv[1]))
 assert recall["status"] == "ok", recall
 assert any(hit["document_ref"] == sys.argv[2] for hit in recall["results"]), recall
+mail = json.load(open(sys.argv[3]))
+hits = mail["results"]
+assert hits and all(hit["evidence"]["kind"] == "external_record" for hit in hits), mail
+assert any(hit["evidence"]["source_id"].startswith("relay-thread-") for hit in hits), mail
 PY
-pass "7 in-process index ($LEGACY_SOURCE) $LEGACY_OUTCOME by the CLI; recall works"
+pass "7 in-process index ($LEGACY_SOURCE) reused by the CLI: Markdown rows kept, 4 ledger documents re-identified once ($LEGACY_REQUESTS generator requests); recall works"
 
 FINAL="$MOCK_DIR/final.json"
 snapshot "$FINAL"

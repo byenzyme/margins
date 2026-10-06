@@ -15,8 +15,10 @@
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{Mutex, OnceLock};
 
 /// Explicit `enzyme` binary; checked first.
 pub const ENZYME_BIN_ENV: &str = "MARGINS_ENZYME_BIN";
@@ -49,13 +51,45 @@ const INHERITED_ENV: &[&str] = &[
     "XDG_DATA_HOME",
     "XDG_STATE_HOME",
     "XDG_RUNTIME_DIR",
+    // Network reach for `--llm env`, as the in-process engine had it. These
+    // carry no credentials Margins did not already put there.
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
+    "https_proxy",
+    "http_proxy",
+    "no_proxy",
+    "all_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
 ];
+
+/// The `enzyme --version` this Margins requires, from `scripts/enzyme-cli.pin`.
+pub fn required_version() -> &'static str {
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION.get_or_init(|| {
+        include_str!("../scripts/enzyme-cli.pin")
+            .parse::<toml::Table>()
+            .expect("scripts/enzyme-cli.pin is TOML")
+            .get("version")
+            .and_then(toml::Value::as_str)
+            .expect("scripts/enzyme-cli.pin names a version")
+            .to_string()
+    })
+}
 
 /// A failed engine call, by the engine's exit-code contract.
 #[derive(Debug)]
 pub enum EngineError {
     /// No `enzyme` binary was found.
     NotFound { searched: Vec<PathBuf> },
+    /// The binary found is not the release this Margins runs.
+    VersionMismatch {
+        bin: PathBuf,
+        found: String,
+        expected: String,
+    },
     /// Exit 2: bad arguments.
     Usage(String),
     /// Exit 3: a program or the workspace is not usable as configured: parse
@@ -85,6 +119,15 @@ impl std::fmt::Display for EngineError {
                     .map(|path| path.display().to_string())
                     .collect::<Vec<_>>()
                     .join(", ")
+            ),
+            Self::VersionMismatch {
+                bin,
+                found,
+                expected,
+            } => write!(
+                f,
+                "{} is enzyme {found}, but this Margins runs enzyme {expected}; reinstall Margins (or point {ENZYME_BIN_ENV} at enzyme {expected})",
+                bin.display()
             ),
             Self::Usage(message) => write!(f, "enzyme rejected its arguments: {message}"),
             Self::Config(message) => write!(f, "{message}"),
@@ -142,44 +185,92 @@ impl Generator {
     }
 }
 
-/// Locate `enzyme`: [`ENZYME_BIN_ENV`], next to the running executable,
-/// `$MARGINS_HOME/bin/enzyme`, then `PATH`.
+/// Locate `enzyme`: [`ENZYME_BIN_ENV`], next to the running executable, the
+/// installers' `<exe dir>/../libexec/margins/enzyme` (Homebrew keg,
+/// `~/.local` installs), then `$MARGINS_HOME/bin/enzyme`. `PATH` is never
+/// searched: an `enzyme` the user installed for themselves may be another
+/// release that updates itself.
 pub fn locate_binary(margins_home: &Path) -> Result<PathBuf, EngineError> {
     let name = format!("enzyme{}", std::env::consts::EXE_SUFFIX);
-    let mut searched = Vec::new();
-    if let Some(explicit) = std::env::var_os(ENZYME_BIN_ENV).filter(|value| !value.is_empty()) {
-        let explicit = PathBuf::from(explicit);
-        if explicit.is_file() {
-            return Ok(explicit);
-        }
-        searched.push(explicit);
-        return Err(EngineError::NotFound { searched });
-    }
     let mut candidates = Vec::new();
-    if let Some(dir) = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.canonicalize().ok())
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))
-    {
-        candidates.push(dir.join(&name));
-    }
-    candidates.push(margins_home.join("bin").join(&name));
-    for candidate in candidates {
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-        searched.push(candidate);
-    }
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            let candidate = dir.join(&name);
-            if candidate.is_file() {
-                return Ok(candidate);
+    if let Some(explicit) = std::env::var_os(ENZYME_BIN_ENV).filter(|value| !value.is_empty()) {
+        candidates.push(PathBuf::from(explicit));
+    } else {
+        if let Some(dir) = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.canonicalize().ok())
+            .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        {
+            candidates.push(dir.join(&name));
+            if let Some(prefix) = dir.parent() {
+                candidates.push(prefix.join("libexec").join("margins").join(&name));
             }
         }
-        searched.push(PathBuf::from(format!("{name} on PATH")));
+        candidates.push(margins_home.join("bin").join(&name));
     }
-    Err(EngineError::NotFound { searched })
+    match candidates.iter().find(|candidate| is_executable(candidate)) {
+        Some(found) => Ok(found.clone()),
+        None => Err(EngineError::NotFound {
+            searched: candidates,
+        }),
+    }
+}
+
+fn is_executable(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.is_file()
+    }
+}
+
+/// Require `enzyme --version` to be [`required_version`]. Checked once per
+/// binary per process.
+pub fn verify_version(bin: &Path) -> Result<(), EngineError> {
+    static CHECKED: OnceLock<Mutex<BTreeMap<PathBuf, Result<(), String>>>> = OnceLock::new();
+    let expected = required_version();
+    let mut checked = CHECKED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let outcome = checked
+        .entry(bin.to_path_buf())
+        .or_insert_with(|| {
+            let output = Command::new(bin)
+                .arg("--version")
+                .env_clear()
+                .stdin(Stdio::null())
+                .output()
+                .map_err(|error| format!("could not run: {error}"))?;
+            let text = String::from_utf8_lossy(&output.stdout);
+            let found = text
+                .trim()
+                .strip_prefix("enzyme ")
+                .unwrap_or(text.trim())
+                .to_string();
+            if output.status.success() && found == expected {
+                Ok(())
+            } else {
+                Err(found)
+            }
+        })
+        .clone();
+    outcome.map_err(|found| EngineError::VersionMismatch {
+        bin: bin.to_path_buf(),
+        found: if found.is_empty() {
+            "unknown".to_string()
+        } else {
+            found
+        },
+        expected: expected.to_string(),
+    })
 }
 
 /// One Margins home driving `enzyme`.
@@ -195,6 +286,7 @@ impl Engine {
     /// the managed `margins-sources.enzyme`.
     pub fn for_home(margins_home: &Path) -> Result<Self> {
         let bin = locate_binary(margins_home)?;
+        verify_version(&bin)?;
         margins_workflows::machine_config::ensure_engine_settings(margins_home)?;
         margins_workflows::source_kinds::ensure_sources_program(margins_home)?;
         Ok(Self {
@@ -240,10 +332,14 @@ impl Engine {
         }
     }
 
-    fn lock_args(command: &mut Command) {
+    /// `--lock-timeout`: [`LOCK_TIMEOUT_ENV`] when set, otherwise `default`
+    /// seconds, otherwise the engine's own default.
+    fn lock_args(command: &mut Command, default: Option<u64>) {
         if let Some(timeout) = std::env::var_os(LOCK_TIMEOUT_ENV).filter(|value| !value.is_empty())
         {
             command.arg("--lock-timeout").arg(timeout);
+        } else if let Some(seconds) = default {
+            command.arg("--lock-timeout").arg(seconds.to_string());
         }
     }
 
@@ -271,11 +367,12 @@ impl Engine {
         workspace: &str,
         generator: &Generator,
         force: bool,
+        lock_timeout: Option<u64>,
     ) -> Result<InitSummary, EngineError> {
         let mut command = self.command(Some(workspace));
         command.arg("init").arg("--json-progress");
         Self::generator_args(&mut command, generator);
-        Self::lock_args(&mut command);
+        Self::lock_args(&mut command, lock_timeout);
         if force {
             command.arg("--force");
         }
@@ -300,11 +397,12 @@ impl Engine {
         &self,
         workspace: &str,
         generator: &Generator,
+        lock_timeout: Option<u64>,
     ) -> Result<serde_json::Value, EngineError> {
         let mut command = self.command(Some(workspace));
         command.arg("refresh").arg("--quiet");
         Self::generator_args(&mut command, generator);
-        Self::lock_args(&mut command);
+        Self::lock_args(&mut command, lock_timeout);
         let output = self.run(command)?;
         check_status(&output, &[])?;
         parse_json(&output.stdout)
@@ -762,6 +860,37 @@ mod tests {
         for name in inherited_env() {
             assert!(!name.starts_with("ENZYME_") && !name.starts_with("OPENAI_"));
         }
+    }
+
+    #[test]
+    fn pinned_version_is_semver() {
+        assert!(required_version().split('.').count() == 3, "{}", required_version());
+    }
+
+    #[test]
+    fn version_mismatch_and_non_executables_are_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("enzyme");
+        std::fs::write(&fake, "#!/bin/sh\necho 'enzyme 0.0.1'\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!is_executable(&fake));
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(is_executable(&fake));
+        let error = verify_version(&fake).unwrap_err();
+        assert!(
+            matches!(&error, EngineError::VersionMismatch { found, .. } if found == "0.0.1"),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains(required_version()), "{error}");
+        let matching = dir.path().join("enzyme-ok");
+        std::fs::write(
+            &matching,
+            format!("#!/bin/sh\necho 'enzyme {}'\n", required_version()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&matching, std::fs::Permissions::from_mode(0o755)).unwrap();
+        verify_version(&matching).unwrap();
     }
 
     #[test]
