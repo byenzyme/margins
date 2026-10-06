@@ -18,7 +18,7 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 # Public parser for the readable workspace language (github.com/byenzyme/enzyme-spec).
-enzyme-spec = { git = "https://github.com/byenzyme/enzyme-spec", tag = "v0.3.0" }
+enzyme-spec = { git = "https://github.com/byenzyme/enzyme-spec", tag = "v0.4.0" }
 fs4 = { version = "0.13", features = ["sync"] }
 globset = "0.4"
 keyring = { version = "3.6.2", default-features = false, features = ["apple-native", "linux-native-sync-persistent", "crypto-rust", "vendored"] }

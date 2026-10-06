@@ -5,7 +5,8 @@
 // The program a new Margins Workspace starts from. `enzyme compile --preset`
 // fills __WORKSPACE__ with the Workspace id and __SOURCE__ with the notes
 // folder. Margins then drops each folder reading whose folder the notes folder
-// does not have, and shows the result for review before it is saved.
+// does not have, and shows the result for review before it is saved. The
+// engine's automatic selection keeps running alongside these readings.
 workspace __WORKSPACE__ {
   source markdown "home" { path __SOURCE__ }
 
@@ -16,4 +17,5 @@ workspace __WORKSPACE__ {
   learn questions from folder "Meetings" about operational
   learn questions from folder "People" including linked pages about relationships
   learn questions from folder "Projects" about decisions
+  learn questions automatically
 }

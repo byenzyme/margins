@@ -32,9 +32,11 @@ session, or draft a note as part of this workflow.
   questions from `Meetings` (open work and follow-ups), `People` (relationships,
   including linked pages), and `Projects` (decisions). Readings for folders the
   notes folder does not have are dropped; folder names match case-insensitively.
-  Margins attends to exactly the readings a program has; a program with none
-  (for example, a notes folder without those folders) leaves attention automatic,
-  chosen again every time Margins indexes.
+  The preset also says `learn questions automatically`: besides its readings,
+  Margins picks what they miss, chosen again every time it indexes. A program
+  without that statement attends to exactly its readings; one with no readings
+  leaves attention fully automatic. Running setup again adds the statement to
+  a preset-made program that lacks it and changes nothing else.
 - **Plan** turns the preset into an exact, reviewable list of changes. **Apply**
   commits only that plan.
 - **Init** and **sync** prepare recall. **Recall** proves that the notes folder is

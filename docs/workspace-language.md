@@ -293,7 +293,7 @@ the server together.
   prints which (`engine index reuse …` or `engine index rebuild …`).
 - enzyme-spec unification: the engine and `margins-workflows` both depend on
   `enzyme-spec = { git = "https://github.com/byenzyme/enzyme-spec", tag =
-  "v0.3.0" }`. `scripts/enzyme-cli.pin` names the enzyme-rust `rev` that
+  "v0.4.0" }`. `scripts/enzyme-cli.pin` names the enzyme-rust `rev` that
   tests and gates build (`scripts/enzyme-bin`) and the `version` Margins
   requires at runtime.
 
