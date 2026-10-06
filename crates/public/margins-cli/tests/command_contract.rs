@@ -271,9 +271,13 @@ fn workspace_plan_apply_and_migrate_use_enzyme_programs() {
 
     // Forms the previous engine ignored are reported, not fatal; a Workspace
     // that cannot migrate is listed with its error and keeps its legacy file.
+    // Programs in one configs directory resolve together, and two Workspaces
+    // may not declare the same Markdown folder: give these their own.
+    let odd_notes = temp.path().join("odd-notes");
+    std::fs::create_dir_all(&odd_notes).unwrap();
     let home_binding = format!(
         "\n[bindings.home]\nkind = \"notes\"\npath = {:?}\nrole = \"home\"\n",
-        vault.canonicalize().unwrap()
+        odd_notes.canonicalize().unwrap()
     );
     let odd_dir = machine.join("workspaces/odd");
     std::fs::create_dir_all(&odd_dir).unwrap();
@@ -303,7 +307,7 @@ fn workspace_plan_apply_and_migrate_use_enzyme_programs() {
     assert_eq!(lines[0]["workspace_id"], "broken");
     assert_eq!(lines[0]["status"], "failed");
     assert_eq!(lines[1]["workspace_id"], "odd");
-    assert_eq!(lines[1]["status"], "migrated");
+    assert_eq!(lines[1]["status"], "migrated", "{output}");
     let warnings = lines[1]["warnings"].as_array().unwrap();
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(warnings[0].as_str().unwrap().contains("person:ada"));

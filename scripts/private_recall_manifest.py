@@ -51,7 +51,9 @@ def compose() -> str:
         "recall-engine/local-llm",
     ]
     assert manifest["dependencies"]["recall-engine"]["optional"] is True
-    assert manifest["dependencies"]["recall-engine"]["rev"] == "624e539bc34ad7bb4855aaceb34492c85190ae9c"
+    # The linked engine and the enzyme CLI that Margins runs are one revision.
+    pinned_cli = tomllib.loads((ROOT / "scripts/enzyme-cli.pin").read_text())["rev"]
+    assert manifest["dependencies"]["recall-engine"]["rev"] == pinned_cli
     return source
 
 

@@ -80,7 +80,7 @@ fn exact_phrase_recall_returns_actual_source_path() {
 }
 
 #[test]
-fn recall_without_selected_entities_still_searches_declared_notes() {
+fn recall_without_readings_still_searches_declared_notes() {
     let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     margins::initialize_sqlite_runtime().unwrap();
     let tmp = tempfile::tempdir().unwrap();
@@ -113,8 +113,10 @@ fn recall_without_selected_entities_still_searches_declared_notes() {
     std::env::remove_var("ENZYME_HOME");
     let _generator = fixture_generator::FixtureGenerator::start(&margins_home);
 
+    // No readings: the engine's automatic selection chooses what to bridge
+    // (here the home folder), and the declared notes stay recallable.
     let init = margins::recall::provision_workspace_for_init(&workspace).unwrap();
-    assert_eq!(init.readiness.entities_curated, 0);
+    assert_eq!(init.status, "ok", "{init:?}");
     let out = margins::recall::recall(
         &workspace,
         "What supports the handoff decision and what remains unresolved?",
@@ -122,8 +124,6 @@ fn recall_without_selected_entities_still_searches_declared_notes() {
     )
     .unwrap();
     assert_eq!(out.status, "ok");
-    assert_eq!(out.reason, "no_entities");
-    assert_eq!(out.search_strategy, "direct");
     assert!(out
         .results
         .iter()
@@ -132,20 +132,6 @@ fn recall_without_selected_entities_still_searches_declared_notes() {
         .results
         .iter()
         .any(|hit| hit.document_ref == "questions.md"));
-
-    let handle = margins::recall::open_workspace(&workspace).unwrap().unwrap();
-    let in_process: serde_json::Value = serde_json::from_str(
-        &handle
-            .catalyze_json("What supports the handoff decision?", 5)
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(in_process["search_strategy"], "direct");
-    assert!(in_process["results"].as_array().unwrap().iter().any(|hit| {
-        hit["document_ref"]
-            .as_str()
-            .is_some_and(|path| path == "decision.md")
-    }));
 
     let exact = margins::recall::recall(
         &workspace,

@@ -1,0 +1,5 @@
+workspace "legacy" {
+  source markdown "notes" { path "@NOTES@" }
+  source google-mail "mail" { account "fixture@example.com" }
+  remember in folder "." create note
+}

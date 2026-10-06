@@ -210,6 +210,7 @@ def quick(gate: Gate, inputs: list[str]) -> None:
             args.extend(["-p", package])
         if "margins" in packages and os.environ.get("MARGINS_PRIVATE_RECALL_ACTIVE") == "1":
             args.extend(["--features", "recall"])
+            use_enzyme_binary(gate)
         gate.cargo("affected root workspace tests", *args)
     if parked_desktop:
         gate.skipped.append("parked desktop path")
@@ -218,11 +219,27 @@ def quick(gate: Gate, inputs: list[str]) -> None:
     check_shipped_linux(gate)
 
 
+def use_enzyme_binary(gate: Gate) -> None:
+    """Export MARGINS_ENZYME_BIN: the given binary, or the pinned enzyme build."""
+    label = "locate or build the pinned enzyme CLI"
+    print(f"\n==> {label}", flush=True)
+    result = subprocess.run(
+        [str(ROOT / "scripts/enzyme-bin")], cwd=ROOT, check=False,
+        stdout=subprocess.PIPE, text=True,
+    )
+    if result.returncode:
+        raise GateFailure(label, result.returncode)
+    os.environ["MARGINS_ENZYME_BIN"] = result.stdout.strip()
+    print(f"MARGINS_ENZYME_BIN={os.environ['MARGINS_ENZYME_BIN']}", flush=True)
+    gate.passed.append(label)
+
+
 def linux(gate: Gate) -> None:
     if os.environ.get("MARGINS_PRIVATE_RECALL_ACTIVE") != "1":
         raise ValueError("linux recall gate requires scripts/with-private-recall")
     check_private_composition_lock(gate)
     check_bb_plugin(gate)
+    use_enzyme_binary(gate)
     gate.cargo(
         "portable workspace and private composition tests",
         "test", "--workspace", "--no-default-features", "--features", "recall", "--locked",
@@ -236,6 +253,11 @@ def linux(gate: Gate) -> None:
     gate.run(
         "isolated Google onboarding harness",
         ["bash", "tests/test_e2e_fresh_onboarding.sh"],
+        env={**os.environ, "MARGINS_E2E_BIN": str(binary)},
+    )
+    gate.run(
+        "Enzyme home isolation through the margins and enzyme binaries",
+        ["bash", "scripts/e2e-enzyme-home-isolation.sh"],
         env={**os.environ, "MARGINS_E2E_BIN": str(binary)},
     )
     gate.run(
@@ -264,6 +286,7 @@ def public(gate: Gate) -> None:
 def macos(gate: Gate) -> None:
     if os.environ.get("MARGINS_PRIVATE_RECALL_ACTIVE") != "1":
         raise ValueError("macos recall gate requires scripts/with-private-recall")
+    use_enzyme_binary(gate)
     gate.cargo(
         "build private release CLI",
         "build", "--release", "-p", "margins", "--bin", "margins-private", "--locked",

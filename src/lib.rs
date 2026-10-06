@@ -22,7 +22,7 @@ pub mod recall;
 #[cfg(feature = "recall")]
 pub mod scan;
 #[cfg(feature = "recall")]
-mod recall_engine_seam;
+pub mod enzyme_cli;
 #[cfg(feature = "recall")]
 mod setup_compile;
 #[cfg(feature = "recall")]
@@ -30,8 +30,9 @@ mod workspace_recall;
 /// Portable public contracts re-exported by the root crate.
 pub use margins_core as core;
 
-/// Initialize the process-wide SQLite runtime before recall and Margins storage
-/// can open their independently wrapped connections.
+/// Initialize the process-wide SQLite runtime before the linked engine (still
+/// used by setup scan and compile) and Margins storage can open their
+/// independently wrapped connections.
 pub fn initialize_sqlite_runtime() -> anyhow::Result<()> {
     #[cfg(feature = "recall")]
     recall_engine::initialize_sqlite_runtime()?;

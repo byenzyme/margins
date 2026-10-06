@@ -201,14 +201,26 @@ the server together.
 - `ResolvedWorkspace { program, config, … }`: `config_path` is the program file;
   `workspace_revision` hashes its bytes. Display names live in machine config
   `[workspace.names]`.
-- Language validation runs the same host lowering the engine path uses
-  (`margins_workflows::workspace_lowering::lower_for_engine`) and then
-  `enzyme_spec::resolve` with the optional `configs/profiles.enzyme`, so readings,
+- Language validation runs `enzyme_spec::resolve_in` with an
+  `enzyme_spec::Environment` holding Margins' source kinds
+  (`margins_workflows::source_kinds`, the same `margins-sources.enzyme` text the
+  engine reads) and the optional `configs/profiles.enzyme`, so readings,
   profiles, folder qualification and exclusions are checked by the engine's own
   resolver against the sources it will index.
-- Plan JSON is `margins.workspace.plan.v2`: `workspace_id`, `base_revision`,
-  `plan_id`, `actions` (each with a `summary`; `update_program` when the change is
-  outside the typed view), `desired_program`, `desired_sha256`, `diff`. A legacy
+- `settings.enzyme` is rewritten only when it lacks `updates disabled`; that
+  rewrite renders the program and drops its comments.
+- Plan/apply is `enzyme_spec::plan::ConfigStore` over `configs/` (lock,
+  journal and receipts in `configs/.enzyme-apply/`, shared with `enzyme
+  workspace plan|apply`). Margins adds only its view-level `actions` and
+  receipt. Plan JSON is `margins.workspace.plan.v2`: `workspace_id`,
+  `base_revision`, `plan_id`, `actions` (each with a `summary`; `update_program`
+  when the change is outside the typed view), `desired_program`,
+  `desired_sha256`, `diff`, and `program_plan`, the language plan
+  (`enzyme.plan.v1`) that apply hands to the store unchanged. Re-applying an
+  applied plan returns its receipt again (same `request_id`, `replayed:
+  true`) while the program still holds that plan's result; after a later
+  change it is stale. A plan made before `program_plan` existed is refused
+  as invalid ("plan again"). A legacy
   `.toml` desired file is converted with the migration rules onto the current
   program. `workspace compile` emits `margins.workspace.compile.v2` with
   `desired_program` (no `desired_toml`).
@@ -223,37 +235,76 @@ the server together.
 
 ## Margins implementation (recall side)
 
-- Lowering (`workspace_lowering`): `google-mail`, `google-calendar`,
-  `google-meet` and `granola` become read-only `sqlite` sources over the
-  Workspace `ledger.db`, keeping the source name; `margins-captures` is dropped
-  (the capture registry has never been indexed, and keeping it out preserves a
-  one-Markdown Workspace's identity); the `margins-managed-projection` tag
-  exclusion is added. Margins also adds, only in the lowered program, its
-  catalyst budget (`total_limit`) and, when the program has no readings, its
-  automatic correspondent/people link readings and correspondence noise as
-  `leave out links`.
-- One engine seam (`src/recall_engine_seam.rs`): inputs are the rendered lowered
-  program text, workspace name, state directory and generator home; inside it
-  parses and resolves with `enzyme-spec`, builds
-  `EnzymeConfig::from_program_workspace`, resolves the generator, reconciles
-  catalysts, and calls `ensure_searchable_sync` with `workspace_config` (never
-  `config_path`). A Workspace whose only lowered source is one Markdown source
-  indexes from that path (the engine's path-addressed identity); every other
-  Workspace indexes from its empty state directory. No other Margins module
-  builds engine configuration. Search over an opened index and read-only scan
-  helpers still call the engine directly.
-- Document identity follows the language: one Markdown source gives root-relative
-  refs (`people/ada.md`); several give `<source name>/<relative>`; ledger sources
-  give `sqlite:<source name>/<hex id>`. Folder readings use the same identity.
-  A source rename is therefore a new identity. `workspaces/<id>/index.identity`
-  records the identity version; an index built by an earlier release (hashed
-  `markdown_…`/`gmail_…` namespaces) is fully reindexed exactly once, and its
-  folder/collection catalysts are dropped.
+- Margins runs the shipped `enzyme` CLI (`src/enzyme_cli.rs`) with
+  `ENZYME_HOME=$MARGINS_HOME`, `--workspace <id>`, and an allowlisted
+  environment (plus proxy and CA variables: `HTTP(S)_PROXY`, `NO_PROXY`,
+  `ALL_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`). It finds the binary through
+  `MARGINS_ENZYME_BIN`, then beside `margins`, then
+  `<exe dir>/../libexec/margins/enzyme`, then `$MARGINS_HOME/bin/enzyme`;
+  never `PATH`, where a user's own `enzyme` may be another release. Before the
+  first call in a process it requires `enzyme --version` to equal the
+  `version` in `scripts/enzyme-cli.pin`. The generator is
+  always explicit: `--llm env` with Margins' hosted bundle as `OPENAI_*`,
+  `--llm local` when the selected model is installed, otherwise `--llm none`
+  (the index is built, and init and recall fail closed until setup chooses a
+  generator). Exit codes 2–5 become typed errors; 4 is "workspace busy"
+  (`MARGINS_ENZYME_LOCK_TIMEOUT` passes `--lock-timeout`). Exit 5 (index
+  built, catalysts failed) is reported as `catalysts_pending`.
+- `margins init` runs `enzyme init --json-progress`. A sync, connector
+  reconcile, Granola import, or retention change runs `enzyme refresh`, which
+  builds a due catalyst epoch in a detached worker that inherits the call's
+  environment. These sync-triggered updates wait at most 10 s for another
+  build of the Workspace and then report it busy; the next sync or init
+  catches up. Recall runs `enzyme search --json` (catalyst, direct and
+  exact-phrase hits); readiness, counts and source freshness come from
+  `enzyme status --json`; the model registry from `enzyme model list --json`.
+- Before any call Margins writes `configs/settings.enzyme` with `updates
+  disabled` and the managed `configs/margins-sources.enzyme`, whose `source
+  kind` definitions expand `google-mail`, `google-calendar`, `google-meet` and
+  `granola` to SQLite sources over `workspaces/<id>/ledger.db` (`accepts` lists
+  the fields only sync reads). Calendar reads the window the last sync
+  materialized. `margins-captures` stays in the program as the capture store's
+  declaration; its kind indexes nothing, so captures never enter recall and a
+  one-Markdown Workspace keeps root-relative refs. Margins creates `ledger.db`
+  before indexing because every program declares a captures source.
+- The engine reads the program as written. Margins no longer adds hidden
+  rules: entity selection is the engine's automatic selection on every
+  init/refresh (never written back), the managed-projection tag exclusion and
+  Margins' correspondent link readings are gone.
+- Document identity: one Markdown source gives root-relative refs
+  (`people/ada.md`); several give `<source name>/<relative>`; ledger records
+  give the engine's `sqlite:<source name>/<sha256>` (name length, name, and
+  JSON id tuple; `margins_workflows::source_kinds::sqlite_document_ref`), which
+  Margins maps back to ledger records. A source rename is a new identity.
+  The in-process Margins used `sqlite:<source name>/<hex id>`, so the first
+  CLI run over its index re-identifies (re-embeds) every ledger document once
+  and may regenerate the affected catalysts. Once kind templates can name
+  their declaration (`{source}`, engine slice E4), the kinds emit the hex refs
+  and this cost goes away.
+- An index the in-process Margins built at `workspaces/<id>/enzyme.db` is
+  reused when `enzyme status` reports a compatible schema (its marker
+  `index.identity` is removed after the first CLI run); an index the engine
+  cannot read is rebuilt once with `init --force`. `MARGINS_RECALL_DEBUG=1`
+  prints which (`engine index reuse …` or `engine index rebuild …`).
 - enzyme-spec unification: the engine and `margins-workflows` both depend on
   `enzyme-spec = { git = "https://github.com/byenzyme/enzyme-spec", tag =
-  "v0.1.0" }`, so Cargo links one crate with no `[patch]` (check:
-  `scripts/with-private-recall cargo tree -i enzyme-spec --workspace --features
-  recall`). Bump the tag in both repositories together.
+  "v0.2.0" }`. `scripts/enzyme-cli.pin` names the enzyme-rust `rev` that
+  tests and gates build (`scripts/enzyme-bin`) and the `version` Margins
+  requires at runtime; the private composition pins the same revision.
+
+### Inspecting a Workspace with plain `enzyme`
+
+A Margins home is an Enzyme home, so the engine's own commands read the same
+programs and index:
+
+```bash
+ENZYME_HOME=~/.margins enzyme --workspace <id> status
+ENZYME_HOME=~/.margins enzyme --workspace <id> status --json
+ENZYME_HOME=~/.margins enzyme --workspace <id> search "a phrase" --json
+```
+
+These open the index read-only. Avoid `init`/`refresh` by hand on a live
+home: without `--llm` they use Enzyme's default generator, not Margins'.
 
 ## Open items
 

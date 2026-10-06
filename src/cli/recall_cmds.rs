@@ -58,7 +58,7 @@ fn run_sync(workspace_selector: Option<&str>, source_filter: Option<&str>, json:
         };
     sources.extend(external_rows.into_iter().map(sync_connector_row_json));
 
-    let recall = match crate::recall::provision_workspace_for_init(&workspace) {
+    let recall = match crate::recall::refresh_workspace(&workspace) {
         Ok(status) => serde_json::json!({
             "ok": status.status != "catalysts_pending",
             "status": status.status,

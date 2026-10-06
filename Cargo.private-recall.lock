@@ -1387,7 +1387,7 @@ dependencies = [
 [[package]]
 name = "enzyme-core"
 version = "0.7.2"
-source = "git+https://github.com/byenzyme/enzyme-rust.git?rev=624e539bc34ad7bb4855aaceb34492c85190ae9c#624e539bc34ad7bb4855aaceb34492c85190ae9c"
+source = "git+https://github.com/byenzyme/enzyme-rust.git?rev=d9b1c5b484f5e335b7d35ff02eb3631e1902b252#d9b1c5b484f5e335b7d35ff02eb3631e1902b252"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1421,12 +1421,15 @@ dependencies = [
 
 [[package]]
 name = "enzyme-spec"
-version = "0.1.0"
-source = "git+https://github.com/byenzyme/enzyme-spec?tag=v0.1.0#37abd99c473aa3fa7341dd65b0242c9a909bc924"
+version = "0.2.0"
+source = "git+https://github.com/byenzyme/enzyme-spec?tag=v0.2.0#12d06794ea19995cab3c658ef0b86913f3fe60fe"
 dependencies = [
  "anyhow",
+ "fs2",
  "serde",
  "serde_json",
+ "sha2",
+ "similar",
 ]
 
 [[package]]
@@ -1448,7 +1451,7 @@ dependencies = [
 [[package]]
 name = "ese"
 version = "0.1.0"
-source = "git+https://github.com/byenzyme/enzyme-rust.git?rev=624e539bc34ad7bb4855aaceb34492c85190ae9c#624e539bc34ad7bb4855aaceb34492c85190ae9c"
+source = "git+https://github.com/byenzyme/enzyme-rust.git?rev=d9b1c5b484f5e335b7d35ff02eb3631e1902b252#d9b1c5b484f5e335b7d35ff02eb3631e1902b252"
 dependencies = [
  "minreq",
  "rayon",
@@ -1615,6 +1618,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]

@@ -1,13 +1,17 @@
 #![cfg(feature = "recall")]
-//! End-to-end proof of the Workspace language through the real `margins`
-//! binary: program authoring, plan/apply, indexing from the in-memory program,
-//! recall provenance, host-source lowering, legacy upgrade, and edit
-//! round-trips. Every run is hermetic: temp `HOME`, `MARGINS_HOME`, and
-//! `ENZYME_HOME`, a local fixture generator, no network, no real credentials.
-//! Each test asserts that neither `ENZYME_HOME` nor `~/.enzyme` is touched.
+//! End-to-end proof of the Workspace language through the real `margins` and
+//! `enzyme` binaries: program authoring, plan/apply, indexing by `enzyme`
+//! from the program in `$MARGINS_HOME/configs`, recall provenance, source
+//! kinds, legacy upgrade, and edit round-trips. Every run is hermetic: temp
+//! `HOME` and `MARGINS_HOME`, a poisoned `ENZYME_HOME` in the environment, a
+//! local fixture generator, no network, no real credentials. Each test
+//! asserts that neither `ENZYME_HOME` nor `~/.enzyme` is touched.
 
 #[path = "support/fixture_generator.rs"]
 mod fixture_generator;
+
+#[path = "support/enzyme_bin.rs"]
+mod enzyme_bin;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -70,14 +74,39 @@ impl Hermetic {
     }
 
     fn run_bin(&self, bin: &Path, args: &[&str]) -> Output {
-        Command::new(bin)
+        self.command(bin, args).output().unwrap()
+    }
+
+    fn command(&self, bin: &Path, args: &[&str]) -> Command {
+        let mut command = Command::new(bin);
+        command
             .args(args)
             .env_clear()
             .env("HOME", &self.home)
             .env("MARGINS_HOME", &self.margins_home)
             .env("ENZYME_HOME", &self.enzyme_home)
+            .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("MARGINS_RECALL_DEBUG", "1")
+            .current_dir(&self.home);
+        command
+    }
+
+    /// Run the engine directly on the Margins home, with the hosted bundle the
+    /// fixture generator installed as its `--llm env` endpoint.
+    fn enzyme(&self, args: &[&str]) -> Output {
+        let bundle: serde_json::Value = serde_json::from_slice(
+            &fs::read(self.margins_home.join("llm-config-cache.json")).unwrap(),
+        )
+        .unwrap();
+        Command::new(enzyme_bin::enzyme_bin())
+            .args(args)
+            .env_clear()
+            .env("HOME", &self.home)
+            .env("ENZYME_HOME", &self.margins_home)
+            .env("OPENAI_API_KEY", bundle["api_key"].as_str().unwrap())
+            .env("OPENAI_BASE_URL", bundle["base_url"].as_str().unwrap())
+            .env("OPENAI_MODEL", bundle["model"].as_str().unwrap())
             .current_dir(&self.home)
             .output()
             .unwrap()
@@ -272,7 +301,7 @@ fn fresh_program_setup_plans_applies_indexes_and_recalls() {
     let init = env.ok(&["--workspace", "practice", "init"]);
     let stderr = String::from_utf8_lossy(&init.stderr);
     assert!(
-        stderr.contains("full_reindex=true reason=first_build"),
+        stderr.contains("engine index first_build"),
         "{stderr}"
     );
     let state = env.margins_home.join("workspaces/practice");
@@ -626,13 +655,14 @@ backfill_days = 365
     // (as `sync` would with real credentials).
     seed_mail_and_calendar(&state);
 
-    // The first index run under the new identity is a full reindex, exactly once.
+    // The engine reuses a release index it can read (re-identifying its
+    // documents) or rebuilds one it cannot, once.
     let first = env.ok(&["--workspace", "legacy", "init"]);
     let first_stderr = String::from_utf8_lossy(&first.stderr);
     let expected_reason = if legacy_bin.is_some() {
-        "full_reindex=true reason=document_identity"
+        "engine index re"
     } else {
-        "full_reindex=true reason=first_build"
+        "engine index first_build"
     };
     assert!(first_stderr.contains(expected_reason), "{first_stderr}");
     let refs = indexed_refs(&state);
@@ -655,8 +685,11 @@ backfill_days = 365
     let second = env.ok(&["--workspace", "legacy", "init"]);
     let second_stderr = String::from_utf8_lossy(&second.stderr);
     assert!(
-        !second_stderr.contains("full_reindex=true"),
-        "the identity reindex happens once: {second_stderr}"
+        second_stderr.contains("engine index reuse")
+            && !second_stderr.contains("rebuild")
+            && !second_stderr.contains("first_build")
+            && !second_stderr.contains("in_process_index"),
+        "the transition happens once: {second_stderr}"
     );
 
     let recalled = recall(
@@ -811,5 +844,156 @@ fn adding_a_second_markdown_source_reindexes_home_identities() {
     assert_eq!(unique.len(), hits.len(), "duplicate hits: {recalled}");
     let book = recall(&env, "grow", "The vermilion orchard almanac lists every graft", None);
     assert!(result_refs(&book).contains(&"library/book.md".to_string()), "{book}");
+    env.assert_enzyme_untouched();
+}
+
+fn indexed_documents(state_dir: &Path) -> Vec<(String, String)> {
+    let index = rusqlite::Connection::open(state_dir.join("enzyme.db")).unwrap();
+    let mut statement = index
+        .prepare("SELECT source_ref, content_hash FROM docs ORDER BY source_ref")
+        .unwrap();
+    let documents = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    documents
+}
+
+fn catalyst_entities(state_dir: &Path) -> Vec<String> {
+    let index = rusqlite::Connection::open(state_dir.join("enzyme.db")).unwrap();
+    let mut statement = index
+        .prepare("SELECT DISTINCT entity FROM catalysts ORDER BY entity")
+        .unwrap();
+    let entities = statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    entities
+}
+
+/// `enzyme` run directly with `ENZYME_HOME=$MARGINS_HOME` reads the Workspace
+/// program, `settings.enzyme`, and `margins-sources.enzyme` that Margins
+/// wrote, and builds the same index Margins builds; `enzyme search` finds
+/// what `margins recall` finds.
+#[test]
+fn enzyme_reads_margins_programs_and_kinds_and_builds_the_same_index() {
+    let env = Hermetic::new();
+    let notes = notes_fixture(&env);
+    people_fixture(&notes);
+    env.ok(&["workspace", "new", "direct", "--home", notes.to_str().unwrap(), "--json"]);
+    let desired = format!(
+        r#"workspace "direct" {{
+  source markdown "notes" {{ path "{}" }}
+  source google-mail "mail" {{ account "{ACCOUNT}" }}
+  source google-calendar "calendar" {{ account "{ACCOUNT}" }}
+  remember in folder "inbox" create note
+  leave out folders ["archive"]
+}}
+"#,
+        notes.display()
+    );
+    env.plan_and_apply("direct", &desired);
+    let state = env.margins_home.join("workspaces/direct");
+    seed_mail_and_calendar(&state);
+    let _generator = fixture_generator::FixtureGenerator::start(&env.margins_home);
+    env.ok(&["--workspace", "direct", "init"]);
+    let documents = indexed_documents(&state);
+    let entities = catalyst_entities(&state);
+    assert!(documents.iter().any(|(r, _)| r == "projects/harbor.md"), "{documents:?}");
+    assert!(documents.iter().any(|(r, _)| r.starts_with("sqlite:mail/")), "{documents:?}");
+    assert!(!entities.is_empty());
+    let sources = fs::read_to_string(env.margins_home.join("configs/margins-sources.enzyme"))
+        .unwrap();
+    assert_eq!(sources, margins_workflows::source_kinds::SOURCES_TEXT);
+    let settings = fs::read_to_string(env.margins_home.join("configs/settings.enzyme")).unwrap();
+    assert!(settings.contains("updates disabled"), "{settings}");
+
+    let phrase = "The quartz harbor ledger records every crossing";
+    let recalled = recall(&env, "direct", phrase, None);
+    let searched = env.enzyme(&[
+        "--workspace", "direct", "search", phrase, "--phrase", phrase, "-n", "8", "--json",
+    ]);
+    assert!(searched.status.success(), "{}", String::from_utf8_lossy(&searched.stderr));
+    let searched: serde_json::Value = serde_json::from_slice(&searched.stdout).unwrap();
+    let engine_refs = ["exact_hits", "catalyst_hits"]
+        .iter()
+        .flat_map(|list| searched[list].as_array().unwrap())
+        .map(|hit| hit["path"].as_str().unwrap().to_string())
+        .collect::<std::collections::BTreeSet<_>>();
+    let margins_refs = result_refs(&recalled);
+    assert!(!margins_refs.is_empty(), "{recalled}");
+    assert!(
+        margins_refs.iter().all(|reference| engine_refs.contains(reference)),
+        "margins {margins_refs:?} vs enzyme {engine_refs:?}"
+    );
+
+    // Rebuild the index from scratch with plain `enzyme`.
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = fs::remove_file(state.join(format!("enzyme.db{suffix}")));
+    }
+    let built = env.enzyme(&["--workspace", "direct", "init", "--llm", "env", "--quiet"]);
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    assert_eq!(indexed_documents(&state), documents);
+    assert_eq!(catalyst_entities(&state), entities);
+    env.assert_enzyme_untouched();
+}
+
+/// A second index build of the same Workspace while one runs: with no wait it
+/// fails as busy, without changing anything; with the default wait it runs
+/// after the first finishes. `margins sync` reports the busy refresh.
+#[test]
+fn concurrent_margins_commands_map_lock_busy() {
+    let env = Hermetic::new();
+    let notes = notes_fixture(&env);
+    people_fixture(&notes);
+    env.ok(&["workspace", "new", "busy", "--home", notes.to_str().unwrap(), "--json"]);
+    let generator = fixture_generator::FixtureGenerator::start_with_delay(&env.margins_home, 1500);
+    let mut first = env
+        .command(Path::new(BIN), &["--workspace", "busy", "init"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Generation runs under the workspace lock.
+    let started = std::time::Instant::now();
+    while generator.request_count() == 0 {
+        assert!(started.elapsed().as_secs() < 60, "the first init never reached generation");
+        assert!(first.try_wait().unwrap().is_none(), "the first init exited early");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    let busy = env
+        .command(Path::new(BIN), &["--workspace", "busy", "init"])
+        .env("MARGINS_ENZYME_LOCK_TIMEOUT", "0")
+        .output()
+        .unwrap();
+    assert!(!busy.status.success());
+    let stderr = String::from_utf8_lossy(&busy.stderr);
+    assert!(stderr.contains("workspace busy"), "{stderr}");
+
+    let sync = env
+        .command(Path::new(BIN), &["--workspace", "busy", "sync", "--json"])
+        .env("MARGINS_ENZYME_LOCK_TIMEOUT", "0")
+        .output()
+        .unwrap();
+    let sync_json: serde_json::Value = serde_json::from_slice(&sync.stdout)
+        .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&sync.stderr)));
+    assert_eq!(sync_json["recall"]["ok"], false, "{sync_json}");
+    assert!(
+        sync_json["recall"]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("workspace busy")),
+        "{sync_json}"
+    );
+
+    let waiting = env
+        .command(Path::new(BIN), &["--workspace", "busy", "init"])
+        .output()
+        .unwrap();
+    let first = first.wait_with_output().unwrap();
+    assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
+    assert!(waiting.status.success(), "{}", String::from_utf8_lossy(&waiting.stderr));
     env.assert_enzyme_untouched();
 }
