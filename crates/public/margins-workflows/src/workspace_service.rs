@@ -983,8 +983,18 @@ impl WorkspaceService {
             "_aligned.md",
             "_capture_context.md",
             "_grounding.json",
+            // Provisional live views: the remote producer's checkpoint and its
+            // lock, then each native segment's checkpoint.
+            "_remote.live-transcript.json",
+            "_remote_live.lock",
         ] {
             remove_session_file(&self.margins_dir.join(format!("{name}{suffix}")))?;
+        }
+        for segment in &meta.segments {
+            remove_session_file(&self.margins_dir.join(format!(
+                "{name}_seg{}.live-transcript.json",
+                segment.segment_index
+            )))?;
         }
         let artifact_root = self.margins_dir.join("artifacts");
         let artifact_dir = artifact_root.join(name);
