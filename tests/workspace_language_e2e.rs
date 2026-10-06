@@ -650,9 +650,13 @@ backfill_days = 365
         assert!(state.join("config.toml").is_file());
     }
 
-    // Any normal command migrates the program.
+    // Status is read-only: it shows the Workspace without migrating it.
     let status = env.json(&["--workspace", "legacy", "workspace", "status", "--json"]);
     assert_eq!(status["id"], "legacy");
+    assert_eq!(fs::read_to_string(state.join("config.toml")).unwrap(), legacy);
+
+    // A command that writes the home migrates the program.
+    env.ok(&["--workspace", "legacy", "workspace", "migrate", "--json"]);
     assert!(!state.join("config.toml").exists());
     assert_eq!(fs::read_to_string(state.join("config.toml.migrated")).unwrap(), legacy);
     let program = env.program("legacy");
@@ -1066,10 +1070,9 @@ fn preset_setup_keeps_existing_readings_recalls_and_is_safe_to_rerun() {
     assert_eq!(plan["preset"]["readings"], serde_json::json!(["folder:Meetings", "folder:people"]));
     assert_eq!(plan["preset"]["skipped_readings"], serde_json::json!(["folder:Projects"]));
     assert_eq!(plan["preset"]["note_folder"], "Meetings");
-    assert_eq!(
-        fs::read_to_string(env.margins_home.join("presets/margins-meetings.enzyme.in")).unwrap(),
-        margins_workflows::workspace_preset::MEETINGS_PRESET_TEXT
-    );
+    // The preview writes nothing into the Margins home, not even the preset.
+    assert_eq!(plan["preset"]["template"], "margins-meetings");
+    assert!(!env.margins_home.join("presets").exists());
     let receipt = env.json(&[
         "--workspace", "practice", "workspace", "apply", "--plan", plan_path.to_str().unwrap(), "--json",
     ]);
@@ -1089,12 +1092,9 @@ fn preset_setup_keeps_existing_readings_recalls_and_is_safe_to_rerun() {
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .filter(|name| name.ends_with(".enzyme"))
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        programs,
-        ["margins-sources.enzyme", "practice.enzyme", "settings.enzyme"]
-            .map(String::from)
-            .into()
-    );
+    // Only the program: the preview prepared nothing, and the engine's
+    // settings and source kinds are written when the engine first runs (init).
+    assert_eq!(programs, ["practice.enzyme"].map(String::from).into());
 
     let _generator = fixture_generator::FixtureGenerator::start(&env.margins_home);
     env.ok(&["--workspace", "practice", "init"]);
@@ -1126,7 +1126,18 @@ fn preset_setup_keeps_existing_readings_recalls_and_is_safe_to_rerun() {
     assert_eq!(again["diff"], "");
     assert_eq!(again["desired_program"], plan["desired_program"]);
     assert_eq!(env.program("practice"), program);
-    assert_eq!(fs::read_dir(env.margins_home.join("configs")).unwrap().count(), programs.len() + 1);
+    let programs_after = fs::read_dir(env.margins_home.join("configs"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".enzyme"))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        programs_after,
+        ["margins-sources.enzyme", "practice.enzyme", "settings.enzyme"]
+            .map(String::from)
+            .into(),
+        "init added only the engine's settings and source kinds"
+    );
 
     // A program set up before the preset had the statement gains it, and
     // only it, when setup runs again.

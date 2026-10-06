@@ -57,6 +57,7 @@ SCRIPT_TESTS = {
     "tests/test_portable_scripts.py": (
         "scripts/e2e-",
         "scripts/core-product-smoke.sh",
+        "scripts/smoke-official-cli.sh",
         "install.sh",
     ),
     "tests/test_smoke_official_cli.sh": (

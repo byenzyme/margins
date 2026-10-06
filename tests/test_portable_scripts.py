@@ -16,6 +16,7 @@ SCRIPTS = sorted(
     {
         *ROOT.glob("scripts/e2e-*.sh"),
         ROOT / "scripts" / "core-product-smoke.sh",
+        ROOT / "scripts" / "smoke-official-cli.sh",
         *ROOT.glob("tests/*.sh"),
         ROOT / "install.sh",
     }

@@ -1,8 +1,8 @@
 //! The preset program Workspace setup starts from.
 //!
-//! Margins ships `margins-meetings.enzyme.in`, an Enzyme preset template, and
-//! keeps it at `$MARGINS_HOME/presets/` as a managed file. Setup has the
-//! engine fill it (`enzyme compile --preset <path> --dry-run`) for the
+//! Margins ships `margins-meetings.enzyme.in`, an Enzyme preset template.
+//! Setup has the engine fill it (`enzyme compile --preset <path> --dry-run`,
+//! in a throwaway engine home so the preview writes nothing) for the
 //! Workspace's notes folder, then [`propose`] turns the filled program into the
 //! desired Workspace view: folder readings whose folder the notes folder does
 //! not have are dropped, and the rest is added to the current program. The
@@ -13,39 +13,14 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
-use crate::workspace::{
-    atomic_write, SourceRole, WorkspaceBinding, WorkspaceConfig, WorkspaceEntity,
-};
+use crate::workspace::{SourceRole, WorkspaceBinding, WorkspaceConfig, WorkspaceEntity};
 use crate::workspace_program::{derive_view, home_folder_entity, WorkspaceProgram};
 
-/// Directory under `$MARGINS_HOME` that holds the managed presets.
-pub const PRESETS_DIR: &str = "presets";
 /// The preset setup uses.
 pub const MEETINGS_PRESET: &str = "margins-meetings";
 /// The shipped text of [`MEETINGS_PRESET`].
 pub const MEETINGS_PRESET_TEXT: &str =
     include_str!("../resources/presets/margins-meetings.enzyme.in");
-
-/// Where a preset lives in a Margins home.
-pub fn preset_path(margins_home: &Path, name: &str) -> PathBuf {
-    margins_home
-        .join(PRESETS_DIR)
-        .join(format!("{name}.enzyme.in"))
-}
-
-/// Write the shipped meetings preset unless the file already holds exactly
-/// that text, and return its path.
-pub fn ensure_meetings_preset(margins_home: &Path) -> Result<PathBuf> {
-    let path = preset_path(margins_home, MEETINGS_PRESET);
-    match std::fs::read_to_string(&path) {
-        Ok(current) if current == MEETINGS_PRESET_TEXT => return Ok(path),
-        Ok(_) => log::info!("restoring managed {}", path.display()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
-    }
-    atomic_write(&path, MEETINGS_PRESET_TEXT.as_bytes())?;
-    Ok(path)
-}
 
 /// The desired Workspace a filled preset proposes, and what it kept.
 #[derive(Debug, Clone, Serialize)]
@@ -458,15 +433,5 @@ mod tests {
             HomeFolder::Ambiguous(vec!["Work".into(), "work".into()])
         );
         assert!(resolve_home_folder(temp.path(), "WORK/people").is_err());
-    }
-
-    #[test]
-    fn writes_the_managed_preset_and_restores_edits() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = ensure_meetings_preset(temp.path()).unwrap();
-        assert_eq!(path, temp.path().join("presets/margins-meetings.enzyme.in"));
-        std::fs::write(&path, "edited").unwrap();
-        ensure_meetings_preset(temp.path()).unwrap();
-        assert_eq!(std::fs::read_to_string(path).unwrap(), MEETINGS_PRESET_TEXT);
     }
 }

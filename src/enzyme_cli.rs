@@ -384,6 +384,28 @@ impl Engine {
         })
     }
 
+    /// An engine for a throwaway Enzyme home (`scratch`), with Margins'
+    /// settings (`updates disabled`) and source kinds, for engine work that
+    /// must not touch the Margins home, such as filling a preset for a plan
+    /// preview. The binary is located through `margins_home` as usual.
+    pub fn for_scratch_home(margins_home: &Path, scratch: &Path) -> Result<Self> {
+        let configs = scratch.join(margins_workflows::workspace::CONFIGS_DIR);
+        std::fs::create_dir_all(&configs)
+            .with_context(|| format!("creating {}", configs.display()))?;
+        std::fs::write(
+            configs.join(margins_workflows::machine_config::SETTINGS_PROGRAM),
+            "settings {\n  updates disabled\n}\n",
+        )?;
+        std::fs::write(
+            configs.join(margins_workflows::source_kinds::SOURCES_PROGRAM),
+            margins_workflows::source_kinds::SOURCES_TEXT,
+        )?;
+        Ok(Self {
+            bin: locate_binary(margins_home)?,
+            home: scratch.to_path_buf(),
+        })
+    }
+
     pub fn bin(&self) -> &Path {
         &self.bin
     }

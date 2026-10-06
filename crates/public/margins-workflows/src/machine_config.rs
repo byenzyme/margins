@@ -12,10 +12,19 @@
 //! a command writes machine configuration (readers see the migrated values in
 //! memory and never write the home): it is validated before
 //! anything is written, `[llm] mode`/`local_model` move to `settings.enzyme`,
-//! every other key moves to `margins.toml` with its comments, and the original
-//! is kept as `config.toml.migrated`. Comments on the moved `[llm]` keys are
-//! not carried into the rendered engine program; they stay in the original.
-//! Re-running is idempotent.
+//! every other key moves to `margins.toml`, and the original is kept as
+//! `config.toml.migrated`. Re-running is idempotent.
+//!
+//! Comments survive only where they belong to a key that is copied: a comment
+//! above a key, or above a table `margins.toml` does not have yet. A header
+//! comment on a table both files already have, and one above an `[llm]` table
+//! the migration empties, are dropped, as are comments on the moved `[llm]`
+//! keys. The backup keeps the original file, comments and all.
+//!
+//! Read-only commands (status, show, source list, plan previews, capabilities)
+//! never migrate. Commands that write the home migrate under the machine lock,
+//! and so does `margins-server` at startup: it is a writer and is upgraded
+//! together with the CLI.
 
 use anyhow::{bail, Context, Result};
 use fs4::fs_std::FileExt;
@@ -92,7 +101,8 @@ pub fn migrate_locked(margins_home: &Path) -> Result<()> {
     // Everything is validated; a crash between these writes leaves the legacy
     // file in place, so the migration simply runs again.
     // margins.toml is owner-only (at most 0600, see `atomic_write`); a new one
-    // also keeps a stricter mode of the legacy file it replaces.
+    // also keeps a stricter mode of the legacy file it replaces, but always
+    // stays writable by its owner.
     let new_config = !config_path.exists();
     atomic_write(&config_path, migrated.config.to_string().as_bytes())?;
     #[cfg(unix)]
@@ -102,7 +112,7 @@ pub fn migrate_locked(margins_home: &Path) -> Result<()> {
             .with_context(|| format!("reading {}", legacy_path.display()))?
             .permissions()
             .mode();
-        let mode = legacy_mode & crate::workspace::OWNER_ONLY_MODE;
+        let mode = crate::workspace::owner_only(legacy_mode);
         std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(mode))
             .with_context(|| format!("setting permissions of {}", config_path.display()))?;
     }
@@ -479,7 +489,8 @@ mod tests {
         std::fs::write(&legacy, "[cli]\nnote_agent = \"pi\"\n").unwrap();
         std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o400)).unwrap();
         ensure_migrated(home.path()).unwrap();
-        assert_eq!(mode(&config), 0o400, "a stricter legacy mode is kept");
+        assert_eq!(mode(&config), 0o600, "a read-only legacy file still yields a writable margins.toml");
+        update_machine_document(home.path(), |_| Ok(())).unwrap();
     }
 
     #[test]
