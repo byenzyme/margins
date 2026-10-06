@@ -621,7 +621,10 @@ pub struct WorkspacePlan {
     pub desired_program: String,
     pub desired_sha256: String,
     pub diff: String,
-    pub program_plan: enzyme_spec::plan::Plan,
+    /// Absent only in plans made before Margins applied through the store;
+    /// apply refuses those as invalid ("plan again").
+    #[serde(default)]
+    pub program_plan: Option<enzyme_spec::plan::Plan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2412,7 +2415,7 @@ pub fn plan_workspace_program(
         desired_program: program_plan.desired.clone(),
         desired_sha256: program_plan.desired_sha256.clone(),
         diff: program_plan.diff.clone(),
-        program_plan,
+        program_plan: Some(program_plan),
     })
 }
 
@@ -2623,7 +2626,11 @@ pub fn apply_workspace_plan(
             "workspace plan desired_program does not match desired_sha256",
         ));
     }
-    let program_plan = &plan.program_plan;
+    let Some(program_plan) = &plan.program_plan else {
+        return Err(invalid(
+            "workspace plan was made by an earlier Margins and has no program_plan; plan again",
+        ));
+    };
     if program_plan.workspace != plan.workspace_id
         || plan.workspace_id != workspace.config.id
         || program_plan.base_revision != plan.base_revision
@@ -4158,9 +4165,16 @@ account = "owner@example.com"
         );
         assert!(workspace.config.bindings.contains_key("mail"));
 
+        // Re-applying the same plan file replays its receipt: the same
+        // request identity and actions, `replayed: true`, nothing written.
         let replay = apply_workspace_plan(&mut workspace, &plan).unwrap();
         assert!(replay.replayed);
+        assert_eq!(replay.request_id, receipt.request_id);
+        assert_eq!(replay.request_hash, receipt.request_hash);
+        assert_eq!(replay.plan_id, receipt.plan_id);
+        assert_eq!(replay.before_revision, receipt.before_revision);
         assert_eq!(replay.after_revision, receipt.after_revision);
+        assert_eq!(replay.actions, receipt.actions);
 
         // Re-planning the applied program is a no-op.
         let unchanged = plan_workspace_program(&workspace, workspace.program.text()).unwrap();
@@ -4182,6 +4196,49 @@ account = "owner@example.com"
         assert!(stale
             .downcast_ref::<WorkspaceMutationError>()
             .is_some_and(|error| matches!(error, WorkspaceMutationError::RevisionConflict { .. })));
+    }
+
+    #[test]
+    fn replay_needs_the_program_still_at_the_plan_result() {
+        let temp = tempfile::tempdir().unwrap();
+        let margins_home = temp.path().join("state");
+        let notes = temp.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        let mut workspace = create_workspace(&margins_home, "practice", None, &notes).unwrap();
+        let mut desired = workspace.config.clone();
+        desired.bindings.insert("mail".to_string(), mail_binding());
+        let plan = plan_workspace_config(&workspace, desired).unwrap();
+        apply_workspace_plan(&mut workspace, &plan).unwrap();
+        // Unlike Margins' earlier receipt store, a replay is answered only
+        // while the program still holds the plan's result; after a later
+        // change the old plan is stale.
+        let mut policy = workspace.config.policy.clone();
+        policy.excluded_tags = vec!["private".to_string()];
+        update_policy(&mut workspace, policy).unwrap();
+        let stale = apply_workspace_plan(&mut workspace, &plan).unwrap_err();
+        assert!(stale
+            .downcast_ref::<WorkspaceMutationError>()
+            .is_some_and(|error| matches!(error, WorkspaceMutationError::RevisionConflict { .. })));
+    }
+
+    #[test]
+    fn a_plan_from_before_the_program_store_is_invalid() {
+        let temp = tempfile::tempdir().unwrap();
+        let margins_home = temp.path().join("state");
+        let notes = temp.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        let mut workspace = create_workspace(&margins_home, "practice", None, &notes).unwrap();
+        let mut desired = workspace.config.clone();
+        desired.bindings.insert("mail".to_string(), mail_binding());
+        let mut json = serde_json::to_value(plan_workspace_config(&workspace, desired).unwrap())
+            .unwrap();
+        json.as_object_mut().unwrap().remove("program_plan");
+        let old: WorkspacePlan = serde_json::from_value(json).unwrap();
+        let error = apply_workspace_plan(&mut workspace, &old).unwrap_err();
+        assert!(error
+            .downcast_ref::<WorkspaceMutationError>()
+            .is_some_and(|error| matches!(error, WorkspaceMutationError::InvalidPlan(_))));
+        assert!(error.to_string().contains("plan again"), "{error}");
     }
 
     #[test]
@@ -4265,7 +4322,7 @@ account = "owner@example.com"
         // A crash after the store journaled the write, before the program write.
         config_store(&margins_home)
             .unwrap()
-            .prepare(&plan.program_plan)
+            .prepare(plan.program_plan.as_ref().unwrap())
             .unwrap();
         assert_ne!(
             std::fs::read_to_string(&workspace.config_path).unwrap(),
