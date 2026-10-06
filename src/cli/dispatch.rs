@@ -59,6 +59,9 @@ fn official_capabilities_json() -> serde_json::Value {
         "workspace": {
             "setup": true,
             "preset": cfg!(feature = "recall"),
+            // `workspace show --text --json`, `plan --desired`, and `apply`
+            // edit the program; the bb plugin's editor requires them.
+            "program": true,
         },
         "audio_import": {
             "available": cfg!(any(feature = "coreml-asr", feature = "parakeet-asr")),

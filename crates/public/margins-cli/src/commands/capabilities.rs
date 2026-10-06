@@ -13,6 +13,7 @@ pub fn public(stdout: &mut dyn Write) -> Result<(), CliError> {
         "build": crate::build_info::get(),
         "workspace": {
             "setup": true,
+            "program": true,
             "declarations": ["workspace", "source"],
             "lifecycle": ["init", "sync"],
             "automation": ["plan", "apply"],

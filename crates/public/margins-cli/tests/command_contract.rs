@@ -2661,6 +2661,7 @@ fn public_capabilities_report_only_supported_workflows() {
     assert_eq!(value["schema"], 1);
     assert_eq!(value["product"], "margins");
     assert_eq!(value["composition"], "public");
+    assert_eq!(value["workspace"]["program"], true);
     assert_eq!(
         value["build"]["commit"],
         margins_cli::build_info::get().commit

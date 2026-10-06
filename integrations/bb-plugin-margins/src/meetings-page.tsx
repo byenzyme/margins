@@ -6,6 +6,7 @@ import { browserCaptureOwner, detectClientCapabilities } from "./browser-capture
 import { nativeBridgeOwner } from "./native-bridge-client.js";
 import type { PanelState, WorkspaceMeeting, WorkspaceMeetingSummary } from "./contracts.js";
 import type { WorkspaceSetupPreview } from "./workspace-setup.js";
+import { ProgramEditor } from "./program-editor.js";
 
 const LAST_PROJECT_KEY = "margins.bb.meetings-project";
 const STOP_ACK_KEY = "margins.bb.stop-ack";
@@ -87,6 +88,10 @@ export function MeetingsAccessory() {
   return <MeetingLevelDot level={native?.state === "recording" ? native.micPeak ?? null : browser.active ? browser.level : null} accessory />;
 }
 
+/** Meetings sub-path segment that opens the Workspace program editor. Session
+ * ids never start with `@`. */
+export const PROGRAM_SEGMENT = "@program";
+
 export function MeetingsPage({ subPath }: { subPath: string }) {
   const rpc = useRpc<typeof marginsRpcContract>();
   const navigate = useBbNavigate();
@@ -117,7 +122,13 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     return () => { unsubscribe(); };
   }, []);
   const [meetings, setMeetings] = useState<WorkspaceMeetingSummary[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(() => subPath.split("/")[1] || null);
+  const [selectedId, setSelectedId] = useState<string | null>(() => {
+    const segment = subPath.split("/")[1];
+    return segment && segment !== PROGRAM_SEGMENT ? segment : null;
+  });
+  const [programOpen, setProgramOpen] = useState(() => subPath.split("/")[1] === PROGRAM_SEGMENT);
+  const [setupDone, setSetupDone] = useState(false);
+  useEffect(() => { setProgramOpen(subPath.split("/")[1] === PROGRAM_SEGMENT); }, [subPath]);
   const [meeting, setMeeting] = useState<WorkspaceMeeting | null>(() => openedMeetings.get(`${projectId}/${selectedId}`) || null);
   const [draft, setDraft] = useState(() => openedMeetings.get(`${projectId}/${selectedId}`)?.notepad.text || "");
   const [message, setMessage] = useState("");
@@ -373,15 +384,24 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     latestDraft.current = cached?.notepad.text || "";
     setMeeting(cached);
     setDraft(cached?.notepad.text || "");
-    setSelectedId(sessionId);
+    setSelectedId(sessionId); setProgramOpen(false);
     setMoreOpen(false); setEditingTitle(false); setTranscriptOpen(false); setTranscriptBody("");
     navigate.toPluginPanel("meetings", { subPath: `${projectId}/${sessionId}` });
+  }
+  async function openProgram() {
+    try { await saveMemo(); } catch (error) { setMessage(String(error)); return; }
+    setProgramOpen(true); setSetupDone(false);
+    navigate.toPluginPanel("meetings", { subPath: `${projectId}/${PROGRAM_SEGMENT}` });
+  }
+  function closeProgram() {
+    setProgramOpen(false);
+    navigate.toPluginPanel("meetings", { subPath: selectedId ? `${projectId}/${selectedId}` : projectId });
   }
   async function chooseProject(nextProjectId: string) {
     try { await saveMemo(); } catch (error) { setMessage(String(error)); return; }
     dirty.current = false; latestDraft.current = ""; revision.current = "";
     setProjectId(nextProjectId); setSelectedId(null); setMeeting(null); setDraft(""); setMessage("");
-    setSetupPreview(null);
+    setSetupPreview(null); setSetupDone(false); setProgramOpen(false);
     setShowArchived(false); setMoreOpen(false); setEditingTitle(false); setTranscriptOpen(false);
     navigate.toPluginPanel("meetings", { subPath: nextProjectId });
   }
@@ -550,6 +570,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     try {
       await rpc.call("applyWorkspaceSetup", { projectId, previewId: setupPreview.previewId });
       setSetupPreview(null);
+      setSetupDone(true);
       await refresh();
     } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
     finally { setSetupBusy(false); }
@@ -687,8 +708,19 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
         }
         setShowArchived(!showArchived);
       }}>{showArchived ? "Hide archived" : `Archived (${archived.length})`}</button>}
+      {resolvedWorkspaceName && <button className={`margins-program-link${programOpen ? " selected" : ""}`}
+        onClick={() => void (programOpen ? closeProgram() : openProgram())}>Workspace program</button>}
     </aside>
-    <section className={`margins-meeting-pad${selected?.inputFinalized ? " finished" : ""}`}>
+    {programOpen && resolvedWorkspaceName ? <div className="margins-program-pane">
+      {live.length > 0 && <div className="margins-workspace-notice margins-program-entry" role="status">
+        <span>Recording in progress. Pause and Stop stay in the recording bar.</span>
+        <button onClick={() => void choose(live[0].sessionId)}>Back to the meeting</button></div>}
+      <ProgramEditor key={projectId} projectId={projectId} onClose={closeProgram} /></div>
+      : <section className={`margins-meeting-pad${selected?.inputFinalized ? " finished" : ""}`}>
+      {setupDone && panel?.state !== "unavailable" && <div className="margins-workspace-notice margins-program-entry" role="status">
+        <span>Workspace ready. Its settings live in one program you can read and change.</span>
+        <button onClick={() => void openProgram()}>Edit program</button>
+        <button className="margins-quiet" onClick={() => setSetupDone(false)}>Dismiss</button></div>}
       {panel && panel.state !== "unavailable" && (client.platform === "macos" || menuAvailable) && live.length === 0 && <div className="margins-menu-connect">
         <span>{nativeBridgeOwner.paired && nativeConnectionError
           ? "Margins Menu disconnected"
@@ -812,6 +844,6 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
       </> : selectedId && panel?.state !== "unavailable" ? <div className="margins-meetings-empty" role="status"><h2>{selected?.title || (selected ? `Meeting · ${meetingTime(selected.startedAt)}` : "Opening meeting…")}</h2><p>Opening memo…</p>{message && <p role="alert">{message}</p>}</div>
       : panel?.state !== "unavailable" && <div className="margins-meetings-empty"><h2>{archived.length ? "No recent meetings" : "No meetings yet"}</h2>{workspaceNotice && <p>{workspaceNotice}</p>}{resolvedWorkspaceName && <p>Save to {resolvedWorkspaceName} · Started from {projects.find((item) => item.id === projectId)?.name || "this project"}</p>}{meetings.length === 0 && <button onClick={() => void start()}>Start meeting</button>}
         {message && <p role="alert">{message}</p>}</div>}
-    </section>
+    </section>}
   </main>;
 }
