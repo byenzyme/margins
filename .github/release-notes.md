@@ -14,6 +14,9 @@ the bundled `enzyme` 0.12.1.
   `plan` prints the exact `apply --plan` command to run. After `setup`,
   `init`, and `apply`, Margins says where your Workspace program lives and how
   to read and change it.
+- `workspace plan` and `workspace edit` colour their diffs on a terminal
+  (`--color auto|always|never`). Saved plans are pruned to the newest 40 from
+  the last day. `margins enzyme` refuses `spec plan --prompts`.
 - Only `margins init` creates a Workspace. `recall`, `workspace status`,
   `source list`, `sync`, integrations, and Granola import no longer create one
   for the current folder. Without a Workspace they fail with
