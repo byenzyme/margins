@@ -9,6 +9,9 @@ export CARGO_TARGET_DIR
 
 BIN_DIR="${MARGINS_BIN_DIR:-${HOME:?HOME is required}/.local/bin}"
 DEST="$BIN_DIR/margins"
+# margins finds its pinned engine at <prefix>/libexec/margins/enzyme, off PATH,
+# so it never replaces or shadows an `enzyme` the user installed.
+ENGINE_DIR="$(dirname "$BIN_DIR")/libexec/margins"
 
 # Build profile selects the compiled feature set:
 #   recall (default) — portable lookup only (`--features recall`), no native
@@ -29,6 +32,23 @@ case "$PROFILE" in
   *) echo "Unknown MARGINS_CLI_PROFILE '$PROFILE' (expected 'recall' or 'full')" >&2; exit 1 ;;
 esac
 BUILD_ARGS+=(--bin margins-private)
+
+# The engine margins runs: the official enzyme release asset in
+# scripts/enzyme-cli.pin, or an explicit MARGINS_ENZYME_BIN (for example
+# "$(scripts/enzyme-bin)" before that release exists). Either must report the
+# pinned version.
+engine_stage="$(mktemp -d "${TMPDIR:-/tmp}/margins-engine.XXXXXX")"
+trap 'rm -rf "$engine_stage"' EXIT
+if [ -n "${MARGINS_ENZYME_BIN:-}" ]; then
+  "$REPO_ROOT/scripts/enzyme-pin" check "$MARGINS_ENZYME_BIN"
+  install -m 0755 "$MARGINS_ENZYME_BIN" "$engine_stage/enzyme"
+else
+  "$REPO_ROOT/scripts/enzyme-pin" fetch "$("$REPO_ROOT/scripts/enzyme-pin" host-target)" "$engine_stage" || {
+    echo "Could not install the pinned enzyme engine. To use a local build, rerun with" >&2
+    echo "  MARGINS_ENZYME_BIN=\"\$(scripts/cargo-lane shared -- scripts/enzyme-bin)\"" >&2
+    exit 1
+  }
+fi
 
 echo "Building official Margins CLI (profile: $PROFILE)..."
 (
@@ -120,6 +140,9 @@ if [ -e "$DEST" ] || [ -L "$DEST" ]; then
 fi
 
 mv "$tmp" "$DEST"
+mkdir -p "$ENGINE_DIR"
+install -m 0755 "$engine_stage/enzyme" "$ENGINE_DIR/.enzyme-install-$$"
+mv "$ENGINE_DIR/.enzyme-install-$$" "$ENGINE_DIR/enzyme"
 
 capabilities="$("$DEST" capabilities)"
 python3 - "$capabilities" <<'PY'
@@ -137,4 +160,5 @@ if recall.get("scan") is not True or recall.get("indexing") is not True or recal
 PY
 
 echo "Installed official margins command at $DEST"
+echo "Installed its enzyme engine at $ENGINE_DIR/enzyme"
 echo "Add $BIN_DIR to PATH if your shell cannot find margins."
