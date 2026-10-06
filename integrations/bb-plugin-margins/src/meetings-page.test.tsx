@@ -41,6 +41,7 @@ const mocks = vi.hoisted(() => ({
     throw new Error(`Unexpected RPC ${method}`);
   }),
   rpc: null as unknown,
+  realtime: null as null | (() => void),
 }));
 mocks.rpc = { call: mocks.call };
 const defaultCall = mocks.call.getMockImplementation()!;
@@ -52,7 +53,7 @@ vi.mock("@get-bb/plugin-sdk/app", () => ({
   useBbContext: () => ({ projectId: "proj-mac" }),
   useBbNavigate: () => ({ toPluginPanel: mocks.navigate, toThread: mocks.navigateThread }),
   useComposer: () => ({ text: "", setText: vi.fn(), insertMention: vi.fn() }),
-  useRealtime: () => undefined,
+  useRealtime: (_channel: string, callback: () => void) => { mocks.realtime = callback; },
   useRpc: () => mocks.rpc,
 }));
 vi.mock("./browser-capture.js", () => ({
@@ -420,6 +421,40 @@ describe("Meetings Mac recorder choice", () => {
     expect(screen.getByText(/could not be saved \(session not found\)/)).toBeTruthy();
     expect(JSON.parse(sessionStorage.getItem("margins.bb.unsaved-memo.proj-mac/gone")!))
       .toEqual({ text: "Follow up with Ana", revision: "rev" });
+    expect(screen.getByLabelText("Unsaved memo text")).toHaveProperty("value", "Follow up with Ana");
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    fireEvent.click(screen.getByRole("button", { name: "Copy text" }));
+    expect(writeText).toHaveBeenCalledWith("Follow up with Ana");
+    expect(await screen.findByRole("button", { name: "Copied" })).toBeTruthy();
+  });
+
+  it("keeps a memo typed just before a refresh follows a newly live meeting", async () => {
+    mocks.meetings = [saved("fresh-open", "Fresh")];
+    renderLikeBb("proj-mac/fresh-open");
+    const pad = await screen.findByLabelText("Meeting memo pad");
+    mocks.meetings = [...mocks.meetings, { ...saved("live-new", "Live"), inputFinalized: false }];
+    fireEvent.change(pad, { target: { value: "Typed before the refresh" } });
+    await act(async () => { mocks.realtime!(); });
+    await waitFor(() => expect(mocks.navigate).toHaveBeenLastCalledWith("meetings", { subPath: "proj-mac/live-new" }));
+    expect(mocks.call).toHaveBeenCalledWith("saveWorkspaceMemo",
+      { projectId: "proj-mac", sessionId: "fresh-open", expectedRevision: "rev", text: "Typed before the refresh" });
+  });
+
+  it("offers the saved memo when a restored memo conflicts", async () => {
+    mocks.meetings = [saved("conflicted", "Conflicted")];
+    sessionStorage.setItem("margins.bb.unsaved-memo.proj-mac/conflicted", JSON.stringify({ text: "Mine", revision: "old" }));
+    mocks.call.mockImplementation((async (method: string, input?: { sessionId?: string; text?: string }) => {
+      if (method === "readWorkspaceMeeting") return { ok: true, meeting: { ...saved("conflicted", "Conflicted"), notepad: { revision: "rev", text: "Theirs" } } };
+      if (method === "saveWorkspaceMemo") return { ok: false, error: { code: "revision_conflict", message: "memo changed elsewhere", retryable: false } };
+      return defaultCall(method, input);
+    }) as unknown as typeof defaultCall);
+    renderLikeBb("proj-mac/conflicted");
+    await waitFor(() => expect(screen.getByLabelText("Meeting memo pad")).toHaveProperty("value", "Mine"));
+    fireEvent.click(await screen.findByRole("button", { name: "Load saved version" }));
+    await waitFor(() => expect(screen.getByLabelText("Meeting memo pad")).toHaveProperty("value", "Theirs"));
+    expect(screen.getByLabelText("Unsaved memo text")).toHaveProperty("value", "Mine");
+    expect(sessionStorage.getItem("margins.bb.unsaved-memo.proj-mac/conflicted")).toBeNull();
   });
 
   it("switches meetings and projects past a failed memo save, then restores the text on return", async () => {

@@ -484,6 +484,17 @@ fn discard_finished_session_removes_source_material_and_preserves_home_note() {
             finalize(session.as_ref()),
         )
         .unwrap();
+    let segments = service.session(&owner, &session).unwrap().segment_count;
+    assert!(segments > 0);
+    let native_checkpoints = (0..segments)
+        .map(|index| {
+            let path = service
+                .margins_dir()
+                .join(format!("to-discard_seg{index}.live-transcript.json"));
+            std::fs::write(&path, "{}").unwrap();
+            path
+        })
+        .collect::<Vec<_>>();
     let note = notes.join("linked.md");
     std::fs::write(&note, "Connected note remains").unwrap();
     let artifact = service.margins_dir().join("artifacts/to-discard");
@@ -503,6 +514,7 @@ fn discard_finished_session_removes_source_material_and_preserves_home_note() {
         .is_empty());
     assert!(!artifact.exists());
     assert!(live_files.iter().all(|path| !path.exists()));
+    assert!(native_checkpoints.iter().all(|path| !path.exists()));
     assert!(service
         .margins_dir()
         .join("meeting-blobs")

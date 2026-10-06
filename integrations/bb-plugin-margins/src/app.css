@@ -191,6 +191,9 @@
 .margins-code-error-callout { position:absolute; z-index:0; top:calc(var(--enz-pad) + var(--enz-line) * var(--enz-lh)); left:calc(14px + var(--enz-col) * 1ch); display:flex; height:var(--enz-lh); align-items:center; pointer-events:none; }
 .margins-code-error-callout span { max-width:56ch; overflow:hidden; padding:0 8px; border-radius:5px; background:color-mix(in srgb,var(--destructive) 14%,var(--enz-bg)); color:var(--destructive); font-family:var(--font-sans,system-ui,sans-serif); font-size:11.5px; line-height:18px; text-overflow:ellipsis; white-space:nowrap; }
 .margins-program-entry { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+.margins-memo-notice { display:flex; flex-direction:column; gap:6px; }
+.margins-memo-notice textarea { width:100%; min-height:3em; font:inherit; resize:vertical; }
+.margins-memo-notice > div { display:flex; flex-wrap:wrap; gap:6px; }
 .margins-meeting-list .margins-program-link { margin-top:auto; border:0; border-radius:7px; padding:7px 8px; background:transparent; color:var(--muted-foreground); font:inherit; font-size:12px; text-align:left; cursor:pointer; }
 .margins-meeting-list .margins-program-link:hover, .margins-meeting-list .margins-program-link.selected { background:var(--muted); color:var(--foreground); }
 .margins-program-pane { display:flex; min-width:0; flex-direction:column; }

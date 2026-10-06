@@ -111,9 +111,17 @@ export function MeetingsAccessory() {
   return <MeetingLevelDot level={native?.state === "recording" ? native.micPeak ?? null : browser.active ? browser.level : null} accessory />;
 }
 
-function MemoNotice({ text, onDismiss }: { text: string; onDismiss: () => void }) {
-  return <div className="margins-workspace-notice margins-program-entry" role="status">
-    <span>{text}</span><button className="margins-quiet" onClick={onDismiss}>Dismiss</button></div>;
+type MemoNoticeState = { sessionId: string; text: string; unsaved: string };
+function MemoNotice({ notice, onLoadSaved, onDismiss }: { notice: MemoNoticeState; onLoadSaved?: () => void; onDismiss: () => void }) {
+  const [copied, setCopied] = useState(false);
+  return <div className="margins-workspace-notice margins-memo-notice" role="status">
+    <span>{notice.text}</span>
+    <textarea aria-label="Unsaved memo text" readOnly value={notice.unsaved} rows={3} />
+    <div>
+      <button onClick={() => void navigator.clipboard?.writeText(notice.unsaved).then(() => setCopied(true), () => undefined)}>{copied ? "Copied" : "Copy text"}</button>
+      {onLoadSaved && <button onClick={onLoadSaved}>Load saved version</button>}
+      <button className="margins-quiet" onClick={onDismiss}>Dismiss</button>
+    </div></div>;
 }
 
 /** Meetings sub-path segment that opens the Workspace program editor. Session
@@ -160,7 +168,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   const [meeting, setMeeting] = useState<WorkspaceMeeting | null>(() => openedMeetings.get(`${projectId}/${selectedId}`) || null);
   const [draft, setDraft] = useState(() => openedMeetings.get(`${projectId}/${selectedId}`)?.notepad.text || "");
   const [message, setMessage] = useState("");
-  const [memoNotice, setMemoNotice] = useState<{ sessionId: string; text: string } | null>(null);
+  const [memoNotice, setMemoNotice] = useState<MemoNoticeState | null>(null);
   const [transcriptStatus, setTranscriptStatus] = useState<{ sessionId: string; state: "checking" | "ready" | "pending" | "not_ready" | "failed" } | null>(null);
   const [speechSetup, setSpeechSetup] = useState<{ state: "preparing" | "ready" | "failed" | "unavailable"; message: string; progress: number | null } | null>(null);
   const [stopAck, setStopAck] = useState<StopAck | null>(null);
@@ -173,6 +181,12 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   const [transcriptBody, setTranscriptBody] = useState("");
   const [actionBusy, setActionBusy] = useState(false);
   const dirty = useRef(false);
+  // Read through refs: refresh callbacks outlive the render that created them,
+  // and a first-opened meeting arrives after that render.
+  const meetingRef = useRef(meeting);
+  meetingRef.current = meeting;
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
   const latestDraft = useRef(draft);
   const revision = useRef(meeting?.notepad.revision || "");
   const saveLoop = useRef<Promise<void> | null>(null);
@@ -387,6 +401,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   }, [projectId, selectedId, selected?.inputFinalized, rpc]);
   async function saveMemo() {
     if (saveLoop.current) return saveLoop.current;
+    const meeting = meetingRef.current;
     if (!dirty.current || !meeting || !projectId || !revision.current) return;
     const sessionId = meeting.sessionId;
     const loop = (async () => {
@@ -409,20 +424,42 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   }
   useEffect(() => {
     if (!dirty.current) return;
-    const timer = setTimeout(() => void saveMemo().catch((error) => setMessage(String(error))), 800);
+    const timer = setTimeout(() => void saveMemo().catch(memoSaveFailed), 800);
     return () => clearTimeout(timer);
   }, [draft, meeting?.sessionId]);
 
   /** Save a dirty memo before leaving it. A failed save never traps the user:
    * the text is stashed for its meeting and a notice says so. */
   async function settleMemo() {
-    try { await saveMemo(); }
-    catch (error) {
-      if (!meeting || !dirty.current) return;
-      stashMemo(`${projectId}/${meeting.sessionId}`, { text: latestDraft.current, revision: revision.current });
-      const reason = error instanceof Error ? error.message : String(error);
-      setMemoNotice({ sessionId: meeting.sessionId, text: `Memo edits for “${meeting.title || `Meeting · ${meetingTime(meeting.startedAt)}`}” could not be saved (${reason}). They are kept in this browser; reopen that meeting to retry.` });
-    }
+    let failure: unknown = null;
+    try { await saveMemo(); } catch (error) { failure = error; }
+    // saveMemo also returns without saving while the memo is still loading.
+    if (dirty.current) memoSaveFailed(failure ?? new Error("the memo had not finished loading"));
+  }
+  /** Keep unsaved memo text for its meeting and say how to get it back. */
+  function memoSaveFailed(error: unknown) {
+    const meeting = meetingRef.current;
+    const sessionId = meeting?.sessionId || selectedIdRef.current;
+    if (!sessionId || !dirty.current) { setMessage(String(error)); return; }
+    const unsaved = latestDraft.current;
+    stashMemo(`${projectId}/${sessionId}`, { text: unsaved, revision: revision.current });
+    const reason = error instanceof Error ? error.message : String(error);
+    const label = meeting ? meeting.title || `Meeting · ${meetingTime(meeting.startedAt)}` : "this meeting";
+    setMemoNotice({ sessionId, unsaved, text: `Memo edits for “${label}” could not be saved (${reason}). They are kept in this tab until it closes: reopen that meeting to retry, or copy them.` });
+  }
+  /** Way out of a save that keeps failing (e.g. a revision conflict): show the
+   * saved memo, keeping the unsaved text in the notice to copy. */
+  async function loadSavedMemo(sessionId: string) {
+    const result = await rpc.call("readWorkspaceMeeting", { projectId, sessionId }).catch((error) => {
+      setMessage(String(error)); return null;
+    });
+    if (!result?.ok || !result.meeting) { if (result && !result.ok) setMessage(result.error.message); return; }
+    forgetUnsavedMemo(`${projectId}/${sessionId}`);
+    rememberMeeting(`${projectId}/${sessionId}`, result.meeting);
+    dirty.current = false; revision.current = result.meeting.notepad.revision;
+    latestDraft.current = result.meeting.notepad.text;
+    setMeeting(result.meeting); setDraft(result.meeting.notepad.text); setMessage("");
+    setMemoNotice((current) => current && { ...current, text: "Showing the saved memo. Your unsaved text is below to copy." });
   }
   async function choose(sessionId: string) {
     await settleMemo();
@@ -761,13 +798,17 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
         onClick={() => void (programOpen ? closeProgram() : openProgram())}>Workspace program</button>}
     </aside>
     {programOpen && resolvedWorkspaceName ? <div className="margins-program-pane">
-      {memoNotice && <MemoNotice text={memoNotice.text} onDismiss={() => setMemoNotice(null)} />}
+      {memoNotice && <MemoNotice notice={memoNotice} onDismiss={() => setMemoNotice(null)}
+        onLoadSaved={!programOpen && memoNotice.sessionId === meeting?.sessionId && dirty.current
+          ? () => void loadSavedMemo(memoNotice.sessionId) : undefined} />}
       {live.length > 0 && <div className="margins-workspace-notice margins-program-entry" role="status">
         <span>Recording in progress. Pause and Stop stay in the recording bar.</span>
         <button onClick={() => void choose(live[0].sessionId)}>Back to the meeting</button></div>}
       <ProgramEditor key={projectId} projectId={projectId} onClose={closeProgram} /></div>
       : <section className={`margins-meeting-pad${selected?.inputFinalized ? " finished" : ""}`}>
-      {memoNotice && <MemoNotice text={memoNotice.text} onDismiss={() => setMemoNotice(null)} />}
+      {memoNotice && <MemoNotice notice={memoNotice} onDismiss={() => setMemoNotice(null)}
+        onLoadSaved={!programOpen && memoNotice.sessionId === meeting?.sessionId && dirty.current
+          ? () => void loadSavedMemo(memoNotice.sessionId) : undefined} />}
       {setupDone && panel?.state !== "unavailable" && <div className="margins-workspace-notice margins-program-entry" role="status">
         <span>Workspace ready. Its settings live in one program you can read and change.</span>
         <button onClick={() => void openProgram()}>Edit program</button>
@@ -871,7 +912,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
         </p>}
         {audioStartingId === selected.sessionId && nativeStatus?.state === "needs_attention" &&
           <p role="alert">{nativeStatus.error || "Margins Menu could not start recording."}</p>}
-        <textarea ref={memoRef} aria-label="Meeting memo pad" placeholder="Write notes..." value={draft} onChange={(event) => { dirty.current = true; latestDraft.current = event.target.value; setDraft(event.target.value); setMessage(""); }} onBlur={() => void saveMemo().catch((error) => setMessage(String(error)))} />
+        <textarea ref={memoRef} aria-label="Meeting memo pad" placeholder="Write notes..." value={draft} onChange={(event) => { dirty.current = true; latestDraft.current = event.target.value; setDraft(event.target.value); setMessage(""); }} onBlur={() => void saveMemo().catch(memoSaveFailed)} />
         <footer className={selected.inputFinalized ? "margins-meeting-actions" : undefined}>
           {selected.inputFinalized && <div className="margins-meeting-trail">{shownTranscript !== "ready" && <span>{shownTranscript === "pending" ? "Transcribing…" : shownTranscript === "checking" ? "Checking transcript…" : shownTranscript === "failed" ? "Transcript unavailable" : "Transcript not ready"}</span>}
             {shownTranscript === "ready" && <button onClick={() => void viewTranscript()}>{transcriptOpen ? "Hide transcript" : "View transcript"}</button>}
