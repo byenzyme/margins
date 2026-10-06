@@ -53,7 +53,11 @@ On first Workspace discovery, the plugin’s project-host worker installs one ve
 digest-verified Margins release when needed. That release contains:
 
 - `margins`, the normal CLI;
-- `margins-server`, the project-side recording service.
+- `margins-server`, the project-side recording service;
+- `enzyme`, the pinned recall engine that `margins` runs, in archives from the
+  first release that ships it. The plugin copies it next to the runtime and,
+  when it manages the CLI in `~/.local/bin`, to `~/.local/libexec/margins/enzyme`,
+  off `PATH`, so it never replaces a user's own `enzyme`.
 
 The plugin pins `v0.4.15`, whose Linux and Apple Silicon macOS archives include
 both executables. That release must be published before a clean installation
