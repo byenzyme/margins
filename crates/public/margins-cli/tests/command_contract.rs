@@ -2889,6 +2889,7 @@ fn public_init_recall_and_sync_form_an_autonomous_local_loop() {
     assert!(status.get("catalyst").is_none());
     assert!(status.get("source_refresh_staleness").is_none());
     assert!(!notes.join(".margins").exists());
+    assert!(!margins_home.join("workspaces/practice/enzyme.db").exists());
     assert!(!margins_home.join("workspaces/practice/index.db").exists());
 
     restore_env("MARGINS_HOME", old_margins_home.as_ref());

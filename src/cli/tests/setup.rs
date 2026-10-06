@@ -665,9 +665,9 @@
             assert!(path.is_file(), "missing {}", path.display());
             assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
         }
-        assert!(std::fs::read_to_string(margins_home.join("config.toml"))
+        assert!(std::fs::read_to_string(margins_home.join("configs/settings.enzyme"))
             .unwrap()
-            .contains("mode = \"hosted\""));
+            .contains("generation hosted"));
         let stderr = String::from_utf8(stderr).unwrap();
         let hosted = stderr.find("setup hosted catalyst: ok").unwrap();
         let skills = stderr.find("setup skills: ok").unwrap();

@@ -3,8 +3,9 @@
 //! This is the third downloadable asset behind `margins setup`, alongside the
 //! FluidAudio transcription and Polyvoice diarization models. It is the fine-
 //! tuned model that lets `margins init` build thematic bridges offline, with
-//! no key. Setup is machine-level and directory-agnostic: this only touches the
-//! shared model cache, never a vault.
+//! no key. Setup is machine-level and directory-agnostic: this only touches
+//! `$MARGINS_HOME/models` (the models directory of the Margins home as an
+//! Enzyme home), never a vault or `~/.enzyme/models`.
 
 use anyhow::{bail, Context, Result};
 use recall_engine::llm::model_registry::{self, ModelEntry, DEFAULT_MODEL};
@@ -58,7 +59,7 @@ pub fn is_installed_at(home: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Download and verify the catalyst model into the shared cache. No-op if a
+/// Download and verify the catalyst model into `$MARGINS_HOME/models`. No-op if a
 /// correctly-sized copy is already present. Emits a single progress line; curl
 /// renders its own progress bar to stderr.
 pub fn ensure_installed() -> Result<PathBuf> {

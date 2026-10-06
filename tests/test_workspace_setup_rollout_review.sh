@@ -23,6 +23,8 @@ make_fixture() {
     "$vault" "$state/captures" > "$configs/fixture.enzyme"
   printf 'workspace "unrelated" {\n  source markdown "home" { path "%s" }\n  remember in folder "." in source "home" create note\n}\n' \
     "$other_vault" > "$configs/unrelated.enzyme"
+  printf 'settings {\n  generation hosted\n  updates disabled\n}\n' > "$configs/settings.enzyme"
+  cp "$configs/settings.enzyme" "$RUN_ROOT/$name/settings.original"
   cp "$configs/fixture.enzyme" "$RUN_ROOT/$name/fixture-program.original"
   printf '[llm]\nmode = "hosted"\n\n[defaults]\nminimum_tags = 2\n\n[cli]\nnote_agent = "codex"\n\n[vaults."%s"]\nentities = ["folder:people"]\n\n[vaults."%s"]\nentities = ["#unrelated"]\n\n[workspaces.target]\nentities = ["folder:people"]\n\n[workspaces.target.sources.notes]\npath = "%s"\nwritable = true\n\n[workspaces.unrelated]\nentities = ["#unrelated"]\n\n[workspaces.unrelated.sources.notes]\npath = "%s"\nwritable = true\n' \
     "$vault" "$other_vault" "$vault" "$other_vault" > "$margins_home/config.toml"
@@ -34,7 +36,9 @@ make_fixture() {
     --run-dir "$RUN_ROOT/$name/run" >/dev/null
   test ! -e "$vault/.margins"
   test ! -e "$state"
-  test ! -e "$configs"
+  # Only the machine settings program stays active; Workspace programs are isolated.
+  test "$(ls "$configs")" = settings.enzyme
+  cmp "$RUN_ROOT/$name/settings.original" "$configs/settings.enzyme"
   test -f "$RUN_ROOT/$name/run/backup/vault-dot-margins/session.md"
   test -f "$RUN_ROOT/$name/run/backup/workspaces/fixture/index.db"
   test ! -e "$RUN_ROOT/$name/run/backup/workspaces/fixture/config.toml"
@@ -50,8 +54,8 @@ manifest = json.load(open(sys.argv[2]))
 assert manifest["workspace_ids_before"] == ["fixture", "unrelated"], manifest
 assert manifest["config_registry_backed_up"] is True, manifest
 PY
-  test -f "$RUN_ROOT/$name/run/backup/global-config.toml"
-  cmp "$RUN_ROOT/$name/global-config.original" "$RUN_ROOT/$name/run/backup/global-config.toml"
+  test -f "$RUN_ROOT/$name/run/backup/machine-config/config.toml"
+  cmp "$RUN_ROOT/$name/global-config.original" "$RUN_ROOT/$name/run/backup/machine-config/config.toml"
   python3 - "$margins_home/config.toml" "$vault" "$other_vault" <<'PY'
 import sys, tomllib
 value = tomllib.load(open(sys.argv[1], "rb"))
@@ -72,6 +76,10 @@ PY
 }
 
 make_fixture safe
+# The rollout's binary migrates the legacy machine config inside the isolation.
+mv "$RUN_ROOT/safe/margins-home/config.toml" "$RUN_ROOT/safe/margins-home/config.toml.migrated"
+printf '[cli]\nnote_agent = "codex"\n' > "$RUN_ROOT/safe/margins-home/margins.toml"
+printf 'settings {\n  generation local\n  updates disabled\n}\n' > "$RUN_ROOT/safe/margins-home/configs/settings.enzyme"
 if "$HARNESS" workspace-id --run-dir "$RUN_ROOT/safe/run" >/dev/null 2>&1; then
   echo "expected observer lookup to refuse when no Workspace was generated" >&2
   exit 1
@@ -86,6 +94,11 @@ test -f "$RUN_ROOT/safe/vault/.margins/session.md"
 test -f "$RUN_ROOT/safe/margins-home/workspaces/fixture/index.db"
 cmp "$RUN_ROOT/safe/fixture-program.original" "$RUN_ROOT/safe/margins-home/configs/fixture.enzyme"
 cmp "$RUN_ROOT/safe/global-config.original" "$RUN_ROOT/safe/margins-home/config.toml"
+cmp "$RUN_ROOT/safe/settings.original" "$RUN_ROOT/safe/margins-home/configs/settings.enzyme"
+test ! -e "$RUN_ROOT/safe/margins-home/margins.toml"
+test ! -e "$RUN_ROOT/safe/margins-home/config.toml.migrated"
+test -f "$RUN_ROOT/safe/run/generated/machine-config/margins.toml"
+test -f "$RUN_ROOT/safe/run/generated/machine-config/config.toml.migrated"
 grep -Fx 'legacy session state' "$RUN_ROOT/safe/vault/.margins/session.md" >/dev/null
 grep -Fx 'old index' "$RUN_ROOT/safe/margins-home/workspaces/fixture/index.db" >/dev/null
 python3 - "$RUN_ROOT/safe/run/hard-gates.json" <<'PY'
@@ -178,7 +191,7 @@ test ! -e "$RUN_ROOT/fresh/margins-home/configs"
 test ! -e "$RUN_ROOT/fresh/margins-home/config.toml"
 test -f "$RUN_ROOT/fresh/run/generated/workspaces/fresh/index.db"
 test -f "$RUN_ROOT/fresh/run/generated/configs/fresh.enzyme"
-test -f "$RUN_ROOT/fresh/run/generated/global-config.toml"
+test -f "$RUN_ROOT/fresh/run/generated/machine-config/config.toml"
 cmp "$RUN_ROOT/fresh/run/generated/configs/fresh.enzyme" "$RUN_ROOT/fresh/run/workspace-configs-after/fresh.enzyme"
 test -f "$RUN_ROOT/fresh/run/workspace-configs-after/fresh.enzyme.sha256"
 test ! -e "$RUN_ROOT/fresh/run/workspace-configs-after/fresh.toml"
@@ -289,7 +302,7 @@ ln -s "$RUN_ROOT/symlink/external-global-config.toml" "$RUN_ROOT/symlink/margins
   --margins-home "$RUN_ROOT/symlink/margins-home" \
   --run-dir "$RUN_ROOT/symlink/run" >/dev/null
 test -L "$RUN_ROOT/symlink/run/backup/workspaces/linked"
-test -L "$RUN_ROOT/symlink/run/backup/global-config.toml"
+test -L "$RUN_ROOT/symlink/run/backup/machine-config/config.toml"
 test ! -L "$RUN_ROOT/symlink/margins-home/config.toml"
 test -f "$RUN_ROOT/symlink/external-state/config.toml"
 "$HARNESS" restore --run-dir "$RUN_ROOT/symlink/run" >/dev/null
@@ -314,5 +327,84 @@ if "$HARNESS" restore --run-dir "$RUN_ROOT/symlink-drift/run" >/dev/null; then
 fi
 test -L "$RUN_ROOT/symlink-drift/margins-home/config.toml"
 grep -F '"global_config_exact": false' "$RUN_ROOT/symlink-drift/run/restoration.json" >/dev/null
+
+# An upgraded home: margins.toml (which may still carry legacy setup for the
+# practice), retired originals, and the engine settings program.
+mkdir -p "$RUN_ROOT/upgraded/vault" "$RUN_ROOT/upgraded/other-vault" "$RUN_ROOT/upgraded/margins-home/configs" "$RUN_ROOT/upgraded/margins-home/workspaces/fixture" "$RUN_ROOT/upgraded/run"
+printf '# Upgraded\n' > "$RUN_ROOT/upgraded/vault/note.md"
+UPGRADED_HOME="$RUN_ROOT/upgraded/margins-home"
+printf '[workspace]\ndefault = "fixture"\n\n[cli]\nnote_agent = "codex"\n\n[vaults."%s"]\nentities = ["folder:people"]\n\n[vaults."%s"]\nentities = ["#unrelated"]\n' \
+  "$RUN_ROOT/upgraded/vault" "$RUN_ROOT/upgraded/other-vault" > "$UPGRADED_HOME/margins.toml"
+chmod 0600 "$UPGRADED_HOME/margins.toml"
+printf '[llm]\nmode = "hosted"\n' > "$UPGRADED_HOME/config.toml.migrated"
+printf 'old\n' > "$UPGRADED_HOME/config.toml.migrated.1"
+printf 'settings {\n  generation hosted\n  updates disabled\n}\n' > "$UPGRADED_HOME/configs/settings.enzyme"
+printf 'workspace "fixture" {\n  source markdown "home" { path "%s" }\n  remember in folder "." in source "home" create note\n}\n' \
+  "$RUN_ROOT/upgraded/vault" > "$UPGRADED_HOME/configs/fixture.enzyme"
+printf 'index\n' > "$UPGRADED_HOME/workspaces/fixture/enzyme.db"
+for file in margins.toml config.toml.migrated config.toml.migrated.1 configs/settings.enzyme; do
+  mkdir -p "$(dirname "$RUN_ROOT/upgraded/original/$file")"
+  cp -p "$UPGRADED_HOME/$file" "$RUN_ROOT/upgraded/original/$file"
+done
+"$HARNESS" prepare \
+  --vault "$RUN_ROOT/upgraded/vault" \
+  --margins-home "$UPGRADED_HOME" \
+  --run-dir "$RUN_ROOT/upgraded/run" >/dev/null
+test ! -e "$UPGRADED_HOME/config.toml.migrated"
+test ! -e "$UPGRADED_HOME/config.toml.migrated.1"
+test -f "$RUN_ROOT/upgraded/run/backup/machine-config/config.toml.migrated.1"
+cmp "$RUN_ROOT/upgraded/original/margins.toml" "$RUN_ROOT/upgraded/run/backup/machine-config/margins.toml"
+cmp "$RUN_ROOT/upgraded/original/configs/settings.enzyme" "$UPGRADED_HOME/configs/settings.enzyme"
+test ! -e "$UPGRADED_HOME/configs/fixture.enzyme"
+python3 - "$UPGRADED_HOME/margins.toml" "$RUN_ROOT/upgraded/vault" "$RUN_ROOT/upgraded/other-vault" "$RUN_ROOT/upgraded/run/run.json" <<'PY'
+import json, sys, tomllib
+value = tomllib.load(open(sys.argv[1], "rb"))
+assert value["cli"]["note_agent"] == "codex", value
+assert sys.argv[2] not in value.get("vaults", {}), value
+assert value["vaults"][sys.argv[3]]["entities"] == ["#unrelated"], value
+manifest = json.load(open(sys.argv[4]))
+assert manifest["machine_config_backed_up"] == [
+    "config.toml.migrated", "config.toml.migrated.1", "margins.toml"
+], manifest
+assert manifest["workspace_ids_before"] == ["fixture"], manifest
+PY
+# The rollout changes machine config and settings, and an older binary writes config.toml.
+printf '[workspace]\ndefault = "generated"\n' > "$UPGRADED_HOME/margins.toml"
+printf '[llm]\nmode = "local"\n' > "$UPGRADED_HOME/config.toml"
+printf 'settings {\n  generation local\n}\n' > "$UPGRADED_HOME/configs/settings.enzyme"
+printf 'Setup completed.\n' > "$RUN_ROOT/upgraded/transcript.txt"
+"$HARNESS" finalize \
+  --run-dir "$RUN_ROOT/upgraded/run" \
+  --transcript "$RUN_ROOT/upgraded/transcript.txt" >/dev/null
+for file in margins.toml config.toml.migrated config.toml.migrated.1 configs/settings.enzyme; do
+  cmp "$RUN_ROOT/upgraded/original/$file" "$UPGRADED_HOME/$file"
+done
+test "$(stat -c %a "$UPGRADED_HOME/margins.toml" 2>/dev/null || stat -f %Lp "$UPGRADED_HOME/margins.toml")" = 600
+test ! -e "$UPGRADED_HOME/config.toml"
+test -f "$RUN_ROOT/upgraded/run/generated/machine-config/config.toml"
+test -f "$RUN_ROOT/upgraded/run/generated/machine-config/margins.toml"
+python3 - "$RUN_ROOT/upgraded/run/hard-gates.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1]))
+details = value["preexisting_setup_restoration"]["details"]
+assert value["preexisting_setup_restoration"]["passed"] is True, value
+assert details["global_config_exact"] is True, details
+assert details["config_registry_exact"] is True, details
+PY
+
+# Restoration refuses when a retired original drifted without a backup.
+mkdir -p "$RUN_ROOT/drift/vault" "$RUN_ROOT/drift/margins-home" "$RUN_ROOT/drift/run"
+printf '# Drift\n' > "$RUN_ROOT/drift/vault/note.md"
+printf '[cli]\nnote_agent = "codex"\n' > "$RUN_ROOT/drift/margins-home/margins.toml"
+"$HARNESS" prepare \
+  --vault "$RUN_ROOT/drift/vault" \
+  --margins-home "$RUN_ROOT/drift/margins-home" \
+  --run-dir "$RUN_ROOT/drift/run" >/dev/null
+rm "$RUN_ROOT/drift/run/backup/machine-config/margins.toml"
+printf '[cli]\nnote_agent = "cursor"\n' > "$RUN_ROOT/drift/margins-home/margins.toml"
+if "$HARNESS" restore --run-dir "$RUN_ROOT/drift/run" >/dev/null 2>&1; then
+  echo "expected a drifted margins.toml without its backup to fail restoration" >&2
+  exit 1
+fi
 
 echo "workspace setup rollout review harness: ok"

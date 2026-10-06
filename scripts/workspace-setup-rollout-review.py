@@ -443,6 +443,39 @@ def local_binding_paths(config_path: Path) -> list[Path]:
 
 
 SHARED_PROFILES_PROGRAM = "profiles.enzyme"
+# Programs under configs/ that are machine settings, not Workspaces. They are
+# installation capabilities (generator selection, shared profiles, source
+# kinds), so they stay active during the rollout like machine config does.
+RESERVED_PROGRAMS = (SHARED_PROFILES_PROGRAM, "settings.enzyme", "margins-sources.enzyme")
+# Machine config at the MARGINS_HOME root, isolated and restored as one set:
+# host preferences (`margins.toml`), Enzyme's legacy machine file that earlier
+# Margins used (`config.toml`), and the originals a migration retired.
+MACHINE_CONFIG = "margins.toml"
+LEGACY_MACHINE_CONFIG = "config.toml"
+ACTIVE_MACHINE_CONFIGS = (MACHINE_CONFIG, LEGACY_MACHINE_CONFIG)
+
+
+def machine_config_names(margins_home: Path) -> list[str]:
+    """Machine config set members present at the MARGINS_HOME root."""
+    if not margins_home.is_dir():
+        return []
+    names = []
+    for entry in margins_home.iterdir():
+        name = entry.name
+        if (
+            name in ACTIVE_MACHINE_CONFIGS
+            or name == "config.toml.migrated"
+            or re.fullmatch(r"config\.toml\.migrated\.[0-9]+", name)
+        ) and (entry.exists() or entry.is_symlink()):
+            names.append(name)
+    return sorted(names)
+
+
+def machine_config_snapshot(margins_home: Path) -> dict[str, object]:
+    return {
+        name: path_entry_snapshot(margins_home / name)
+        for name in machine_config_names(margins_home)
+    }
 
 
 def workspace_inventory(
@@ -460,7 +493,7 @@ def workspace_inventory(
     programs: dict[str, Path] = {}
     if configs_root.is_dir():
         for program in sorted(configs_root.glob("*.enzyme")):
-            if program.name == SHARED_PROFILES_PROGRAM or not program.is_file():
+            if program.name in RESERVED_PROGRAMS or not program.is_file():
                 continue
             programs[program.stem] = program
     state_dirs: dict[str, Path] = {}
@@ -551,11 +584,16 @@ def prepare(args: argparse.Namespace) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
     run_dir.chmod(0o700)
 
-    global_config = margins_home / "config.toml"
-    filtered_config, preexisting_global_setup = filtered_global_config(
-        global_config, vault
-    )
-    global_config_before = path_entry_snapshot(global_config)
+    # Active machine config files are filtered so the practice's own legacy
+    # setup cannot leak into the rollout; retired originals are only isolated.
+    filtered_configs: dict[str, bytes] = {}
+    preexisting_global_setup: dict[str, object] = {}
+    for name in ACTIVE_MACHINE_CONFIGS:
+        filtered, evidence = filtered_global_config(margins_home / name, vault)
+        if filtered is not None:
+            filtered_configs[name] = filtered
+            preexisting_global_setup[name] = evidence
+    machine_config_before = machine_config_snapshot(margins_home)
     all_workspace_ids, affected = workspace_inventory(margins_home, vault, strict=False)
     workspaces_root = margins_home / "workspaces"
     workspace_registry_existed = workspaces_root.exists() or workspaces_root.is_symlink()
@@ -575,12 +613,12 @@ def prepare(args: argparse.Namespace) -> int:
     write_json(run_dir / "preexisting-workspace-state.json", workspace_registry_state)
     write_json(run_dir / "preexisting-config-state.json", config_registry_state)
     write_json(run_dir / "preexisting-global-setup.json", preexisting_global_setup)
-    write_json(run_dir / "global-config-before.json", global_config_before)
+    write_json(run_dir / "machine-config-before.json", machine_config_before)
 
     local_state = vault / ".margins"
     local_state_exists = local_state.exists() or local_state.is_symlink()
     manifest = {
-        "schema": "margins.workspace-setup-rollout-review.v4",
+        "schema": "margins.workspace-setup-rollout-review.v5",
         "prepared_at": datetime.now(timezone.utc).isoformat(),
         "vault": str(vault),
         "margins_home": str(margins_home),
@@ -589,7 +627,7 @@ def prepare(args: argparse.Namespace) -> int:
         "workspace_registry_backed_up": workspace_registry_existed,
         "config_registry_backed_up": config_registry_existed,
         "vault_local_state_backed_up": local_state_exists,
-        "global_config_backed_up": global_config_before.get("exists") is True,
+        "machine_config_backed_up": sorted(machine_config_before),
     }
     write_json(run_dir / "run.json", manifest)
 
@@ -604,7 +642,7 @@ def prepare(args: argparse.Namespace) -> int:
     backup_root = run_dir / "backup"
     backup_root.mkdir(mode=0o700)
     moved: list[tuple[Path, Path]] = []
-    active_global_config_created = False
+    created: list[Path] = []
     try:
         if local_state.exists() or local_state.is_symlink():
             destination = backup_root / "vault-dot-margins"
@@ -618,23 +656,36 @@ def prepare(args: argparse.Namespace) -> int:
             destination = backup_root / "configs"
             move_path(configs_root, destination)
             moved.append((configs_root, destination))
-        if global_config_before.get("exists") is True:
-            destination = backup_root / "global-config.toml"
-            move_path(global_config, destination)
-            moved.append((global_config, destination))
-            if filtered_config is None:
-                raise SystemExit("global config disappeared while preparing the rollout")
-            atomic_write_bytes(global_config, filtered_config)
-            active_global_config_created = True
-    except BaseException:
-        if active_global_config_created and (
-            global_config.exists() or global_config.is_symlink()
-        ):
-            if global_config.is_dir() and not global_config.is_symlink():
-                raise SystemExit(
-                    f"cannot roll back unexpected directory at {global_config}"
+            # Machine settings programs stay active as copies; the originals
+            # are restored with the rest of configs/.
+            reserved = [
+                destination / name
+                for name in RESERVED_PROGRAMS
+                if (destination / name).is_file()
+            ]
+            if reserved:
+                configs_root.mkdir()
+                created.append(configs_root)
+            for original in reserved:
+                active = configs_root / original.name
+                atomic_write_bytes(
+                    active, original.read_bytes(), stat.S_IMODE(original.stat().st_mode)
                 )
-            global_config.unlink()
+                created.append(active)
+        for name in machine_config_before:
+            source = margins_home / name
+            destination = backup_root / "machine-config" / name
+            move_path(source, destination)
+            moved.append((source, destination))
+            if name in filtered_configs:
+                atomic_write_bytes(source, filtered_configs[name])
+                created.append(source)
+    except BaseException:
+        for path in reversed(created):
+            if path.is_dir() and not path.is_symlink():
+                path.rmdir()
+            elif path.exists() or path.is_symlink():
+                path.unlink()
         for source, destination in reversed(moved):
             if destination.exists() or destination.is_symlink():
                 source.parent.mkdir(parents=True, exist_ok=True)
@@ -676,6 +727,71 @@ def redact_secrets(transcript: bytes) -> bytes:
     return redacted
 
 
+def machine_config_plan(
+    run_dir: Path, backup_root: Path
+) -> tuple[dict[str, object] | None, dict[str, Path]]:
+    """Expected machine config set and its backups, or `None` when untracked.
+
+    v5 runs snapshot the whole set (`machine-config-before.json`); v3/v4 runs
+    tracked only `config.toml` (`global-config-before.json`); older runs
+    tracked nothing.
+    """
+    current = run_dir / "machine-config-before.json"
+    if current.is_file():
+        expected = read_json(current)
+        if not isinstance(expected, dict) or not all(
+            isinstance(value, dict) for value in expected.values()
+        ):
+            raise SystemExit("invalid machine-config-before.json")
+        return expected, {name: backup_root / "machine-config" / name for name in expected}
+    single = run_dir / "global-config-before.json"
+    if single.is_file():
+        snapshot = read_json(single)
+        if not isinstance(snapshot, dict):
+            raise SystemExit("invalid global-config-before.json")
+        expected = {LEGACY_MACHINE_CONFIG: snapshot} if snapshot.get("exists") else {}
+        return expected, {LEGACY_MACHINE_CONFIG: backup_root / "global-config.toml"}
+    return None, {}
+
+
+def restore_machine_config(
+    margins_home: Path,
+    expected: dict[str, object],
+    backups: dict[str, Path],
+    generated_root: Path,
+    moved_generated: list[str],
+    restored: list[str],
+) -> None:
+    """Restore the machine config set exactly; anything the rollout created
+    (a migrated `margins.toml`, a retired `config.toml.migrated`) is kept
+    under `generated/machine-config/`."""
+    for name in sorted(set(expected) | set(machine_config_names(margins_home)) | set(backups)):
+        active = margins_home / name
+        backup = backups.get(name)
+        backup_exists = backup is not None and (backup.exists() or backup.is_symlink())
+        active_exists = active.exists() or active.is_symlink()
+        if backup_exists:
+            if active_exists:
+                destination = unused_destination(generated_root / "machine-config" / name)
+                move_path(active, destination)
+                moved_generated.append(str(destination))
+            move_path(backup, active)
+            restored.append(str(active))
+        elif name in expected:
+            if not active_exists:
+                raise SystemExit(f"machine config {name} and its backup are both missing")
+            if path_entry_snapshot(active) != expected[name]:
+                raise SystemExit(
+                    f"machine config {name} backup is missing and the active file does "
+                    "not match the pre-run state"
+                )
+            restored.append(str(active))
+        elif active_exists:
+            destination = unused_destination(generated_root / "machine-config" / name)
+            move_path(active, destination)
+            moved_generated.append(str(destination))
+
+
 def restore_preexisting_state(run_dir: Path, manifest: dict[str, object]) -> dict[str, object]:
     receipt = run_dir / "restoration.json"
     if receipt.is_file():
@@ -693,14 +809,13 @@ def restore_preexisting_state(run_dir: Path, manifest: dict[str, object]) -> dic
         raise SystemExit("invalid preexisting_workspaces in run.json")
     expected_workspace_state = read_json(run_dir / "preexisting-workspace-state.json")
     expected_local_state = read_json(run_dir / "vault-local-state-before.json")
-    global_config_snapshot_path = run_dir / "global-config-before.json"
-    tracks_global_config = global_config_snapshot_path.is_file()
-    expected_global_config = (
-        read_json(global_config_snapshot_path) if tracks_global_config else None
+    expected_machine_config, machine_config_backups = machine_config_plan(
+        run_dir, backup_root
     )
+    tracks_global_config = expected_machine_config is not None
     if not isinstance(expected_workspace_state, dict) or not isinstance(
         expected_local_state, dict
-    ) or (tracks_global_config and not isinstance(expected_global_config, dict)):
+    ):
         raise SystemExit("invalid preexisting state snapshots")
 
     moved_generated: list[str] = []
@@ -792,32 +907,15 @@ def restore_preexisting_state(run_dir: Path, manifest: dict[str, object]) -> dic
         move_path(local_state, destination)
         moved_generated.append(str(destination))
 
-    global_config = margins_home / "config.toml"
-    if tracks_global_config:
-        global_backup = backup_root / "global-config.toml"
-        global_backup_exists = global_backup.exists() or global_backup.is_symlink()
-        global_config_exists = global_config.exists() or global_config.is_symlink()
-        had_global_config = manifest.get("global_config_backed_up") is True
-        if global_backup_exists:
-            if global_config_exists:
-                destination = unused_destination(generated_root / "global-config.toml")
-                move_path(global_config, destination)
-                moved_generated.append(str(destination))
-            move_path(global_backup, global_config)
-            restored.append(str(global_config))
-        elif had_global_config:
-            if not global_config_exists:
-                raise SystemExit("global config and its backup are both missing")
-            if path_entry_snapshot(global_config) != expected_global_config:
-                raise SystemExit(
-                    "global config backup is missing and the active config does not "
-                    "match the pre-run state"
-                )
-            restored.append(str(global_config))
-        elif global_config_exists:
-            destination = unused_destination(generated_root / "global-config.toml")
-            move_path(global_config, destination)
-            moved_generated.append(str(destination))
+    if expected_machine_config is not None:
+        restore_machine_config(
+            margins_home,
+            expected_machine_config,
+            machine_config_backups,
+            generated_root,
+            moved_generated,
+            restored,
+        )
 
     final_ids, _ = workspace_inventory(margins_home, vault, strict=False)
     expected_ids = manifest.get("workspace_ids_before", [])
@@ -831,8 +929,8 @@ def restore_preexisting_state(run_dir: Path, manifest: dict[str, object]) -> dic
     )
     local_state_exact = state_snapshot(local_state) == expected_local_state
     global_config_exact = (
-        path_entry_snapshot(global_config) == expected_global_config
-        if tracks_global_config
+        machine_config_snapshot(margins_home) == expected_machine_config
+        if expected_machine_config is not None
         else True
     )
     result = {
@@ -913,10 +1011,7 @@ def finalize(args: argparse.Namespace) -> int:
             hashlib.sha256(config_bytes).hexdigest() + "\n"
         )
 
-    write_json(
-        run_dir / "global-config-after.json",
-        path_entry_snapshot(margins_home / "config.toml"),
-    )
+    write_json(run_dir / "machine-config-after.json", machine_config_snapshot(margins_home))
 
     restoration = restore_preexisting_state(run_dir, manifest)
 
@@ -943,12 +1038,11 @@ def finalize(args: argparse.Namespace) -> int:
     local_state_before = read_json(run_dir / "vault-local-state-before.json")
     local_state_after = state_snapshot(vault / ".margins")
     write_json(run_dir / "vault-local-state-restored.json", local_state_after)
-    global_config_snapshot_path = run_dir / "global-config-before.json"
-    if global_config_snapshot_path.is_file():
-        global_config_after = path_entry_snapshot(margins_home / "config.toml")
-        write_json(run_dir / "global-config-restored.json", global_config_after)
-        global_config_before = read_json(global_config_snapshot_path)
-        global_config_restored = global_config_before == global_config_after
+    expected_machine_config, _ = machine_config_plan(run_dir, run_dir / "backup")
+    if expected_machine_config is not None:
+        machine_config_after = machine_config_snapshot(margins_home)
+        write_json(run_dir / "machine-config-restored.json", machine_config_after)
+        global_config_restored = expected_machine_config == machine_config_after
     else:
         global_config_restored = True
     workspace_restored = (

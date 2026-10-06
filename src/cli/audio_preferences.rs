@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use fs4::fs_std::FileExt;
-use std::fs::{self, OpenOptions};
+use margins_workflows::machine_config;
+use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use toml_edit::{value, DocumentMut, Item, Table};
@@ -26,11 +26,9 @@ pub(super) fn load() -> Result<Option<InputPreference>> {
 }
 
 fn load_at(home: &Path) -> Result<Option<InputPreference>> {
-    let path = home.join("config.toml");
-    let raw = match fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    let path = machine_config::machine_config_path(home);
+    let Some(raw) = machine_config::read_machine_config_text(home)? else {
+        return Ok(None);
     };
     let document = raw
         .parse::<DocumentMut>()
@@ -73,13 +71,9 @@ pub(super) fn remember_selection(
 }
 
 fn save_at(home: &Path, preference: &InputPreference) -> Result<()> {
-    fs::create_dir_all(home).with_context(|| format!("creating {}", home.display()))?;
-    let lock = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(home.join("config.lock"))?;
-    lock.lock_exclusive()?;
-    let path = home.join("config.toml");
+    let _lock = machine_config::lock_machine(home)?;
+    machine_config::migrate_locked(home)?;
+    let path = machine_config::machine_config_path(home);
     let existing_permissions = match fs::metadata(&path) {
         Ok(metadata) => Some(metadata.permissions()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
@@ -217,14 +211,19 @@ mod tests {
         };
         save_at(home.path(), &choice).unwrap();
         assert_eq!(load_at(home.path()).unwrap(), Some(choice.clone()));
-        let raw = fs::read_to_string(home.path().join("config.toml")).unwrap();
+        // The legacy machine file migrated: host preferences stay together,
+        // the generator moved to the engine settings program.
+        let raw = fs::read_to_string(home.path().join("margins.toml")).unwrap();
         assert!(raw.contains("# keep me"));
-        assert!(raw.contains("mode = 'local'"));
+        assert!(raw.contains("input_name"));
+        assert!(fs::read_to_string(home.path().join("configs/settings.enzyme"))
+            .unwrap()
+            .contains("generation local"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(
-                fs::metadata(home.path().join("config.toml"))
+                fs::metadata(home.path().join("margins.toml"))
                     .unwrap()
                     .permissions()
                     .mode()
@@ -232,13 +231,13 @@ mod tests {
                 0o644
             );
             fs::set_permissions(
-                home.path().join("config.toml"),
+                home.path().join("margins.toml"),
                 fs::Permissions::from_mode(0o600),
             )
             .unwrap();
             save_at(home.path(), &choice).unwrap();
             assert_eq!(
-                fs::metadata(home.path().join("config.toml"))
+                fs::metadata(home.path().join("margins.toml"))
                     .unwrap()
                     .permissions()
                     .mode()

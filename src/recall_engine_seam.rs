@@ -39,13 +39,14 @@ pub(crate) struct EngineWorkspace {
     /// (and any profiles it uses).
     pub program_text: String,
     pub workspace: String,
-    /// `$MARGINS_HOME/workspaces/<id>`; holds `index.db`.
+    /// `$MARGINS_HOME/workspaces/<id>`; holds `enzyme.db`.
     pub state_dir: PathBuf,
 }
 
 impl EngineWorkspace {
     pub fn db_path(&self) -> PathBuf {
-        self.state_dir.join("index.db")
+        self.state_dir
+            .join(margins_workflows::workspace::INDEX_DB)
     }
 }
 

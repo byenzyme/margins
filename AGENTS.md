@@ -316,8 +316,9 @@ user's Obsidian notes. The hosted/MCP route may be unavailable in this workspace
 
 **Do not confuse the two stores, and know exactly where they still overlap.**
 The standalone `enzyme` CLI below is for the *agent research* pass and reads
-`~/.enzyme/enzyme.db`. Product retrieval is a different path: Margins indexes
-and reads `$MARGINS_HOME/workspaces/<id>/index.db` in-process. When testing
+`~/.enzyme/enzyme.db`. Product retrieval is a different path: the Margins home
+is its own Enzyme home (`ENZYME_HOME=$MARGINS_HOME`), and Margins indexes and
+reads `$MARGINS_HOME/workspaces/<id>/enzyme.db` in-process. When testing
 product retrieval, declare Sources and pass `--workspace <id>` to `margins init`;
 initializing an Enzyme fixture leaves the product path unindexed.
 
@@ -326,9 +327,9 @@ The boundary as it actually stands:
 | Concern | State |
 | --- | --- |
 | Auth/credentials | Uncrossed. Margins uses an injected desktop credential or explicit env; it never discovers Enzyme auth. |
-| Recall database | Uncrossed. `$MARGINS_HOME/workspaces/<id>/index.db`. |
-| Local model *files* | Intentionally shared at `~/.enzyme/models/`. |
-| Model selection | Machine-level Margins config. |
+| Recall database | Uncrossed. `$MARGINS_HOME/workspaces/<id>/enzyme.db` (renamed from `index.db` on first use, no reindex). |
+| Local model *files* | Uncrossed. `$MARGINS_HOME/models/`; never `~/.enzyme/models/`. |
+| Model selection | `$MARGINS_HOME/configs/settings.enzyme` (`settings { generation …; model …; updates disabled }`); host preferences in `$MARGINS_HOME/margins.toml`. |
 | Excluded folders | Workspace program `leave out folders` in `$MARGINS_HOME/configs/<id>.enzyme`. |
 
 Margins builds an ephemeral engine configuration from those declarations; it

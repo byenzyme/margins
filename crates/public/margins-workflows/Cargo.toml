@@ -44,5 +44,6 @@ similar = "2"
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "time", "io-std", "io-util", "net"] }
 toml = "0.8"
+toml_edit = "0.22"
 url = "2"
 walkdir = "2"
