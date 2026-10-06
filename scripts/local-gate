@@ -56,7 +56,6 @@ SCRIPT_TESTS = {
     "tests/test_design_docs.py": ("desktop/INTEGRATIONS_",),
     "tests/test_setup_e2e_lanes.sh": (
         "scripts/e2e-fresh-workspace-setup.sh",
-        "scripts/e2e-official-hosted-workspace-setup.sh",
     ),
 }
 USAGE = "usage: scripts/local-gate quick <paths-or-crates>... | public | linux | macos | scan [git-range]"
