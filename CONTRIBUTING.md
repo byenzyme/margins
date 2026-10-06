@@ -3,8 +3,8 @@
 This repository is the public source tree. It contains the CLI/TUI, meeting
 runtime, media, workflows, BB plugin, and project server. Keep credentials,
 recordings, transcripts, personal databases and vault contents, model files,
-and signing material out of source. The Enzyme recall engine is a separate
-private git dependency used only for official recall compositions.
+and signing material out of source. Recall runs the shipped `enzyme` CLI,
+pinned in `scripts/enzyme-cli.pin`; Margins links no closed code.
 
 ## Prerequisites
 
@@ -38,16 +38,13 @@ RUSTDOCFLAGS='-D warnings' scripts/cargo-lane disposable -- cargo doc --workspac
 After fetching public dependencies once, you can verify the locked public graph
 offline with `scripts/cargo-lane shared -- cargo metadata --no-deps --locked
 --offline` and `scripts/cargo-lane shared -- cargo tree --workspace
---no-default-features --locked --offline`. The root `Cargo.lock` has no private
-git source. Official builds use `scripts/with-private-recall` and the pinned
-`Cargo.private-recall.lock`; this requires read access to the private
-`byenzyme/enzyme-rust` repository. The wrapper defaults
-`CARGO_NET_GIT_FETCH_WITH_CLI=true` so Cargo uses the git CLI's configured SSH,
-deploy key, or token credentials; an explicitly supplied value is preserved.
-Local developers use their own git credentials. Release CI instead uses the
-read-only `ENZYME_RUST_DEPLOY_KEY` environment secret over SSH. See the
-[official CLI release](docs/official-cli-release.md) for the secret table and
-key rotation.
+--no-default-features --locked --offline`. Official builds use the same
+manifest and lockfile with the `recall` feature. Its tests and
+`scripts/local-gate linux` run an `enzyme` binary from `scripts/enzyme-bin`:
+the pinned official release asset, or, before that release exists, a build of
+the pinned enzyme-rust `rev`, which needs read access to that repository. See
+the [official CLI release](docs/official-cli-release.md) for the secret table
+and how the engine is pinned.
 
 Format Rust changes with `scripts/cargo-lane shared -- cargo fmt --all`.
 Test the smallest affected crate while iterating, then run the affected crate

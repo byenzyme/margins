@@ -2,15 +2,15 @@
 
 The official `margins` executable is built from a tag in the public
 `byenzyme/margins` source tree. The private `byenzyme/margins-desktop` repository
-remains an archive after cutover. Only the Enzyme recall engine is fetched from
-a private repository, at the exact revision in
-`scripts/private_recall_dependency.toml` and `Cargo.private-recall.lock`.
+remains an archive after cutover. The build needs no private source: Margins
+runs the `enzyme` CLI, and each archive ships the official enzyme release asset
+pinned in `scripts/enzyme-cli.pin`.
 
 ## Release topology
 
 `.github/workflows/cli-release.yml` checks out an existing public source tag
-and builds the root `margins` package's internal `margins-private` target with
-`scripts/with-private-recall`, then stages it in each archive as
+and builds the root `margins` package's internal `margins-private` target,
+then stages it in each archive as
 the user-facing `margins` executable alongside `margins-server` and the pinned
 `enzyme` engine (see [The bundled enzyme engine](#the-bundled-enzyme-engine)),
 for:
@@ -20,11 +20,10 @@ for:
 - `x86_64-unknown-linux-gnu` on Ubuntu with
   `audio-capture,parakeet-asr,polyvoice-diarization,recall`.
 
-The public manifest defaults to portable capture only, so a source build never
-needs private repository access or a platform ASR/diarization backend. Official
-builds fail closed by explicitly enabling the target's full media and recall
-feature set through the private composition and asserting its capabilities in
-the packaged-binary smoke test.
+The manifest defaults to portable capture only, so a source build never needs
+a platform ASR/diarization backend. Official builds fail closed by explicitly
+enabling the target's full media and recall feature set and asserting its
+capabilities in the packaged-binary smoke test.
 
 The Apple Silicon archive no longer includes `margins-live`; the desktop app
 and its live runtime were retired on 2026-10-02 (PR #100).
@@ -38,12 +37,13 @@ no publishing credential. The build and publish jobs run in the
 (see below). The build steps live in the composite action
 `.github/actions/build-official-cli`, shared with the no-publish dry run.
 
-The Rust cache in that action contains private `enzyme-rust` source and build
-artifacts. Only a tag-push release run saves it, because tag-scoped caches are
-unreadable from other refs, and it uses a distinct `v0-official-private` key
-prefix. A cache saved on `main` would be restorable by any run, including fork
-pull requests in `public-ci.yml`. So a `workflow_dispatch` of `cli-release.yml`
-and the dry run never restore or save a cache.
+The Rust cache in that action contains build artifacts that embed the Google
+OAuth client. Only a tag-push release run saves it, because tag-scoped caches
+are unreadable from other refs, and it uses a distinct `v1-official` key prefix
+(`v0-official-private` caches also held private engine source). A cache saved
+on `main` would be restorable by any run, including fork pull requests in
+`public-ci.yml`. So a `workflow_dispatch` of `cli-release.yml` and the dry run
+never restore or save a cache.
 
 Re-dispatching `cli-release.yml` for a tag created before the
 environment-secrets change (v0.4.15 and earlier) does not work. The workflow
@@ -142,7 +142,7 @@ Release in this order:
    `sha256` for every release target (see
    [Bumping the engine](#the-bundled-enzyme-engine)). Without them the build
    job fails at "Fetch the pinned enzyme engine".
-2. The full local Linux gate passes on `main` (`scripts/with-private-recall scripts/local-gate linux`).
+2. The full local Linux gate passes on `main` (`scripts/local-gate linux`).
 3. The macOS gate and the Mac smoke checklist pass on the attached Mac bb host.
 4. Merge the PR that bumps `RUNTIME_RELEASE_VERSION` and its rebuilt `dist/`
    **immediately** before tagging. Between that merge and the published release,
@@ -179,7 +179,6 @@ the environment), `bump` in `version-bump.yml`, and
 
 | Secret | Used by | Purpose |
 | --- | --- | --- |
-| `ENZYME_RUST_DEPLOY_KEY` | build, bump, dry run | Private key of a **read-only deploy key** on private `byenzyme/enzyme-rust` (org deploy keys are enabled). `.github/actions/private-recall-ssh` loads it into an `ssh-agent`, pins GitHub's published host keys, and rewrites `https://github.com/byenzyme/enzyme-rust` to `ssh://git@github.com/byenzyme/enzyme-rust` with `url.insteadOf`. Manifests and lockfiles keep the https URL. With `CARGO_NET_GIT_FETCH_WITH_CLI=true`, Cargo fetches through that SSH path. The agent, key file and rewrite are removed right after the private fetch, even on failure. |
 | `MARGINS_GOOGLE_OAUTH_CLIENT_JSON` | build, dry run | The downloaded Desktop OAuth client JSON. The CLI build embeds it through `option_env!`; source and lockfiles contain no client credential. A public source build may instead set a runtime file or JSON environment variable. |
 | `APPLE_CERTIFICATE_BASE64` | macOS build, dry run | Base64 Developer ID Application `.p12`. |
 | `APPLE_CERTIFICATE_PASSWORD` | macOS build, dry run | Password for that `.p12`. |
@@ -188,26 +187,11 @@ the environment), `bump` in `version-bump.yml`, and
 | `APPLE_PASSWORD` | macOS build, dry run | App-specific password for `notarytool`. |
 | `HOMEBREW_TAP_TOKEN` | publish | Separate fine-grained PAT limited to `byenzyme/homebrew-margins`, with **Contents: read and write**. It needs no access to releases or private source. |
 
-`ENZYME_RUST_READ_TOKEN`, `MARGINS_RELEASE_TOKEN` and the `TAURI_*` secrets are
-no longer used and can be deleted.
-
-To rotate `ENZYME_RUST_DEPLOY_KEY`:
-
-1. Generate a new key pair, for example
-   `ssh-keygen -t ed25519 -N '' -C margins-release -f enzyme-rust-deploy`.
-2. Add `enzyme-rust-deploy.pub` as a deploy key on `byenzyme/enzyme-rust` with
-   **Allow write access** left unchecked.
-3. Replace the `ENZYME_RUST_DEPLOY_KEY` environment secret on
-   `official-cli-release` with the private key file's contents, then delete the
-   old deploy key and the local key files.
-
-If GitHub rotates its SSH host keys, update the pinned `known_hosts` entries
-and fingerprints in `.github/actions/private-recall-ssh/action.yml` from
-<https://api.github.com/meta> and GitHub's published fingerprints.
-
-Local developers do not use the deploy key. `scripts/with-private-recall` keeps
-using their own git credentials (SSH key, credential helper or token) with
-read access to `byenzyme/enzyme-rust`. A missing secret fails its step with an `::error::` naming it.
+`ENZYME_RUST_DEPLOY_KEY`, `ENZYME_RUST_READ_TOKEN`, `MARGINS_RELEASE_TOKEN` and
+the `TAURI_*` secrets are no longer used and can be deleted. Margins no longer
+fetches enzyme-rust, so also remove the `margins-release` deploy key from
+`byenzyme/enzyme-rust`. A missing secret fails its step with an `::error::`
+naming it.
 
 Environment and tag policy:
 
@@ -233,8 +217,7 @@ scoped to its publish step.
 `.github/workflows/cli-release-validation.yml` (**Validate official CLI
 packages**) is a manual rehearsal of the release build. It uses the same
 `.github/actions/build-official-cli` composite action as `cli-release.yml`: it
-fetches the private engine over SSH with `ENZYME_RUST_DEPLOY_KEY` and the official
-feature composition, embeds `MARGINS_GOOGLE_OAUTH_CLIENT_JSON`, and on macOS
+builds the official feature composition, fetches the pinned enzyme asset, embeds `MARGINS_GOOGLE_OAUTH_CLIENT_JSON`, and on macOS
 imports the Apple certificate, codesigns and submits to `notarytool --wait`.
 It then smokes the packaged archive (`oauth_client` valid, recall present) and
 uploads the archives as short-lived workflow artifacts. It never creates a
@@ -283,7 +266,7 @@ from a real terminal app with Microphone permission:
 
 ```bash
 MARGINS_FLUID_COREML_MODEL_DIR="$HOME/Library/Application Support/FluidAudio/Models/parakeet-tdt-0.6b-v2" \
-  scripts/with-private-recall scripts/core-product-smoke.sh
+  scripts/core-product-smoke.sh
 ```
 
 The full gate compiles the focused tests once in one disposable Cargo lane,

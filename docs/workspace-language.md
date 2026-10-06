@@ -296,7 +296,7 @@ the server together.
   `enzyme-spec = { git = "https://github.com/byenzyme/enzyme-spec", tag =
   "v0.2.0" }`. `scripts/enzyme-cli.pin` names the enzyme-rust `rev` that
   tests and gates build (`scripts/enzyme-bin`) and the `version` Margins
-  requires at runtime; the private composition pins the same revision.
+  requires at runtime.
 
 ### Inspecting a Workspace with plain `enzyme`
 

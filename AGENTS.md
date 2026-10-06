@@ -124,25 +124,26 @@ mode is required.
 scripts/local-gate quick src/cli.rs crates/public/margins-workflows
 scripts/local-gate quick integrations/bb-plugin-margins/src
 scripts/local-gate public
-scripts/with-private-recall scripts/local-gate linux
+scripts/local-gate linux
 # On the attached Mac host:
-scripts/with-private-recall scripts/local-gate macos
+scripts/local-gate macos
 ```
 
-`scripts/with-private-recall` defaults `CARGO_NET_GIT_FETCH_WITH_CLI=true`, so
-private enzyme-rust fetches use credentials already available to the git CLI.
-An explicitly supplied value is preserved. Release CI sets the variable
-directly before invoking the wrapper.
+Margins builds entirely from public source. Lanes with `recall` run the pinned
+`enzyme` CLI from `scripts/enzyme-bin`: the official release asset named in
+`scripts/enzyme-cli.pin` when it has a sha256 for the host, otherwise a build of
+the pinned `rev`, which needs read access to `byenzyme/enzyme-rust` until that
+enzyme release exists.
 
 `quick` accepts changed paths or Cargo package names. It tests affected root
 workspace crates and their reverse dependents, then checks shipped binaries.
 BB plugin paths also run its typecheck, tests, build, and committed `dist/`
 check; `desktop/` paths are reported as parked. `public` builds and tests the
-root workspace with default features disabled and no private git source in its
-manifest or lockfile.
+root workspace with default features disabled and needs no `enzyme` binary.
 `linux` runs the full portable recall suite, the isolated
-Google onboarding fixture, setup rollout contracts, BB plugin checks, and shipped
-Linux binary checks. `macos` runs the native private and public composition suites and checks
+Google onboarding fixture, the Enzyme home isolation and bundled-engine proofs,
+setup rollout contracts, BB plugin checks, and shipped
+Linux binary checks. `macos` runs the native official and public composition suites and checks
 the extracted `margins-server` when present. Every mode uses one disposable
 `scripts/cargo-lane` invocation and prints a pass/fail summary.
 
@@ -155,7 +156,7 @@ desktop app. For the shipped project server, check `margins-server` with
 `scripts/cargo-lane shared`.
 
 ```bash
-scripts/with-private-recall scripts/cargo-lane disposable -- cargo test --workspace --no-default-features --features recall
+MARGINS_ENZYME_BIN="$(scripts/enzyme-bin)" scripts/cargo-lane disposable -- cargo test --workspace --no-default-features --features recall
 # Historical desktop-only test (cannot run after desktop/src-tauri retirement):
 cargo test -p margins-desktop \
   --manifest-path desktop/src-tauri/Cargo.toml \
@@ -506,9 +507,10 @@ and does not fix it. The coordinator routes it to the owning worker (or a new
 one) with the worker's diagnosis attached.
 
 **One repo (2026-10-02).** This repository becomes the public repository, with
-fresh history at cutover; there is no separate public export. Only the Enzyme
-recall engine stays closed, consumed as a private git dependency behind the
-`recall` / `recall-local-model` features. Workers must keep every crate building
+fresh history at cutover; there is no separate public export. Margins links no
+closed code: it runs the shipped `enzyme` CLI (pinned in
+`scripts/enzyme-cli.pin`) behind the public `recall` feature, and releases ship
+that binary next to `margins`. Workers must keep every crate building
 and testing with `recall` off, keep credentials out of source, and stop editing
 the export allowlist; the cutover retires that machinery.
 
@@ -558,7 +560,7 @@ The CI regression verifies only the harness's capture and hard-gate mechanics;
 it does not replace the real agent rollout against the release-candidate binary.
 
 For native CLI core-product verification, use
-`scripts/with-private-recall scripts/core-product-smoke.sh`; the full and
+`scripts/core-product-smoke.sh`; the full and
 zero-compile iteration commands are documented in
 `docs/official-cli-release.md`.
 
