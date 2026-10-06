@@ -265,11 +265,13 @@ fn run_inner(
             );
         }
         Some(Command::Workspace {
-            command: WorkspaceCommand::Edit,
+            command: WorkspaceCommand::Edit { color },
         }) => {
+            use std::io::IsTerminal;
             return commands::workspace::edit(
                 workspace_selector.as_deref(),
                 invocation_dir,
+                color.enabled(std::io::stdout().is_terminal()),
                 &mut std::io::stdin().lock(),
                 stdout,
                 stderr,
@@ -280,14 +282,17 @@ fn run_inner(
                 WorkspaceCommand::Plan {
                     desired: Some(desired),
                     json,
+                    color,
                     ..
                 },
         }) => {
+            use std::io::IsTerminal;
             return commands::workspace::plan(
                 workspace_selector.as_deref(),
                 invocation_dir,
                 &absolute_from(invocation_dir, &desired),
                 json,
+                color.enabled(std::io::stdout().is_terminal()),
                 stdout,
             );
         }

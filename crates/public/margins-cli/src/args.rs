@@ -397,7 +397,11 @@ pub enum WorkspaceCommand {
     },
     /// Edit the selected Workspace's program in $VISUAL or $EDITOR, then review
     /// the change and apply it through plan/apply (interactive terminals only)
-    Edit,
+    Edit {
+        /// Colour the reviewed change: auto (only on a terminal), always, never
+        #[arg(long, value_enum, default_value_t = ColorArg::Auto)]
+        color: ColorArg,
+    },
     /// Compile a complete desired Workspace program, or the setup preset, into
     /// a revisioned plan
     Plan {
@@ -415,6 +419,10 @@ pub enum WorkspaceCommand {
         /// (without it, the plan is saved to a file for `workspace apply`)
         #[arg(long)]
         json: bool,
+        /// Colour the readable change: auto (only on a terminal), always,
+        /// never. JSON is never coloured.
+        #[arg(long, value_enum, default_value_t = ColorArg::Auto)]
+        color: ColorArg,
     },
     /// Atomically apply an exact workspace plan
     Apply {
@@ -434,6 +442,31 @@ pub enum WorkspaceCommand {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// `--color`: `auto` colours only output written to a terminal (and honours
+/// `NO_COLOR` and `TERM=dumb`), so piped output is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ColorArg {
+    Auto,
+    Always,
+    Never,
+}
+
+impl ColorArg {
+    /// Whether to colour output for a stream that is (`terminal`) or is not a
+    /// terminal.
+    pub fn enabled(self, terminal: bool) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Never => false,
+            Self::Auto => {
+                terminal
+                    && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
+                    && std::env::var_os("TERM").is_none_or(|term| term != "dumb")
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
