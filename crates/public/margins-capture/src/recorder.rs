@@ -618,7 +618,16 @@ impl MicCapture {
         self.quiescing = true;
         // Quiesce the native producer before allowing the drain to finish.
         if let Some(stream) = self.stream.take() {
-            stream.stop()?;
+            if let Err(error) = stream.stop() {
+                // A failed CPAL pause must not prevent the drain and writer from
+                // sealing the audio already captured (for example, after a
+                // device is unplugged on Windows).
+                if self.backend == MicBackendKind::Cpal {
+                    eprintln!("Warning: could not stop microphone input: {error:#}");
+                } else {
+                    return Err(error);
+                }
+            }
         }
         self.stop_flag.store(true, Ordering::Release);
         let outcome = self
@@ -2887,7 +2896,20 @@ mod tests {
             !running(),
             "test process already has active microphone input"
         );
-        let raw = start_mic_raw(None, &telemetry()).unwrap();
+        // CPAL marks enumerated devices as non-default even when they refer to
+        // the default physical input. That path installs the disconnect
+        // listener responsible for the retained-stream regression.
+        let default_name = cpal::default_host()
+            .default_input_device()
+            .and_then(|device| device.name().ok());
+        let devices = list_input_devices();
+        let (_, device) = devices
+            .iter()
+            .find(|(name, _)| Some(name) == default_name.as_ref())
+            .or_else(|| devices.first())
+            .expect("test needs an enumerated microphone input");
+
+        let raw = start_mic_raw(Some(device), &telemetry()).unwrap();
         assert!(reaches(true), "CPAL did not start microphone input");
         drop(raw);
         assert!(
@@ -2895,7 +2917,7 @@ mod tests {
             "dropping an unowned stream left input running"
         );
 
-        let raw = start_mic_raw(None, &telemetry()).unwrap();
+        let raw = start_mic_raw(Some(device), &telemetry()).unwrap();
         assert!(reaches(true), "CPAL did not restart microphone input");
         raw.stream.stop().unwrap();
         assert!(reaches(false), "stopping a recording left input running");
