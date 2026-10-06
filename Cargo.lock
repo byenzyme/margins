@@ -954,16 +954,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ctor"
-version = "0.2.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32a2785755761f3ddc1492979ce1e48d2c00d09311c39e4466429188f3dd6501"
-dependencies = [
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "darling"
 version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1319,8 +1309,8 @@ dependencies = [
 
 [[package]]
 name = "enzyme-spec"
-version = "0.2.0"
-source = "git+https://github.com/byenzyme/enzyme-spec?tag=v0.2.0#12d06794ea19995cab3c658ef0b86913f3fe60fe"
+version = "0.4.0"
+source = "git+https://github.com/byenzyme/enzyme-spec?tag=v0.4.0#244b5df398dfa099f081c796fac005048965aba7"
 dependencies = [
  "anyhow",
  "fs2",
@@ -2364,7 +2354,6 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm 0.28.1",
- "ctor",
  "dirs",
  "fs4",
  "hound",

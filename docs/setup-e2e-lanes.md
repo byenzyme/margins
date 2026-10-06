@@ -29,7 +29,7 @@ and `enzyme` binaries in temporary homes with a local fixture generator; it spen
 no hosted model resources:
 
 ```bash
-MARGINS_ENZYME_BIN="$(scripts/enzyme-bin)" scripts/with-private-recall \
+MARGINS_ENZYME_BIN="$(scripts/enzyme-bin)" \
   scripts/cargo-lane disposable -- cargo test --no-default-features --features recall \
   --test workspace_language_e2e preset_setup
 ```

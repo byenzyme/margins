@@ -1,8 +1,8 @@
 name: Validate official CLI packages
 
 # Manual, NO-PUBLISH rehearsal of cli-release.yml. It runs in the
-# official-cli-release environment (dispatch from main), fetches the private
-# recall engine, embeds the Google OAuth client, signs and notarizes on macOS,
+# official-cli-release environment (dispatch from main), fetches the pinned
+# enzyme release asset, embeds the Google OAuth client, signs and notarizes on macOS,
 # and smokes the packaged archive with the same shared action as the release.
 # It never creates a release or tag and never touches the Homebrew tap.
 on:
@@ -52,10 +52,9 @@ jobs:
           host-arch: ${{ matrix.host_arch }}
           features: ${{ matrix.features }}
           version: ${{ steps.version.outputs.version }}
-          # Runs on main: a saved cache would hold private enzyme-rust source
+          # Runs on main: a saved cache would hold the embedded OAuth client,
           # restorable by any run, including fork pull requests. Never cache.
           cache: "false"
-          enzyme-rust-deploy-key: ${{ secrets.ENZYME_RUST_DEPLOY_KEY }}
           google-oauth-client-json: ${{ secrets.MARGINS_GOOGLE_OAUTH_CLIENT_JSON }}
           apple-certificate-base64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           apple-certificate-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}

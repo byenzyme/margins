@@ -7,7 +7,7 @@
 #   MARGINS_LEGACY_INPROCESS_BIN=/path/to/margins-private \
 #     tests/fixtures/inprocess-index/generate.sh
 #
-# Build that binary from 71c73b5 with
+# Build that binary in a checkout of 71c73b5, which still has the wrapper:
 # `scripts/with-private-recall scripts/cargo-lane shared -- cargo build
 #  --no-default-features --features recall --bin margins-private`.
 set -euo pipefail

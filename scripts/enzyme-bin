@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Print the path of the `enzyme` binary that Margins tests and gates run.
 #
-# MARGINS_ENZYME_BIN wins when set. Otherwise the enzyme-rust revision in
-# scripts/enzyme-cli.pin is built once per host (debug, no local model) into
-# MARGINS_ENZYME_CACHE (default ~/.cache/margins-enzyme/<rev>) and reused. Run
-# it inside scripts/cargo-lane so the build uses a managed target.
+# MARGINS_ENZYME_BIN wins when set. Otherwise, when scripts/enzyme-cli.pin has
+# a sha256 for this host, the official release asset it pins (the binary
+# releases ship) is fetched and verified with scripts/enzyme-pin; that needs no
+# enzyme-rust source access. Before that release exists, the pinned `rev` is
+# built (debug, no local model), which needs read access to enzyme-rust; run it
+# inside scripts/cargo-lane so the build uses a managed target. Either is cached
+# once per host under MARGINS_ENZYME_CACHE (default ~/.cache/margins-enzyme).
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,9 +20,25 @@ if [[ -n "${MARGINS_ENZYME_BIN:-}" ]]; then
   exit 0
 fi
 
+cache_root="${MARGINS_ENZYME_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/margins-enzyme}"
+pin="$repo_root/scripts/enzyme-pin"
+target="$("$pin" host-target)"
+if "$pin" get "sha256.$target" >/dev/null 2>&1; then
+  release="$cache_root/v$("$pin" get version)-$target"
+  if [[ ! -x "$release/enzyme" ]]; then
+    staging="$release.partial.$$"
+    trap 'rm -rf "$staging"' EXIT
+    "$pin" fetch "$target" "$staging" >&2
+    rm -rf "$release"
+    mv "$staging" "$release"
+  fi
+  echo "$release/enzyme"
+  exit 0
+fi
+
 rev="$(sed -n 's/^rev = "\([0-9a-f]*\)"$/\1/p' "$repo_root/scripts/enzyme-cli.pin")"
 [[ -n "$rev" ]] || { echo "enzyme-bin: no rev in scripts/enzyme-cli.pin" >&2; exit 1; }
-cache="${MARGINS_ENZYME_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/margins-enzyme}/$rev"
+cache="$cache_root/$rev"
 if [[ ! -x "$cache/bin/enzyme" ]]; then
   echo "enzyme-bin: building enzyme $rev into $cache" >&2
   staging="$cache.partial.$$"
@@ -31,4 +50,6 @@ if [[ ! -x "$cache/bin/enzyme" ]]; then
   rm -rf "$cache"
   mv "$staging" "$cache"
 fi
+"$pin" check "$cache/bin/enzyme" \
+  || { echo "enzyme-bin: rev $rev does not report the pinned version; repin rev and version together" >&2; exit 1; }
 echo "$cache/bin/enzyme"

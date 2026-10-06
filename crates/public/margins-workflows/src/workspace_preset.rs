@@ -70,6 +70,8 @@ pub struct PresetProposal {
 ///   folder reading is added only when the folder exists under Home (matched
 ///   case-insensitively and written with its on-disk name), else skipped;
 /// - preset `leave out folders` entries are added;
+/// - the preset's `learn questions automatically` is added to a program that
+///   has none; an existing one, with its own `up to`, is kept;
 /// - the preset note folder is used only by a program that has not been set
 ///   up yet: Home-root (`"."`) note folder, no readings, nothing left out (what
 ///   `workspace new` writes). Any other `"."` is a choice and is kept.
@@ -140,6 +142,10 @@ pub fn propose(current: &WorkspaceConfig, filled: &str) -> Result<PresetProposal
         {
             desired.policy.excluded_folders.push(folder);
         }
+    }
+
+    if desired.policy.automatic.is_none() {
+        desired.policy.automatic = preset.policy.automatic;
     }
 
     let preset_note_folder = preset
@@ -378,6 +384,24 @@ mod tests {
         let root = propose(&edited, &filled(temp.path())).unwrap();
         assert_eq!(root.desired, edited);
         assert_eq!(root.note_folder, ".");
+    }
+
+    #[test]
+    fn automatic_selection_is_added_once_and_an_existing_cap_is_kept() {
+        use crate::workspace::WorkspaceAutomatic;
+        let temp = tempfile::tempdir().unwrap();
+        let first = propose(&current(temp.path()), &filled(temp.path())).unwrap();
+        assert_eq!(first.desired.policy.automatic, Some(WorkspaceAutomatic::default()));
+
+        // A program set up before the preset had the statement gains it.
+        let mut older = first.desired.clone();
+        older.policy.automatic = None;
+        assert_eq!(propose(&older, &filled(temp.path())).unwrap().desired, first.desired);
+
+        // The user's own `up to N` is kept.
+        let mut capped = first.desired.clone();
+        capped.policy.automatic = Some(WorkspaceAutomatic { up_to: Some(5) });
+        assert_eq!(propose(&capped, &filled(temp.path())).unwrap().desired, capped);
     }
 
     #[test]

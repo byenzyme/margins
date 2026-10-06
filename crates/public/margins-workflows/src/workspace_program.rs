@@ -12,7 +12,7 @@
 use crate::workspace::{
     CalendarCollectionSelector, GmailCollectionSelector, GranolaCollectionSelector,
     GranolaTimeRange, RetentionPolicy, SourceRole, WorkspaceBinding, WorkspaceConfig,
-    WorkspaceEntity, WorkspaceEntityOptions, WorkspacePolicy,
+    WorkspaceAutomatic, WorkspaceEntity, WorkspaceEntityOptions, WorkspacePolicy,
 };
 use anyhow::{bail, ensure, Context, Result};
 use enzyme_spec::{
@@ -261,6 +261,9 @@ fn view_policy(workspace: &enzyme_spec::Workspace) -> WorkspacePolicy {
             .iter()
             .map(|link| enzyme_spec::entity_selector("link", link))
             .collect(),
+        automatic: workspace.automatic.as_ref().map(|automatic| WorkspaceAutomatic {
+            up_to: automatic.up_to,
+        }),
     }
 }
 
@@ -875,6 +878,10 @@ pub fn reconcile(
     workspace.exclusions = folders;
     workspace.excluded_tags = tags;
     workspace.excluded_links = links;
+    workspace.automatic = desired
+        .policy
+        .automatic
+        .map(|automatic| enzyme_spec::Automatic { up_to: automatic.up_to });
     Ok(program)
 }
 
@@ -1199,6 +1206,20 @@ workspace "practice" {
     }
 
     #[test]
+    fn automatic_selection_round_trips_through_the_view() {
+        let text = "workspace \"w\" {\n  source markdown \"notes\" { path \"/abs/notes\" }\n  remember in folder \".\" create note\n  learn questions from folder \"people\"\n  learn questions automatically up to 7\n}\n";
+        let program = WorkspaceProgram::from_program(parse(text).program().clone()).unwrap();
+        let config = view(program.text()).unwrap();
+        assert_eq!(config.policy.automatic, Some(WorkspaceAutomatic { up_to: Some(7) }));
+        let same = reconcile(program.program(), &config, FolderQualification::Program).unwrap();
+        assert_eq!(WorkspaceProgram::from_program(same).unwrap().text(), program.text());
+        let mut without = config.clone();
+        without.policy.automatic = None;
+        let removed = reconcile(program.program(), &without, FolderQualification::Program).unwrap();
+        assert!(!WorkspaceProgram::from_program(removed).unwrap().text().contains("automatically"));
+    }
+
+    #[test]
     fn home_requires_exactly_one_create_note_policy_inside_its_source() {
         let without = "workspace \"w\" {\n  source markdown \"notes\" { path \"/abs/notes\" }\n}\n";
         assert!(view(without)
@@ -1388,6 +1409,7 @@ workspace "practice" {
                 excluded_tags: Vec::new(),
                 entities: entities.iter().map(|entity| WorkspaceEntity::simple(*entity)).collect(),
                 excluded_entities: Vec::new(),
+                automatic: None,
             },
             retention: RetentionPolicy::default(),
             bindings: bindings

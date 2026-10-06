@@ -11,6 +11,9 @@ class Margins < Formula
 
   def install
     bin.install "margins"
+    # The pinned enzyme engine margins runs. It stays off PATH so it never
+    # conflicts with an `enzyme` the user installs (e.g. enzyme-cli).
+    (libexec/"margins").install "enzyme"
   end
 
   def caveats
@@ -30,5 +33,6 @@ class Margins < Formula
 
   test do
     assert_match "Usage:", shell_output("#{bin}/margins --help 2>&1", 2)
+    assert_equal "enzyme @ENZYME_VERSION@\n", shell_output("#{libexec}/margins/enzyme --version")
   end
 end

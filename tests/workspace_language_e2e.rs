@@ -245,6 +245,22 @@ fn notes_fixture(env: &Hermetic) -> PathBuf {
     notes
 }
 
+/// Four tagged planning notes no preset reading covers: material for the
+/// engine's automatic selection.
+fn planning_fixture(notes: &Path) {
+    for index in 0..4 {
+        write(
+            &notes.join(format!("Planning/plan-{index}.md")),
+            &format!(
+                "# Plan {index}\n\n#roadmap planning record {index} weighs launch sequencing, \
+                 staffing, budget tradeoffs, vendor dependencies, migration risk, pricing \
+                 experiments, support load, hiring timing, quarterly milestones, partner \
+                 commitments, analytics instrumentation, and rollout communication.\n"
+            ),
+        );
+    }
+}
+
 /// Four substantive people notes, enough evidence for a folder catalyst.
 fn people_fixture(notes: &Path) {
     for (index, name) in ["Ada Chen", "Ben Patel", "Cara Jones", "Diego Ruiz"]
@@ -1031,6 +1047,7 @@ fn preset_setup_keeps_existing_readings_recalls_and_is_safe_to_rerun() {
         "# Vendor sync\n\nThe cobalt orchard review moved the launch to Thursday.\n",
     );
     people_fixture(&notes);
+    planning_fixture(&notes);
     write(&notes.join("templates/meeting.md"), "# {{title}}\n\nThe template sentinel phrase stays out.\n");
     env.ok(&["workspace", "new", "practice", "--home", notes.to_str().unwrap(), "--json"]);
 
@@ -1066,6 +1083,7 @@ fn preset_setup_keeps_existing_readings_recalls_and_is_safe_to_rerun() {
     assert!(program.contains(r#"leave out folders ["templates", "Attachments"]"#), "{program}");
     assert!(program.contains(r#"remember in folder "Meetings" create note"#), "{program}");
     assert!(program.contains(r#"source margins-captures "captures""#), "{program}");
+    assert!(program.contains("learn questions automatically\n"), "{program}");
     let programs = fs::read_dir(env.margins_home.join("configs"))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
@@ -1091,6 +1109,16 @@ fn preset_setup_keeps_existing_readings_recalls_and_is_safe_to_rerun() {
     );
     let destination = env.json(&["--workspace", "practice", "workspace", "destination", "--json"]);
     assert_eq!(destination["destination"], notes.join("Meetings").to_str().unwrap(), "{destination}");
+    // Automatic selection runs alongside the readings: besides the people
+    // reading, the engine picks what the readings miss (the Planning notes and
+    // their #roadmap tag), and nothing is written back.
+    let entities = catalyst_entities(&state);
+    assert!(entities.iter().any(|entity| entity == "people"), "{entities:?}");
+    assert!(
+        entities.iter().any(|entity| entity == "planning" || entity == "roadmap"),
+        "no automatic pick alongside the readings: {entities:?}"
+    );
+    assert_eq!(env.program("practice"), program);
 
     // Setup again: the same preset proposes no change and no second program.
     let again: serde_json::Value = serde_json::from_slice(&env.ok(&plan_args).stdout).unwrap();
@@ -1099,6 +1127,113 @@ fn preset_setup_keeps_existing_readings_recalls_and_is_safe_to_rerun() {
     assert_eq!(again["desired_program"], plan["desired_program"]);
     assert_eq!(env.program("practice"), program);
     assert_eq!(fs::read_dir(env.margins_home.join("configs")).unwrap().count(), programs.len() + 1);
+
+    // A program set up before the preset had the statement gains it, and
+    // only it, when setup runs again.
+    let older = program.replace("  learn questions automatically\n", "");
+    assert_ne!(older, program);
+    env.plan_and_apply("practice", &older);
+    let upgrade: serde_json::Value = serde_json::from_slice(&env.ok(&plan_args).stdout).unwrap();
+    assert_eq!(upgrade["desired_program"].as_str().unwrap(), program, "{upgrade}");
+    let added: Vec<&str> = upgrade["diff"]
+        .as_str()
+        .unwrap()
+        .lines()
+        .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
+        .collect();
+    assert_eq!(added, ["+  learn questions automatically"], "{upgrade}");
+    assert!(
+        !upgrade["diff"].as_str().unwrap().lines().any(|line| line.starts_with('-') && !line.starts_with("---")),
+        "{upgrade}"
+    );
+
+    env.assert_enzyme_untouched();
+}
+
+#[test]
+fn a_program_without_automatic_selection_learns_only_its_readings_and_is_unchanged() {
+    let env = Hermetic::new();
+    let notes = env.path("notes");
+    people_fixture(&notes);
+    planning_fixture(&notes);
+    env.ok(&["workspace", "new", "practice", "--home", notes.to_str().unwrap(), "--json"]);
+    let desired = format!(
+        "workspace \"practice\" {{\n  source markdown \"home\" {{ path \"{}\" }}\n  remember in folder \".\" create note\n  learn questions from folder \"people\"\n}}\n",
+        notes.display()
+    );
+    env.plan_and_apply("practice", &desired);
+    let program = env.program("practice");
+    assert!(!program.contains("automatically"), "{program}");
+
+    let _generator = fixture_generator::FixtureGenerator::start(&env.margins_home);
+    env.ok(&["--workspace", "practice", "init"]);
+    env.ok(&["--workspace", "practice", "init"]);
+    let entities = catalyst_entities(&env.margins_home.join("workspaces/practice"));
+    assert_eq!(entities, ["people"], "readings are the complete set");
+    assert_eq!(env.program("practice"), program);
+    env.assert_enzyme_untouched();
+}
+
+#[test]
+fn two_workspaces_share_one_notes_folder_and_index_independently() {
+    let env = Hermetic::new();
+    let notes = notes_fixture(&env);
+    // `alpha` leaves the archive out; `beta` reads the whole folder.
+    for (id, extra) in [("alpha", "\n  leave out folders [\"archive\"]"), ("beta", "")] {
+        env.ok(&[
+            "workspace",
+            "new",
+            id,
+            "--home",
+            notes.to_str().unwrap(),
+            "--json",
+        ]);
+        let desired = format!(
+            "workspace \"{id}\" {{\n  source markdown \"notes\" {{ path \"{}\" }}\n  remember in folder \"inbox\" create note{extra}\n}}\n",
+            notes.display()
+        );
+        env.plan_and_apply(id, &desired);
+    }
+
+    let _generator = fixture_generator::FixtureGenerator::start(&env.margins_home);
+    env.ok(&["--workspace", "alpha", "init"]);
+    let alpha = env.margins_home.join("workspaces/alpha");
+    let alpha_index = indexed_documents(&alpha);
+    assert_eq!(indexed_refs(&alpha), ["projects/harbor.md"]);
+    // Nothing of beta's exists until beta itself is initialized.
+    assert!(!env.margins_home.join("workspaces/beta/enzyme.db").exists());
+
+    env.ok(&["--workspace", "beta", "init"]);
+    let beta = env.margins_home.join("workspaces/beta");
+    assert_eq!(
+        indexed_refs(&beta),
+        ["archive/secret.md", "projects/harbor.md"]
+    );
+    // Building beta's index over the same folder leaves alpha's untouched,
+    // and nothing is written into the shared notes folder.
+    assert_eq!(indexed_documents(&alpha), alpha_index);
+    assert!(!notes.join(".enzyme").exists());
+
+    let harbor = "The quartz harbor ledger records every crossing";
+    let archive = "The obsidian lantern archive phrase must never be recalled";
+    for id in ["alpha", "beta"] {
+        let recalled = recall(&env, id, harbor, None);
+        assert_eq!(recalled["status"], "ok", "{id}: {recalled}");
+        assert!(
+            result_refs(&recalled).contains(&"projects/harbor.md".to_string()),
+            "{id}: {recalled}"
+        );
+    }
+    assert!(!result_refs(&recall(&env, "alpha", archive, None))
+        .contains(&"archive/secret.md".to_string()));
+    assert!(result_refs(&recall(&env, "beta", archive, None))
+        .contains(&"archive/secret.md".to_string()));
+
+    // Re-initializing one Workspace changes neither index.
+    let beta_index = indexed_documents(&beta);
+    env.ok(&["--workspace", "alpha", "init"]);
+    assert_eq!(indexed_documents(&alpha), alpha_index);
+    assert_eq!(indexed_documents(&beta), beta_index);
 
     env.assert_enzyme_untouched();
 }

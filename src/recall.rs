@@ -32,7 +32,7 @@ use margins_workflows::integrations::{
     EvidenceFreshness, EvidenceHandle, FreshnessStatus, GoogleCalendarScope,
     GOOGLE_MEET_MATERIALIZATION_FINGERPRINT,
 };
-use margins_workflows::source_kinds::sqlite_document_ref_prefix;
+use margins_workflows::source_kinds::{ledger_record_id, sqlite_document_ref_prefix};
 use margins_workflows::workspace::{ResolvedWorkspace, SourceKind, WorkspaceBinding};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
@@ -351,11 +351,10 @@ pub fn recall(
     let started = std::time::Instant::now();
     let (status_word, reason, search_strategy, hits, top_contributing_catalysts) =
         search_index(workspace, &engine, &status, query, source_filter)?;
-    let mut refs = LedgerRefs::default();
     let results = hits
         .into_iter()
         .map(|hit| {
-            let entry = catalog_entry_for_document_ref(workspace, &hit.path, &mut refs)?;
+            let entry = catalog_entry_for_document_ref(workspace, &hit.path)?;
             Ok(RecallResult {
                 document_ref: hit.path,
                 similarity: hit.score,
@@ -536,44 +535,9 @@ fn filter_recall_hits(
         .collect()
 }
 
-/// Ledger record ids by engine document ref, per source, built on first use
-/// within one recall. Refs of ledger documents are hashes
-/// ([`margins_workflows::source_kinds::sqlite_document_ref`]), so a hit maps
-/// back to its record through the source's own ledger rows.
-#[derive(Default)]
-struct LedgerRefs {
-    by_source: BTreeMap<String, BTreeMap<String, String>>,
-}
-
-impl LedgerRefs {
-    fn source_id(
-        &mut self,
-        workspace: &ResolvedWorkspace,
-        source: &str,
-        document_ref: &str,
-    ) -> Result<Option<String>> {
-        if !self.by_source.contains_key(source) {
-            let ids = crate::workspace_recall::ledger_source_ids(workspace, source)?;
-            self.by_source.insert(
-                source.to_string(),
-                ids.into_iter()
-                    .map(|id| {
-                        (
-                            margins_workflows::source_kinds::sqlite_document_ref(source, &id),
-                            id,
-                        )
-                    })
-                    .collect(),
-            );
-        }
-        Ok(self.by_source[source].get(document_ref).cloned())
-    }
-}
-
 fn catalog_entry_for_document_ref(
     workspace: &ResolvedWorkspace,
     document_ref: &str,
-    refs: &mut LedgerRefs,
 ) -> Result<CatalogEntry> {
     if let Some((source, path)) = crate::workspace_recall::markdown_document(workspace, document_ref)
     {
@@ -594,7 +558,7 @@ fn catalog_entry_for_document_ref(
             WorkspaceBinding::NativeMarkdown { .. } | WorkspaceBinding::Captures { .. } => continue,
         };
         if document_ref_source_matches(document_ref, name) {
-            let source_id = refs.source_id(workspace, name, document_ref)?;
+            let source_id = ledger_record_id(name, document_ref);
             return Ok(CatalogEntry {
                 source: name.clone(),
                 kind: binding.kind(),
@@ -1900,11 +1864,10 @@ mod tests {
             )
             .unwrap();
         let document_ref =
-            margins_workflows::source_kinds::sqlite_document_ref("mail", "thread-123");
+            margins_workflows::source_kinds::ledger_document_ref("mail", "thread-123");
 
         let entry =
-            catalog_entry_for_document_ref(&workspace, &document_ref, &mut LedgerRefs::default())
-                .unwrap();
+            catalog_entry_for_document_ref(&workspace, &document_ref).unwrap();
 
         assert_eq!(
             source_name_for_document_ref(&workspace, &document_ref).as_deref(),

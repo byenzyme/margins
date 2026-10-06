@@ -33810,7 +33810,7 @@ import {
   writeFile
 } from "node:fs/promises";
 import { homedir, platform } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 var execFile = promisify(execFileCallback);
 var RUNTIME_RELEASE_VERSION = "0.4.15";
@@ -33822,6 +33822,7 @@ function targetName(hostPlatform, arch) {
   if (hostPlatform === "linux" && arch === "arm64") return "aarch64-unknown-linux-gnu";
   return null;
 }
+var RELEASE_ENGINE = "enzyme";
 async function isRegularExecutable(path2) {
   try {
     const stat2 = await lstat(path2);
@@ -33926,11 +33927,20 @@ async function installRuntime(input2) {
       }
       await copyRuntimeBinary(source, join(input2.runtimeBinDir, name));
     }
+    const engine = join(unpacked, RELEASE_ENGINE);
+    const engineStat = await lstat(engine).catch(() => null);
+    const hasEngine = Boolean(engineStat?.isFile() && !engineStat.isSymbolicLink());
+    if (hasEngine) await copyRuntimeBinary(engine, join(input2.runtimeBinDir, RELEASE_ENGINE));
     await mkdir(input2.cliBinDir, { recursive: true });
     const cliDestination = join(input2.cliBinDir, "margins");
     const cliExists = await lstat(cliDestination).catch(() => null);
     const pluginManaged = await readFile(`${cliDestination}.bb-margins-managed`, "utf8").then((value) => value.startsWith("managed-by=bb-plugin-margins\n")).catch(() => false);
     if (!cliExists || pluginManaged) {
+      if (hasEngine) {
+        const engineDir = join(dirname(input2.cliBinDir), "libexec", "margins");
+        await mkdir(engineDir, { recursive: true });
+        await copyRuntimeBinary(engine, join(engineDir, RELEASE_ENGINE));
+      }
       await replaceManagedBinary(join(unpacked, "margins"), cliDestination);
     }
   } finally {

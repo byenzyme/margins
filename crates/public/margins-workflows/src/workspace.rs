@@ -509,6 +509,18 @@ pub struct WorkspacePolicy {
     /// another entity.
     #[serde(default)]
     pub excluded_entities: Vec<String>,
+    /// `learn questions automatically [up to N]`: the engine's automatic
+    /// selection keeps running alongside the readings. Automatic picks are
+    /// never written back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automatic: Option<WorkspaceAutomatic>,
+}
+
+/// Automatic selection alongside readings, capped at `up_to` picks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceAutomatic {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub up_to: Option<usize>,
 }
 
 /// Workspace-owned eligibility policy for independently purgeable integration
@@ -542,6 +554,7 @@ impl Default for WorkspacePolicy {
             excluded_tags: Vec::new(),
             entities: Vec::new(),
             excluded_entities: Vec::new(),
+            automatic: None,
         }
     }
 }

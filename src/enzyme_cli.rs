@@ -83,9 +83,10 @@ pub fn required_version() -> &'static str {
 /// A failed engine call, by the engine's exit-code contract.
 #[derive(Debug)]
 pub enum EngineError {
-    /// No `enzyme` binary was found.
-    NotFound { searched: Vec<PathBuf> },
-    /// The binary found is not the release this Margins runs.
+    /// No candidate was a usable `enzyme` of the pinned version; each path
+    /// with why it was rejected.
+    NotFound { rejected: Vec<(PathBuf, Rejection)> },
+    /// [`ENZYME_BIN_ENV`] names an `enzyme` that is not the pinned release.
     VersionMismatch {
         bin: PathBuf,
         found: String,
@@ -112,12 +113,13 @@ pub enum EngineError {
 impl std::fmt::Display for EngineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotFound { searched } => write!(
+            Self::NotFound { rejected } => write!(
                 f,
-                "the enzyme engine is not installed: looked for {}; set {ENZYME_BIN_ENV} or reinstall Margins",
-                searched
+                "no usable enzyme {} engine: {}; reinstall Margins or set {ENZYME_BIN_ENV}",
+                required_version(),
+                rejected
                     .iter()
-                    .map(|path| path.display().to_string())
+                    .map(|(path, why)| format!("{} ({why})", path.display()))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -186,34 +188,127 @@ impl Generator {
     }
 }
 
-/// Locate `enzyme`: [`ENZYME_BIN_ENV`], next to the running executable, the
-/// installers' `<exe dir>/../libexec/margins/enzyme` (Homebrew keg,
-/// `~/.local` installs), then `$MARGINS_HOME/bin/enzyme`. `PATH` is never
-/// searched: an `enzyme` the user installed for themselves may be another
-/// release that updates itself.
+/// Why a candidate `enzyme` was not used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rejection {
+    Missing,
+    NotExecutable,
+    /// It ran, but reported this version (or `unknown`).
+    Version(String),
+}
+
+impl std::fmt::Display for Rejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing => f.write_str("missing"),
+            Self::NotExecutable => f.write_str("not executable"),
+            Self::Version(found) => write!(f, "version {found}"),
+        }
+    }
+}
+
+/// Locate the pinned `enzyme`, once per process and Margins home.
+///
+/// [`ENZYME_BIN_ENV`], when set, is used or the call fails. Otherwise the
+/// bundled locations are tried in order: the installers'
+/// `<exe dir>/../libexec/margins/enzyme` (Homebrew keg, `~/.local`
+/// installs) when `<exe dir>/../libexec/margins` exists, otherwise
+/// `<exe dir>/enzyme` (the release archive); then `$MARGINS_HOME/bin/enzyme`.
+/// A candidate that is missing, not executable, or not the pinned version is
+/// skipped. An installed `margins` therefore never runs an `enzyme` beside it
+/// in a shared `bin` directory such as `~/.local/bin`, which may be the user's
+/// own release that updates itself, and `PATH` is never searched.
 pub fn locate_binary(margins_home: &Path) -> Result<PathBuf, EngineError> {
+    static FOUND: OnceLock<Mutex<BTreeMap<(Option<PathBuf>, PathBuf), PathBuf>>> = OnceLock::new();
+    let explicit = std::env::var_os(ENZYME_BIN_ENV)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let key = (explicit.clone(), margins_home.to_path_buf());
+    let mut found = FOUND
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(bin) = found.get(&key) {
+        return Ok(bin.clone());
+    }
+    let bin = match explicit {
+        Some(explicit) => select_explicit(&explicit)?,
+        None => select_bundled(&bundled_candidates(margins_home))?,
+    };
+    found.insert(key, bin.clone());
+    Ok(bin)
+}
+
+fn bundled_candidates(margins_home: &Path) -> Vec<PathBuf> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.canonicalize().ok())
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    candidates_for(exe_dir.as_deref(), margins_home)
+}
+
+/// The bundled locations for a `margins` in `exe_dir`: the installed layout's
+/// libexec copy, or, when there is no `../libexec/margins`, the archive
+/// layout's sibling.
+fn candidates_for(exe_dir: Option<&Path>, margins_home: &Path) -> Vec<PathBuf> {
     let name = format!("enzyme{}", std::env::consts::EXE_SUFFIX);
     let mut candidates = Vec::new();
-    if let Some(explicit) = std::env::var_os(ENZYME_BIN_ENV).filter(|value| !value.is_empty()) {
-        candidates.push(PathBuf::from(explicit));
-    } else {
-        if let Some(dir) = std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.canonicalize().ok())
-            .and_then(|exe| exe.parent().map(Path::to_path_buf))
-        {
-            candidates.push(dir.join(&name));
-            if let Some(prefix) = dir.parent() {
-                candidates.push(prefix.join("libexec").join("margins").join(&name));
-            }
-        }
-        candidates.push(margins_home.join("bin").join(&name));
+    if let Some(dir) = exe_dir {
+        let libexec = dir
+            .parent()
+            .map(|prefix| prefix.join("libexec").join("margins"))
+            .filter(|libexec| libexec.is_dir());
+        candidates.push(match libexec {
+            Some(libexec) => libexec.join(&name),
+            None => dir.join(&name),
+        });
     }
-    match candidates.iter().find(|candidate| is_executable(candidate)) {
-        Some(found) => Ok(found.clone()),
-        None => Err(EngineError::NotFound {
-            searched: candidates,
+    candidates.push(margins_home.join("bin").join(&name));
+    candidates
+}
+
+/// The explicit binary is the only candidate; a wrong version is an error.
+fn select_explicit(bin: &Path) -> Result<PathBuf, EngineError> {
+    match probe(bin) {
+        Ok(()) => Ok(bin.to_path_buf()),
+        Err(Rejection::Version(found)) => Err(EngineError::VersionMismatch {
+            bin: bin.to_path_buf(),
+            found,
+            expected: required_version().to_string(),
         }),
+        Err(why) => Err(EngineError::NotFound {
+            rejected: vec![(bin.to_path_buf(), why)],
+        }),
+    }
+}
+
+/// The first candidate that is the pinned version.
+fn select_bundled(candidates: &[PathBuf]) -> Result<PathBuf, EngineError> {
+    let mut rejected = Vec::new();
+    for candidate in candidates {
+        match probe(candidate) {
+            Ok(()) => return Ok(candidate.clone()),
+            Err(why) => rejected.push((candidate.clone(), why)),
+        }
+    }
+    Err(EngineError::NotFound { rejected })
+}
+
+fn probe(path: &Path) -> Result<(), Rejection> {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return Err(Rejection::Missing);
+    };
+    if !is_executable(path) {
+        return Err(if metadata.is_file() {
+            Rejection::NotExecutable
+        } else {
+            Rejection::Missing
+        });
+    }
+    match reported_version(path) {
+        Some(found) if found == required_version() => Ok(()),
+        Some(found) => Err(Rejection::Version(found)),
+        None => Err(Rejection::Version("unknown".to_string())),
     }
 }
 
@@ -232,16 +327,15 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
-/// Require `enzyme --version` to be [`required_version`]. Checked once per
-/// binary per process.
-pub fn verify_version(bin: &Path) -> Result<(), EngineError> {
-    static CHECKED: OnceLock<Mutex<BTreeMap<PathBuf, Result<(), String>>>> = OnceLock::new();
-    let expected = required_version();
-    let mut checked = CHECKED
+/// What `enzyme --version` reports, run once per binary per process; `None`
+/// when it does not run or exits nonzero.
+fn reported_version(bin: &Path) -> Option<String> {
+    static REPORTED: OnceLock<Mutex<BTreeMap<PathBuf, Option<String>>>> = OnceLock::new();
+    let mut reported = REPORTED
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let outcome = checked
+    reported
         .entry(bin.to_path_buf())
         .or_insert_with(|| {
             let output = Command::new(bin)
@@ -249,29 +343,14 @@ pub fn verify_version(bin: &Path) -> Result<(), EngineError> {
                 .env_clear()
                 .stdin(Stdio::null())
                 .output()
-                .map_err(|error| format!("could not run: {error}"))?;
+                .ok()
+                .filter(|output| output.status.success())?;
             let text = String::from_utf8_lossy(&output.stdout);
-            let found = text
-                .trim()
-                .strip_prefix("enzyme ")
-                .unwrap_or(text.trim())
-                .to_string();
-            if output.status.success() && found == expected {
-                Ok(())
-            } else {
-                Err(found)
-            }
+            let text = text.trim();
+            let found = text.strip_prefix("enzyme ").unwrap_or(text);
+            (!found.is_empty()).then(|| found.to_string())
         })
-        .clone();
-    outcome.map_err(|found| EngineError::VersionMismatch {
-        bin: bin.to_path_buf(),
-        found: if found.is_empty() {
-            "unknown".to_string()
-        } else {
-            found
-        },
-        expected: expected.to_string(),
-    })
+        .clone()
 }
 
 /// One Margins home driving `enzyme`.
@@ -287,7 +366,6 @@ impl Engine {
     /// the managed `margins-sources.enzyme`.
     pub fn for_home(margins_home: &Path) -> Result<Self> {
         let bin = locate_binary(margins_home)?;
-        verify_version(&bin)?;
         margins_workflows::machine_config::ensure_engine_settings(margins_home)?;
         margins_workflows::source_kinds::ensure_sources_program(margins_home)?;
         Ok(Self {
@@ -766,7 +844,10 @@ fn parse_json<T: serde::de::DeserializeOwned>(stdout: &[u8]) -> Result<T, Engine
     serde_json::from_slice(stdout).map_err(|error| {
         EngineError::Protocol(format!(
             "{error}: {}",
-            String::from_utf8_lossy(stdout).chars().take(400).collect::<String>()
+            String::from_utf8_lossy(stdout)
+                .chars()
+                .take(400)
+                .collect::<String>()
         ))
     })
 }
@@ -849,9 +930,12 @@ mod tests {
             (1, "Failed"),
             (9, "Failed"),
         ] {
-            let error = check_status(&output(code, "", "noise\nError: the reason\n"), &[])
-                .unwrap_err();
-            assert!(format!("{error:?}").starts_with(expected), "{code}: {error:?}");
+            let error =
+                check_status(&output(code, "", "noise\nError: the reason\n"), &[]).unwrap_err();
+            assert!(
+                format!("{error:?}").starts_with(expected),
+                "{code}: {error:?}"
+            );
             assert!(error.to_string().contains("the reason"), "{error}");
         }
         assert!(check_status(&output(0, "{}", ""), &[]).is_ok());
@@ -898,33 +982,102 @@ mod tests {
 
     #[test]
     fn pinned_version_is_semver() {
-        assert!(required_version().split('.').count() == 3, "{}", required_version());
+        assert!(
+            required_version().split('.').count() == 3,
+            "{}",
+            required_version()
+        );
+    }
+
+    fn fake_enzyme(path: &Path, version: &str, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("#!/bin/sh\necho 'enzyme {version}'\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
     }
 
     #[test]
     fn version_mismatch_and_non_executables_are_refused() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let fake = dir.path().join("enzyme");
-        std::fs::write(&fake, "#!/bin/sh\necho 'enzyme 0.0.1'\n").unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(!is_executable(&fake));
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(is_executable(&fake));
-        let error = verify_version(&fake).unwrap_err();
+        fake_enzyme(&fake, "0.0.1", 0o644);
+        assert_eq!(probe(&fake), Err(Rejection::NotExecutable));
+        let stale = dir.path().join("enzyme-stale");
+        fake_enzyme(&stale, "0.0.1", 0o755);
+        assert_eq!(probe(&stale), Err(Rejection::Version("0.0.1".into())));
+        let error = select_explicit(&stale).unwrap_err();
         assert!(
             matches!(&error, EngineError::VersionMismatch { found, .. } if found == "0.0.1"),
             "{error:?}"
         );
         assert!(error.to_string().contains(required_version()), "{error}");
         let matching = dir.path().join("enzyme-ok");
-        std::fs::write(
-            &matching,
-            format!("#!/bin/sh\necho 'enzyme {}'\n", required_version()),
-        )
-        .unwrap();
-        std::fs::set_permissions(&matching, std::fs::Permissions::from_mode(0o755)).unwrap();
-        verify_version(&matching).unwrap();
+        fake_enzyme(&matching, required_version(), 0o755);
+        assert_eq!(select_explicit(&matching).unwrap(), matching);
+    }
+
+    #[test]
+    fn mismatched_sibling_falls_through_to_matching_libexec_copy() {
+        // `~/.local/bin/enzyme` is the user's own release; the installed
+        // engine is `~/.local/libexec/margins/enzyme`.
+        let prefix = tempfile::tempdir().unwrap();
+        let libexec = prefix.path().join("libexec/margins/enzyme");
+        let sibling = prefix.path().join("bin/enzyme");
+        fake_enzyme(&sibling, "99.0.0", 0o755);
+        fake_enzyme(&libexec, required_version(), 0o755);
+        assert_eq!(
+            select_bundled(&[sibling.clone(), libexec.clone()]).unwrap(),
+            libexec
+        );
+        // The real order puts libexec first; a stale libexec copy falls
+        // through to a matching archive sibling.
+        let stale = prefix.path().join("stale/libexec/margins/enzyme");
+        let archive = prefix.path().join("stale/bin/enzyme");
+        fake_enzyme(&stale, "0.0.1", 0o755);
+        fake_enzyme(&archive, required_version(), 0o755);
+        assert_eq!(select_bundled(&[stale, archive.clone()]).unwrap(), archive);
+    }
+
+    #[test]
+    fn an_installed_margins_never_considers_the_enzyme_beside_it() {
+        let prefix = tempfile::tempdir().unwrap();
+        let bin = prefix.path().join("bin");
+        let home = prefix.path().join("home");
+        // Archive layout: no ../libexec/margins, so the sibling is the engine.
+        std::fs::create_dir_all(&bin).unwrap();
+        assert_eq!(
+            candidates_for(Some(&bin), &home),
+            [bin.join("enzyme"), home.join("bin/enzyme")]
+        );
+        // Installed layout: only the libexec copy, even when it is missing and
+        // the user's own enzyme beside margins reports the pinned version.
+        let libexec = prefix.path().join("libexec/margins");
+        std::fs::create_dir_all(&libexec).unwrap();
+        fake_enzyme(&bin.join("enzyme"), required_version(), 0o755);
+        let candidates = candidates_for(Some(&bin), &home);
+        assert_eq!(candidates, [libexec.join("enzyme"), home.join("bin/enzyme")]);
+        let message = select_bundled(&candidates).unwrap_err().to_string();
+        assert!(!message.contains(&bin.join("enzyme").display().to_string()), "{message}");
+    }
+
+    #[test]
+    fn no_usable_candidate_lists_each_rejection() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("libexec/margins/enzyme");
+        let unexecutable = dir.path().join("bin/enzyme");
+        let stale = dir.path().join("home/bin/enzyme");
+        fake_enzyme(&unexecutable, required_version(), 0o644);
+        fake_enzyme(&stale, "0.0.1", 0o755);
+        let error =
+            select_bundled(&[missing.clone(), unexecutable.clone(), stale.clone()]).unwrap_err();
+        let message = error.to_string();
+        for expected in [
+            format!("{} (missing)", missing.display()),
+            format!("{} (not executable)", unexecutable.display()),
+            format!("{} (version 0.0.1)", stale.display()),
+        ] {
+            assert!(message.contains(&expected), "{message}");
+        }
     }
 
     #[test]

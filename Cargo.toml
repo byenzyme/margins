@@ -53,11 +53,11 @@ required-features = ["recall"]
 [features]
 default = ["audio-capture"]
 audio-capture = ["margins-capture/audio-capture"]
-# The public manifest and lockfile contain no private git source. Official
-# builds use scripts/with-private-recall to inject the pinned optional engine.
+# The Margins client of the shipped `enzyme` CLI (indexing, recall, hosted
+# generator credentials). Off in the portable lane, which needs no enzyme binary.
 recall = ["dep:reqwest", "dep:tokio"]
-# In-process llama.cpp generation for offline thematic bridges. Kept separate
-# so recall policy and lookup tests need no native C/C++ inference toolchain.
+# Offer offline thematic bridges: setup provisions the local catalyst model
+# that the shipped enzyme (built with local-llm) runs with `--llm local`.
 recall-local-model = ["recall"]
 parakeet-asr = ["margins-cli/parakeet-onnx", "margins-media/parakeet-onnx", "margins-media/model-download", "margins-capture/parakeet-asr"]
 parakeet-asr-dynamic = ["parakeet-asr", "margins-media/parakeet-onnx-dynamic"]
@@ -97,7 +97,6 @@ tempfile = "3"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-ctor = "0.2.9"
 hound = "3.5"
 margins-capture = { path = "crates/public/margins-capture", features = ["test-support"] }
 margins-workflows = { path = "crates/public/margins-workflows", features = ["test-support"] }

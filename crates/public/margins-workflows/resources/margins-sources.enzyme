@@ -4,7 +4,9 @@
 //
 // Each kind turns a Workspace source into the SQLite source Enzyme indexes,
 // read from the Workspace's ledger at
-// $MARGINS_HOME/workspaces/<workspace>/ledger.db. `accepts` names fields that
+// $MARGINS_HOME/workspaces/<workspace>/ledger.db. Each record's document is
+// sqlite:<source>/<lowercase hex of its id>, so Margins can read the record
+// back from a recall hit. `accepts` names fields that
 // Margins reads when it syncs; Enzyme ignores them.
 
 // One document per synced email thread. Its people are the thread's
@@ -14,6 +16,7 @@ source kind google-mail {
   accepts query, backfill days
   database "{home}/workspaces/{workspace}/ledger.db"
   query """SELECT te.thread_id AS id,
+       'sqlite:' || {source} || '/' || lower(hex(te.thread_id)) AS source_ref,
        CAST(strftime('%s', te.occurred_to) AS INTEGER) * 1000 AS occurred_at_ms,
        te.body_text AS body,
        COALESCE((SELECT json_group_array(ordered.participant) FROM (
@@ -38,6 +41,7 @@ WHERE te.connector_id = 'email'
   AND te.source_account = {account}
   AND te.tombstoned_at IS NULL"""
   id "id"
+  document ref "source_ref"
   who json_array "participants"
   when "occurred_at_ms" unit ms
   what "body"
@@ -49,6 +53,7 @@ source kind google-calendar {
   accepts lookback days, lookahead days
   database "{home}/workspaces/{workspace}/ledger.db"
   query """SELECT ce.source_id AS id,
+       'sqlite:' || {source} || '/' || lower(hex(ce.source_id)) AS source_ref,
        CAST(strftime('%s', ce.occurred_from) AS INTEGER) * 1000 AS occurred_at_ms,
        ce.title,
        ce.body_text AS body,
@@ -71,6 +76,7 @@ WHERE ce.connector_id = 'gcal'
   AND julianday(ce.occurred_from)
       <= julianday(json_extract(c.scope_boundary_json, '$.occurred_to'))"""
   id "id"
+  document ref "source_ref"
   who json_array "participants"
   when "occurred_at_ms" unit ms
   what ["title", "body"]
@@ -81,6 +87,7 @@ source kind google-meet {
   needs account
   database "{home}/workspaces/{workspace}/ledger.db"
   query """SELECT ed.source_id AS id,
+       'sqlite:' || {source} || '/' || lower(hex(ed.source_id)) AS source_ref,
        CAST(strftime('%s', ed.occurred_at) AS INTEGER) * 1000 AS occurred_at_ms,
        ed.title,
        ed.body_text AS body,
@@ -98,6 +105,7 @@ WHERE ed.connector_id = 'google_meet'
   AND ed.source_account = {account}
   AND ed.tombstoned_at IS NULL"""
   id "id"
+  document ref "source_ref"
   who json_array "participants"
   when "occurred_at_ms" unit ms
   what ["title", "body"]
@@ -109,6 +117,7 @@ source kind granola {
   accepts time range, workspace only
   database "{home}/workspaces/{workspace}/ledger.db"
   query """SELECT ed.source_id AS id,
+       'sqlite:' || {source} || '/' || lower(hex(ed.source_id)) AS source_ref,
        CAST(strftime('%s', ed.occurred_at) AS INTEGER) * 1000 AS occurred_at_ms,
        ed.title,
        ed.body_text AS body,
@@ -126,6 +135,7 @@ WHERE ed.connector_id = 'granola'
   AND ed.source_account = {account}
   AND ed.tombstoned_at IS NULL"""
   id "id"
+  document ref "source_ref"
   who json_array "participants"
   when "occurred_at_ms" unit ms
   what ["title", "body"]

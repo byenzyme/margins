@@ -14,7 +14,6 @@
 //! the recall corpus and never changes Markdown document identity.
 
 use anyhow::{Context, Result};
-use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -88,24 +87,27 @@ pub fn sqlite_document_ref_prefix(source_name: &str) -> String {
     format!("sqlite:{}/", sqlite_source_namespace(source_name))
 }
 
-/// The document ref Enzyme gives the ledger record `id` of a source declared
-/// as `source_name`: `sqlite:<name>/<sha256>`, hashing the name's length
-/// (little-endian `u64`), the name, and the JSON id tuple
-/// `[{"type":"text","value":id}]`. A kind template cannot name its
-/// declaration, so it cannot supply a readable `document ref` column.
-pub fn sqlite_document_ref(source_name: &str, id: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update((source_name.len() as u64).to_le_bytes());
-    hasher.update(source_name.as_bytes());
-    hasher.update(
-        serde_json::to_vec(&serde_json::json!([{ "type": "text", "value": id }]))
-            .expect("serializing a JSON literal cannot fail"),
-    );
-    format!(
-        "{}{:x}",
-        sqlite_document_ref_prefix(source_name),
-        hasher.finalize()
-    )
+/// The document ref of ledger record `id` in the source declared as
+/// `source_name`: `sqlite:<name>/<lowercase hex of id>`, which the kinds in
+/// `margins-sources.enzyme` emit through `document ref` (the in-process
+/// Margins used the same refs, so existing indexes keep them).
+pub fn ledger_document_ref(source_name: &str, id: &str) -> String {
+    let hex: String = id.bytes().map(|byte| format!("{byte:02x}")).collect();
+    format!("{}{hex}", sqlite_document_ref_prefix(source_name))
+}
+
+/// The ledger record id behind a [`ledger_document_ref`], if `document_ref`
+/// belongs to `source_name`.
+pub fn ledger_record_id(source_name: &str, document_ref: &str) -> Option<String> {
+    let hex = document_ref.strip_prefix(&sqlite_document_ref_prefix(source_name))?;
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    String::from_utf8(bytes).ok()
 }
 
 #[cfg(test)]
@@ -245,11 +247,15 @@ workspace "practice" {
     }
 
     #[test]
-    fn sqlite_document_refs_hash_like_the_engine() {
+    fn ledger_document_refs_are_readable_and_round_trip() {
         assert_eq!(sqlite_source_namespace("my mail"), "my%20mail");
-        let reference = sqlite_document_ref("mail", "t1");
-        assert!(reference.starts_with("sqlite:mail/"), "{reference}");
-        assert_eq!(reference.len(), "sqlite:mail/".len() + 64);
-        assert_ne!(reference, sqlite_document_ref("mail2", "t1"));
+        assert_eq!(ledger_document_ref("mail", "t1"), "sqlite:mail/7431");
+        for id in ["relay-thread-0", "événement/42", ""] {
+            let reference = ledger_document_ref("mail", id);
+            assert_eq!(ledger_record_id("mail", &reference).as_deref(), Some(id));
+            assert_eq!(ledger_record_id("mail2", &reference), None);
+        }
+        assert_eq!(ledger_record_id("mail", "sqlite:mail/zz"), None);
+        assert_eq!(ledger_record_id("mail", "sqlite:mail/7"), None);
     }
 }

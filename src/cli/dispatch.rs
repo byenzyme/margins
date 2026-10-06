@@ -90,7 +90,7 @@ fn official_capabilities_json() -> serde_json::Value {
     })
 }
 
-/// Side-effect-free packaged-binary probe used by the private release pipeline.
+/// Side-effect-free packaged-binary probe used by the release pipeline.
 ///
 /// Keeping this command in the private composition (rather than the public CLI
 /// parser) makes a public-only binary with its no-capture service unable to
@@ -112,9 +112,6 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    if let Err(error) = crate::initialize_sqlite_runtime() {
-        return report_error(&format!("SQLite runtime initialization failed: {error:#}"));
-    }
     let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
     if let Some(code) = release_smoke(&args) {
         return code;
