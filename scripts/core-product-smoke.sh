@@ -40,6 +40,11 @@ Options:
 Environment:
   MARGINS_CORE_PRODUCT_BIN       Existing binary to test instead of target release path
   MARGINS_CORE_PRODUCT_LOG_DIR   Directory for logs (default: /tmp/margins-core-product-smoke.*)
+  MARGINS_CORE_PRODUCT_OAUTH_CLIENT
+                                 auto (default), embedded, or runtime-dummy: how
+                                 the release smoke checks the Google OAuth client;
+                                 auto uses a runtime dummy only when the build has
+                                 no embedded client (see smoke-official-cli.sh)
   MARGINS_FLUID_COREML_MODEL_DIR Explicit FluidAudio CoreML model path for live smoke
   KEEP_MARGINS_CORE_PRODUCT_SMOKE=1 keeps the live temp tree
 
@@ -397,9 +402,22 @@ EOF
   run_logged "12a-workspace-new" \
     env HOME="$workspace_root/home" MARGINS_HOME="$workspace_root/margins-home" \
     "$binary" workspace new core-product-smoke --home "$workspace_root/notes"
-  run_logged "12b-workspace-scan" \
+  # Setup is preset-only (docs/setup-e2e-lanes.md): plan the managed
+  # margins-meetings preset with the pinned engine and apply the reviewed plan.
+  local enzyme_bin="${MARGINS_ENZYME_BIN:-}"
+  if [ -z "$enzyme_bin" ]; then
+    enzyme_bin="$("$REPO_ROOT/scripts/enzyme-bin")" || die "scripts/enzyme-bin failed; set MARGINS_ENZYME_BIN"
+  fi
+  # The plan is stdout only; run_logged's log also carries stderr.
+  run_logged "12b-workspace-preset-plan" \
+    bash -c 'out="$1"; shift; "$@" > "$out"' _ "$workspace_root/plan.json" \
     env HOME="$workspace_root/home" MARGINS_HOME="$workspace_root/margins-home" \
-    "$binary" --workspace core-product-smoke scan
+    MARGINS_ENZYME_BIN="$enzyme_bin" \
+    "$binary" --workspace core-product-smoke workspace plan --preset margins-meetings --json
+  run_logged "12b-workspace-preset-apply" \
+    env HOME="$workspace_root/home" MARGINS_HOME="$workspace_root/margins-home" \
+    MARGINS_ENZYME_BIN="$enzyme_bin" \
+    "$binary" --workspace core-product-smoke workspace apply --plan "$workspace_root/plan.json" --json
   run_logged "12c-workspace-status" \
     env HOME="$workspace_root/home" MARGINS_HOME="$workspace_root/margins-home" \
     "$binary" --workspace core-product-smoke workspace status --json
@@ -495,8 +513,31 @@ fi
 BINARY="$(binary_path)"
 [ -x "$BINARY" ] || die "binary is not executable: $BINARY"
 log "binary=$BINARY"
-run_logged "11-release-smoke" "$REPO_ROOT/scripts/smoke-official-cli.sh" "$BINARY"
-"$BINARY" __release-smoke > "$LOG_ROOT/release-smoke.json"
+# A local build has no embedded Google OAuth client unless it was built with
+# the MARGINS_GOOGLE_OAUTH_CLIENT_JSON secret. `auto` checks the embedded
+# client and, only when it is missing, reruns with the documented runtime dummy
+# (see scripts/smoke-official-cli.sh); the release action always checks the
+# embedded client.
+smoke_home="$(mktemp -d "$LOG_ROOT/release-smoke-home.XXXXXX")"
+env -u MARGINS_GOOGLE_OAUTH_CLIENT_JSON -u MARGINS_GOOGLE_OAUTH_CLIENT_FILE \
+  HOME="$smoke_home" MARGINS_HOME="$smoke_home/.margins" \
+  "$BINARY" __release-smoke > "$LOG_ROOT/release-smoke.json"
+case "${MARGINS_CORE_PRODUCT_OAUTH_CLIENT:-auto}" in
+  auto)
+    if python3 -c 'import json, sys; sys.exit(json.load(open(sys.argv[1])).get("oauth_client") != "valid")' \
+      "$LOG_ROOT/release-smoke.json"; then
+      oauth_mode=embedded
+    else
+      oauth_mode=runtime-dummy
+      log "NOTE release-smoke: no embedded Google OAuth client in this build; using the runtime dummy (embedded client unverified)"
+    fi
+    ;;
+  embedded|runtime-dummy) oauth_mode="$MARGINS_CORE_PRODUCT_OAUTH_CLIENT" ;;
+  *) die "MARGINS_CORE_PRODUCT_OAUTH_CLIENT must be auto, embedded, or runtime-dummy" ;;
+esac
+run_logged "11-release-smoke" \
+  env MARGINS_SMOKE_OAUTH_CLIENT="$oauth_mode" "$REPO_ROOT/scripts/smoke-official-cli.sh" "$BINARY"
+[ ! -e "$smoke_home/.margins" ] || die "__release-smoke wrote to its Margins home"
 
 if [ "$RUN_WORKSPACE" = "1" ]; then
   run_workspace_structural_smoke "$BINARY"

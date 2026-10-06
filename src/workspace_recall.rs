@@ -69,9 +69,12 @@ mod tests {
     #[test]
     fn markdown_document_identity_follows_the_workspace_language() {
         let temp = tempfile::tempdir().unwrap();
-        let margins_home = temp.path().join("margins");
-        let notes = temp.path().join("notes");
-        let reference = temp.path().join("reference");
+        // Workspaces record canonical Source paths; on macOS the temp dir is
+        // under the /var -> /private/var symlink.
+        let root = temp.path().canonicalize().unwrap();
+        let margins_home = root.join("margins");
+        let notes = root.join("notes");
+        let reference = root.join("reference");
         std::fs::create_dir_all(&notes).unwrap();
         std::fs::create_dir_all(&reference).unwrap();
         let mut workspace =

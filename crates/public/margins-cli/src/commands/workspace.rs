@@ -72,7 +72,7 @@ pub fn new(
 
 pub fn list(json: bool, stdout: &mut dyn Write) -> Result<(), CliError> {
     let home = workspace::margins_home().map_err(CliError::from_anyhow)?;
-    let workspaces = workspace::list_workspace_entries(&home).map_err(CliError::from_anyhow)?;
+    let workspaces = workspace::inspect_workspace_entries(&home).map_err(CliError::from_anyhow)?;
     let default = workspace::default_workspace(&home).map_err(CliError::from_anyhow)?;
     if json {
         let entries = workspaces

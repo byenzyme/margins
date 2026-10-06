@@ -1,7 +1,5 @@
 use anyhow::{Context, Result};
 use margins_workflows::machine_config;
-use std::fs;
-use std::io::{self, Write};
 use std::path::Path;
 use toml_edit::{value, DocumentMut, Item, Table};
 
@@ -71,56 +69,21 @@ pub(super) fn remember_selection(
 }
 
 fn save_at(home: &Path, preference: &InputPreference) -> Result<()> {
-    let _lock = machine_config::lock_machine(home)?;
-    machine_config::migrate_locked(home)?;
-    let path = machine_config::machine_config_path(home);
-    let existing_permissions = match fs::metadata(&path) {
-        Ok(metadata) => Some(metadata.permissions()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
-    };
-    let raw = match fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
-    };
-    let mut document = if raw.trim().is_empty() {
-        DocumentMut::new()
-    } else {
-        raw.parse::<DocumentMut>()
-            .with_context(|| format!("parsing {}", path.display()))?
-    };
-    if document.get("audio").is_none() {
-        document["audio"] = Item::Table(Table::new());
-    }
-    let audio = document["audio"]
-        .as_table_mut()
-        .context("machine audio config must be a table")?;
-    audio["input_name"] = value(&preference.name);
-    if let Some(uid) = &preference.uid {
-        audio["input_uid"] = value(uid);
-    } else {
-        audio.remove("input_uid");
-    }
-    let mut temporary = tempfile::NamedTempFile::new_in(home)?;
-    if let Some(permissions) = existing_permissions {
-        temporary.as_file().set_permissions(permissions)?;
-    } else {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            temporary
-                .as_file()
-                .set_permissions(fs::Permissions::from_mode(0o644))?;
+    machine_config::update_machine_document(home, |document| {
+        if document.get("audio").is_none() {
+            document["audio"] = Item::Table(Table::new());
         }
-    }
-    temporary.write_all(document.to_string().as_bytes())?;
-    temporary.as_file().sync_all()?;
-    temporary
-        .persist(&path)
-        .map_err(|error| error.error)
-        .with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
+        let audio = document["audio"]
+            .as_table_mut()
+            .context("machine audio config must be a table")?;
+        audio["input_name"] = value(&preference.name);
+        if let Some(uid) = &preference.uid {
+            audio["input_uid"] = value(uid);
+        } else {
+            audio.remove("input_uid");
+        }
+        Ok(())
+    })
 }
 
 /// A saved device may still appear in the device list while refusing an open.
@@ -196,13 +159,14 @@ pub(super) fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn choice_persists_without_erasing_other_machine_settings() {
         let home = tempfile::tempdir().unwrap();
         fs::write(
             home.path().join("config.toml"),
-            "# keep me\n[llm]\nmode = 'local'\n",
+            "# keep me\n[workspace]\n# and me\ndefault = \"notes\"\n\n# engine\n[llm]\nmode = 'local'\n",
         )
         .unwrap();
         let choice = InputPreference {
@@ -211,10 +175,16 @@ mod tests {
         };
         save_at(home.path(), &choice).unwrap();
         assert_eq!(load_at(home.path()).unwrap(), Some(choice.clone()));
-        // The legacy machine file migrated: host preferences stay together,
-        // the generator moved to the engine settings program.
+        // The legacy machine file migrated: host preferences stay together
+        // with their comments, the generator moved to the engine settings
+        // program, and its comment stays in the retired original.
         let raw = fs::read_to_string(home.path().join("margins.toml")).unwrap();
-        assert!(raw.contains("# keep me"));
+        assert!(raw.contains("# keep me\n[workspace]"), "{raw}");
+        assert!(raw.contains("# and me\ndefault = \"notes\""), "{raw}");
+        assert!(!raw.contains("# engine"), "{raw}");
+        assert!(fs::read_to_string(home.path().join("config.toml.migrated"))
+            .unwrap()
+            .contains("# engine"));
         assert!(raw.contains("input_name"));
         assert!(fs::read_to_string(home.path().join("configs/settings.enzyme"))
             .unwrap()
@@ -228,11 +198,12 @@ mod tests {
                     .permissions()
                     .mode()
                     & 0o777,
-                0o644
+                0o600,
+                "machine config can name accounts, so it is owner-only"
             );
             fs::set_permissions(
                 home.path().join("margins.toml"),
-                fs::Permissions::from_mode(0o600),
+                fs::Permissions::from_mode(0o644),
             )
             .unwrap();
             save_at(home.path(), &choice).unwrap();

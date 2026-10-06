@@ -913,14 +913,17 @@ impl ResolvedWorkspace {
 }
 
 /// Machine preference used by clients outside any declared Source folder.
+/// Never writes; see [`machine_config::read_machine_config_text`].
 pub fn default_workspace(margins_home: &Path) -> Result<Option<String>> {
-    machine_config::ensure_migrated(margins_home)?;
-    default_workspace_locked(margins_home)
+    default_workspace_in(&read_machine_config(margins_home)?)
 }
 
 /// [`default_workspace`] for a caller holding the machine lock.
 fn default_workspace_locked(margins_home: &Path) -> Result<Option<String>> {
-    let config = read_machine_config_locked(margins_home)?;
+    default_workspace_in(&read_machine_config_locked(margins_home)?)
+}
+
+fn default_workspace_in(config: &toml::Table) -> Result<Option<String>> {
     let selected = config
         .get("workspace")
         .and_then(|value| value.get("default"));
@@ -947,15 +950,19 @@ pub fn set_default_workspace(margins_home: &Path, id: &str) -> Result<()> {
     })
 }
 
+/// Machine `margins.toml` as a migration would leave it. Never writes.
 fn read_machine_config(margins_home: &Path) -> Result<toml::Table> {
-    machine_config::ensure_migrated(margins_home)?;
-    read_machine_config_locked(margins_home)
+    parse_machine_config(machine_config::read_machine_config_text(margins_home)?)
 }
 
-/// Machine `margins.toml` for a caller holding the machine lock (or after
-/// [`machine_config::ensure_migrated`]).
+/// Machine `margins.toml` for a caller holding the machine lock (after
+/// [`machine_config::migrate_locked`]).
 fn read_machine_config_locked(margins_home: &Path) -> Result<toml::Table> {
-    match machine_config::read_machine_config_text_locked(margins_home)? {
+    parse_machine_config(machine_config::read_machine_config_text_locked(margins_home)?)
+}
+
+fn parse_machine_config(raw: Option<String>) -> Result<toml::Table> {
+    match raw {
         Some(raw) if !raw.trim().is_empty() => {
             toml::from_str(&raw).context("invalid machine config")
         }
@@ -1559,7 +1566,45 @@ pub fn resolve_at(margins_home: &Path, id: &str) -> Result<ResolvedWorkspace> {
         migrate_workspace(margins_home, id)?;
     }
     adopt_engine_index_name(&state_dir)?;
-    let text = std::fs::read_to_string(&program_path)
+    let program = read_program(&program_path, id)?;
+    resolved_from_program(margins_home, state_dir, program_path, program)
+}
+
+/// [`resolve_at`] for read-only inspection: never writes the Margins home. A
+/// retired `config.toml` is converted in memory (see
+/// [`preview_workspace_migration`]) and nothing is migrated, retired, or
+/// renamed; commands that need a writable home use [`resolve_at`].
+pub fn inspect_at(margins_home: &Path, id: &str) -> Result<ResolvedWorkspace> {
+    if is_reserved_id(id) {
+        return Err(reserved_id_error(id));
+    }
+    let state_dir = workspace_state_dir(margins_home, id)?;
+    let program_path = workspace_program_path(margins_home, id)?;
+    let legacy_path = state_dir.join(LEGACY_WORKSPACE_CONFIG);
+    if program_path.exists() || !legacy_path.is_file() {
+        let program = read_program(&program_path, id)?;
+        return resolved_from_program(margins_home, state_dir, program_path, program);
+    }
+    let legacy = read_legacy_config(&legacy_path)?;
+    if legacy.id != id {
+        bail!("workspace directory '{id}' contains config for '{}'", legacy.id);
+    }
+    let (program, _) = program_from_legacy_config(&legacy)
+        .with_context(|| format!("reading {}", legacy_path.display()))?;
+    let mut resolved = resolved_from_program(margins_home, state_dir, program_path, program)
+        .with_context(|| format!("reading {}", legacy_path.display()))?;
+    // A migration would move these to machine config; show them as it would.
+    if resolved.config.name.is_none() {
+        resolved.config.name = legacy.name;
+    }
+    if legacy.retention != RetentionPolicy::default() {
+        resolved.config.retention = legacy.retention;
+    }
+    Ok(resolved)
+}
+
+fn read_program(program_path: &Path, id: &str) -> Result<WorkspaceProgram> {
+    let text = std::fs::read_to_string(program_path)
         .with_context(|| format!("workspace '{id}' not found at {}", program_path.display()))?;
     let program = WorkspaceProgram::parse(&text)
         .with_context(|| format!("invalid workspace program {}", program_path.display()))?;
@@ -1570,7 +1615,7 @@ pub fn resolve_at(margins_home: &Path, id: &str) -> Result<ResolvedWorkspace> {
             program.id()
         );
     }
-    resolved_from_program(margins_home, state_dir, program_path, program)
+    Ok(program)
 }
 
 fn resolved_from_program(
@@ -1936,6 +1981,29 @@ pub fn list_workspaces(margins_home: &Path) -> Result<Vec<ResolvedWorkspace>> {
 pub fn list_workspace_entries(
     margins_home: &Path,
 ) -> Result<Vec<(String, Result<ResolvedWorkspace>)>> {
+    Ok(declared_workspace_ids(margins_home)?
+        .into_iter()
+        .map(|id| {
+            let resolved = resolve_at(margins_home, &id);
+            (id, resolved)
+        })
+        .collect())
+}
+
+/// [`list_workspace_entries`] for read-only inspection; see [`inspect_at`].
+pub fn inspect_workspace_entries(
+    margins_home: &Path,
+) -> Result<Vec<(String, Result<ResolvedWorkspace>)>> {
+    Ok(declared_workspace_ids(margins_home)?
+        .into_iter()
+        .map(|id| {
+            let resolved = inspect_at(margins_home, &id);
+            (id, resolved)
+        })
+        .collect())
+}
+
+fn declared_workspace_ids(margins_home: &Path) -> Result<std::collections::BTreeSet<String>> {
     let mut ids = std::collections::BTreeSet::new();
     let configs = margins_home.join(CONFIGS_DIR);
     if configs.exists() {
@@ -1959,13 +2027,7 @@ pub fn list_workspace_entries(
         }
     }
     ids.extend(legacy_workspace_ids(margins_home)?);
-    Ok(ids
-        .into_iter()
-        .map(|id| {
-            let resolved = resolve_at(margins_home, &id);
-            (id, resolved)
-        })
-        .collect())
+    Ok(ids)
 }
 
 /// Result of [`rename_reserved_workspace`].
@@ -2481,7 +2543,9 @@ fn write_program(margins_home: &Path, id: &str, text: &str) -> Result<()> {
     if !plan.is_noop() {
         store.apply(&plan).map_err(apply_error)?;
     }
-    Ok(())
+    // The store keeps an existing file's mode and creates new ones with the
+    // process umask; a program can name accounts, so it is owner-only.
+    restrict_to_owner(&path)
 }
 
 fn plan_error(error: anyhow::Error, id: &str) -> anyhow::Error {
@@ -3086,10 +3150,14 @@ fn lock_workspace_ready(state_dir: &Path) -> Result<File> {
     Ok(lock)
 }
 
+/// Atomically replace a Margins home config file. Config files can name
+/// accounts, so they are owner-only: a new file is 0600 and an existing file
+/// keeps its mode restricted to at most 0600, so a stricter mode survives.
 pub(crate) fn atomic_write(path: &Path, body: &[u8]) -> Result<()> {
-    if path
-        .metadata()
-        .is_ok_and(|metadata| metadata.permissions().readonly())
+    let existing = path.metadata().ok();
+    if existing
+        .as_ref()
+        .is_some_and(|metadata| metadata.permissions().readonly())
     {
         bail!("writing {}: destination is read-only", path.display());
     }
@@ -3099,6 +3167,17 @@ pub(crate) fn atomic_write(path: &Path, body: &[u8]) -> Result<()> {
     std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("creating temporary config in {}", parent.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = existing.map_or(OWNER_ONLY_MODE, |metadata| {
+            metadata.permissions().mode() & OWNER_ONLY_MODE
+        });
+        temporary
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(mode))
+            .with_context(|| format!("setting permissions for {}", path.display()))?;
+    }
     temporary
         .write_all(body)
         .with_context(|| format!("writing temporary file for {}", path.display()))?;
@@ -3111,6 +3190,30 @@ pub(crate) fn atomic_write(path: &Path, body: &[u8]) -> Result<()> {
         .map_err(|error| error.error)
         .with_context(|| format!("atomically replacing {}", path.display()))?;
     sync_parent_directory(path)
+}
+
+/// The loosest mode of a Margins home config file.
+pub(crate) const OWNER_ONLY_MODE: u32 = 0o600;
+
+/// Restrict a config file written by another writer (the engine's
+/// `ConfigStore`) to at most 0600, keeping a stricter mode.
+fn restrict_to_owner(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path)
+            .with_context(|| format!("reading {}", path.display()))?
+            .permissions()
+            .mode()
+            & 0o7777;
+        if mode & !OWNER_ONLY_MODE != 0 {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & OWNER_ONLY_MODE))
+                .with_context(|| format!("setting permissions for {}", path.display()))?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 pub(crate) fn sync_parent_directory(path: &Path) -> Result<()> {
@@ -4710,6 +4813,81 @@ entities = [
             .actions
             .iter()
             .any(|action| matches!(action, WorkspacePlanAction::UpdateProgram { .. })));
+    }
+
+    /// Read-only inspection shows a retired config as its migration would,
+    /// without migrating, retiring, or renaming anything.
+    #[test]
+    fn inspection_never_writes_a_legacy_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let margins_home = temp.path().join("machine");
+        let notes = temp.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        let body = legacy_home(&notes, "").replace("id = \"legacy\"", "id = \"legacy\"\nname = \"Legacy\"");
+        let legacy_path = write_legacy(&margins_home, "legacy", &body);
+        std::fs::write(legacy_path.with_file_name(LEGACY_INDEX_DB), b"index").unwrap();
+        std::fs::write(margins_home.join("config.toml"), "[workspace]\ndefault = \"legacy\"\n").unwrap();
+        let before = walkdir_files(temp.path());
+
+        let entries = inspect_workspace_entries(&margins_home).unwrap();
+        assert_eq!(entries.len(), 1);
+        let inspected = entries[0].1.as_ref().unwrap();
+        assert_eq!(inspected.config.id, "legacy");
+        assert_eq!(inspected.config.name.as_deref(), Some("Legacy"));
+        assert_eq!(default_workspace(&margins_home).unwrap().as_deref(), Some("legacy"));
+        assert_eq!(before, walkdir_files(temp.path()), "inspection wrote the home");
+
+        // Resolution, which needs a writable home, still migrates.
+        let resolved = resolve_at(&margins_home, "legacy").unwrap();
+        assert_eq!(resolved.config, inspected.config);
+        assert!(workspace_program_path(&margins_home, "legacy").unwrap().is_file());
+        assert_eq!(
+            inspect_at(&margins_home, "legacy").unwrap().config,
+            resolved.config
+        );
+    }
+
+    fn walkdir_files(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path.clone());
+                    out.push((path, Vec::new()));
+                } else {
+                    out.push((path.clone(), std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn workspace_programs_are_owner_only_and_keep_stricter_modes() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let temp = tempfile::tempdir().unwrap();
+        let margins_home = temp.path().join("machine");
+        let notes = temp.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        let mut workspace = create_workspace(&margins_home, "modes", None, &notes).unwrap();
+        let program = workspace_program_path(&margins_home, "modes").unwrap();
+        assert_eq!(mode(&program), 0o600, "a new program is owner-only");
+
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut policy = workspace.config.policy.clone();
+        policy.excluded_folders.push("archive".to_string());
+        update_policy(&mut workspace, policy.clone()).unwrap();
+        assert_eq!(mode(&program), 0o600, "a looser program is restricted");
+
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o400)).unwrap();
+        policy.excluded_folders.push("drafts".to_string());
+        assert!(update_policy(&mut workspace, policy).is_err());
+        assert_eq!(mode(&program), 0o400, "a stricter mode is kept");
     }
 
     #[test]

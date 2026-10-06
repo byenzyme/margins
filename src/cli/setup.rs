@@ -219,16 +219,33 @@ fn run_setup_with(
             !hosted_ready || selection.local_model == SetupLocalModelPolicyArg::Always;
         if install_local {
             match provisioner.provision_local_catalyst() {
-                Ok(Some(path)) => setup_status(
-                    stderr,
-                    "local catalyst",
-                    true,
-                    &format!(
-                        "installed at {} ({})",
-                        path.display(),
-                        human_bytes(std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0))
-                    ),
-                )?,
+                Ok(Some(path)) => {
+                    // An installed local model is the generator: chosen by
+                    // `--local-model always`, or the fallback without hosted.
+                    let selected = margins_home
+                        .context("could not resolve MARGINS_HOME")
+                        .and_then(|home| {
+                            margins_workflows::machine_config::set_generation(home, "local")
+                        });
+                    match selected {
+                        Ok(()) => setup_status(
+                            stderr,
+                            "local catalyst",
+                            true,
+                            &format!(
+                                "installed at {} ({})",
+                                path.display(),
+                                human_bytes(
+                                    std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+                                )
+                            ),
+                        )?,
+                        Err(error) => {
+                            local_model_failed = true;
+                            setup_status(stderr, "local catalyst", false, &format!("{error:#}"))?;
+                        }
+                    }
+                }
                 Ok(None) => setup_status(
                     stderr,
                     "local catalyst",

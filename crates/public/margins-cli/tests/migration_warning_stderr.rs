@@ -26,6 +26,7 @@ fn migrate(margins_home: &Path, rust_log: Option<&str>) -> Output {
     command
         .args(["workspace", "migrate", "--json"])
         .env_clear()
+        .env("HOME", margins_home.parent().unwrap())
         .env("MARGINS_HOME", margins_home);
     if let Some(filter) = rust_log {
         command.env("RUST_LOG", filter);

@@ -839,6 +839,7 @@ fn init_fails_closed_without_a_usable_generator() {
         .args(["--workspace", "init-status", "init"])
         .env_clear()
         .env("MARGINS_HOME", &margins_home)
+        .env("HOME", temp.path())
         .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .output()
         .unwrap();
@@ -943,6 +944,7 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
         .env_clear()
         .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .env("MARGINS_HOME", &margins_home)
+        .env("HOME", temp.path())
         .env("MARGINS_COREML_PREPROCESSOR_CACHE_DIR", &preprocessor_cache)
         .output()
         .unwrap();
@@ -973,6 +975,7 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
         .env_clear()
         .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .env("MARGINS_HOME", &margins_home)
+        .env("HOME", temp.path())
         .env("MARGINS_COREML_PREPROCESSOR_CACHE_DIR", &preprocessor_cache)
         .output()
         .unwrap();
@@ -1003,6 +1006,7 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
         .env_clear()
         .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .env("MARGINS_HOME", &margins_home)
+        .env("HOME", temp.path())
         .env("MARGINS_COREML_PREPROCESSOR_CACHE_DIR", &preprocessor_cache)
         .output()
         .unwrap();
@@ -1036,6 +1040,7 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
         .env_clear()
         .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .env("MARGINS_HOME", &margins_home)
+        .env("HOME", temp.path())
         .env(
             "MARGINS_COREML_PREPROCESSOR_CACHE_DIR",
             &blocked_preprocessor_cache,
@@ -1095,6 +1100,7 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
         .env_clear()
         .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .env("MARGINS_HOME", &margins_home)
+        .env("HOME", temp.path())
         .env("MARGINS_COREML_PREPROCESSOR_CACHE_DIR", &preprocessor_cache)
         .output()
         .unwrap();
@@ -1124,9 +1130,12 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
 #[test]
 #[cfg(feature = "audio-capture")]
 fn packaged_binary_reports_private_native_composition() {
+    let temp = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_margins-private"))
         .arg("__release-smoke")
         .env_remove("MARGINS_PROJECT")
+        .env("HOME", temp.path())
+        .env("MARGINS_HOME", temp.path().join("margins-home"))
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -1154,4 +1163,125 @@ fn packaged_binary_reports_private_native_composition() {
         contract["recall"]["local_model"],
         cfg!(feature = "recall-local-model")
     );
+}
+
+/// Every file, directory, and symlink under `root` with its bytes and mode.
+fn home_snapshot(root: &Path) -> std::collections::BTreeMap<String, (String, Vec<u8>, u32)> {
+    fn walk(
+        root: &Path,
+        dir: &Path,
+        out: &mut std::collections::BTreeMap<String, (String, Vec<u8>, u32)>,
+    ) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let relative = path.strip_prefix(root).unwrap().display().to_string();
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            #[cfg(unix)]
+            let mode = std::os::unix::fs::PermissionsExt::mode(&metadata.permissions());
+            #[cfg(not(unix))]
+            let mode = 0;
+            if metadata.file_type().is_symlink() {
+                let target = fs::read_link(&path).unwrap();
+                let entry = ("symlink".into(), target.display().to_string().into_bytes(), mode);
+                out.insert(relative, entry);
+            } else if metadata.is_dir() {
+                out.insert(relative, ("dir".into(), Vec::new(), mode));
+                walk(root, &path, out);
+            } else {
+                out.insert(relative, ("file".into(), fs::read(&path).unwrap(), mode));
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(root, root, &mut out);
+    out
+}
+
+/// Read-only and diagnostic commands never migrate or write user data, even
+/// against a home that every migration would rewrite: a legacy machine
+/// `config.toml`, a retired Workspace `config.toml`, and a Workspace index
+/// under its pre-engine name.
+#[test]
+fn read_only_commands_leave_a_legacy_home_byte_identical() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let margins_home = home.join(".margins");
+    let notes = home.join("notes");
+    fs::create_dir_all(&notes).unwrap();
+    fs::write(notes.join("note.md"), "# Note\n").unwrap();
+    fs::create_dir_all(&margins_home).unwrap();
+    fs::write(
+        margins_home.join("config.toml"),
+        "# machine preferences\n[llm]\nmode = \"local\"\n\n[workspace]\ndefault = \"legacy\"\n",
+    )
+    .unwrap();
+    let state = margins_home.join("workspaces/legacy");
+    fs::create_dir_all(&state).unwrap();
+    fs::write(
+        state.join("config.toml"),
+        format!(
+            "id = \"legacy\"\nname = \"Legacy\"\n\n[bindings.home]\nkind = \"notes\"\npath = {:?}\nrole = \"home\"\n",
+            notes.canonicalize().unwrap()
+        ),
+    )
+    .unwrap();
+    fs::write(state.join("index.db"), b"not a database").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(margins_home.join("config.toml"), fs::Permissions::from_mode(0o600))
+            .unwrap();
+    }
+    let before = home_snapshot(temp.path());
+
+    let commands: &[&[&str]] = &[
+        &["__release-smoke"],
+        &["capabilities"],
+        &["--version"],
+        &["--help"],
+        &["guide", "workspace-setup"],
+        &["workspace", "list", "--json"],
+        &["workspace", "default", "--json"],
+        &["connect", "status", "--json"],
+    ];
+    for args in commands {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_margins-private"));
+        command
+            .args(*args)
+            .current_dir(&notes)
+            .env_clear()
+            .env("HOME", &home)
+            .env("MARGINS_HOME", &margins_home)
+            .env("ENZYME_HOME", temp.path().join("poisoned-enzyme-home"));
+        #[cfg(feature = "recall")]
+        command.env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin());
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let after = home_snapshot(temp.path());
+        assert!(
+            before == after,
+            "{args:?} changed the home: added {:?}, removed {:?}, modified {:?}",
+            after.keys().filter(|key| !before.contains_key(*key)).collect::<Vec<_>>(),
+            before.keys().filter(|key| !after.contains_key(*key)).collect::<Vec<_>>(),
+            before
+                .iter()
+                .filter(|(key, value)| after.get(*key).is_some_and(|other| other != *value))
+                .map(|(key, _)| key)
+                .collect::<Vec<_>>(),
+        );
+        if args == &["workspace", "list", "--json"] {
+            let listed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(listed["default_workspace"], "legacy", "{listed}");
+            assert_eq!(listed["workspaces"][0]["id"], "legacy", "{listed}");
+            assert_eq!(listed["workspaces"][0]["name"], "Legacy", "{listed}");
+        }
+        if args == &["capabilities"] {
+            let capabilities: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(capabilities["catalyst"]["mode"], "local", "{capabilities}");
+        }
+    }
 }

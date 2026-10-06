@@ -54,6 +54,15 @@ REVERSE_DEPENDENTS = {
 SCRIPT_TESTS = {
     "tests/test_cargo_lane.py": ("scripts/cargo-lane",),
     "tests/test_design_docs.py": ("desktop/INTEGRATIONS_",),
+    "tests/test_portable_scripts.py": (
+        "scripts/e2e-",
+        "scripts/core-product-smoke.sh",
+        "install.sh",
+    ),
+    "tests/test_smoke_official_cli.sh": (
+        "scripts/smoke-official-cli.sh",
+        "scripts/core-product-smoke.sh",
+    ),
     "tests/test_setup_e2e_lanes.sh": (
         "scripts/e2e-fresh-workspace-setup.sh",
     ),
