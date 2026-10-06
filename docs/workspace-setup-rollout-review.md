@@ -31,10 +31,18 @@ Quit Margins and stop every other Margins process before this review. `prepare`
 temporarily isolates three kinds of existing state in the private run directory:
 
 - the practice's `.margins/` folder, if present; and
-- the complete `$MARGINS_HOME/workspaces/` registry; and
-- `$MARGINS_HOME/config.toml`, with only legacy `[vaults.*]` and
-  `[workspaces.*]` entries whose note roots overlap this practice removed from
-  the temporary active copy.
+- the complete `$MARGINS_HOME/workspaces/` registry and `configs/` programs; and
+- the machine config set at the `$MARGINS_HOME` root, isolated and restored
+  as one unit: `margins.toml`, a legacy `config.toml`, and any retired
+  `config.toml.migrated[.<n>]`. The active `margins.toml`/`config.toml` get
+  temporary copies with only legacy `[vaults.*]` and `[workspaces.*]` entries
+  whose note roots overlap this practice removed; retired originals are only
+  isolated.
+
+The machine settings programs in `configs/` (`settings.enzyme`,
+`profiles.enzyme`, `margins-sources.enzyme`) are not Workspaces: they stay
+active as copies while the rest of `configs/` is isolated, and the originals
+are restored with it.
 
 The whole registry is isolated—not only the expected Workspace—because unrelated
 Workspace ids affect implicit naming, and a faulty rollout must not be able to
