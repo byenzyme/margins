@@ -76,6 +76,13 @@ PY
 }
 
 make_fixture safe
+# The judge weighs the preset flow, not the retired scan-grounded review.
+grep -F 'managed meetings preset' "$RUN_ROOT/safe/run/judge-prompt.md" >/dev/null
+grep -F 'exact-phrase recall' "$RUN_ROOT/safe/run/judge-prompt.md" >/dev/null
+if grep -Ei 'grounded account|recognition|scan' "$RUN_ROOT/safe/run/judge-prompt.md" >/dev/null; then
+  echo "judge prompt still requires the retired scan-grounded review" >&2
+  exit 1
+fi
 # The rollout's binary migrates the legacy machine config inside the isolation.
 mv "$RUN_ROOT/safe/margins-home/config.toml" "$RUN_ROOT/safe/margins-home/config.toml.migrated"
 printf '[cli]\nnote_agent = "codex"\n' > "$RUN_ROOT/safe/margins-home/margins.toml"
@@ -390,6 +397,56 @@ details = value["preexisting_setup_restoration"]["details"]
 assert value["preexisting_setup_restoration"]["passed"] is True, value
 assert details["global_config_exact"] is True, details
 assert details["config_registry_exact"] is True, details
+PY
+
+# A preset setup keeps readings only for folders the notes have: this practice
+# has Meetings (lowercase on disk) and People but no Projects.
+make_preset_rollout() {
+  local name="$1" extra_reading="$2"
+  local home="$RUN_ROOT/$name/margins-home"
+  mkdir -p "$RUN_ROOT/$name/vault/meetings" "$RUN_ROOT/$name/vault/People" "$home" "$RUN_ROOT/$name/run"
+  printf '# Standup\n' > "$RUN_ROOT/$name/vault/meetings/standup.md"
+  "$HARNESS" prepare \
+    --vault "$RUN_ROOT/$name/vault" \
+    --margins-home "$home" \
+    --run-dir "$RUN_ROOT/$name/run" >/dev/null
+  mkdir -p "$home/configs" "$home/workspaces/notes/captures"
+  printf 'workspace "notes" {\n  source markdown "home" { path "%s" }\n  source margins-captures "captures" { path "%s" }\n\n  remember in folder "meetings" in source "home" create note\n\n  leave out folders { "Templates" "Attachments" }\n\n  learn questions from folder "meetings" about operational\n  learn questions from folder "People" including linked pages about relationships\n%s}\n' \
+    "$RUN_ROOT/$name/vault" "$home/workspaces/notes/captures" "$extra_reading" > "$home/configs/notes.enzyme"
+  printf 'Setup completed.\n' > "$RUN_ROOT/$name/transcript.txt"
+}
+
+make_preset_rollout preset ''
+"$HARNESS" finalize \
+  --run-dir "$RUN_ROOT/preset/run" \
+  --transcript "$RUN_ROOT/preset/transcript.txt" >/dev/null
+python3 - "$RUN_ROOT/preset/run/hard-gates.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1]))
+gate = value["readings_match_notes"]
+assert value["passed"] is True, value
+assert gate["passed"] is True, gate
+[program] = gate["programs"]
+assert program["folder_readings"] == ["meetings", "People"], program
+assert program["readings_without_folder"] == [], program
+assert program["preset_folders_present"] == ["People", "meetings"], program
+assert program["preset_folders_without_reading"] == [], program
+PY
+
+make_preset_rollout dangling '  learn questions from folder "Projects" about decisions\n'
+if "$HARNESS" finalize \
+  --run-dir "$RUN_ROOT/dangling/run" \
+  --transcript "$RUN_ROOT/dangling/transcript.txt" >/dev/null; then
+  echo "expected a reading for a missing folder to fail" >&2
+  exit 1
+fi
+python3 - "$RUN_ROOT/dangling/run/hard-gates.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1]))
+gate = value["readings_match_notes"]
+assert gate["passed"] is False, gate
+assert gate["programs"][0]["readings_without_folder"] == ["Projects"], gate
+assert value["preexisting_setup_restoration"]["passed"] is True, value
 PY
 
 # Restoration refuses when a retired original drifted without a backup.
