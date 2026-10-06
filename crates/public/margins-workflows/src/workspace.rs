@@ -1657,8 +1657,9 @@ pub fn inspect_at(margins_home: &Path, id: &str) -> Result<ResolvedWorkspace> {
         .with_context(|| format!("reading {}", legacy_path.display()))?;
     let mut resolved = resolved_from_program(margins_home, state_dir, program_path, program)
         .with_context(|| format!("reading {}", legacy_path.display()))?;
-    // A migration would move these to machine config; show them as it would.
-    if resolved.config.name.is_none() {
+    // A migration would move these to machine config, the legacy values
+    // winning over machine config; show them as it would.
+    if legacy.name.is_some() {
         resolved.config.name = legacy.name;
     }
     if legacy.retention != RetentionPolicy::default() {
@@ -5003,6 +5004,30 @@ entities = [
             inspect_at(&margins_home, "legacy").unwrap().config,
             resolved.config
         );
+    }
+
+    /// When machine config and a retired config name the Workspace
+    /// differently, the migration writes the retired config's name, so
+    /// inspection shows that one too.
+    #[test]
+    fn inspection_shows_the_legacy_name_the_migration_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let margins_home = temp.path().join("machine");
+        let notes = temp.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        let body = legacy_home(&notes, "")
+            .replace("id = \"legacy\"", "id = \"legacy\"\nname = \"From Legacy\"");
+        write_legacy(&margins_home, "legacy", &body);
+        std::fs::write(
+            margins_home.join(machine_config::MACHINE_CONFIG),
+            "[workspace.names]\nlegacy = \"From Machine\"\n",
+        )
+        .unwrap();
+
+        let inspected = inspect_at(&margins_home, "legacy").unwrap();
+        let migrated = resolve_at(&margins_home, "legacy").unwrap();
+        assert_eq!(migrated.config.name.as_deref(), Some("From Legacy"));
+        assert_eq!(inspected.config.name, migrated.config.name);
     }
 
     fn walkdir_files(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
