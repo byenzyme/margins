@@ -222,13 +222,17 @@ the server together.
   change it is stale. A plan made before `program_plan` existed is refused
   as invalid ("plan again"). A legacy
   `.toml` desired file is converted with the migration rules onto the current
-  program. `workspace compile` emits `margins.workspace.compile.v2` with
-  `desired_program` (no `desired_toml`).
+  program. `workspace plan --preset <name|path>` fills a preset through
+  `enzyme compile --preset --dry-run`, drops folder readings whose folders do
+  not exist, adds the rest to the current program, and adds `program_path` and
+  `preset` (`readings`, `skipped_readings`, `note_folder`) to the plan JSON.
+  (`workspace compile` and `margins.workspace.compile.v2` were removed with the
+  scan, 2026-10-06.)
 - Migration also runs explicitly: `margins workspace migrate [--dry-run] [--json]`.
   Enzyme's implicit folder exclusions (`.git`, `node_modules`, …) are not written.
   With several Markdown sources, unqualified legacy folder references are
-  qualified with the Home source name. `workspace compile` qualifies its
-  Home-relative scan specs the same way and plans them as a view change.
+  qualified with the Home source name. `workspace plan --preset` qualifies
+  preset folder readings the same way and plans them as a view change.
 - `update_program` is emitted only when applying the view actions to the
   current program does not yield the desired program's statements (layout-only
   differences are visible in the diff).

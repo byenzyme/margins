@@ -259,15 +259,11 @@ fn run_inner(
             );
         }
         Some(Command::Workspace {
-            command: WorkspaceCommand::Compile { .. },
-        }) => {
-            return Err(CliError::new(
-                "workspace_compile_unavailable",
-                "this build does not include the Workspace compiler",
-            ));
-        }
-        Some(Command::Workspace {
-            command: WorkspaceCommand::Plan { desired, .. },
+            command:
+                WorkspaceCommand::Plan {
+                    desired: Some(desired),
+                    ..
+                },
         }) => {
             return commands::workspace::plan(
                 workspace_selector.as_deref(),
@@ -275,6 +271,14 @@ fn run_inner(
                 &absolute_from(invocation_dir, &desired),
                 stdout,
             );
+        }
+        Some(Command::Workspace {
+            command: WorkspaceCommand::Plan { desired: None, .. },
+        }) => {
+            return Err(CliError::new(
+                "composition_unavailable",
+                "this build cannot fill presets; install the official Margins CLI, which runs the enzyme engine",
+            ));
         }
         Some(Command::Workspace {
             command: WorkspaceCommand::Migrate { dry_run, json },
@@ -572,12 +576,6 @@ fn run_inner(
                 stdout,
             );
         }
-        Some(Command::Scan) => {
-            return Err(CliError::new(
-                "composition_unavailable",
-                "This public development CLI cannot scan a Margins recall workspace. Install the official Margins CLI (`./install.sh` or a release artifact).",
-            ));
-        }
         Some(Command::Note { print }) => {
             let workspace = workspace_selector.as_deref().or(env_workspace.as_deref());
             return commands::guide::note_handoff(workspace, print, stdout);
@@ -774,7 +772,6 @@ fn run_inner(
         },
         Some(Command::Recall { .. }) => unreachable!("handled before project resolution"),
         Some(Command::Sync { .. }) => unreachable!("handled before project resolution"),
-        Some(Command::Scan) => unreachable!("handled before project resolution"),
         Some(Command::Capabilities) => unreachable!("handled before project resolution"),
         Some(Command::Init) => unreachable!("handled before project resolution"),
         Some(Command::Note { .. }) => unreachable!("handled before project resolution"),

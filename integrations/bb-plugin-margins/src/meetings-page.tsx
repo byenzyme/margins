@@ -32,6 +32,10 @@ function meetingListTitle(value: string) {
   const today = date.toDateString() === new Date().toDateString();
   return `${today ? "Today" : date.toLocaleDateString("en-US", { month: "short", day: "numeric" })} ${meetingTime(value)}`;
 }
+/** `folder:People` reads as "People"; other entity refs stay as written. */
+function readingLabel(reading: string) {
+  return reading.replace(/^folder:/i, "");
+}
 function noteTitle(relativePath: string) {
   const title = relativePath.split(/[\\/]/).at(-1)?.replace(/\.md$/i, "")
     .replace(/^\d{4}-\d{2}-\d{2}[\s_-]+/, "").replace(/[-_]+/g, " ").trim();
@@ -95,7 +99,6 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   const [workspaceOptions, setWorkspaceOptions] = useState<Array<{ id: string; name: string | null }>>([]);
   const [workspaceNotice, setWorkspaceNotice] = useState("");
   const [setupHome, setSetupHome] = useState("");
-  const [setupFolder, setSetupFolder] = useState("inbox");
   const [setupPreview, setSetupPreview] = useState<WorkspaceSetupPreview | null>(null);
   const [setupBusy, setSetupBusy] = useState(false);
   const [resolvedWorkspaceName, setResolvedWorkspaceName] = useState("");
@@ -537,7 +540,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   async function previewSetup() {
     if (!projectId) return;
     setSetupBusy(true); setMessage("");
-    try { setSetupPreview(await rpc.call("previewWorkspaceSetup", { projectId, homeRoot: setupHome, noteFolder: setupFolder })); }
+    try { setSetupPreview(await rpc.call("previewWorkspaceSetup", { projectId, homeRoot: setupHome })); }
     catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
     finally { setSetupBusy(false); }
   }
@@ -714,16 +717,14 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
           {workspaceOptions.map((item) => <option key={item.id} value={item.id}>{item.name || item.id}</option>)}
         </select><button onClick={() => void chooseWorkspace()} disabled={!workspaceChoice}>Use Workspace</button></div>
           : <div className="margins-setup"><p>Choose your notes project above. Margins keeps recordings in its own store.</p>
-            <p>Continue discovers useful recall topics in your notes.</p>
+            <p>Continue starts from the Margins meetings preset: meeting notes, people, and projects.</p>
             <label>Notes folder <input aria-label="Workspace notes folder" value={setupHome} placeholder="Use this project if it is an Obsidian vault" disabled={setupBusy}
               onChange={(event) => { setSetupHome(event.target.value); setSetupPreview(null); }} /></label>
-            <label>New notes folder <input aria-label="Meeting note folder" value={setupFolder} disabled={setupBusy}
-              onChange={(event) => { setSetupFolder(event.target.value); setSetupPreview(null); }} /></label>
-            {!setupPreview ? <button disabled={setupBusy} onClick={() => void previewSetup()}>{setupBusy ? "Discovering notes…" : "Continue →"}</button>
+            {!setupPreview ? <button disabled={setupBusy} onClick={() => void previewSetup()}>{setupBusy ? "Preparing…" : "Continue →"}</button>
               : <div className="margins-setup-preview"><p>Workspace: {setupPreview.workspaceId}</p><p>Notes will go to {setupPreview.destination}</p>
-                <p>{setupPreview.filesScanned} notes found · {setupPreview.selectedEntities.length} recall topics selected</p>
-                {setupPreview.selectedEntities.length > 0 && <p>{setupPreview.selectedEntities.join(" · ")}</p>}
-                {setupPreview.warning && <p role="status">{setupPreview.warning}</p>}
+                <p>{setupPreview.readings.length ? `Learns from ${setupPreview.readings.map(readingLabel).join(" · ")}` : "Chooses what to learn from automatically"}</p>
+                {setupPreview.skippedReadings.length > 0 && <p>Skipped, not in your notes: {setupPreview.skippedReadings.map(readingLabel).join(" · ")}</p>}
+                <p>Settings: {setupPreview.programPath} · change them later with <code>margins workspace edit</code></p>
                 <details><summary>Exact Workspace changes</summary><pre>{JSON.stringify(setupPreview.actions, null, 2)}</pre></details>
                 <button disabled={setupBusy} onClick={() => void applySetup()}>{setupBusy ? "Saving…" : "Use this Workspace"}</button>
                 <button disabled={setupBusy} onClick={() => setSetupPreview(null)}>Change</button></div>}</div>}

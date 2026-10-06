@@ -43,7 +43,6 @@ fn official_capabilities_json() -> serde_json::Value {
         "build": margins_cli::build_info::get(),
         "recall": {
             "available": cfg!(feature = "recall"),
-            "scan": cfg!(feature = "recall"),
             "indexing": cfg!(feature = "recall"),
             "lookup": cfg!(feature = "recall"),
             "local_model": cfg!(feature = "recall-local-model"),
@@ -59,6 +58,7 @@ fn official_capabilities_json() -> serde_json::Value {
         },
         "workspace": {
             "setup": true,
+            "preset": cfg!(feature = "recall"),
         },
         "audio_import": {
             "available": cfg!(any(feature = "coreml-asr", feature = "parakeet-asr")),
@@ -413,19 +413,18 @@ where
         return run_sync(workspace_selector.as_deref(), source.as_deref(), *json);
     }
 
-    // Scan is filesystem-only discovery. It shares Margins' explicit config
-    // path but never opens or creates the recall database.
-    #[cfg(feature = "recall")]
-    if matches!(&parsed.command, Some(Command::Scan)) {
-        return run_scan(workspace_selector.as_deref());
-    }
-
+    // The engine fills the setup preset; the plan itself is the ordinary one.
     #[cfg(feature = "recall")]
     if let Some(Command::Workspace {
-        command: margins_cli::args::WorkspaceCommand::Compile { note_folder, .. },
+        command:
+            margins_cli::args::WorkspaceCommand::Plan {
+                desired: None,
+                preset: Some(preset),
+                ..
+            },
     }) = &parsed.command
     {
-        return run_workspace_compile(workspace_selector.as_deref(), note_folder.as_deref());
+        return run_workspace_plan_preset(workspace_selector.as_deref(), preset);
     }
 
     let interactive_command = match &parsed.command {

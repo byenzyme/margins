@@ -250,35 +250,88 @@ fn generated_sync_request_id() -> String {
     format!("sync-{millis}-{}", std::process::id())
 }
 
+/// `workspace plan --preset`: the engine fills the preset for the Workspace's
+/// notes folder, Margins drops folder readings for folders that do not exist
+/// and adds the rest to the current program, and the result is planned like any
+/// desired program. The plan JSON also names the program and what the preset
+/// kept and skipped.
 #[cfg(feature = "recall")]
-fn run_scan(workspace_selector: Option<&str>) -> i32 {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
-    let workspace =
-        match margins_cli::commands::workspace::resolve_existing(workspace_selector, &cwd) {
-            Ok(workspace) => workspace,
-            Err(error) => return report_error(&error.to_string()),
-        };
-    match crate::scan::run_scan(&workspace) {
-        Ok(()) => 0,
-        Err(error) => report_error(&format!("scanning vault: {error:#}")),
+fn run_workspace_plan_preset(workspace_selector: Option<&str>, preset: &str) -> i32 {
+    match workspace_plan_preset(workspace_selector, preset) {
+        Ok(plan) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&plan).unwrap_or_else(|_| plan.to_string())
+            );
+            0
+        }
+        Err(error) => report_json_cli_error(error),
     }
 }
 
 #[cfg(feature = "recall")]
-fn run_workspace_compile(workspace_selector: Option<&str>, note_folder: Option<&str>) -> i32 {
+fn workspace_plan_preset(
+    workspace_selector: Option<&str>,
+    preset: &str,
+) -> Result<serde_json::Value, margins_cli::CliError> {
+    use margins_cli::CliError;
+    use margins_workflows::workspace_preset;
+
+    let Some(selector) = workspace_selector else {
+        return Err(CliError::new(
+            "workspace_required",
+            "workspace plan needs an explicit --workspace <id>",
+        ));
+    };
     let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
-    let workspace =
-        match margins_cli::commands::workspace::resolve_existing(workspace_selector, &cwd) {
-            Ok(workspace) => workspace,
-            Err(error) => return report_error(&error.to_string()),
-        };
-    match crate::setup_compile::compile(&workspace, note_folder) {
-        Ok(result) => {
-            println!("{result}");
-            0
-        }
-        Err(error) => report_error(&format!("compiling Workspace setup: {error:#}")),
-    }
+    let workspace = margins_cli::commands::workspace::resolve_existing(Some(selector), &cwd)?;
+    let invalid = |error: anyhow::Error| CliError::new("workspace_preset_invalid", format!("{error:#}"));
+    let margins_home = margins_workflows::workspace::margins_home().map_err(CliError::from_anyhow)?;
+    let template = if preset == workspace_preset::MEETINGS_PRESET {
+        workspace_preset::ensure_meetings_preset(&margins_home).map_err(CliError::from_anyhow)?
+    } else if Path::new(preset).is_file() {
+        cwd.join(preset)
+    } else {
+        return Err(CliError::new(
+            "workspace_preset_unknown",
+            format!(
+                "unknown preset {preset:?}; use {} or the path to a .enzyme.in template",
+                workspace_preset::MEETINGS_PRESET
+            ),
+        ));
+    };
+    let home = workspace
+        .config
+        .bindings
+        .values()
+        .find_map(|binding| match binding {
+            margins_workflows::workspace::WorkspaceBinding::NativeMarkdown {
+                path,
+                role: margins_workflows::workspace::SourceRole::Home,
+                ..
+            } => Some(path.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| CliError::new("workspace_preset_invalid", "Workspace has no Home notes source"))?;
+    let engine = crate::enzyme_cli::Engine::for_home(&margins_home)
+        .map_err(|error| CliError::new("engine_unavailable", format!("{error:#}")))?;
+    let filled = engine
+        .compile_preset(&workspace.config.id, &template, &home)
+        .map_err(|error| CliError::new("workspace_preset_invalid", error.to_string()))?;
+    let proposal = workspace_preset::propose(&workspace.config, &filled).map_err(invalid)?;
+    let plan = margins_workflows::workspace::plan_workspace_config(&workspace, proposal.desired.clone())
+        .map_err(CliError::from_anyhow)?;
+    let mut value = serde_json::to_value(&plan)
+        .map_err(|error| CliError::new("output_failed", error.to_string()))?;
+    value["program_path"] = serde_json::json!(workspace.config_path);
+    value["preset"] = serde_json::json!({
+        "template": template,
+        "readings": proposal.readings,
+        "skipped_readings": proposal.skipped_readings,
+        "skip_reasons": proposal.skip_reasons,
+        "note_folder": proposal.note_folder,
+    });
+    Ok(value)
 }
 
 #[cfg(feature = "recall")]

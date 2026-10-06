@@ -1036,8 +1036,6 @@ PY
 
   local init_output="$MARGINS_E2E_ARTIFACTS/phase2-index-init.txt"
   if recall_composition_available; then
-    local scan_output="$MARGINS_E2E_ARTIFACTS/phase2-scan.json"
-    timed_run "phase2.scan" "$scan_output" run_margins scan
     timed_run "phase2.index-refresh" "$init_output" run_margins init
   else
     local started ended

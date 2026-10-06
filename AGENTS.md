@@ -81,25 +81,25 @@ The Codex plugin is parked outside core; see
 
 ## Workspace Setup and Distillation
 
-- Setup exists to make one knowledge practice legible to Margins and to persist
-  only the minimum settings that keep that understanding true. A Workspace is the
-  durable read/write/attention boundary for a single practice; `init`/`sync`
-  materialize it. Exact-phrase recall proves a declared Source is reachable. When
-  a grounded review is available, setup must also test one question that review
-  promised. The setup skill and `margins guide workspace-setup` are the single
-  source of truth for declaration, review, `init`, `sync`, proof, and optional
-  plan/apply.
-- Some builds report `recall.scan: true`: setup must consume the complete
-  read-only `scan.v2` result as its evidence substrate, including coverage and
-  curation candidates, representative samples, hierarchy, frontmatter, structural
-  exclusions, current config, and available profiles. The skill—not a deterministic
-  renderer—forms the grounded interpretation, leads with that understanding, and
-  invites plain-language corrections before deriving settings. Source declarations,
-  not scan, define the full recall boundary.
-- A desired config is compiled with `workspace plan --desired`. The **final
-  reviewed** plan is applied unchanged—`workspace apply` reads the plan's base
-  revision, derives its retry identity, commits only the exact plan the user last
-  saw, and refuses stale or altered plans. Never hand-edit plan JSON.
+- Setup exists to point Margins at one practice's notes and persist the minimum
+  settings that keep recall true. A Workspace is the durable read/write/attention
+  boundary for a single practice; `init`/`sync` materialize it. Setup is one
+  preset-only flow: choose the notes folder → `workspace new` → `workspace plan
+  --preset margins-meetings` (the engine fills Margins' managed
+  `$MARGINS_HOME/presets/margins-meetings.enzyme.in` through `enzyme compile
+  --preset`; Margins drops folder readings whose folders do not exist) → reviewed
+  `workspace apply` → `init` → exact-phrase recall proves a declared Source is
+  reachable → tell the user the program path and `margins workspace edit`. The
+  setup skill and `margins guide workspace-setup` are the single source of truth
+  for that flow.
+- There is no scan or grounded review in setup, and no promised-question recall
+  test. Refinement is optional and later: `margins workspace edit`, or an agent
+  that wants evidence reads the engine's own `enzyme scan --workspace <id> --json`.
+  Margins keeps no copy of engine scan or selection logic.
+- A desired program is compiled with `workspace plan --desired` (or `--preset`).
+  The **final reviewed** plan is applied unchanged—`workspace apply` reads the
+  plan's base revision, derives its retry identity, commits only the exact plan
+  the user last saw, and refuses stale or altered plans. Never hand-edit plan JSON.
 - Setup and distillation are separate. Setup makes recall ready and must not begin
   connected-note distillation. Distillation is latest-session-first: the skill
   resolves `transcript latest` (and, when needed, `artifacts latest`) inside the
@@ -108,11 +108,11 @@ The Codex plugin is parked outside core; see
   default. Removing capture from a build must not remove read-only access to
   sessions that already exist.
 - These are seams over existing contracts, not new surfaces. Do not introduce a
-  second setup protocol, a new anchor schema, or a write/update mode for `scan`,
-  and do not conflate setup with distillation.
-- Preserve both verification lanes in `docs/setup-e2e-lanes.md`: the
-  credential-free public source lane and the separate hosted grounded-review
-  lane.
+  second setup protocol or a new anchor schema, and do not conflate setup with
+  distillation.
+- Preserve the verification lanes in `docs/setup-e2e-lanes.md`: the
+  credential-free public source lane and the preset setup E2E through the real
+  binaries. The hosted grounded-review lane was retired with the scan.
 
 ## Portable and macOS Platform Test Lanes
 

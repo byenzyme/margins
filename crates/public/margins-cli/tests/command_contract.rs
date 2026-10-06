@@ -2447,15 +2447,27 @@ fn integrations_cli_reconciles_native_google_bindings_and_replays_idempotently()
 }
 
 #[test]
-fn parser_accepts_only_read_only_scan() {
-    let parsed = Args::try_parse_from(["margins", "scan"]).unwrap();
+fn setup_has_no_scan_or_compile_and_plans_from_a_preset() {
+    assert!(Args::try_parse_from(["margins", "scan"]).is_err());
+    assert!(Args::try_parse_from(["margins", "workspace", "compile", "--json"]).is_err());
+    let parsed =
+        Args::try_parse_from(["margins", "workspace", "plan", "--preset", "margins-meetings", "--json"])
+            .unwrap();
     assert!(matches!(
         parsed.command,
-        Some(margins_cli::args::Command::Scan)
+        Some(margins_cli::args::Command::Workspace {
+            command: margins_cli::args::WorkspaceCommand::Plan {
+                desired: None,
+                preset: Some(ref preset),
+                ..
+            }
+        }) if preset == "margins-meetings"
     ));
-
-    assert!(Args::try_parse_from(["margins", "scan", "--write-config"]).is_err());
-    assert!(Args::try_parse_from(["margins", "scan", "--update"]).is_err());
+    assert!(Args::try_parse_from(["margins", "workspace", "plan", "--json"]).is_err());
+    assert!(Args::try_parse_from([
+        "margins", "workspace", "plan", "--desired", "d.enzyme", "--preset", "margins-meetings", "--json",
+    ])
+    .is_err());
 }
 
 #[test]
@@ -2529,7 +2541,7 @@ fn parser_accepts_repeatable_setup_only_and_speech_skip() {
 }
 
 #[test]
-fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only() {
+fn workspace_setup_guide_is_the_preset_flow_and_is_read_only() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("note.md"), "real note").unwrap();
     let services = services(temp.path());
@@ -2553,63 +2565,40 @@ fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only()
     assert!(stdout.contains("source add notes"));
     assert!(stdout.contains("Run these commands from the notes folder"));
     assert!(stdout.contains("cd \"/absolute/path/to/notes\""));
-    assert!(stdout.contains("`recall.scan: true`"));
-    assert!(stdout.contains("scan as soon as the explicit named Workspace"));
-    assert!(stdout.contains("There is no `margins workspace scan` subcommand"));
-    assert!(stdout.contains("Read the complete saved `scan.v2` result"));
-    assert!(stdout.contains("Show the user an understanding, not scan output"));
-    assert!(stdout.contains("The field names below are for your analysis"));
-    assert!(stdout.contains("match how you work, and what did it miss?"));
+    assert!(stdout.contains("`workspace.preset: true`"));
+    assert!(stdout.contains("workspace plan --preset margins-meetings --json"));
+    assert!(stdout.contains("`skipped_readings`"));
+    assert!(stdout.contains("`program_path`"));
+    assert!(stdout.contains("workspace show"));
+    assert!(stdout.contains("workspace edit"));
+    assert!(stdout.contains("enzyme scan --workspace <id> --json"));
     assert!(stdout.contains("Never open, cat, print, or summarize credential bundles"));
     assert!(stdout.contains("Use only redacted Margins product status"));
     assert!(stdout.contains("Do not run recall before `margins init`"));
     assert!(stdout.contains("margins setup --only catalyst"));
     assert!(stdout.contains("If `actions` is empty"));
     assert!(stdout.contains("apply the saved plan unchanged"));
-    assert!(stdout.contains("workspace plan"));
     assert!(stdout.contains("Never hand-edit plan JSON"));
-    assert!(stdout.contains("Do not ask for a second “apply this plan” confirmation"));
+    assert!(stdout.contains("do not ask for a second “apply this plan”"));
     assert!(stdout.contains("machine-level catalyst mode"));
     assert!(stdout.contains("not an exact-phrase boundary proof"));
     assert!(stdout.contains("contiguous, verbatim phrase"));
-    assert!(stdout.contains("one universal discovery question"));
-    assert!(stdout.contains("universal pause."));
-    assert!(stdout.contains("Do not ask the user to design readings"));
-    assert!(stdout.contains("Never declare setup complete while"));
-    assert!(stdout.contains("Translate the scan spellings exactly"));
-    assert!(stdout.contains("folder:<path>"));
     assert!(stdout.contains("`learn questions from …` reading"));
-    assert!(stdout.contains("    about relational"));
+    assert!(stdout.contains("    about relationships"));
     assert!(stdout.contains("    including linked pages"));
-    assert!(stdout.contains("remember in folder \"inbox\" create note"));
+    assert!(stdout.contains("remember in folder \"Meetings\" create note"));
     assert!(stdout.contains("/tmp/margins-workspace-desired.enzyme"));
-    assert!(!stdout.contains("desired-state TOML"));
-    for field in [
-        "summary",
-        "instructions",
-        "coverage_entities",
-        "entity_curation_candidates",
-        "top_entities",
-        "top_folders",
-        "top_tags",
-        "top_links",
-        "entity_samples",
-        "representative_samples",
-        "sample_files",
-        "folder_stats",
-        "folder_page_entities",
-        "folder_children",
-        "tag_children",
-        "frontmatter_samples",
+    for removed in [
+        "scan.v2",
+        "margins --workspace practice scan",
+        "workspace compile",
+        "recall.scan",
         "current_config",
-        "available_profiles",
+        "entity_curation_candidates",
+        "desired-state TOML",
     ] {
-        assert!(
-            stdout.contains(&format!("`{field}`")),
-            "missing scan field {field}"
-        );
+        assert!(!stdout.contains(removed), "guide still mentions {removed}");
     }
-    assert!(stdout.contains("`current_config.config_path`"));
     for profile in [
         "relational",
         "operational",
@@ -2625,58 +2614,33 @@ fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only()
         );
     }
     let normalized_guide = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(normalized_guide.contains("A fallback policy change after failure is not part"));
     assert!(normalized_guide.contains("Do not run unsupported discovery commands"));
-    assert!(normalized_guide.contains("Do not provision a hosted lease at the start"));
-    assert!(normalized_guide.contains("short-lived lease should begin as late as possible"));
     assert!(normalized_guide.contains("do not run `init` repeatedly"));
     assert!(normalized_guide.contains("earlier setup attempts as hypotheses"));
-    assert!(normalized_guide.contains("preserve that policy"));
+    assert!(normalized_guide.contains("preserve that program"));
     assert!(normalized_guide.contains("`live_lexical` status only confirms that an index exists"));
     assert!(normalized_guide.contains("portable live Markdown coverage"));
     assert!(normalized_guide.contains("Never relabel that number as “indexed documents.”"));
     assert!(normalized_guide.contains("`mode = \"indexed\"` reports the persisted engine index"));
-    assert!(normalized_guide.contains("`entity_curation_candidates[].spec`"));
-    assert!(normalized_guide.contains("`entity_curation_candidates[].expansion`"));
-    assert!(normalized_guide
-        .contains("`expands_automatically = true` means `including linked pages` is redundant"));
-    assert!(
-        normalized_guide.contains("`mode = \"explicit_available\"` means real child pages exist")
-    );
-    assert!(normalized_guide.contains("frequency alone does not establish importance"));
+    assert!(normalized_guide.contains("folder names match case-insensitively"));
+    assert!(normalized_guide.contains("running setup again on a set-up Workspace changes nothing"));
     assert!(normalized_guide.contains("not a weight or an importance score"));
     assert!(normalized_guide.contains("Leave an ambiguous entity without a profile"));
-    assert!(normalized_guide.contains("one note per person is an optional practice"));
-    assert!(normalized_guide.contains("Do not create, reorganize, or configure those notes"));
-    assert!(normalized_guide.contains("at most two future capture habits"));
-    assert!(normalized_guide.contains("name the question that habit would make answerable"));
-    assert!(normalized_guide.contains("Do not prescribe a generic folder taxonomy"));
-    assert!(normalized_guide.contains("Lead the final handoff with what the proof revealed"));
-    assert!(normalized_guide.contains("Do not mistake a successful command"));
+    assert!(normalized_guide.contains("Refinement is optional and never a setup step"));
     assert!(normalized_guide.contains("operational receipt"));
     assert!(normalized_guide.contains("revision hashes, similarity scores"));
     assert!(stdout.contains("Do not begin connected-note distillation as part of setup"));
     let declaration = stdout.find("margins workspace new practice").unwrap();
-    let scan = stdout.find("margins --workspace practice scan").unwrap();
-    let understanding = stdout
-        .find("## 4. Show the user an understanding, not scan output")
-        .unwrap();
-    let plan = stdout
-        .find("margins --workspace practice workspace plan")
+    let preset = stdout
+        .find("margins --workspace practice workspace plan --preset")
         .unwrap();
     let apply = stdout
         .find("margins --workspace practice workspace apply")
         .unwrap();
     let initialize = stdout.find("margins --workspace practice init").unwrap();
-    assert!(
-        declaration < scan
-            && scan < understanding
-            && understanding < plan
-            && plan < apply
-            && apply < initialize
-    );
+    let recall = stdout.find("margins --workspace practice recall").unwrap();
+    assert!(declaration < preset && preset < apply && apply < initialize && initialize < recall);
     assert!(!stdout.contains("margins transcribe"));
-    assert!(!stdout.contains("scan --write-config"));
     assert!(!stdout.contains("workspace propose"));
     assert!(!stdout.contains("--if-revision"));
     assert!(!stdout.contains("--request-id"));
@@ -2787,7 +2751,6 @@ fn guided_onboarding_routes_without_duplicating_setup_protocol() {
     assert!(normalized.contains("setup result brief and secondary"));
     assert!(stdout.split_whitespace().count() < 300);
     for duplicated_detail in [
-        "scan.v2",
         "workspace plan",
         "workspace apply",
         "current_config",
@@ -2804,16 +2767,20 @@ fn guided_onboarding_routes_without_duplicating_setup_protocol() {
 }
 
 #[test]
-fn public_scan_is_not_the_product_workspace_discovery() {
+fn public_preset_plan_needs_the_engine() {
     let temp = tempfile::tempdir().unwrap();
     let services = services(temp.path());
 
-    let (result, stdout, stderr) = invoke(&services, temp.path(), &["margins", "scan"]);
+    let (result, stdout, stderr) = invoke(
+        &services,
+        temp.path(),
+        &["margins", "--workspace", "practice", "workspace", "plan", "--preset", "margins-meetings", "--json"],
+    );
 
     assert!(result.is_err());
     assert!(stdout.is_empty());
-    assert!(stderr.contains("composition_unavailable"));
-    assert!(stderr.contains("official Margins CLI"));
+    assert!(stderr.contains("composition_unavailable"), "{stderr}");
+    assert!(stderr.contains("official Margins CLI"), "{stderr}");
     assert!(!temp.path().join(".margins").exists());
 }
 

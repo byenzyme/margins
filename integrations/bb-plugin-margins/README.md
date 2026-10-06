@@ -146,10 +146,13 @@ transcript.
 ## First-run Workspace setup
 
 In Meetings, select the bb project containing your notes and choose its Home
-folder. An Obsidian project can use its own root without typing a path. The
-note destination defaults to `inbox`. Continue scans notes and uses hosted Jev
-selection when available, then shows the exact Workspace plan before **Use this
-Workspace** applies it and sets the machine default. A vault with no notes can
+folder. An Obsidian project can use its own root without typing a path.
+Continue starts from the Margins meetings preset: notes go to `Meetings`, and
+Margins learns from the `Meetings`, `People`, and `Projects` folders that exist.
+The panel shows the folders it learns from, the preset folders it skipped, the
+program path, and the exact Workspace plan before **Use this Workspace** applies
+it and sets the machine default. `margins workspace edit` changes the program
+later. A vault with no notes can
 still be connected for recording. Existing People notes can inform recall; the
 first confirmed participant can create a People folder during distillation.
 SQLite sources require an explicit mapping later.

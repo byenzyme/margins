@@ -10,27 +10,31 @@ Help the user show Margins how one set of notes is organized. This is separate
 from live meeting feedback and from turning a finished meeting into a note.
 
 For first recording setup in bb, open **Meetings** and select the notes project.
-The panel discovers existing note structure, chooses the `inbox` note destination
-by default, shows the exact Workspace changes, and applies them after the user
-accepts. No agent conversation is required to begin recording. An empty notes
-folder is valid; recall enrichment can be completed later.
+The panel starts the Workspace from the Margins meetings preset: new notes go to
+`Meetings`, `Templates` and `Attachments` are left out, and Margins learns from
+the `Meetings`, `People`, and `Projects` folders that exist (preset folders the
+notes do not have are skipped). It shows the exact Workspace changes and the
+program path, and applies them after the user accepts. No agent conversation is
+required to begin recording. An empty notes folder is valid.
 
-For additional Sources, corrections to the recall policy, and recall proof,
-use the canonical Margins guide as the source of truth:
+To finish setup—index, prove recall, add Sources, or change the program—use the
+canonical Margins guide as the source of truth:
 
 ```bash
 margins guide workspace-setup
 ```
 
-Follow that guide end to end for advanced setup. The direct Meetings form uses
-the same `workspace plan --desired` and reviewed `apply` contract.
+Follow that guide end to end. It uses the same `workspace plan --preset
+margins-meetings` and reviewed `apply` the panel uses, then `init` and an
+exact-phrase recall proof. Running it on a Workspace the panel already set up
+changes nothing in the program.
 
 The setup conversation should leave the user with:
 
-- a plain-language account of what their notes appear to be about;
 - the folder Margins may write approved notes into;
-- any other folders Margins may search but not change;
-- only the settings needed to keep that account true; and
+- the folders it learns from, and any other folders it may search but not change;
+- where the Workspace program lives (`margins --workspace <id> workspace show`)
+  and that `margins --workspace <id> workspace edit` changes it; and
 - one real example showing that Margins can find an existing note.
 
 Important boundaries:
@@ -42,9 +46,9 @@ Important boundaries:
   environment variable values.
 - Do not run recall before `init` and `sync` have completed for the selected
   Workspace.
-- Do not apply a workspace plan until the user has seen the plan and explicitly
-  agreed.
+- Do not apply a workspace plan until the user has seen the plan; the setup
+  request authorizes applying the preset plan unchanged.
 
 When setup finishes, report the Workspace, its home and reference Sources, what
-changed, the `init` and `sync` result, and the recall proof. Say what Margins can
-now remember in the user's own terms.
+changed, the `init` and `sync` result, the recall proof, and where to edit the
+program. Say what Margins can now remember in the user's own terms.

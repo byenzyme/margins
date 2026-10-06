@@ -469,9 +469,9 @@ export default function marginsPlugin(bb: BbPluginApi) {
       const paths = await callHost(target, "workspacePaths", { workspaceId });
       return { workspaceId, ...paths };
     },
-    async previewWorkspaceSetup({ projectId, homeRoot, noteFolder }) {
+    async previewWorkspaceSetup({ projectId, homeRoot }) {
       const target = await targetForProject(projectId);
-      return callHost(target, "previewWorkspaceSetup", { target, homeRoot, noteFolder });
+      return callHost(target, "previewWorkspaceSetup", { target, homeRoot });
     },
     async applyWorkspaceSetup({ projectId, previewId }) {
       const target = await targetForProject(projectId);
