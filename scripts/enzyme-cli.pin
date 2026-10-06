@@ -1,1 +1,16 @@
-d9b1c5b484f5e335b7d35ff02eb3631e1902b252
+# The enzyme CLI that Margins runs and ships. Every consumer reads this file:
+# scripts/enzyme-bin (tests and gates), scripts/enzyme-pin (release archives,
+# source installs), and the margins binary's run-time version check.
+#
+# rev      enzyme-rust commit whose CLI tests and gates build.
+# version  what `enzyme --version` prints for that commit. Margins runs no
+#          other enzyme.
+# sha256.<target>
+#          sha256 of the official byenzyme/enzyme release asset
+#          enzyme-<platform>.tar.gz of tag v<version>, built from rev with
+#          `--features local-llm`, for each Margins release target. Empty
+#          until that enzyme release exists; release packaging then fails.
+rev=d9b1c5b484f5e335b7d35ff02eb3631e1902b252
+version=0.11.1
+sha256.aarch64-apple-darwin=
+sha256.x86_64-unknown-linux-gnu=

@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# Read scripts/enzyme-cli.pin and fetch or check the pinned enzyme CLI.
+#
+#   enzyme-pin get KEY            print one pin value (rev, version, sha256.<target>)
+#   enzyme-pin asset TARGET       print the official asset name for a Rust target
+#   enzyme-pin fetch TARGET DIR   download the official release asset of the pinned
+#                                 version, verify its sha256 against the pin, and
+#                                 extract DIR/enzyme; on a matching host also run check
+#   enzyme-pin check BINARY       require `BINARY --version` to print the pinned version
+#   enzyme-pin host-target        print the Rust target of this host
+#
+# MARGINS_ENZYME_ASSET=/path/to/enzyme-<platform>.tar.gz makes fetch use a local
+# copy of the asset instead of downloading it. The sha256 check still applies.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+pin_file="$repo_root/scripts/enzyme-cli.pin"
+release_base="https://github.com/byenzyme/enzyme/releases/download"
+work=""
+trap 'if [[ -n "$work" ]]; then rm -rf "$work"; fi' EXIT
+
+die() {
+  echo "enzyme-pin: $*" >&2
+  exit 1
+}
+
+get() {
+  local key="$1" value
+  value="$(sed -n "s/^${key//./\\.}=//p" "$pin_file" | tr -d '[:space:]')"
+  [[ -n "$value" ]] || return 1
+  printf '%s\n' "$value"
+}
+
+asset() {
+  case "$1" in
+    aarch64-apple-darwin) echo enzyme-macos-arm64.tar.gz ;;
+    x86_64-apple-darwin) echo enzyme-macos-x86_64.tar.gz ;;
+    x86_64-unknown-linux-gnu) echo enzyme-linux-x86_64.tar.gz ;;
+    aarch64-unknown-linux-gnu) echo enzyme-linux-arm64.tar.gz ;;
+    *) die "no official enzyme asset for target $1" ;;
+  esac
+}
+
+host_target() {
+  case "$(uname -s)-$(uname -m)" in
+    Darwin-arm64) echo aarch64-apple-darwin ;;
+    Darwin-x86_64) echo x86_64-apple-darwin ;;
+    Linux-x86_64) echo x86_64-unknown-linux-gnu ;;
+    Linux-aarch64 | Linux-arm64) echo aarch64-unknown-linux-gnu ;;
+    *) die "unsupported host $(uname -s)-$(uname -m)" ;;
+  esac
+}
+
+sha256_of() {
+  if command -v sha256sum >/dev/null; then
+    sha256sum "$1" | cut -d ' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d ' ' -f1
+  fi
+}
+
+check() {
+  local binary="$1" version actual
+  version="$(get version)" || die "the pin has no version"
+  [[ -x "$binary" ]] || die "$binary is not an executable"
+  actual="$(env -i PATH=/usr/bin:/bin "$binary" --version 2>/dev/null)" \
+    || die "$binary --version failed"
+  [[ "$actual" == "enzyme $version" ]] \
+    || die "$binary reports '$actual'; Margins pins 'enzyme $version'"
+}
+
+fetch() {
+  local target="$1" dir="$2" version name expected source actual entries
+  version="$(get version)" || die "the pin has no version"
+  name="$(asset "$target")"
+  expected="$(get "sha256.$target")" \
+    || die "enzyme $version is not pinned for $target: publish the enzyme release v$version and record sha256.$target in scripts/enzyme-cli.pin"
+  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || die "sha256.$target is not a sha256 digest"
+
+  work="$(mktemp -d "${TMPDIR:-/tmp}/enzyme-pin.XXXXXX")"
+  if [[ -n "${MARGINS_ENZYME_ASSET:-}" ]]; then
+    source="$MARGINS_ENZYME_ASSET"
+  else
+    source="$work/$name"
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 3 \
+      -o "$source" "$release_base/v$version/$name" \
+      || die "could not download $release_base/v$version/$name"
+  fi
+  actual="$(sha256_of "$source")"
+  [[ "$actual" == "$expected" ]] \
+    || die "$name has sha256 $actual; the pin for $target is $expected"
+
+  # The official asset is one regular file named enzyme.
+  entries="$(tar -tzvf "$source")"
+  [[ "$(wc -l <<<"$entries" | tr -d ' ')" == 1 && "$entries" == -* \
+    && "$(tar -tzf "$source" | sed 's#^\./##')" == enzyme ]] \
+    || die "$name does not contain exactly one regular file named enzyme"
+  mkdir "$work/unpacked"
+  tar -xzf "$source" -C "$work/unpacked"
+  chmod 0755 "$work/unpacked/enzyme"
+  if [[ "$target" == "$(host_target)" ]]; then
+    check "$work/unpacked/enzyme"
+  fi
+  mkdir -p "$dir"
+  install -m 0755 "$work/unpacked/enzyme" "$dir/enzyme"
+  echo "enzyme $version ($target) verified at $dir/enzyme" >&2
+}
+
+case "${1:-}" in
+  get) [[ $# == 2 ]] || die "usage: enzyme-pin get KEY"; get "$2" || die "the pin has no $2" ;;
+  asset) [[ $# == 2 ]] || die "usage: enzyme-pin asset TARGET"; asset "$2" ;;
+  fetch) [[ $# == 3 ]] || die "usage: enzyme-pin fetch TARGET DIR"; fetch "$2" "$3" ;;
+  check) [[ $# == 2 ]] || die "usage: enzyme-pin check BINARY"; check "$2" ;;
+  host-target) host_target ;;
+  *) die "usage: enzyme-pin get|asset|fetch|check|host-target ..." ;;
+esac
