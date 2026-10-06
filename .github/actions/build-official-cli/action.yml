@@ -1,6 +1,7 @@
 name: Build official Margins CLI
 description: >-
-  Build, sign/notarize (macOS), package and smoke one official CLI archive.
+  Build, sign/notarize (macOS), package and smoke one official CLI archive:
+  margins, margins-server, and the pinned enzyme engine they run.
   Shared by cli-release.yml and the no-publish cli-release-validation.yml so the
   dry run exercises exactly the release build. This action never publishes.
 
@@ -121,6 +122,16 @@ runs:
         --bin margins-server
         --target "$TARGET"
 
+    # Margins ships the enzyme Enzyme users get: the official byenzyme/enzyme
+    # release asset (built with --features local-llm), checked against the
+    # version and per-target sha256 in scripts/enzyme-cli.pin. It is a public
+    # download, so this step needs no credential, and an unpinned target fails.
+    - name: Fetch the pinned enzyme engine
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+      run: scripts/enzyme-pin fetch "$TARGET" "target/$TARGET/release/enzyme-pinned"
+
     - name: Sign and notarize the macOS CLI
       if: runner.os == 'macOS'
       shell: bash
@@ -130,7 +141,7 @@ runs:
         APPLE_ID: ${{ inputs.apple-id }}
         APPLE_PASSWORD: ${{ inputs.apple-password }}
         APPLE_TEAM_ID: ${{ inputs.apple-team-id }}
-        BINARY_PATHS: target/${{ inputs.target }}/release/margins-private target/${{ inputs.target }}/release/margins-server
+        BINARY_PATHS: target/${{ inputs.target }}/release/margins-private target/${{ inputs.target }}/release/margins-server target/${{ inputs.target }}/release/enzyme-pinned/enzyme
       run: |
         set -euo pipefail
 
@@ -263,8 +274,13 @@ runs:
         mkdir packaged-cli
         install -m 0755 "target/${TARGET}/release/margins-private" packaged-cli/margins
         install -m 0755 "target/${TARGET}/release/margins-server" packaged-cli/margins-server
+        # Next to margins, where it looks first; installers that put margins
+        # in a shared bin directory move it to ../libexec/margins/enzyme.
+        install -m 0755 "target/${TARGET}/release/enzyme-pinned/enzyme" packaged-cli/enzyme
         if [[ "$TARGET" == "aarch64-apple-darwin" ]]; then
-          codesign --verify --deep --strict --verbose=2 packaged-cli/margins
+          for BINARY in margins margins-server enzyme; do
+            codesign --verify --deep --strict --verbose=2 "packaged-cli/$BINARY"
+          done
         fi
         tar -czf "$ARCHIVE" -C packaged-cli .
         if command -v shasum >/dev/null; then
@@ -283,3 +299,4 @@ runs:
         mkdir packaged-smoke
         tar -xzf "$ARCHIVE" -C packaged-smoke
         scripts/smoke-official-cli.sh packaged-smoke/margins
+        scripts/enzyme-pin check packaged-smoke/enzyme
