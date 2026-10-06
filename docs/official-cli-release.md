@@ -105,9 +105,12 @@ differ from the asset; the asset's sha256 is checked before signing.
 | `install.sh` | `~/.local/bin/margins` | `~/.local/libexec/margins/enzyme` |
 | BB plugin | `~/.local/bin/margins` (when the plugin manages it) | `~/.local/libexec/margins/enzyme` |
 
-**Run-time check.** `margins` locates its engine (next to its resolved
-executable, then `../libexec/margins/enzyme`) and refuses an `enzyme` whose
-`--version` differs from the pin, with an error naming what it found.
+**Run-time check.** `margins` uses the first of
+`<exe dir>/../libexec/margins/enzyme`, `<exe dir>/enzyme`, and
+`$MARGINS_HOME/bin/enzyme` whose `enzyme --version` equals the pin, so a user's
+own `enzyme` beside `margins` in `~/.local/bin` is skipped. With none, it
+fails listing each candidate and why it was rejected. An explicit
+`MARGINS_ENZYME_BIN` must match the pin or the call fails.
 
 **No self-update.** Margins runs `enzyme` with `ENZYME_HOME=$MARGINS_HOME`,
 whose `configs/settings.enzyme` has `settings { updates disabled }`. Enzyme

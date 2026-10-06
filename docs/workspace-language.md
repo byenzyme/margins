@@ -238,12 +238,14 @@ the server together.
 - Margins runs the shipped `enzyme` CLI (`src/enzyme_cli.rs`) with
   `ENZYME_HOME=$MARGINS_HOME`, `--workspace <id>`, and an allowlisted
   environment (plus proxy and CA variables: `HTTP(S)_PROXY`, `NO_PROXY`,
-  `ALL_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`). It finds the binary through
-  `MARGINS_ENZYME_BIN`, then beside `margins`, then
-  `<exe dir>/../libexec/margins/enzyme`, then `$MARGINS_HOME/bin/enzyme`;
-  never `PATH`, where a user's own `enzyme` may be another release. Before the
-  first call in a process it requires `enzyme --version` to equal the
-  `version` in `scripts/enzyme-cli.pin`. The generator is
+  `ALL_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`). `MARGINS_ENZYME_BIN`, when
+  set, is used or the call fails. Otherwise it uses the first of
+  `<exe dir>/../libexec/margins/enzyme`, `<exe dir>/enzyme`, and
+  `$MARGINS_HOME/bin/enzyme` whose `enzyme --version` equals the `version` in
+  `scripts/enzyme-cli.pin`, skipping missing, non-executable, and
+  other-version candidates, and fails listing each rejection; it never
+  searches `PATH`, where a user's own `enzyme` may be another release. The
+  choice is made once per process. The generator is
   always explicit: `--llm env` with Margins' hosted bundle as `OPENAI_*`,
   `--llm local` when the selected model is installed, otherwise `--llm none`
   (the index is built, and init and recall fail closed until setup chooses a
