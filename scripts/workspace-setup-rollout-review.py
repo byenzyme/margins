@@ -1098,6 +1098,11 @@ def finalize(args: argparse.Namespace) -> int:
         for report in preset_readings
         if report.get("error") or report.get("readings_without_folder")
     ]
+    # A rollout that never wrote a Workspace program did not set anything up;
+    # the other gates would pass it vacuously.
+    created_programs = [
+        str(row["id"]) for row in generated_workspaces if row.get("config_format") == "enzyme"
+    ]
 
     write_json(run_dir / "machine-config-after.json", machine_config_snapshot(margins_home))
 
@@ -1160,6 +1165,10 @@ def finalize(args: argparse.Namespace) -> int:
             "passed": workspace_restored,
             "details": restoration,
         },
+        "workspace_program_created": {
+            "passed": bool(created_programs),
+            "workspaces": created_programs,
+        },
         "readings_match_notes": {
             "passed": not dangling_readings,
             "programs": preset_readings,
@@ -1170,6 +1179,7 @@ def finalize(args: argparse.Namespace) -> int:
             and not notes_changed
             and workspace_restored
             and not dangling_readings
+            and bool(created_programs)
         ),
         "note": (
             "Plan review before apply, which preset folders were kept, recall proof, "

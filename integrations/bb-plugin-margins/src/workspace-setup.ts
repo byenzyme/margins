@@ -60,6 +60,10 @@ export async function previewWorkspaceSetup(
   target: ProjectTarget, dataDir: string, homeInput: string,
 ): Promise<WorkspaceSetupPreview> {
   const homeRoot = await selectedHome(target, homeInput);
+  const capabilities = JSON.parse(await cli(["capabilities"])) as { workspace?: { preset?: unknown } };
+  if (capabilities.workspace?.preset !== true) {
+    throw new Error("This Margins version can't set up a Workspace from the meetings preset. Update Margins, then try again.");
+  }
   const listing = JSON.parse(await cli(["workspace", "list", "--json"])) as {
     workspaces?: Array<{ id: string }>;
   };
