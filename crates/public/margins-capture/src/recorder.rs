@@ -308,9 +308,41 @@ impl MicBackendKind {
 }
 
 enum MicStream {
-    Cpal(cpal::Stream),
+    Cpal(CpalMicStream),
     #[cfg(target_os = "macos")]
     CoreAudio(coreaudio_mic::CoreAudioMicStream),
+}
+
+/// CPAL's macOS disconnect listener retains a clone of the stream. Dropping
+/// our handle alone can leave its AudioUnit running, including on an early
+/// startup error before a MicCapture owns it.
+struct CpalMicStream {
+    stream: cpal::Stream,
+    stopped: bool,
+}
+
+impl CpalMicStream {
+    fn stop(mut self) -> Result<()> {
+        self.pause()
+    }
+
+    fn pause(&mut self) -> Result<()> {
+        self.stream
+            .pause()
+            .context("could not stop microphone input")?;
+        self.stopped = true;
+        Ok(())
+    }
+}
+
+impl Drop for CpalMicStream {
+    fn drop(&mut self) {
+        if !self.stopped {
+            if let Err(error) = self.pause() {
+                eprintln!("Warning: microphone input may still be active: {error:#}");
+            }
+        }
+    }
 }
 
 impl MicStream {
@@ -324,10 +356,7 @@ impl MicStream {
 
     fn stop(self) -> Result<()> {
         match self {
-            Self::Cpal(stream) => {
-                drop(stream);
-                Ok(())
-            }
+            Self::Cpal(stream) => stream.stop(),
             #[cfg(target_os = "macos")]
             Self::CoreAudio(stream) => stream.stop(),
         }
@@ -589,7 +618,16 @@ impl MicCapture {
         self.quiescing = true;
         // Quiesce the native producer before allowing the drain to finish.
         if let Some(stream) = self.stream.take() {
-            stream.stop()?;
+            if let Err(error) = stream.stop() {
+                // A failed CPAL pause must not prevent the drain and writer from
+                // sealing the audio already captured (for example, after a
+                // device is unplugged on Windows).
+                if self.backend == MicBackendKind::Cpal {
+                    eprintln!("Warning: could not stop microphone input: {error:#}");
+                } else {
+                    return Err(error);
+                }
+            }
         }
         self.stop_flag.store(true, Ordering::Release);
         let outcome = self
@@ -1891,7 +1929,11 @@ fn start_mic_raw(
         )?,
         _ => bail!("unsupported mic format: {:?}", format),
     };
-    stream.play()?;
+    let stream = CpalMicStream {
+        stream,
+        stopped: false,
+    };
+    stream.stream.play()?;
 
     Ok(RawMicCapture {
         stream: MicStream::Cpal(stream),
@@ -2816,6 +2858,70 @@ fn start_speaker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires microphone permission and a real Mac input device"]
+    fn cpal_input_releases_coreaudio_on_stop_and_early_drop() {
+        use cidre::core_audio as ca;
+
+        assert!(
+            matches!(
+                microphone_authorization().unwrap(),
+                MicrophoneAuthorization::Authorized
+            ),
+            "test executable needs microphone permission"
+        );
+        let process = ca::Process::with_pid(std::process::id() as i32).unwrap();
+        let running = || process.is_running_input().unwrap();
+        let reaches = |expected| {
+            for _ in 0..50 {
+                if running() == expected {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            false
+        };
+        let telemetry = || MicCaptureTelemetry {
+            peak: Arc::new(AtomicU32::new(0)),
+            drops: Arc::new(AtomicU64::new(0)),
+            packet_drops: Arc::new(AtomicU64::new(0)),
+            frames: Arc::new(AtomicU64::new(0)),
+            silence: Arc::new(AtomicU64::new(0)),
+            error: Arc::new(AtomicU8::new(0)),
+        };
+
+        assert!(
+            !running(),
+            "test process already has active microphone input"
+        );
+        // CPAL marks enumerated devices as non-default even when they refer to
+        // the default physical input. That path installs the disconnect
+        // listener responsible for the retained-stream regression.
+        let default_name = cpal::default_host()
+            .default_input_device()
+            .and_then(|device| device.name().ok());
+        let devices = list_input_devices();
+        let (_, device) = devices
+            .iter()
+            .find(|(name, _)| Some(name) == default_name.as_ref())
+            .or_else(|| devices.first())
+            .expect("test needs an enumerated microphone input");
+
+        let raw = start_mic_raw(Some(device), &telemetry()).unwrap();
+        assert!(reaches(true), "CPAL did not start microphone input");
+        drop(raw);
+        assert!(
+            reaches(false),
+            "dropping an unowned stream left input running"
+        );
+
+        let raw = start_mic_raw(Some(device), &telemetry()).unwrap();
+        assert!(reaches(true), "CPAL did not restart microphone input");
+        raw.stream.stop().unwrap();
+        assert!(reaches(false), "stopping a recording left input running");
+    }
 
     #[test]
     fn exact_zero_mic_run_resets_for_a_real_noise_floor() {
