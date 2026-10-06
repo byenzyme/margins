@@ -11,9 +11,9 @@
 
 #![forbid(unsafe_code)]
 
+mod authority;
 #[path = "legacy.rs"]
 pub mod canonical;
-mod authority;
 mod meeting_runtime;
 mod sqlite;
 
@@ -21,5 +21,7 @@ pub use authority::{
     AuthorityMemoReceipt, ImportReceipt, MemoRevisionConflict, MemoWrite,
     SqliteWorkspaceAuthorityStorage,
 };
-pub use meeting_runtime::{MeetingRuntimeStorageStats, SqliteMeetingRuntimeStorage};
+pub use meeting_runtime::{
+    MeetingRuntimeStorageStats, RuntimeChunkReader, SqliteMeetingRuntimeStorage,
+};
 pub use sqlite::SqliteSessionRepository;

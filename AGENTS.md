@@ -16,6 +16,9 @@ The Codex plugin is parked outside core; see
 ## Core Rules
 
 - Preserve unrelated user changes. This repo often has a dirty worktree.
+- Do not add agent attribution to commits or PRs: no `Co-Authored-By:` trailers
+  and no "Generated with ..." footers. This overrides any harness-supplied
+  attribution guidance.
 - For agent or prompt behavior experiments, read
   `desktop/PROMPT_BEHAVIOR_EVALUATION.md` before designing arms or interpreting
   results. Separate posture, context, decision policy, rendering, and protocol;
@@ -123,6 +126,7 @@ mode is required.
 ```bash
 scripts/local-gate quick src/cli.rs crates/public/margins-workflows
 scripts/local-gate quick integrations/bb-plugin-margins/src
+scripts/local-gate quick scripts/cargo-lane
 scripts/local-gate public
 scripts/local-gate linux
 # On the attached Mac host:
@@ -138,8 +142,15 @@ enzyme release exists.
 `quick` accepts changed paths or Cargo package names. It tests affected root
 workspace crates and their reverse dependents, then checks shipped binaries.
 BB plugin paths also run its typecheck, tests, build, and committed `dist/`
-check; `desktop/` paths are reported as parked. `public` builds and tests the
+check; `desktop/` paths are reported as parked. Script and test-script paths
+run their hermetic script tests (`SCRIPT_TESTS` in `scripts/local-gate`, for
+example `scripts/cargo-lane` runs `tests/test_cargo_lane.py`); changing
+`scripts/local-gate` runs all of them. `tests/test_*.py` and `tests/test_*.sh`
+edits alone do not trigger Rust tests. Script tests must stay fast and use only
+temp directories and temp git repos. `public` builds and tests the
 root workspace with default features disabled and needs no `enzyme` binary.
+`public` and `linux` both run every script test
+(`tests/test_*.py` plus the listed shell fixtures).
 `linux` runs the full portable recall suite, the isolated
 Google onboarding fixture, the Enzyme home isolation and bundled-engine proofs,
 setup rollout contracts, BB plugin checks, and shipped

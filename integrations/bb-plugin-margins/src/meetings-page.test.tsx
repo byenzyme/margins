@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MeetingsPage } from "./meetings-page.js";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MeetingsPage, rememberStopAck } from "./meetings-page.js";
 
 const mocks = vi.hoisted(() => ({
   connectMenu: vi.fn(),
@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
     microphoneSamples: number; micPeak: number } | null, connectionError: null as string | null },
   probeMenu: vi.fn(async () => false),
   startBrowser: vi.fn(),
+  discardRetainedAudio: vi.fn(),
   call: vi.fn(async (method: string, input?: { sessionId?: string; text?: string }) => {
     if (method === "availableProjects") return { projects: [{ id: "proj-mac", name: "Mac" }] };
     if (method === "availableWorkspaces") return { workspaces: [{ id: "obsidian", name: "Obsidian" }], autoSelected: false };
@@ -55,7 +56,7 @@ vi.mock("@get-bb/plugin-sdk/app", () => ({
   useRpc: () => mocks.rpc,
 }));
 vi.mock("./browser-capture.js", () => ({
-  browserCaptureOwner: { startFromProject: mocks.startBrowser, panel: () => null,
+  browserCaptureOwner: { startFromProject: mocks.startBrowser, discardRetainedAudio: mocks.discardRetainedAudio, panel: () => null,
     subscribe: () => () => undefined, hasPendingStop: false, recordingId: null },
   detectClientCapabilities: () => ({ clientId: "mac", platform: "macos", secureContext: true,
     browserMicrophone: true, nativeMacCapture: false }),
@@ -79,6 +80,13 @@ afterEach(() => {
 });
 
 describe("Meetings Mac recorder choice", () => {
+  it("shows the saved duration in the stop acknowledgment", async () => {
+    mocks.meetings = [{ sessionId: "native-saved", title: "Call", startedAt: "2026-09-28T00:00:00Z",
+      inputFinalized: true, durationMs: 11_000, notePath: null, threadIds: [], distilledMemoRevision: null }] as never;
+    rememberStopAck("native-saved", "0:27");
+    render(<MeetingsPage subPath="proj-mac/native-saved" />);
+    expect(await screen.findByText("Saved · 0:11 recorded")).toBeTruthy();
+  });
   it("labels a saved recording and its transcript when audio ranges are missing", async () => {
     mocks.meetings = [{ sessionId: "partial", title: "Partial call", startedAt: "2026-09-28T00:00:00Z",
       inputFinalized: true, captureIncomplete: true, captureGaps: [{ segmentId: "browser-000000",
@@ -177,6 +185,7 @@ describe("Meetings Mac recorder choice", () => {
     fireEvent.click(screen.getByRole("button", { name: "Discard permanently…" }));
     await screen.findByRole("heading", { name: "No meetings yet" });
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Any linked note and bb thread remain"));
+    expect(mocks.discardRetainedAudio).toHaveBeenCalledWith("complete");
     confirm.mockRestore();
     mocks.call.mockImplementation(originalCall);
   });
@@ -273,6 +282,31 @@ describe("Meetings Mac recorder choice", () => {
     expect(screen.getByRole("textbox", { name: "Meeting memo pad" })).toHaveProperty("value", "Remember the decision");
     expect(mocks.navigate).toHaveBeenCalledWith("meetings", { subPath: "proj-mac/new" });
     view.unmount();
+  });
+
+  it("tells the user not to speak until the Mac recorder has captured audio", async () => {
+    const native = mocks.native as typeof mocks.native & { subscribe: (listener: () => void) => () => void };
+    const subscribe = native.subscribe;
+    const listeners: Array<() => void> = [];
+    native.subscribe = (listener) => { listeners.push(listener); return () => undefined; };
+    const publish = (status: NonNullable<typeof mocks.native.status>) => {
+      mocks.native.status = status;
+      act(() => listeners.forEach((listener) => listener()));
+    };
+    try {
+      mocks.native.paired = true;
+      mocks.native.status = { state: "ready", sessionId: null, microphoneSamples: 0, micPeak: 0 };
+      mocks.refreshNative.mockImplementation(async () => mocks.native.status);
+      const view = render(<MeetingsPage subPath="proj-mac" />);
+      fireEvent.click(await screen.findByRole("button", { name: "Start meeting" }));
+      await waitFor(() => expect(mocks.control).toHaveBeenCalledWith("start"));
+      publish({ state: "getting_ready", sessionId: null, microphoneSamples: 0, micPeak: 0 });
+      expect(screen.getByRole("status").textContent).toBe("Starting… don't speak yet");
+      // Devices are open and buffering while the session is still being reserved.
+      publish({ state: "recording", sessionId: null, microphoneSamples: 480, micPeak: 0.1 });
+      expect(screen.getByRole("status").textContent).toBe("Recording");
+      view.unmount();
+    } finally { native.subscribe = subscribe; }
   });
 
   it("keeps the unsent memo visible when native Start fails", async () => {

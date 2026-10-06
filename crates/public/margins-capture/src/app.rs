@@ -13,6 +13,8 @@ pub const LIVE_TRANSCRIPTION_OFF: u8 = 0;
 pub const LIVE_TRANSCRIPTION_WARMING: u8 = 1;
 pub const LIVE_TRANSCRIPTION_READY: u8 = 2;
 pub const LIVE_TRANSCRIPTION_DEGRADED: u8 = 3;
+/// The model is ready but still decoding audio it missed while warming up.
+pub const LIVE_TRANSCRIPTION_CATCHING_UP: u8 = 4;
 pub const REMOTE_DELIVERY_LOCAL: u8 = 0;
 pub const REMOTE_DELIVERY_CURRENT: u8 = 1;
 pub const REMOTE_DELIVERY_PENDING: u8 = 2;
@@ -61,6 +63,9 @@ pub struct App {
     pub live_transcription_status: Arc<AtomicU8>,
     pub live_mic_dropped_samples: Arc<AtomicU64>,
     pub live_system_dropped_samples: Arc<AtomicU64>,
+    /// Live audio missing even after durable catch-up. `None` when the live
+    /// worker cannot recover queue drops, so the drop counters are final.
+    pub live_unrecovered_frames: Option<Arc<AtomicU64>>,
     pub capture_paused: bool,
     pub remote_delivery_state: Arc<AtomicU8>,
     pub remote_pending_chunks: Arc<AtomicU64>,
@@ -118,6 +123,7 @@ impl App {
             live_transcription_status: Arc::new(AtomicU8::new(LIVE_TRANSCRIPTION_OFF)),
             live_mic_dropped_samples: Arc::new(AtomicU64::new(0)),
             live_system_dropped_samples: Arc::new(AtomicU64::new(0)),
+            live_unrecovered_frames: None,
             capture_paused: false,
             remote_delivery_state: Arc::new(AtomicU8::new(REMOTE_DELIVERY_LOCAL)),
             remote_pending_chunks: Arc::new(AtomicU64::new(0)),
@@ -180,6 +186,7 @@ impl App {
             live_transcription_status: Arc::new(AtomicU8::new(LIVE_TRANSCRIPTION_OFF)),
             live_mic_dropped_samples: Arc::new(AtomicU64::new(0)),
             live_system_dropped_samples: Arc::new(AtomicU64::new(0)),
+            live_unrecovered_frames: None,
             capture_paused: false,
             remote_delivery_state: Arc::new(AtomicU8::new(REMOTE_DELIVERY_LOCAL)),
             remote_pending_chunks: Arc::new(AtomicU64::new(0)),

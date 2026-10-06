@@ -587,10 +587,28 @@ async fn workspace_session_command(
             "Missing producer token",
         );
     };
-    let result = state
+    let finalized = matches!(&command.body, ClientMessageBodyV1::FinalizeSession(_));
+    match state
         .workspace_service
-        .execute_capture(&principal, token, command);
-    result.map(workspace_ok).unwrap_or_else(service_error)
+        .execute_capture(&principal, token, command)
+    {
+        Ok(response) => {
+            // The service durably admits ASR on finalize. Native producers use
+            // this route, so wake the worker for jobs created after startup.
+            if finalized && state.workspace_service.asr_available() {
+                if let Err(error) = state.remote_asr_jobs.schedule_pending(
+                    state.workspace_service.clone(),
+                    state.service_principal.clone(),
+                ) {
+                    eprintln!(
+                        "[margins-server] deferred ASR schedule after native finalize: {error:#}"
+                    );
+                }
+            }
+            workspace_ok(response)
+        }
+        Err(error) => service_error(error),
+    }
 }
 
 async fn workspace_attach_session(

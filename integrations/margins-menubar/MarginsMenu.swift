@@ -46,7 +46,9 @@ final class MenuRecorder: ObservableObject {
         Task { await refresh() }
         Task {
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(2))
+                // Poll quickly while starting so "Recording" appears as soon
+                // as the microphone delivers audio.
+                try? await Task.sleep(for: state == "getting_ready" ? .milliseconds(250) : .seconds(2))
                 await refresh()
             }
         }
@@ -200,7 +202,8 @@ final class MenuRecorder: ObservableObject {
 
     func refresh() async {
         if microphoneBusy { return }
-        refreshMicrophones()
+        // The picker is locked during a meeting; don't rescan devices on the fast start poll.
+        if !active { refreshMicrophones() }
         if !setupComplete {
             state = "ready"
             status = "Choose where meetings live"
@@ -219,14 +222,17 @@ final class MenuRecorder: ObservableObject {
             }
             if bridgeToken != nil {
                 let snapshot = try await bridgeRequest("/v1/status")
-                let permission = try await bridgeRequest("/v1/microphone-permission")
-                microphonePermission = permission["status"] as? String ?? "unknown"
                 state = snapshot["state"] as? String ?? "ready"
+                if !active {
+                    let permission = try await bridgeRequest("/v1/microphone-permission")
+                    microphonePermission = permission["status"] as? String ?? "unknown"
+                }
                 sessionID = snapshot["sessionId"] as? String
                 bridgePID = (snapshot["pid"] as? NSNumber)?.int32Value
                 let mic = (snapshot["microphoneSamples"] as? NSNumber)?.intValue ?? 0
                 let system = (snapshot["systemSamples"] as? NSNumber)?.intValue ?? 0
-                status = "\(state) · mic \(mic) · system \(system) samples"
+                status = state == "getting_ready" ? "Starting… don't speak yet"
+                    : "\(state) · mic \(mic) · system \(system) samples"
                 error = snapshot["error"] as? String
             } else {
                 state = "ready"
@@ -440,7 +446,7 @@ private struct RecorderControls: View {
                         else { await recorder.start() }
                     }
                 }
-                .disabled(recorder.microphoneBusy || ["starting", "getting_ready", "saving", "finalizing"].contains(recorder.state))
+                .disabled(recorder.microphoneBusy || ["starting", "saving", "finalizing"].contains(recorder.state))
                 Menu("More") {
                     if recorder.state == "recording" {
                         Button("Pause") { Task { await recorder.control("pause") } }

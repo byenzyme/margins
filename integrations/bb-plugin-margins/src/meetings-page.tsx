@@ -3,7 +3,7 @@ import { experimental_FileLink as FileLink, useBbContext, useBbNavigate, useReal
 import { Pause } from "lucide-react";
 import type { marginsRpcContract } from "../server.js";
 import { browserCaptureOwner, detectClientCapabilities } from "./browser-capture.js";
-import { nativeBridgeOwner } from "./native-bridge-client.js";
+import { nativeBridgeOwner, nativeMicrophoneDurationMs } from "./native-bridge-client.js";
 import type { PanelState, WorkspaceMeeting, WorkspaceMeetingSummary } from "./contracts.js";
 import type { WorkspaceSetupPreview } from "./workspace-setup.js";
 import { ProgramEditor } from "./program-editor.js";
@@ -409,7 +409,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     try {
       const native = nativeBridgeOwner.status;
       const elapsed = native?.sessionId === sessionId
-        ? elapsedLabel((native.microphoneSamples || 0) / 16)
+        ? elapsedLabel(nativeMicrophoneDurationMs(native))
         : elapsedLabel(browserCaptureOwner.elapsedMs);
       if (native?.sessionId && native.sessionId === sessionId) await nativeBridgeOwner.control(action);
       else if (browserCaptureOwner.active || action === "stop" && browserCaptureOwner.hasPendingStop) {
@@ -418,8 +418,8 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
       } else throw new Error("Open the bb window with this recorder to control its microphone.");
       await refresh();
       if (action === "stop" && sessionId) {
-        rememberStopAck(sessionId, elapsed);
         const latest = await rpc.call("readWorkspaceMeeting", { projectId, sessionId });
+        rememberStopAck(sessionId, elapsed);
         if (latest.ok && latest.meeting && !dirty.current) {
           rememberMeeting(`${projectId}/${sessionId}`, latest.meeting);
           setMeeting(latest.meeting); setDraft(latest.meeting.notepad.text);
@@ -634,6 +634,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
       await saveMemo();
       const result = await rpc.call("discardWorkspaceMeeting", { projectId, sessionId: selectedId });
       if (!result.ok) throw new Error(result.error.message);
+      browserCaptureOwner.discardRetainedAudio(selectedId);
       openedMeetings.delete(`${projectId}/${selectedId}`);
       openedSummaries.delete(`${projectId}/${selectedId}`);
       setMoreOpen(false);
@@ -763,7 +764,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
         {message && <p role="alert">{message}</p>}
       </div>}
       {panel?.state !== "unavailable" && starting ? <div className="margins-preparing-pad">
-        <header><div><span className="margins-meeting-kicker" role="status">{startError ? "Recording could not start" : nativeStatus?.state === "recording" ? "Recording" : "Preparing audio…"}</span>
+        <header><div><span className="margins-meeting-kicker" role="status">{startError ? "Recording could not start" : nativeStatus?.state === "recording" ? "Recording" : "Starting… don't speak yet"}</span>
           <h2>New meeting</h2><p className="margins-meeting-details">{nativeBridgeOwner.paired ? `${nativeStatus?.microphoneDeviceName || "Microphone"} + computer audio` : "Browser microphone"}{resolvedWorkspaceName && ` · Workspace: ${resolvedWorkspaceName}`} · Started from {projects.find((item) => item.id === projectId)?.name || "this project"}</p></div>{startError && <button onClick={() => void start()}>Retry Start</button>}</header>
         {startError && <p role="alert">{startError}</p>}
         <textarea aria-label="Meeting memo pad" placeholder="Write notes..." autoFocus value={pendingDraft}
@@ -775,7 +776,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
           {(!selected.inputFinalized || memoChangedSinceNote) && <span className="margins-meeting-kicker">
           {!selected.inputFinalized ? nativeStatus?.sessionId === selected.sessionId && nativeStatus.state === "saving" ? "Saving recording…"
             : audioStartingId === selected.sessionId && nativeStatus?.state === "needs_attention" ? "Audio needs attention"
-              : audioStartingId === selected.sessionId && !(nativeStatus?.sessionId === selected.sessionId && ["recording", "paused"].includes(nativeStatus.state)) ? "Preparing audio…"
+              : audioStartingId === selected.sessionId && !(nativeStatus?.sessionId === selected.sessionId && ["recording", "paused"].includes(nativeStatus.state)) ? "Starting… don't speak yet"
                 : <><i className={`margins-meeting-state-dot${pausedSession(selected.sessionId) ? " paused" : ""}`} aria-hidden="true" />{pausedSession(selected.sessionId) ? "Paused" : "Recording"}</>
             : "Memo updated since note"}</span>}
           {selected.notePath && <nav className="margins-meeting-links" aria-label="Meeting links">
@@ -793,7 +794,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
                 {selected.inputFinalized && <button className="margins-inline-action" onClick={() => { setTitleDraft(meeting.title || `Meeting · ${meetingTime(meeting.startedAt)}`); setEditingTitle(true); }}>Rename</button>}</>}
           </div>
           <p className="margins-meeting-details">{selected.inputFinalized
-            ? stopAck?.sessionId === selected.sessionId ? `Saved · ${stopAck.elapsed} recorded` : `Saved${selected.durationMs !== null && selected.durationMs !== undefined ? ` · ${elapsedLabel(selected.durationMs)}` : ""}`
+            ? stopAck?.sessionId === selected.sessionId ? `Saved · ${selected.durationMs != null ? elapsedLabel(selected.durationMs) : stopAck.elapsed} recorded` : `Saved${selected.durationMs !== null && selected.durationMs !== undefined ? ` · ${elapsedLabel(selected.durationMs)}` : ""}`
             : "Recording"}
             {!selected.inputFinalized && selected.audioSource && ` · ${selected.audioSource}`}
             {selected.workspaceName && ` · ${selected.inputFinalized ? selected.workspaceName : `Workspace: ${selected.workspaceName}`}`}
