@@ -212,11 +212,12 @@ impl std::fmt::Display for Rejection {
 /// [`ENZYME_BIN_ENV`], when set, is used or the call fails. Otherwise the
 /// bundled locations are tried in order: the installers'
 /// `<exe dir>/../libexec/margins/enzyme` (Homebrew keg, `~/.local`
-/// installs), `<exe dir>/enzyme` (release archive), then
-/// `$MARGINS_HOME/bin/enzyme`. A candidate that is missing, not executable,
-/// or not the pinned version is skipped. `PATH` is never searched: an
-/// `enzyme` the user installed for themselves, even one beside `margins` in
-/// `~/.local/bin`, may be another release that updates itself.
+/// installs) when `<exe dir>/../libexec/margins` exists, otherwise
+/// `<exe dir>/enzyme` (the release archive); then `$MARGINS_HOME/bin/enzyme`.
+/// A candidate that is missing, not executable, or not the pinned version is
+/// skipped. An installed `margins` therefore never runs an `enzyme` beside it
+/// in a shared `bin` directory such as `~/.local/bin`, which may be the user's
+/// own release that updates itself, and `PATH` is never searched.
 pub fn locate_binary(margins_home: &Path) -> Result<PathBuf, EngineError> {
     static FOUND: OnceLock<Mutex<BTreeMap<(Option<PathBuf>, PathBuf), PathBuf>>> = OnceLock::new();
     let explicit = std::env::var_os(ENZYME_BIN_ENV)
@@ -239,17 +240,28 @@ pub fn locate_binary(margins_home: &Path) -> Result<PathBuf, EngineError> {
 }
 
 fn bundled_candidates(margins_home: &Path) -> Vec<PathBuf> {
-    let name = format!("enzyme{}", std::env::consts::EXE_SUFFIX);
-    let mut candidates = Vec::new();
-    if let Some(dir) = std::env::current_exe()
+    let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.canonicalize().ok())
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))
-    {
-        if let Some(prefix) = dir.parent() {
-            candidates.push(prefix.join("libexec").join("margins").join(&name));
-        }
-        candidates.push(dir.join(&name));
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    candidates_for(exe_dir.as_deref(), margins_home)
+}
+
+/// The bundled locations for a `margins` in `exe_dir`: the installed layout's
+/// libexec copy, or, when there is no `../libexec/margins`, the archive
+/// layout's sibling.
+fn candidates_for(exe_dir: Option<&Path>, margins_home: &Path) -> Vec<PathBuf> {
+    let name = format!("enzyme{}", std::env::consts::EXE_SUFFIX);
+    let mut candidates = Vec::new();
+    if let Some(dir) = exe_dir {
+        let libexec = dir
+            .parent()
+            .map(|prefix| prefix.join("libexec").join("margins"))
+            .filter(|libexec| libexec.is_dir());
+        candidates.push(match libexec {
+            Some(libexec) => libexec.join(&name),
+            None => dir.join(&name),
+        });
     }
     candidates.push(margins_home.join("bin").join(&name));
     candidates
@@ -1024,6 +1036,28 @@ mod tests {
         fake_enzyme(&stale, "0.0.1", 0o755);
         fake_enzyme(&archive, required_version(), 0o755);
         assert_eq!(select_bundled(&[stale, archive.clone()]).unwrap(), archive);
+    }
+
+    #[test]
+    fn an_installed_margins_never_considers_the_enzyme_beside_it() {
+        let prefix = tempfile::tempdir().unwrap();
+        let bin = prefix.path().join("bin");
+        let home = prefix.path().join("home");
+        // Archive layout: no ../libexec/margins, so the sibling is the engine.
+        std::fs::create_dir_all(&bin).unwrap();
+        assert_eq!(
+            candidates_for(Some(&bin), &home),
+            [bin.join("enzyme"), home.join("bin/enzyme")]
+        );
+        // Installed layout: only the libexec copy, even when it is missing and
+        // the user's own enzyme beside margins reports the pinned version.
+        let libexec = prefix.path().join("libexec/margins");
+        std::fs::create_dir_all(&libexec).unwrap();
+        fake_enzyme(&bin.join("enzyme"), required_version(), 0o755);
+        let candidates = candidates_for(Some(&bin), &home);
+        assert_eq!(candidates, [libexec.join("enzyme"), home.join("bin/enzyme")]);
+        let message = select_bundled(&candidates).unwrap_err().to_string();
+        assert!(!message.contains(&bin.join("enzyme").display().to_string()), "{message}");
     }
 
     #[test]

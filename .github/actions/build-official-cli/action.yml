@@ -108,12 +108,15 @@ runs:
 
     # Margins ships the enzyme Enzyme users get: the official byenzyme/enzyme
     # release asset (built with --features local-llm), checked against the
-    # version and per-target sha256 in scripts/enzyme-cli.pin. It is a public
-    # download, so this step needs no credential, and an unpinned target fails.
+    # version and per-target sha256 in scripts/enzyme-cli.pin. The pinned digest
+    # must be the one GitHub recorded for release v<version> and no other
+    # release's (enzyme-pin verify-release). An unpinned target fails.
     - name: Fetch the pinned enzyme engine
       shell: bash
       env:
         TARGET: ${{ inputs.target }}
+        # Read-only token for the releases API (rate limit only).
+        GH_TOKEN: ${{ github.token }}
       run: scripts/enzyme-pin fetch "$TARGET" "target/$TARGET/release/enzyme-pinned"
 
     - name: Sign and notarize the macOS CLI
@@ -201,7 +204,13 @@ runs:
           --timestamp
         )
         for BINARY_PATH in $BINARY_PATHS; do
-          codesign "${SIGNING_ARGS[@]}" "$BINARY_PATH"
+          EXTRA_ARGS=()
+          # Re-signing replaces enzyme's own signature; keep any entitlements
+          # it carries (the v0.11.1 asset is linker-signed ad hoc with none).
+          if [[ "$(basename "$BINARY_PATH")" == enzyme ]]; then
+            EXTRA_ARGS=(--preserve-metadata=entitlements)
+          fi
+          codesign "${SIGNING_ARGS[@]}" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} "$BINARY_PATH"
           codesign --verify --deep --strict --verbose=2 "$BINARY_PATH"
           cp "$BINARY_PATH" "$NOTARIZATION_DIR/"
         done

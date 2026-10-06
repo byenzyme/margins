@@ -244,7 +244,8 @@ the server together.
   environment (plus proxy and CA variables: `HTTP(S)_PROXY`, `NO_PROXY`,
   `ALL_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`). `MARGINS_ENZYME_BIN`, when
   set, is used or the call fails. Otherwise it uses the first of
-  `<exe dir>/../libexec/margins/enzyme`, `<exe dir>/enzyme`, and
+  `<exe dir>/../libexec/margins/enzyme` (when that `libexec/margins` exists;
+  otherwise the archive's `<exe dir>/enzyme`) and
   `$MARGINS_HOME/bin/enzyme` whose `enzyme --version` equals the `version` in
   `scripts/enzyme-cli.pin`, skipping missing, non-executable, and
   other-version candidates, and fails listing each rejection; it never

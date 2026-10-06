@@ -81,9 +81,18 @@ itself, because:
 
 **Pin.** `scripts/enzyme-cli.pin` is the one place that names the engine:
 `rev` (the enzyme-rust commit that tests and gates build with
-`scripts/enzyme-bin`), `version` (what `enzyme --version` prints for it), and
-`sha256.<target>` (the official asset for each Margins release target).
-`scripts/enzyme-pin fetch <target> <dir>` downloads
+`scripts/enzyme-bin`), `version` (what `enzyme --version` prints for it; a new
+enzyme release tagged `v<version>` at `rev`, never an already-published
+version), and `sha256.<target>` (that release's asset for each Margins release
+target). Until those sha256 values exist, `scripts/enzyme-bin` and the gates
+build `rev`, so they never test an older release.
+`scripts/enzyme-pin fetch <target> <dir>` first runs `verify-release`: the
+pinned digest must be the one GitHub recorded for that asset of release
+`v<version>` and must not be any other published release's asset, and, where
+enzyme-rust is readable (a developer's credentials, not CI), its tag
+`v<version>` must be `rev`. The public release tags point at plugin-sync
+commits, not enzyme-rust revs, so CI cannot compare the tag itself. It then
+downloads
 `https://github.com/byenzyme/enzyme/releases/download/v<version>/<asset>`,
 checks its sha256 against the pin, requires it to contain exactly one regular
 file named `enzyme`, and on a native runner checks `enzyme --version`. A target
@@ -92,7 +101,9 @@ release it pins exists. The packaged-archive smoke step runs
 `scripts/enzyme-pin check` on the extracted `enzyme` again. On macOS the
 release re-signs `enzyme` with the Margins Developer ID and hardened runtime
 and notarizes it with the other two binaries, so the shipped file's bytes
-differ from the asset; the asset's sha256 is checked before signing.
+differ from the asset; the asset's sha256 is checked before signing. Signing
+passes `--preserve-metadata=entitlements` for `enzyme`; the v0.11.1 asset is
+linker-signed ad hoc and carries no entitlements.
 
 **Install layout.** In the archive and in the BB plugin's runtime directory,
 `enzyme` sits next to `margins`. Installers that put `margins` in a shared
@@ -105,10 +116,11 @@ differ from the asset; the asset's sha256 is checked before signing.
 | `install.sh` | `~/.local/bin/margins` | `~/.local/libexec/margins/enzyme` |
 | BB plugin | `~/.local/bin/margins` (when the plugin manages it) | `~/.local/libexec/margins/enzyme` |
 
-**Run-time check.** `margins` uses the first of
-`<exe dir>/../libexec/margins/enzyme`, `<exe dir>/enzyme`, and
-`$MARGINS_HOME/bin/enzyme` whose `enzyme --version` equals the pin, so a user's
-own `enzyme` beside `margins` in `~/.local/bin` is skipped. With none, it
+**Run-time check.** `margins` considers `<exe dir>/../libexec/margins/enzyme`
+when `<exe dir>/../libexec/margins` exists (an install), otherwise
+`<exe dir>/enzyme` (the archive), then `$MARGINS_HOME/bin/enzyme`, and uses the
+first whose `enzyme --version` equals the pin. An installed `margins` never
+considers a user's own `enzyme` beside it in `~/.local/bin`. With none, it
 fails listing each candidate and why it was rejected. An explicit
 `MARGINS_ENZYME_BIN` must match the pin or the call fails.
 
@@ -121,8 +133,9 @@ downloading); independently, `refresh` never spawns it under an explicit
 `--llm env|local|none`, which Margins always passes. Enzyme only ever swaps a binary installed in `~/.local/bin` by its own
 installer; neither of the engine locations above is one.
 
-**Bumping the engine.** Publish the enzyme release first (an enzyme-rust
-`vX.Y.Z` tag at the commit Margins needs). Then, in one Margins PR, set `rev`
+**Bumping the engine.** Publish the enzyme release first: a new version, bumped
+in enzyme-rust and tagged `vX.Y.Z` at the commit Margins needs. Then, in one
+Margins PR, set `rev`
 to that tag's commit, `version` to `X.Y.Z`, and each `sha256.<target>` to the
 value in the release's `enzyme-<platform>.tar.gz.sha256`; run the gates
 against it.

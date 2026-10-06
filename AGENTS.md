@@ -509,8 +509,9 @@ one) with the worker's diagnosis attached.
 **One repo (2026-10-02).** This repository becomes the public repository, with
 fresh history at cutover; there is no separate public export. Margins links no
 closed code: it runs the shipped `enzyme` CLI (pinned in
-`scripts/enzyme-cli.pin`) behind the public `recall` feature, and releases ship
-that binary next to `margins`. Workers must keep every crate building
+`scripts/enzyme-cli.pin`) behind the public `recall` feature. Release archives
+carry that binary next to `margins`; installs (Homebrew, `install.sh`, the BB
+plugin) put it at `<prefix>/libexec/margins/enzyme`. Workers must keep every crate building
 and testing with `recall` off, keep credentials out of source, and stop editing
 the export allowlist; the cutover retires that machinery.
 

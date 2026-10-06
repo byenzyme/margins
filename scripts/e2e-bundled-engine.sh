@@ -11,8 +11,9 @@
 #      ~/.local/libexec/margins/enzyme (never ~/.local/bin/enzyme), taking it
 #      through scripts/enzyme-pin fetch with its sha256 and version checks;
 #      init and recall run that engine;
-#   3. an enzyme in ~/.local/bin (a user's own install, any version) does not
-#      replace the installed engine;
+#   3. an enzyme in ~/.local/bin (a user's own install, any version) is never
+#      used by the installed margins, even when the libexec engine is missing
+#      and the user's reports the pinned version;
 #   4. an engine reporting another version is refused with an error naming
 #      both versions, and nothing is indexed.
 #
@@ -163,12 +164,24 @@ ENGINE="$HOME/.local/libexec/margins/enzyme"
 exercise local "$INSTALLED" "$ENGINE"
 pass "2 install.sh layout: ~/.local/bin/margins runs ~/.local/libexec/margins/enzyme"
 
-# --- 3. A user's own enzyme in ~/.local/bin does not replace the engine -------------
+# --- 3. A user's own enzyme in ~/.local/bin is never used -------------------------
 printf '#!/bin/sh\necho "enzyme 99.0.0"\n' > "$HOME/.local/bin/enzyme"
 chmod 0755 "$HOME/.local/bin/enzyme"
 exercise user-enzyme "$INSTALLED" "$ENGINE"
+# Even one reporting the pinned version, with the installed engine gone.
+printf '#!/bin/sh\necho "enzyme %s"\n' "$PIN_VERSION" > "$HOME/.local/bin/enzyme"
+mv "$ENGINE" "$PACK/engine.keep"
+export MARGINS_HOME="$ROOT/margins-home-local"
+if "$INSTALLED" --workspace practice init > "$ROOT/missing.out" 2> "$ROOT/missing.err"; then
+  fail "init ran without the installed engine"
+fi
+grep -qF "$ENGINE (missing)" "$ROOT/missing.err" \
+  || { cat "$ROOT/missing.err" >&2; fail "the refusal does not name the missing libexec engine"; }
+! grep -qF "$HOME/.local/bin/enzyme" "$ROOT/missing.err" \
+  || { cat "$ROOT/missing.err" >&2; fail "margins considered the enzyme beside it"; }
+mv "$PACK/engine.keep" "$ENGINE"
 rm "$HOME/.local/bin/enzyme"
-pass "3 an enzyme on PATH beside margins is not used"
+pass "3 an enzyme beside the installed margins is never used, even at the pinned version"
 
 # --- 4. A mismatched engine is refused ----------------------------------------------
 STALE="$ROOT/stale"

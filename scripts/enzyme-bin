@@ -50,4 +50,6 @@ if [[ ! -x "$cache/bin/enzyme" ]]; then
   rm -rf "$cache"
   mv "$staging" "$cache"
 fi
+"$pin" check "$cache/bin/enzyme" \
+  || { echo "enzyme-bin: rev $rev does not report the pinned version; repin rev and version together" >&2; exit 1; }
 echo "$cache/bin/enzyme"

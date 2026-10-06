@@ -121,6 +121,7 @@ tmp="$BIN_DIR/.margins-install-$$"
 cp "$SOURCE" "$tmp"
 chmod 0755 "$tmp"
 
+preserved=""
 if [ -e "$DEST" ] || [ -L "$DEST" ]; then
   existing_kind="$(capability_kind "$DEST")"
   case "$existing_kind" in
@@ -133,8 +134,6 @@ if [ -e "$DEST" ] || [ -L "$DEST" ]; then
         echo "Preserved public CLI path already exists unexpectedly: $preserved" >&2
         exit 1
       fi
-      mv "$DEST" "$preserved"
-      echo "Preserved public portable Margins CLI at $preserved"
       ;;
     *)
       rm -f "$tmp"
@@ -144,10 +143,15 @@ if [ -e "$DEST" ] || [ -L "$DEST" ]; then
   esac
 fi
 
-mv "$tmp" "$DEST"
+# The engine lands first so the new margins never runs without it.
 mkdir -p "$ENGINE_DIR"
 install -m 0755 "$engine_stage/enzyme" "$ENGINE_DIR/.enzyme-install-$$"
 mv "$ENGINE_DIR/.enzyme-install-$$" "$ENGINE_DIR/enzyme"
+if [ -n "$preserved" ]; then
+  mv "$DEST" "$preserved"
+  echo "Preserved public portable Margins CLI at $preserved"
+fi
+mv "$tmp" "$DEST"
 
 capabilities="$("$DEST" capabilities)"
 python3 - "$capabilities" <<'PY'
