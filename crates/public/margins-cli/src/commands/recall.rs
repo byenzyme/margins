@@ -20,12 +20,38 @@ pub fn run(
     workspace: &ResolvedWorkspace,
     query: &str,
     source: Option<&str>,
+    json: bool,
     stdout: &mut dyn Write,
 ) -> Result<(), CliError> {
     let output = local_recall::search(workspace, query, source).map_err(CliError::from_anyhow)?;
-    serde_json::to_writer_pretty(&mut *stdout, &output)
-        .map_err(|error| CliError::new("output_failed", error.to_string()))?;
-    writeln!(stdout).map_err(|error| CliError::new("output_failed", error.to_string()))
+    let failed = |error: std::io::Error| CliError::new("output_failed", error.to_string());
+    if json {
+        serde_json::to_writer_pretty(&mut *stdout, &output)
+            .map_err(|error| CliError::new("output_failed", error.to_string()))?;
+        return writeln!(stdout).map_err(failed);
+    }
+    if output.results.is_empty() {
+        return writeln!(stdout, "No notes matched \"{}\".", output.query).map_err(failed);
+    }
+    writeln!(
+        stdout,
+        "{} {} for \"{}\":",
+        output.total_results,
+        if output.total_results == 1 { "match" } else { "matches" },
+        output.query
+    )
+    .map_err(failed)?;
+    for hit in &output.results {
+        writeln!(stdout).map_err(failed)?;
+        writeln!(stdout, "{} ({})", hit.document_ref, hit.source).map_err(failed)?;
+        let excerpt = hit.content.split_whitespace().collect::<Vec<_>>().join(" ");
+        let excerpt = match excerpt.char_indices().nth(240) {
+            Some((end, _)) => format!("{}…", &excerpt[..end]),
+            None => excerpt,
+        };
+        writeln!(stdout, "  {excerpt}").map_err(failed)?;
+    }
+    Ok(())
 }
 
 pub fn sync(

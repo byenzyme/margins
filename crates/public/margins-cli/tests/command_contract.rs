@@ -633,7 +633,7 @@ fn recall_parser_accepts_declared_source_filter() {
     .unwrap();
     assert!(matches!(
         parsed.command,
-        Some(margins_cli::args::Command::Recall { query, source })
+        Some(margins_cli::args::Command::Recall { query, source, json: false })
             if query == "relationship context" && source.as_deref() == Some("mail")
     ));
 }
@@ -2590,7 +2590,7 @@ fn workspace_setup_guide_is_the_preset_flow_and_is_read_only() {
     assert!(stdout.contains("margins workspace new practice"));
     assert!(stdout.contains("margins init"));
     assert!(stdout.contains("margins sync --json"));
-    assert!(stdout.contains("margins recall \"an exact phrase from these notes\""));
+    assert!(stdout.contains("margins recall --json \"an exact phrase from these notes\""));
     assert!(stdout.contains("source add notes"));
     assert!(stdout.contains("Run these commands from the notes folder"));
     assert!(stdout.contains("cd \"/absolute/path/to/notes\""));
@@ -2600,7 +2600,7 @@ fn workspace_setup_guide_is_the_preset_flow_and_is_read_only() {
     assert!(stdout.contains("`program_path`"));
     assert!(stdout.contains("workspace show"));
     assert!(stdout.contains("workspace edit"));
-    assert!(stdout.contains("enzyme scan --workspace <id> --json"));
+    assert!(stdout.contains("margins enzyme scan --workspace <id> --json"));
     assert!(stdout.contains("Never open, cat, print, or summarize credential bundles"));
     assert!(stdout.contains("Use only redacted Margins product status"));
     assert!(stdout.contains("Do not run recall before `margins init`"));
@@ -2856,12 +2856,34 @@ fn public_init_recall_and_sync_form_an_autonomous_local_loop() {
             "practice",
             "recall",
             "phosphorescent handoff",
+            "--json",
         ],
     );
     assert!(recall.is_ok(), "{recall_stderr}");
     let recall: serde_json::Value = serde_json::from_str(&recall_stdout).unwrap();
     assert_eq!(recall["search_strategy"], "live_local_markdown");
     assert_eq!(recall["total_results"], 1);
+    let note = recall["results"][0]["document_ref"].as_str().unwrap().to_string();
+
+    // Without --json, people get the matching note and an excerpt, not JSON.
+    let (readable, readable_stdout, readable_stderr) = invoke(
+        &services,
+        &notes,
+        &[
+            "margins",
+            "--workspace",
+            "practice",
+            "recall",
+            "phosphorescent handoff",
+        ],
+    );
+    assert!(readable.is_ok(), "{readable_stderr}");
+    assert!(
+        readable_stdout.starts_with("1 match for \"phosphorescent handoff\":\n"),
+        "{readable_stdout}"
+    );
+    assert!(readable_stdout.contains(&note), "{readable_stdout}");
+    assert!(serde_json::from_str::<serde_json::Value>(&readable_stdout).is_err());
 
     let (sync, sync_stdout, sync_stderr) = invoke(
         &services,

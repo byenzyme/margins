@@ -297,19 +297,48 @@ the server together.
   tests and gates build (`scripts/enzyme-bin`) and the `version` Margins
   requires at runtime.
 
-### Inspecting a Workspace with plain `enzyme`
+### Which Workspace a command uses, and its exit codes
 
-A Margins home is an Enzyme home, so the engine's own commands read the same
-programs and index:
+`recall`, `workspace status`, `source list`, `sync`, `integrations`, and
+`import granola` never create a Workspace. Each uses the `--workspace` (or
+`MARGINS_WORKSPACE`) selection, else the one Workspace that declares the
+current directory, else the machine default, and then prints
+`Using Workspace <id> (default)` on stderr. Commands that write (`sync`,
+imports, `integrations reconcile`) migrate a retired `config.toml` and rename
+`index.db` as any writing command does; read-only ones inspect without
+writing. Only `margins init` establishes a new Workspace for the current
+folder.
+
+For `recall`, `workspace status`, and `sync` the exit code is:
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Success. |
+| 1 | The command failed. stderr names the error code: `<margins_error code="…">` in readable mode, or a `margins.error.v1` object with `--json` (failures inside `sync` itself use a `margins.sync.v1` envelope with `ok: false`). `workspace_required` means no Workspace applied; `command_failed` covers engine and index failures. `sync` also exits 1, after printing its full `margins.sync.v1` envelope, when any source or the recall refresh is not ok. |
+| 2 | The arguments were not valid. |
+
+`recall` prints readable results; pass `--json` for the `margins.recall.v1`
+envelope.
+
+### Inspecting a Workspace with `margins enzyme`
+
+Margins ships its own `enzyme`, separate from any `enzyme` you install, and a
+Margins home is an Enzyme home. `margins enzyme <args…>` runs that bundled
+engine with the same lookup, version check, and scrubbed environment Margins
+uses, `ENZYME_HOME=$MARGINS_HOME` (never `~/.enzyme`), and the selected
+Workspace (`--workspace`, `MARGINS_WORKSPACE`, the one whose notes folder holds
+the current directory, or the default):
 
 ```bash
-ENZYME_HOME=~/.margins enzyme --workspace <id> status
-ENZYME_HOME=~/.margins enzyme --workspace <id> status --json
-ENZYME_HOME=~/.margins enzyme --workspace <id> search "a phrase" --json
+margins enzyme --workspace <id> status
+margins enzyme --workspace <id> status --json
+margins enzyme --workspace <id> search "a phrase" --json
+margins enzyme scan --workspace <id> --json
 ```
 
-These open the index read-only. Avoid `init`/`refresh` by hand on a live
-home: without `--llm` they use Enzyme's default generator, not Margins'.
+`init` and `refresh` get Margins' catalyst generator unless you pass `--llm`.
+`update`, `login`, and `logout` are refused: Margins pins the engine it ships
+and never uses an Enzyme account.
 
 ## Open items
 

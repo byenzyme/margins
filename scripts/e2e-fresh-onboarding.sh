@@ -396,7 +396,9 @@ timed_run() {
   ended="$(now_ms)"
   printf '%s\t%s\t%s\n' "$label" "$((ended - started))" "$status" >> "$MARGINS_E2E_TIMINGS"
   if [ -s "$stderr_path" ] && [ "$label" = "phase2.index-refresh" ] \
-      && [ "$(cat "$stderr_path")" = "Building or refreshing recall index and catalysts…" ]; then
+      && [ "$(head -n 1 "$stderr_path")" = "Building or refreshing recall index and catalysts…" ] \
+      && ! grep -qv -e '^Building or refreshing recall index and catalysts…$' \
+        -e '^Your Workspace is the program at ' -e '^  Read it: ' -e '^  Change it: ' "$stderr_path"; then
     record_observation "$label progress: Building or refreshing recall index and catalysts…"
   elif [ -s "$stderr_path" ]; then
     {

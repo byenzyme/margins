@@ -43,25 +43,26 @@ Margins is built on Enzyme, a local-first compile step for your knowledge base t
 
 It generates "catalysts" by first temporally sampling content in markdown (e.g. folders, a frontmatter field representing people, or around interleaved tags and wikilinks) or in SQLite tables (e.g. around columns that represent simliar). Then, it embeds both documents and catalysts and ranks the best content for each catalyst. Catalysts are a layer of indirection that lets even sparse agent queries to find deep connections.
 
-Margins' agentic setup produces a config like this:
+Your Workspace is one editable program, `~/.margins/configs/<id>.enzyme`. Setup starts it from the Margins meetings preset; it looks like this:
 
+```enzyme
+workspace "notes" {
+  source markdown "home" { path "/Users/me/notes" }
+
+  learn questions from folder "Meetings"
+    about operational
+  learn questions from folder "People"
+    including linked pages
+    about relationships
+  learn questions automatically
+
+  leave out folders ["Templates", "Attachments"]
+
+  remember in folder "Meetings" create note
+}
 ```
-[vaults."/Users/me/obsidian"]
-min_top_catalysts = 40
-entities = [
-    "folder:meetings",
-    "folder:inbox",
-    { "folder:people" = { profile = "relational", expandable = true } },
-    "#research",
-    "#gtm",
-    ...
-]
-excluded_folders = [
-    "templates",
-    "node_modules"
-]
-targets = ["/Users/me/obsidian/Readwise"]
-```
+
+Read it with `margins --workspace notes workspace show --text` and change it with `margins --workspace notes workspace edit`, which shows the change in plain language before applying it. `margins guide glossary` explains the words. Margins ships its own copy of the engine, separate from any `enzyme` you install; `margins enzyme --workspace notes status` runs it on Margins' data.
 
 Using this, Enzyme then periodically refreshes its index with new content and directions.
 

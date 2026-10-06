@@ -68,7 +68,7 @@ setup_and_query() {
     cd "$HOME"
     run_workspace init > "$RUNROOT/init.xml"
     run_workspace sync --json > "$RUNROOT/sync.json"
-    run_workspace recall "$query" > "$RUNROOT/recall.json"
+    run_workspace recall --json "$query" > "$RUNROOT/recall.json"
     run_workspace workspace status --json > "$RUNROOT/status.json"
     run_workspace source list --json > "$RUNROOT/sources.json"
   )

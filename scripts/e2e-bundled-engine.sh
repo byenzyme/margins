@@ -105,7 +105,7 @@ PY
   "$margins" --workspace practice init > "$work/init.out" 2> "$work/init.err" \
     || { cat "$work/init.err" >&2; fail "$label: margins init"; }
   [[ -f "$home/workspaces/practice/enzyme.db" ]] || fail "$label: no index at MARGINS_HOME/workspaces/practice"
-  "$margins" --workspace practice recall "$PHRASE" > "$work/recall.json" 2> "$work/recall.err" \
+  "$margins" --workspace practice recall --json "$PHRASE" > "$work/recall.json" 2> "$work/recall.err" \
     || { cat "$work/recall.err" >&2; fail "$label: margins recall"; }
   python3 - "$work/recall.json" <<'PY' || fail "$label: recall did not return the planted note"
 import json, sys

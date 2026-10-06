@@ -1,3 +1,14 @@
+<!-- Unreleased: fold these into the next release's notes and remove this block. -->
+<!--
+- `margins recall` prints readable text by default; scripts must pass
+  `--json` for the `margins.recall.v1` envelope.
+- `margins workspace plan` and `apply` read in plain language without
+  `--json`; `margins enzyme` runs the bundled engine's read-only commands.
+- recall, `workspace status`, `source list`, `sync`, integrations, and
+  Granola import no longer create a Workspace for the current folder; only
+  `margins init` does. Without one they fail with error code `workspace_required` (exit 1).
+-->
+
 Margins 0.4.17 makes each Workspace one editable program and ships its own
 recall engine. The release archives contain `margins`, `margins-server`, and
 `enzyme`.

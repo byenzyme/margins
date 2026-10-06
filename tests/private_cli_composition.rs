@@ -284,8 +284,14 @@ fn setup_output_redacts_credential_paths_and_secret_shaped_fixture_data() {
         String::from_utf8(output.stderr).unwrap()
     );
     assert!(combined.contains("fixture-catalyst-model"));
+    // Setup names where the Workspace program lives (under `configs/`); no
+    // other Margins-home path, and nothing about credentials, is printed.
+    let home_text = margins_home.to_string_lossy().to_string();
+    let programs = format!("{home_text}/configs/");
+    assert!(combined.contains(&programs), "{combined}");
+    let combined = combined.replace(&programs, "<programs>/");
     for forbidden in [
-        margins_home.to_string_lossy().to_string(),
+        home_text,
         "llm-config-cache.json".to_string(),
         "sk-or-v1-secret-shaped-cli-fixture".to_string(),
         "fixture.invalid".to_string(),
@@ -396,18 +402,23 @@ fn workspace_commands_refuse_unsafe_home_and_state_cwds_with_exact_reasons() {
             let stderr = String::from_utf8(output.stderr).unwrap();
             let explicit_source_mutation =
                 args.first() == Some(&"source") && matches!(args.get(1), Some(&"add" | &"remove"));
+            // Only `init` establishes a Workspace for the cwd, so only it
+            // reaches the unsafe-home refusal; read-like commands never try.
+            let establishes = args.first() == Some(&"init");
             let message = if explicit_source_mutation {
                 "this mutation requires literal --workspace <id>".to_string()
-            } else {
+            } else if establishes {
                 format!(
                     "cannot create implicit workspace: {reason}; use explicit setup instead: margins workspace new {id} --home {}",
                     cwd.canonicalize().unwrap().display()
                 )
-            };
-            let code = if explicit_source_mutation {
-                "workspace_required"
             } else {
+                margins_cli::commands::workspace::NO_WORKSPACE_MESSAGE.to_string()
+            };
+            let code = if establishes {
                 "command_failed"
+            } else {
+                "workspace_required"
             };
             let refusal = stderr.lines().last().unwrap_or("");
             if args.first() == Some(&"integrations") && args.contains(&"--json") {
@@ -417,14 +428,10 @@ fn workspace_commands_refuse_unsafe_home_and_state_cwds_with_exact_reasons() {
                 assert_eq!(error["error"]["message"], message);
                 continue;
             }
-            let expected = if explicit_source_mutation {
-                "<margins_error code=\"workspace_required\">this mutation requires literal --workspace &lt;id&gt;</margins_error>\n".to_string()
-            } else {
-                format!(
-                    "<margins_error code=\"command_failed\">cannot create implicit workspace: {reason}; use explicit setup instead: margins workspace new {id} --home {}</margins_error>\n",
-                    cwd.canonicalize().unwrap().display()
-                )
-            };
+            let expected = format!(
+                "<margins_error code=\"{code}\">{}</margins_error>\n",
+                margins_cli::output::xml_escape_text(&message)
+            );
             assert_eq!(
                 refusal,
                 expected.trim_end(),
@@ -477,13 +484,15 @@ fn integrations_reconcile_requires_literal_workspace_selector() {
 
 #[test]
 #[cfg(feature = "recall")]
-fn workspace_status_implicitly_creates_fresh_notes_once() {
+fn read_like_commands_never_create_a_workspace_and_only_init_establishes_one() {
     let temp = tempfile::Builder::new()
         .prefix("implicit-workspace-cli-")
         .tempdir_in(env!("CARGO_MANIFEST_DIR"))
         .unwrap();
     let machine_home = temp.path().join("machine-home");
     let margins_home = temp.path().join("state");
+    // A folder with no Workspace, such as a code checkout: recall there must
+    // not quietly make it a Workspace whose notes land in the repo.
     let notes = temp.path().join("Fresh Notes");
     fs::create_dir_all(&machine_home).unwrap();
     fs::create_dir_all(&notes).unwrap();
@@ -505,46 +514,71 @@ fn workspace_status_implicitly_creates_fresh_notes_once() {
     })
     .to_string();
     let canonical_notes = notes.canonicalize().unwrap();
-    let created_line = format!(
-        "Created workspace fresh-notes with home {}",
-        canonical_notes.display()
-    );
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_margins-private"))
+            .args(args)
+            .current_dir(&notes)
+            .env_clear()
+            .env("HOME", &machine_home)
+            .env("MARGINS_HOME", &margins_home)
+            .env(
+                margins_workflows::workspace::IMPLICIT_WORKSPACE_DENY_ROOTS_ENV,
+                &deny_roots,
+            )
+            .output()
+            .unwrap()
+    };
 
-    let first = Command::new(env!("CARGO_BIN_EXE_margins-private"))
-        .args(["workspace", "status", "--json"])
-        .current_dir(&notes)
-        .env_clear()
-        .env("HOME", &machine_home)
-        .env("MARGINS_HOME", &margins_home)
-        .env(
-            margins_workflows::workspace::IMPLICIT_WORKSPACE_DENY_ROOTS_ENV,
-            &deny_roots,
-        )
-        .output()
-        .unwrap();
+    for args in [
+        &["recall", "a real note"][..],
+        &["recall", "a real note", "--json"],
+        &["workspace", "status"],
+        &["workspace", "status", "--json"],
+        &["source", "list", "--json"],
+        &["sync", "--json"],
+        &["integrations", "status", "--json"],
+    ] {
+        let output = run(args);
+        // Documented in docs/workspace-language.md: exit 1, code on stderr.
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        if args.contains(&"--json") {
+            let error: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap();
+            assert_eq!(error["schema_version"], "margins.error.v1", "{args:?}");
+            assert_eq!(error["error"]["code"], "workspace_required", "{args:?}");
+        } else {
+            assert!(
+                stderr.starts_with("<margins_error code=\"workspace_required\">"),
+                "{args:?}: {stderr}"
+            );
+        }
+        assert!(stderr.contains("did not create one"), "{args:?}: {stderr}");
+        assert!(stderr.contains("margins workspace new"), "{args:?}: {stderr}");
+        assert!(!stderr.contains("Created workspace"), "{args:?}: {stderr}");
+        assert!(
+            !margins_home.join("configs").exists() && !margins_home.join("workspaces").exists(),
+            "{args:?} created Workspace state"
+        );
+    }
+
+    // Invalid arguments exit 2.
+    assert_eq!(run(&["recall"]).status.code(), Some(2));
+    assert_eq!(run(&["workspace", "status", "--bogus"]).status.code(), Some(2));
+    assert_eq!(run(&["sync", "--bogus"]).status.code(), Some(2));
+
+    // `init` is the one command that establishes the cwd as a Workspace.
+    let init = run(&["init"]);
     assert!(
-        first.status.success(),
+        String::from_utf8_lossy(&init.stderr).contains(&format!(
+            "Created workspace fresh-notes with home {}",
+            canonical_notes.display()
+        )),
         "{}",
-        String::from_utf8_lossy(&first.stderr)
-    );
-    assert_eq!(
-        String::from_utf8(first.stderr).unwrap(),
-        format!("{created_line}\n")
-    );
-    let first_stdout = String::from_utf8(first.stdout).unwrap();
-    let first_json: serde_json::Value = serde_json::from_str(&first_stdout).unwrap();
-    assert_eq!(first_json["id"], "fresh-notes");
-    assert_eq!(
-        first_json["build"]["commit"],
-        margins_cli::build_info::get().commit
-    );
-    assert_eq!(
-        first_json["source_refresh_staleness"],
-        serde_json::json!({})
+        String::from_utf8_lossy(&init.stderr)
     );
     let config_path = margins_home.join("configs/fresh-notes.enzyme");
     assert!(config_path.is_file());
-    assert!(!margins_home.join("workspaces/fresh-notes/config.toml").exists());
     let config = margins_workflows::workspace::resolve_at(&margins_home, "fresh-notes")
         .unwrap()
         .config;
@@ -554,23 +588,17 @@ fn workspace_status_implicitly_creates_fresh_notes_once() {
             if path == &canonical_notes
     ));
 
-    let second = Command::new(env!("CARGO_BIN_EXE_margins-private"))
-        .args(["workspace", "status", "--json"])
-        .current_dir(&notes)
-        .env_clear()
-        .env("HOME", &machine_home)
-        .env("MARGINS_HOME", &margins_home)
-        .env(
-            margins_workflows::workspace::IMPLICIT_WORKSPACE_DENY_ROOTS_ENV,
-            &deny_roots,
-        )
-        .output()
-        .unwrap();
-    assert!(second.status.success());
-    assert!(second.stderr.is_empty());
-    let second_stdout = String::from_utf8(second.stdout).unwrap();
-    let second_json: serde_json::Value = serde_json::from_str(&second_stdout).unwrap();
-    assert_eq!(second_json["id"], "fresh-notes");
+    // Afterwards, read-like commands find it from the cwd and create nothing.
+    let status = run(&["workspace", "status", "--json"]);
+    assert!(status.status.success(), "{}", String::from_utf8_lossy(&status.stderr));
+    assert!(status.stderr.is_empty());
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["id"], "fresh-notes");
+    assert_eq!(
+        status["build"]["commit"],
+        margins_cli::build_info::get().commit
+    );
+    assert_eq!(status["source_refresh_staleness"], serde_json::json!({}));
     assert_eq!(
         fs::read_dir(margins_home.join("workspaces"))
             .unwrap()

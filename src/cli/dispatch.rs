@@ -218,13 +218,16 @@ where
     }
 
     #[cfg(feature = "recall")]
-    if matches!(
-        parsed.command,
-        Some(Command::Workspace {
-            command: margins_cli::args::WorkspaceCommand::Status { json: true }
-        })
-    ) {
-        return run_workspace_status(workspace_selector.as_deref());
+    if let Some(Command::Workspace {
+        command: margins_cli::args::WorkspaceCommand::Status { json },
+    }) = &parsed.command
+    {
+        return run_workspace_status(workspace_selector.as_deref(), *json);
+    }
+
+    #[cfg(feature = "recall")]
+    if let Some(Command::Enzyme { args: enzyme_args }) = &parsed.command {
+        return run_enzyme(workspace_selector.as_deref(), enzyme_args);
     }
 
     if let Some(Command::Connect {
@@ -302,7 +305,7 @@ where
         let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let workspace = match margins_cli::commands::workspace::resolve(
+        let workspace = match margins_cli::commands::workspace::resolve_for_write(
             workspace_selector.as_deref(),
             &cwd,
             &mut stderr,
@@ -414,8 +417,13 @@ where
     // Intercept Recall: the official binary composes the vendored associative
     // search engine, so it never falls through to the public degradation path.
     #[cfg(feature = "recall")]
-    if let Some(Command::Recall { query, source }) = &parsed.command {
-        return run_recall(workspace_selector.as_deref(), query, source.as_deref());
+    if let Some(Command::Recall {
+        query,
+        source,
+        json,
+    }) = &parsed.command
+    {
+        return run_recall(workspace_selector.as_deref(), query, source.as_deref(), *json);
     }
 
     #[cfg(feature = "recall")]
@@ -430,11 +438,11 @@ where
             margins_cli::args::WorkspaceCommand::Plan {
                 desired: None,
                 preset: Some(preset),
-                ..
+                json,
             },
     }) = &parsed.command
     {
-        return run_workspace_plan_preset(workspace_selector.as_deref(), preset);
+        return run_workspace_plan_preset(workspace_selector.as_deref(), preset, *json);
     }
 
     let interactive_command = match &parsed.command {
@@ -479,9 +487,9 @@ where
         };
         #[cfg(feature = "recall")]
         if granola_import && code == 0 {
-            let workspace = match resolve_workspace(workspace_selector.as_deref()) {
+            let workspace = match writable_workspace(workspace_selector.as_deref()) {
                 Ok(workspace) => workspace,
-                Err(error) => return report_error(&error.to_string()),
+                Err(error) => return report_cli_error(error),
             };
             if let Err(error) = crate::recall::refresh_workspace(&workspace) {
                 return report_json_cli_error(
