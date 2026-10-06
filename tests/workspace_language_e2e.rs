@@ -398,6 +398,13 @@ fn seed_mail_and_calendar(state_dir: &Path) {
         });
         associations.push(ParticipantThread {
             participant: "ada@client.test".to_string(),
+            thread_id: thread_id.clone(),
+            last_interaction: at,
+            sampling_score: Some(1_001_001),
+        });
+        // The account itself takes part in every thread.
+        associations.push(ParticipantThread {
+            participant: ACCOUNT.to_string(),
             thread_id,
             last_interaction: at,
             sampling_score: Some(1_001_001),
@@ -516,6 +523,18 @@ fn mixed_host_sources_lower_to_ledger_sources_and_resolve_source_readings() {
         )
         .unwrap();
     assert_eq!(collection, 1);
+    // Mail people are linked; the account owner is not one of them.
+    let people = |name: &str| -> i64 {
+        index
+            .query_row(
+                "SELECT COUNT(*) FROM entities WHERE lower(name) LIKE ?1",
+                [format!("%{name}%")],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert!(people("ada@client.test") > 0);
+    assert_eq!(people(ACCOUNT), 0, "the mail account owner must not be a link entity");
     let mail_catalysts: i64 = index
         .query_row(
             "SELECT COUNT(*) FROM catalysts WHERE entity = 'sqlite:mail'",
@@ -995,5 +1014,91 @@ fn concurrent_margins_commands_map_lock_busy() {
     let first = first.wait_with_output().unwrap();
     assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
     assert!(waiting.status.success(), "{}", String::from_utf8_lossy(&waiting.stderr));
+    env.assert_enzyme_untouched();
+}
+
+/// Setup is preset-only: `workspace new`, then `workspace plan --preset
+/// margins-meetings` fills Margins' managed preset through `enzyme compile`,
+/// keeps only readings whose folders exist, and is applied unchanged; init
+/// and an exact-phrase recall prove the notes folder, and new notes go to
+/// Meetings. Running setup again proposes nothing.
+#[test]
+fn preset_setup_keeps_existing_readings_recalls_and_is_safe_to_rerun() {
+    let env = Hermetic::new();
+    let notes = env.path("notes");
+    write(
+        &notes.join("Meetings/2026-10-01 vendor sync.md"),
+        "# Vendor sync\n\nThe cobalt orchard review moved the launch to Thursday.\n",
+    );
+    people_fixture(&notes);
+    write(&notes.join("templates/meeting.md"), "# {{title}}\n\nThe template sentinel phrase stays out.\n");
+    env.ok(&["workspace", "new", "practice", "--home", notes.to_str().unwrap(), "--json"]);
+
+    let plan_args = [
+        "--workspace", "practice", "workspace", "plan", "--preset", "margins-meetings", "--json",
+    ];
+    let plan = env.ok(&plan_args);
+    let plan_path = env.path("preset-plan.json");
+    fs::write(&plan_path, &plan.stdout).unwrap();
+    let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
+    assert_eq!(plan["schema_version"], "margins.workspace.plan.v2");
+    assert_eq!(
+        plan["program_path"],
+        env.margins_home.join("configs/practice.enzyme").to_str().unwrap()
+    );
+    assert_eq!(plan["preset"]["readings"], serde_json::json!(["folder:Meetings", "folder:people"]));
+    assert_eq!(plan["preset"]["skipped_readings"], serde_json::json!(["folder:Projects"]));
+    assert_eq!(plan["preset"]["note_folder"], "Meetings");
+    assert_eq!(
+        fs::read_to_string(env.margins_home.join("presets/margins-meetings.enzyme.in")).unwrap(),
+        margins_workflows::workspace_preset::MEETINGS_PRESET_TEXT
+    );
+    let receipt = env.json(&[
+        "--workspace", "practice", "workspace", "apply", "--plan", plan_path.to_str().unwrap(), "--json",
+    ]);
+    assert_eq!(receipt["ok"], true, "{receipt}");
+
+    let program = env.program("practice");
+    assert_eq!(program, plan["desired_program"].as_str().unwrap());
+    assert!(program.contains(r#"learn questions from folder "Meetings""#), "{program}");
+    assert!(program.contains(r#"learn questions from folder "people""#), "{program}");
+    assert!(!program.contains("Projects"), "{program}");
+    assert!(program.contains(r#"leave out folders ["templates", "Attachments"]"#), "{program}");
+    assert!(program.contains(r#"remember in folder "Meetings" create note"#), "{program}");
+    assert!(program.contains(r#"source margins-captures "captures""#), "{program}");
+    let programs = fs::read_dir(env.margins_home.join("configs"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".enzyme"))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        programs,
+        ["margins-sources.enzyme", "practice.enzyme", "settings.enzyme"]
+            .map(String::from)
+            .into()
+    );
+
+    let _generator = fixture_generator::FixtureGenerator::start(&env.margins_home);
+    env.ok(&["--workspace", "practice", "init"]);
+    let state = env.margins_home.join("workspaces/practice");
+    assert!(indexed_refs(&state).iter().all(|reference| !reference.starts_with("templates/")));
+    let phrase = "The cobalt orchard review moved the launch to Thursday";
+    let recalled = recall(&env, "practice", phrase, None);
+    assert_eq!(recalled["status"], "ok", "{recalled}");
+    assert!(
+        result_refs(&recalled).contains(&"Meetings/2026-10-01 vendor sync.md".to_string()),
+        "planted phrase not recalled: {recalled}"
+    );
+    let destination = env.json(&["--workspace", "practice", "workspace", "destination", "--json"]);
+    assert_eq!(destination["destination"], notes.join("Meetings").to_str().unwrap(), "{destination}");
+
+    // Setup again: the same preset proposes no change and no second program.
+    let again: serde_json::Value = serde_json::from_slice(&env.ok(&plan_args).stdout).unwrap();
+    assert_eq!(again["actions"], serde_json::json!([]), "{again}");
+    assert_eq!(again["diff"], "");
+    assert_eq!(again["desired_program"], plan["desired_program"]);
+    assert_eq!(env.program("practice"), program);
+    assert_eq!(fs::read_dir(env.margins_home.join("configs")).unwrap().count(), programs.len() + 1);
+
     env.assert_enzyme_untouched();
 }

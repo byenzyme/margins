@@ -240,8 +240,6 @@ pub enum Command {
         #[command(subcommand)]
         command: DisconnectCommand,
     },
-    /// Inspect a vault and emit grounded setup evidence without changing it
-    Scan,
     /// Print this installation's machine-readable capabilities as JSON
     Capabilities,
     /// Establish or refresh a Margins vault in this folder
@@ -371,22 +369,20 @@ pub enum WorkspaceCommand {
     /// Edit the selected Workspace's program in $VISUAL or $EDITOR, then review
     /// the change and apply it through plan/apply (interactive terminals only)
     Edit,
-    /// Compile a complete desired Workspace program into a revisioned plan
+    /// Compile a complete desired Workspace program, or the setup preset, into
+    /// a revisioned plan
     Plan {
         /// `.enzyme` file with the complete desired `workspace "<id>" { … }`
         /// program (a legacy `.toml` desired config is still accepted)
-        #[arg(long)]
-        desired: PathBuf,
+        #[arg(long, required_unless_present = "preset", conflicts_with = "preset")]
+        desired: Option<PathBuf>,
+        /// Fill a preset for the Workspace's notes folder and add it to the
+        /// current program: `margins-meetings` (the setup preset) or the path
+        /// to a `.enzyme.in` template. Folder readings for folders the notes
+        /// folder does not have are dropped.
+        #[arg(long, value_name = "NAME|PATH")]
+        preset: Option<String>,
         /// Emit margins.workspace.plan.v2 JSON
-        #[arg(long, required = true)]
-        json: bool,
-    },
-    /// Propose Workspace recall settings from the declared Home Source
-    Compile {
-        /// Optional relative folder for approved notes under Home
-        #[arg(long)]
-        note_folder: Option<String>,
-        /// Emit a machine-readable proposal and the complete desired program
         #[arg(long, required = true)]
         json: bool,
     },
