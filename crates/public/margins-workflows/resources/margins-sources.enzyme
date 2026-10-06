@@ -7,7 +7,8 @@
 // $MARGINS_HOME/workspaces/<workspace>/ledger.db. `accepts` names fields that
 // Margins reads when it syncs; Enzyme ignores them.
 
-// One document per synced email thread.
+// One document per synced email thread. Its people are the thread's
+// participants other than the account itself (also in Gmail's canonical form).
 source kind google-mail {
   needs account
   accepts query, backfill days
@@ -20,6 +21,16 @@ source kind google-mail {
            WHERE pt.connector_id = te.connector_id
              AND pt.source_account = te.source_account
              AND pt.thread_id = te.thread_id
+             AND pt.participant NOT IN (
+                 SELECT address FROM (SELECT lower(trim({account})) AS address)
+                 UNION ALL
+                 SELECT replace(CASE WHEN instr(local, '+') > 0
+                                     THEN substr(local, 1, instr(local, '+') - 1)
+                                     ELSE local END, '.', '') || '@gmail.com'
+                 FROM (SELECT substr(address, 1, instr(address, '@') - 1) AS local,
+                              substr(address, instr(address, '@') + 1) AS domain
+                       FROM (SELECT lower(trim({account})) AS address))
+                 WHERE domain IN ('gmail.com', 'googlemail.com'))
            ORDER BY pt.participant
        ) ordered), '[]') AS participants
 FROM thread_evidence te
