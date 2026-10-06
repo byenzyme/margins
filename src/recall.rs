@@ -2026,9 +2026,12 @@ mod tests {
             b"selection-fixture",
         )
         .unwrap();
+        // The engine reads the Margins home as an Enzyme home: the generator
+        // selection is the `configs/settings.enzyme` program.
+        std::fs::create_dir_all(home.path().join("configs")).unwrap();
         std::fs::write(
-            home.path().join("config.toml"),
-            "[llm]\nmode = \"local\"\nlocal_model = \"configured-catalyst\"\n",
+            home.path().join("configs/settings.enzyme"),
+            "settings {\n  generation local\n  model \"configured-catalyst\"\n  updates disabled\n}\n",
         )
         .unwrap();
 

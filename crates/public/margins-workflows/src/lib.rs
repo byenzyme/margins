@@ -9,6 +9,7 @@ pub mod catalyst;
 pub mod granola_import;
 pub mod integrations;
 pub mod local_recall;
+pub mod machine_config;
 pub mod note_artifacts;
 pub mod processing;
 pub mod project;

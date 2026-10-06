@@ -3,6 +3,7 @@ use std::ffi::OsStr;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
+use margins_workflows::machine_config;
 use toml_edit::{value, DocumentMut, Item, Table};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,21 +175,17 @@ fn detect_host_agent(keys: &[String]) -> Option<Agent> {
     }
 }
 
-fn config_path(home: &Path) -> PathBuf {
+fn margins_home(home: &Path) -> PathBuf {
     std::env::var_os("MARGINS_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".margins"))
-        .join("config.toml")
 }
 
-fn read_remembered_agent(path: &Path) -> Result<Option<Agent>> {
-    let contents = match std::fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(error).with_context(|| format!("failed to read {}", path.display()))
-        }
+fn read_remembered_agent(margins_home: &Path) -> Result<Option<Agent>> {
+    let path = machine_config::machine_config_path(margins_home);
+    let Some(contents) = machine_config::read_machine_config_text(margins_home)? else {
+        return Ok(None);
     };
     if contents.trim().is_empty() {
         return Ok(None);
@@ -213,34 +210,18 @@ fn read_remembered_agent(path: &Path) -> Result<Option<Agent>> {
     })
 }
 
-fn remember_agent(path: &Path, agent: Agent) -> Result<()> {
-    let contents = match std::fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
-        Err(error) => {
-            return Err(error).with_context(|| format!("failed to read {}", path.display()))
+fn remember_agent(margins_home: &Path, agent: Agent) -> Result<()> {
+    let path = machine_config::machine_config_path(margins_home);
+    machine_config::update_machine_document(margins_home, |document| {
+        if document.get("cli").is_none() {
+            document["cli"] = Item::Table(Table::new());
         }
-    };
-    let mut document = if contents.trim().is_empty() {
-        DocumentMut::new()
-    } else {
-        contents
-            .parse::<DocumentMut>()
-            .with_context(|| format!("failed to parse {}", path.display()))?
-    };
-    if document.get("cli").is_none() {
-        document["cli"] = Item::Table(Table::new());
-    }
-    let cli = document["cli"]
-        .as_table_mut()
-        .with_context(|| format!("cli must be a table in {}", path.display()))?;
-    cli["note_agent"] = value(agent.config_value());
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    std::fs::write(path, document.to_string())
-        .with_context(|| format!("failed to write {}", path.display()))
+        let cli = document["cli"]
+            .as_table_mut()
+            .with_context(|| format!("cli must be a table in {}", path.display()))?;
+        cli["note_agent"] = value(agent.config_value());
+        Ok(())
+    })
 }
 
 fn executable_on_path(agent: Agent, path: Option<&OsStr>) -> bool {
@@ -297,11 +278,11 @@ pub(crate) fn run(print_only: bool) -> Result<()> {
         .collect::<Vec<_>>();
     let host = detect_host_agent(&environment_keys);
     let home = crate::cli::home_dir().context("could not resolve HOME for agent selection")?;
-    let config_path = config_path(&home);
+    let margins_home = margins_home(&home);
     let remembered = if host.is_some() {
         None
     } else {
-        read_remembered_agent(&config_path)?
+        read_remembered_agent(&margins_home)?
     };
     let path = std::env::var_os("PATH");
     let installed = if host.is_some() || remembered.is_some() {
@@ -313,7 +294,7 @@ pub(crate) fn run(print_only: bool) -> Result<()> {
     let mut resolution = resolve_agent(host, remembered, &installed, None);
     if resolution == AgentResolution::Ask {
         let answer = ask_for_agent(&mut io::stdin().lock(), &mut io::stderr().lock())?;
-        remember_agent(&config_path, answer)?;
+        remember_agent(&margins_home, answer)?;
         resolution = resolve_agent(host, remembered, &installed, Some(answer));
     }
     let AgentResolution::Resolved(selection) = resolution else {
@@ -483,21 +464,21 @@ mod tests {
     #[test]
     fn remembered_agent_uses_cli_table_and_preserves_existing_config() {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("config.toml");
         std::fs::write(
-            &path,
+            temp.path().join("config.toml"),
             "# existing policy\n[llm]\nlocal_model = \"fixture\"\n",
         )
         .unwrap();
 
-        remember_agent(&path, Agent::Codex).unwrap();
+        remember_agent(temp.path(), Agent::Codex).unwrap();
 
-        assert_eq!(read_remembered_agent(&path).unwrap(), Some(Agent::Codex));
-        let saved = std::fs::read_to_string(path).unwrap();
+        assert_eq!(read_remembered_agent(temp.path()).unwrap(), Some(Agent::Codex));
+        let saved = std::fs::read_to_string(temp.path().join("margins.toml")).unwrap();
         assert!(saved.contains("# existing policy"));
-        assert!(saved.contains("[llm]"));
-        assert!(saved.contains("local_model = \"fixture\""));
         assert!(saved.contains("[cli]"));
         assert!(saved.contains("note_agent = \"codex\""));
+        let settings =
+            std::fs::read_to_string(temp.path().join("configs/settings.enzyme")).unwrap();
+        assert!(settings.contains("model \"fixture\""), "{settings}");
     }
 }

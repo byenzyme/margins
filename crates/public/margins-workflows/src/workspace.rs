@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 pub use crate::workspace_program::{program_sha256, WorkspaceProgram};
+use crate::machine_config;
 use crate::workspace_program::{self as program_lang, FolderQualification};
 
 pub const WORKSPACES_DIR: &str = "workspaces";
@@ -34,9 +35,24 @@ pub const WORKSPACES_DIR: &str = "workspaces";
 pub const CONFIGS_DIR: &str = "configs";
 /// Optional shared custom profiles for every Workspace program.
 pub const SHARED_PROFILES_PROGRAM: &str = "profiles.enzyme";
+/// Programs under `configs/` that are not Workspaces: shared profiles, engine
+/// settings, and the source kinds Margins defines.
+pub const RESERVED_PROGRAMS: [&str; 3] = [
+    SHARED_PROFILES_PROGRAM,
+    machine_config::SETTINGS_PROGRAM,
+    "margins-sources.enzyme",
+];
 /// The retired per-Workspace TOML config, migrated on first resolution.
 pub const LEGACY_WORKSPACE_CONFIG: &str = "config.toml";
 pub const LEGACY_WORKSPACE_CONFIG_MIGRATED: &str = "config.toml.migrated";
+/// The engine index of a Workspace: the engine's named-workspace index path
+/// `$ENZYME_HOME/workspaces/<id>/enzyme.db`, with `ENZYME_HOME=$MARGINS_HOME`.
+pub const INDEX_DB: &str = "enzyme.db";
+/// The index name before the Margins home became an Enzyme home; renamed to
+/// [`INDEX_DB`] on first resolution, without reindexing.
+pub const LEGACY_INDEX_DB: &str = "index.db";
+/// SQLite files that travel with a database file.
+const SQLITE_SIDECARS: [&str; 3] = ["-wal", "-shm", "-journal"];
 pub const WORKSPACE_PLAN_SCHEMA: &str = "margins.workspace.plan.v2";
 pub const WORKSPACE_APPLY_SCHEMA: &str = "margins.workspace.apply.v2";
 pub const WORKSPACE_MIGRATE_SCHEMA: &str = "margins.workspace.migrate.v1";
@@ -828,7 +844,7 @@ impl ResolvedWorkspace {
     }
 
     pub fn recall_path(&self) -> PathBuf {
-        self.state_dir.join("index.db")
+        self.state_dir.join(INDEX_DB)
     }
 
     pub fn captures_dir(&self) -> PathBuf {
@@ -884,13 +900,13 @@ impl ResolvedWorkspace {
 
 /// Machine preference used by clients outside any declared Source folder.
 pub fn default_workspace(margins_home: &Path) -> Result<Option<String>> {
-    let path = margins_home.join("config.toml");
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
-    };
-    let config: toml::Value = toml::from_str(&raw).context("invalid machine config")?;
+    machine_config::ensure_migrated(margins_home)?;
+    default_workspace_locked(margins_home)
+}
+
+/// [`default_workspace`] for a caller holding the machine lock.
+fn default_workspace_locked(margins_home: &Path) -> Result<Option<String>> {
+    let config = read_machine_config_locked(margins_home)?;
     let selected = config
         .get("workspace")
         .and_then(|value| value.get("default"));
@@ -914,33 +930,32 @@ pub fn set_default_workspace(margins_home: &Path, id: &str) -> Result<()> {
 }
 
 fn read_machine_config(margins_home: &Path) -> Result<toml::Table> {
-    let path = margins_home.join("config.toml");
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(toml::Table::new()),
-        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
-    };
-    if raw.trim().is_empty() {
-        return Ok(toml::Table::new());
-    }
-    toml::from_str(&raw).context("invalid machine config")
+    machine_config::ensure_migrated(margins_home)?;
+    read_machine_config_locked(margins_home)
 }
 
-/// Read-modify-write the machine `config.toml` under the machine config lock.
+/// Machine `margins.toml` for a caller holding the machine lock (or after
+/// [`machine_config::ensure_migrated`]).
+fn read_machine_config_locked(margins_home: &Path) -> Result<toml::Table> {
+    match machine_config::read_machine_config_text_locked(margins_home)? {
+        Some(raw) if !raw.trim().is_empty() => {
+            toml::from_str(&raw).context("invalid machine config")
+        }
+        _ => Ok(toml::Table::new()),
+    }
+}
+
+/// Read-modify-write the machine `margins.toml` under the machine config lock.
 fn update_machine_config(
     margins_home: &Path,
     mutate: impl FnOnce(&mut toml::Table) -> Result<()>,
 ) -> Result<()> {
-    std::fs::create_dir_all(margins_home)?;
-    let lock = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(margins_home.join("config.lock"))?;
-    lock.lock_exclusive()?;
-    let mut config = read_machine_config(margins_home)?;
+    let _lock = machine_config::lock_machine(margins_home)?;
+    machine_config::migrate_locked(margins_home)?;
+    let mut config = read_machine_config_locked(margins_home)?;
     mutate(&mut config)?;
     let rendered = toml::to_string_pretty(&config)?;
-    atomic_write(&margins_home.join("config.toml"), rendered.as_bytes())
+    atomic_write(&machine_config::machine_config_path(margins_home), rendered.as_bytes())
 }
 
 fn machine_table<'a>(table: &'a mut toml::Table, key: &str) -> Result<&'a mut toml::Table> {
@@ -1522,6 +1537,7 @@ pub fn resolve_at(margins_home: &Path, id: &str) -> Result<ResolvedWorkspace> {
         // Migrate, or retire a legacy file left beside an existing program.
         migrate_workspace(margins_home, id)?;
     }
+    adopt_engine_index_name(&state_dir)?;
     let text = std::fs::read_to_string(&program_path)
         .with_context(|| format!("workspace '{id}' not found at {}", program_path.display()))?;
     let program = WorkspaceProgram::parse(&text)
@@ -1563,6 +1579,43 @@ fn resolved_from_program(
         config_path,
         home_dir,
     })
+}
+
+/// Rename a Workspace index from `index.db` to `enzyme.db` (with its SQLite
+/// sidecars) under the Workspace lock. The database and the `index.identity`
+/// marker are untouched, so nothing is reindexed. Sidecars move before the
+/// main file: a crash in between leaves `index.db` in place and the rename
+/// resumes on the next resolution. When both names exist, `enzyme.db` is the
+/// index and `index.db` is left for the user.
+fn adopt_engine_index_name(state_dir: &Path) -> Result<()> {
+    let legacy = state_dir.join(LEGACY_INDEX_DB);
+    if !legacy.exists() {
+        return Ok(());
+    }
+    let _lock = lock_workspace(state_dir)?;
+    let current = state_dir.join(INDEX_DB);
+    if !legacy.exists() {
+        return Ok(());
+    }
+    if current.exists() {
+        log::warn!(
+            "{} is the Workspace index; leaving the older {} in place",
+            current.display(),
+            legacy.display()
+        );
+        return Ok(());
+    }
+    for suffix in SQLITE_SIDECARS {
+        let from = state_dir.join(format!("{LEGACY_INDEX_DB}{suffix}"));
+        if from.exists() {
+            let to = state_dir.join(format!("{INDEX_DB}{suffix}"));
+            std::fs::rename(&from, &to)
+                .with_context(|| format!("renaming {} to {}", from.display(), to.display()))?;
+        }
+    }
+    std::fs::rename(&legacy, &current)
+        .with_context(|| format!("renaming {} to {}", legacy.display(), current.display()))?;
+    sync_parent_directory(&current)
 }
 
 /// Derive and validate the typed view of a program, including machine-owned
@@ -1852,7 +1905,8 @@ pub fn list_workspace_entries(
                 continue;
             }
             if let Some(id) = path.file_stem().and_then(|value| value.to_str()) {
-                if path.file_name().and_then(|value| value.to_str()) != Some(SHARED_PROFILES_PROGRAM) {
+                let file = path.file_name().and_then(|value| value.to_str());
+                if !RESERVED_PROGRAMS.iter().any(|reserved| Some(*reserved) == file) {
                     ids.insert(id.to_string());
                 }
             }
@@ -1875,12 +1929,9 @@ pub fn remove_empty_workspace(margins_home: &Path, id: &str) -> Result<()> {
     // Resolve (and migrate) before taking the machine lock: migration may
     // record machine-owned settings under that same lock.
     resolve_at(margins_home, id)?;
-    let lock = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(margins_home.join("config.lock"))?;
-    lock.lock_exclusive()?;
-    if default_workspace(margins_home)?.as_deref() == Some(id) {
+    let _lock = machine_config::lock_machine(margins_home)?;
+    machine_config::migrate_locked(margins_home)?;
+    if default_workspace_locked(margins_home)?.as_deref() == Some(id) {
         bail!("cannot remove the machine's default Workspace");
     }
     let program_path = workspace_program_path(margins_home, id)?;
@@ -2030,7 +2081,7 @@ pub fn plan_legacy_workspace_config(
 ) -> Result<WorkspacePlan> {
     if desired.retention != workspace.config.retention {
         return Err(WorkspaceMutationError::InvalidPlan(
-            "retention is machine configuration: set [retention] or [retention.<id>] in MARGINS_HOME/config.toml".to_string(),
+            "retention is machine configuration: set [retention] or [retention.<id>] in MARGINS_HOME/margins.toml".to_string(),
         )
         .into());
     }
@@ -2562,8 +2613,11 @@ fn validate_id(id: &str) -> Result<()> {
     {
         bail!("workspace id must use lowercase letters, digits, and internal hyphens");
     }
-    if id == "profiles" {
-        bail!("workspace id 'profiles' is reserved for configs/profiles.enzyme");
+    if let Some(file) = RESERVED_PROGRAMS
+        .iter()
+        .find(|file| file.strip_suffix(".enzyme") == Some(id))
+    {
+        bail!("workspace id '{id}' is reserved for configs/{file}");
     }
     Ok(())
 }
@@ -2777,7 +2831,7 @@ fn store_workspace_receipt(state_dir: &Path, receipt: &WorkspaceApplyReceipt) ->
     atomic_write(&path, &body)
 }
 
-fn atomic_write(path: &Path, body: &[u8]) -> Result<()> {
+pub(crate) fn atomic_write(path: &Path, body: &[u8]) -> Result<()> {
     if path
         .metadata()
         .is_ok_and(|metadata| metadata.permissions().readonly())
@@ -2804,7 +2858,7 @@ fn atomic_write(path: &Path, body: &[u8]) -> Result<()> {
     sync_parent_directory(path)
 }
 
-fn sync_parent_directory(path: &Path) -> Result<()> {
+pub(crate) fn sync_parent_directory(path: &Path) -> Result<()> {
     let parent = path
         .parent()
         .with_context(|| format!("{} has no parent directory", path.display()))?;
@@ -2892,6 +2946,63 @@ mod tests {
         assert!(!notes.join(".margins").exists());
         let resolved = resolve_workspace(&margins_home, None, &notes.join("client")).unwrap();
         assert_eq!(resolved.config.id, "practice");
+    }
+
+    #[test]
+    fn index_db_is_renamed_to_enzyme_db_once_without_touching_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let margins_home = temp.path().join("state");
+        let notes = temp.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        let created = create_workspace(&margins_home, "practice", None, &notes).unwrap();
+        let state = created.state_dir.clone();
+        std::fs::write(state.join("index.db"), b"index bytes").unwrap();
+        std::fs::write(state.join("index.db-wal"), b"wal bytes").unwrap();
+        std::fs::write(state.join("index.identity"), b"identity\n").unwrap();
+
+        let resolved = resolve_at(&margins_home, "practice").unwrap();
+
+        assert_eq!(resolved.recall_path(), state.join("enzyme.db"));
+        assert_eq!(std::fs::read(state.join("enzyme.db")).unwrap(), b"index bytes");
+        assert_eq!(std::fs::read(state.join("enzyme.db-wal")).unwrap(), b"wal bytes");
+        assert!(!state.join("index.db").exists());
+        assert!(!state.join("index.db-wal").exists());
+        assert_eq!(std::fs::read(state.join("index.identity")).unwrap(), b"identity\n");
+        resolve_at(&margins_home, "practice").unwrap();
+        assert_eq!(std::fs::read(state.join("enzyme.db")).unwrap(), b"index bytes");
+
+        // A crash after the sidecars moved resumes with the main file.
+        std::fs::rename(state.join("enzyme.db"), state.join("index.db")).unwrap();
+        resolve_at(&margins_home, "practice").unwrap();
+        assert_eq!(std::fs::read(state.join("enzyme.db")).unwrap(), b"index bytes");
+        assert_eq!(std::fs::read(state.join("enzyme.db-wal")).unwrap(), b"wal bytes");
+
+        // Both names: enzyme.db is the index; index.db is left alone.
+        std::fs::write(state.join("index.db"), b"older").unwrap();
+        resolve_at(&margins_home, "practice").unwrap();
+        assert_eq!(std::fs::read(state.join("enzyme.db")).unwrap(), b"index bytes");
+        assert_eq!(std::fs::read(state.join("index.db")).unwrap(), b"older");
+    }
+
+    #[test]
+    fn engine_programs_in_configs_are_not_workspaces() {
+        let temp = tempfile::tempdir().unwrap();
+        let margins_home = temp.path().join("state");
+        let notes = temp.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        create_workspace(&margins_home, "practice", None, &notes).unwrap();
+        crate::machine_config::set_generation(&margins_home, "local").unwrap();
+        std::fs::write(margins_home.join("configs/profiles.enzyme"), "").unwrap();
+        let ids = list_workspace_entries(&margins_home)
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["practice".to_string()]);
+        for reserved in ["settings", "profiles", "margins-sources"] {
+            let error = create_workspace(&margins_home, reserved, None, &notes).unwrap_err();
+            assert!(format!("{error:#}").contains("reserved"), "{error:#}");
+        }
     }
 
     #[test]
@@ -3957,7 +4068,7 @@ backfill_days = 365
         let workspace = resolve_at(&margins_home, "legacy").unwrap();
         assert_eq!(workspace.config.name.as_deref(), Some("Client practice"));
         assert_eq!(workspace.config.retention.raw_cache_max_age_days, Some(30));
-        let machine = std::fs::read_to_string(margins_home.join("config.toml")).unwrap();
+        let machine = std::fs::read_to_string(margins_home.join("margins.toml")).unwrap();
         assert!(machine.contains("[retention.legacy]"), "{machine}");
         assert_eq!(workspace.note_destination().unwrap(), notes.canonicalize().unwrap().join("inbox"));
 

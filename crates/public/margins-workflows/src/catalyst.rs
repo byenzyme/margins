@@ -36,27 +36,21 @@ impl CatalystStatus {
     }
 }
 
-/// Report the setup-selected generator without resolving credentials,
-/// discovering ambient provider environment, contacting the broker, or changing
-/// setup.
+/// Report the setup-selected generator (`configs/settings.enzyme`
+/// `settings { generation … }`) without resolving credentials, discovering
+/// ambient provider environment, contacting the broker, or changing setup.
+/// A legacy machine `config.toml` is migrated first; see
+/// [`crate::machine_config`].
 pub fn selected_status(margins_home: &Path) -> CatalystStatus {
-    let config = match std::fs::read_to_string(margins_home.join("config.toml")) {
-        Ok(contents) => match contents.parse::<toml::Value>() {
-            Ok(config) => config,
-            Err(_) => return CatalystStatus::new(CatalystMode::None, "invalid_config"),
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return CatalystStatus::new(CatalystMode::None, "setup_required");
+    let settings = match crate::machine_config::engine_settings(margins_home) {
+        Ok(settings) => settings,
+        Err(error) if error.chain().any(|cause| cause.is::<std::io::Error>()) => {
+            return CatalystStatus::new(CatalystMode::None, "config_unreadable");
         }
-        Err(_) => return CatalystStatus::new(CatalystMode::None, "config_unreadable"),
+        Err(_) => return CatalystStatus::new(CatalystMode::None, "invalid_config"),
     };
 
-    match config
-        .get("llm")
-        .and_then(|llm| llm.get("mode"))
-        .and_then(toml::Value::as_str)
-        .unwrap_or("auto")
-    {
+    match settings.generation.as_deref().unwrap_or("auto") {
         "local" => CatalystStatus::new(CatalystMode::Local, "local_selected"),
         "hosted" => hosted_bundle_status(margins_home),
         "auto" => CatalystStatus::new(CatalystMode::None, "setup_required"),
@@ -194,6 +188,31 @@ mod tests {
             selected_status(home.path()),
             CatalystStatus::new(CatalystMode::Local, "local_selected")
         );
+    }
+
+    #[test]
+    fn settings_program_selects_and_invalid_configs_are_reported() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvRestore::without_explicit_keys();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("configs")).unwrap();
+        std::fs::write(
+            home.path().join("configs/settings.enzyme"),
+            "settings {\n  generation local\n}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            selected_status(home.path()),
+            CatalystStatus::new(CatalystMode::Local, "local_selected")
+        );
+
+        let legacy = tempfile::tempdir().unwrap();
+        std::fs::write(legacy.path().join("config.toml"), "[llm]\nmode = \"cloud\"\n").unwrap();
+        assert_eq!(
+            selected_status(legacy.path()),
+            CatalystStatus::new(CatalystMode::None, "invalid_config")
+        );
+        assert!(legacy.path().join("config.toml").is_file());
     }
 
     #[test]
