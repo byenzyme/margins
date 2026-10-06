@@ -139,6 +139,8 @@
 .margins-program-review h3 { margin:0; font-size:13px; }
 .margins-program-review ul { margin:0; padding-left:18px; font-size:12px; line-height:1.5; }
 .margins-program-diff { max-height:320px; overflow:auto; border:1px solid var(--border); border-radius:7px; background:var(--background); }
+.margins-program-diff .is-added { color:var(--enz-string,#15803d); background:color-mix(in srgb,#22c55e 12%,transparent); }
+.margins-program-diff .is-removed { color:var(--destructive); background:color-mix(in srgb,var(--destructive) 10%,transparent); }
 .margins-program-diff pre { margin:0; padding:8px 10px; font-family:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,monospace); font-size:12px; white-space:pre; }
 
 /* Code editor: a transparent textarea over a highlighted <pre> of identical
@@ -176,7 +178,10 @@
 .margins-code .enz-profile { color:var(--enz-profile); }
 .margins-code .enz-error { text-decoration:underline wavy var(--destructive); text-decoration-skip-ink:none; text-underline-offset:3px; }
 .margins-code-error-line { position:absolute; left:0; right:0; top:calc(var(--enz-pad) + var(--enz-line) * var(--enz-lh)); height:var(--enz-lh); background:color-mix(in srgb,var(--destructive) 11%,transparent); }
-.margins-code-error-callout { position:absolute; z-index:0; top:calc(var(--enz-pad) + var(--enz-line) * var(--enz-lh)); left:calc(14px + var(--enz-col) * 1ch); height:var(--enz-lh); padding:0 8px; border-radius:5px; background:color-mix(in srgb,var(--destructive) 14%,var(--enz-bg)); color:var(--destructive); font-family:var(--font-sans,system-ui,sans-serif); font-size:11.5px; white-space:nowrap; pointer-events:none; }
+/* Positioned in the editor's monospace `ch` after the end of the error line;
+   the message itself is set in the UI font. */
+.margins-code-error-callout { position:absolute; z-index:0; top:calc(var(--enz-pad) + var(--enz-line) * var(--enz-lh)); left:calc(14px + var(--enz-col) * 1ch); display:flex; height:var(--enz-lh); align-items:center; pointer-events:none; }
+.margins-code-error-callout span { max-width:56ch; overflow:hidden; padding:0 8px; border-radius:5px; background:color-mix(in srgb,var(--destructive) 14%,var(--enz-bg)); color:var(--destructive); font-family:var(--font-sans,system-ui,sans-serif); font-size:11.5px; line-height:18px; text-overflow:ellipsis; white-space:nowrap; }
 .margins-program-entry { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
 .margins-meeting-list .margins-program-link { margin-top:auto; border:0; border-radius:7px; padding:7px 8px; background:transparent; color:var(--muted-foreground); font:inherit; font-size:12px; text-align:left; cursor:pointer; }
 .margins-meeting-list .margins-program-link:hover, .margins-meeting-list .margins-program-link.selected { background:var(--muted); color:var(--foreground); }

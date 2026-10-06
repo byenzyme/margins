@@ -75,7 +75,7 @@ describe("Workspace program editor", () => {
     expect(container.querySelector(".margins-code-gutter span.is-error")?.textContent).toBe("3");
     expect(container.querySelector("pre .enz-error")?.textContent).toBe("lern");
     expect((container.querySelector(".margins-code-error-line") as HTMLElement).style.getPropertyValue("--enz-line")).toBe("2");
-    expect(container.querySelector(".margins-code-error-callout")?.textContent).toBe('invalid desired program: expected "}"; found "lern"');
+    expect(container.querySelector(".margins-code-error-callout")?.textContent).toBe('expected "}"; found "lern"');
     expect(area.getAttribute("aria-invalid")).toBe("true");
     fireEvent.click(screen.getByRole("button", { name: "Go to line 3" }));
     expect(area.selectionStart).toBe(area.value.indexOf("lern"));

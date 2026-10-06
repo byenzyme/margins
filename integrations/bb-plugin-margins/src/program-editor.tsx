@@ -96,7 +96,7 @@ export function EnzymeCodeEditor({ value, onChange, error, label, textareaRef }:
         onChange={(event) => onChange(event.target.value)} onKeyDown={onKeyDown} />
       {error && <div className="margins-code-error-callout" aria-hidden="true"
         style={{ "--enz-line": error.line - 1, "--enz-col": (value.split("\n")[error.line - 1]?.length ?? 0) + 3 } as CSSProperties}>
-        {error.message}
+        <span>{error.message}</span>
       </div>}
     </div>
   </div>;
@@ -117,9 +117,17 @@ function writeDraft(workspaceId: string, draft: { text: string; baseRevision: st
   } catch { /* storage unavailable: the text stays in the editor */ }
 }
 
-/** Strip enzyme-spec's `line:column:` prefix once the location is shown. */
+/** Once the location is shown, the `invalid desired program: line:column:`
+ * prefix only repeats it. */
 function errorText(error: ProgramError) {
-  return error.message.replace(/^(invalid desired program: )?\d+:\d+: /, "$1");
+  return error.message.replace(/^(invalid desired program: )?\d+:\d+: /, "");
+}
+
+/** A plain unified diff with added and removed lines marked, for hosts
+ * without bb's diff component. */
+function PlainDiff({ patch }: { patch: string }) {
+  return <pre>{patch.split("\n").map((line, index) => <span key={index} className={line.startsWith("+") && !line.startsWith("+++") ? "is-added"
+    : line.startsWith("-") && !line.startsWith("---") ? "is-removed" : undefined}>{line}{"\n"}</span>)}</pre>;
 }
 
 type Validation =
@@ -311,7 +319,7 @@ export function ProgramEditor({ projectId, onClose }: { projectId: string; onClo
       <ul>{review.actions.map((action, index) => <li key={index}>{action.summary}</li>)}</ul>
       <div className="margins-program-diff">{DiffView
         ? <DiffView patch={review.diff} path={saved.programPath} />
-        : <pre>{review.diff}</pre>}</div>
+        : <PlainDiff patch={review.diff} />}</div>
       <div className="margins-program-actions">
         <button disabled={applying} onClick={() => void apply()}>{applying ? "Applying…" : "Apply"}</button>
         <button className="margins-quiet" disabled={applying} onClick={() => setReview(null)}>Keep editing</button>
