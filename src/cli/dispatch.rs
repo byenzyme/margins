@@ -349,7 +349,7 @@ where
             .map_or_else(|error| error.exit_code(), |_| 0);
         #[cfg(feature = "recall")]
         if code == 0 && workspace.ledger_path().is_file() {
-            if let Err(error) = crate::recall::provision_workspace_for_init(&workspace) {
+            if let Err(error) = crate::recall::refresh_workspace(&workspace) {
                 return report_json_cli_error(
                     margins_cli::CliError::new(
                         "integration_index_refresh_failed",
@@ -474,7 +474,7 @@ where
                 Ok(workspace) => workspace,
                 Err(error) => return report_error(&error.to_string()),
             };
-            if let Err(error) = crate::recall::provision_workspace_for_init(&workspace) {
+            if let Err(error) = crate::recall::refresh_workspace(&workspace) {
                 return report_json_cli_error(
                     margins_cli::CliError::new(
                         "granola_index_refresh_failed",
@@ -510,7 +510,7 @@ where
                 }
             };
             if retention_requires_refresh && workspace.ledger_path().is_file() {
-                if let Err(error) = crate::recall::provision_workspace_for_init(&workspace) {
+                if let Err(error) = crate::recall::refresh_workspace(&workspace) {
                     return report_json_cli_error(
                         margins_cli::CliError::new(
                             "retention_index_refresh_failed",

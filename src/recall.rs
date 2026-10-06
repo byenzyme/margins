@@ -1,12 +1,15 @@
 //! Associative vault search backing `margins recall`.
 //!
-//! This is the private composition of the subtree-linked recall engine (see
-//! `crates/private/recall-engine`). Recall only opens a pre-built index; vault
-//! establishment and catalyst generation belong to `margins init`.
+//! Recall runs the shipped `enzyme` CLI ([`crate::enzyme_cli`]) against the
+//! Workspace's index at `$MARGINS_HOME/workspaces/<id>/enzyme.db`. Querying
+//! only opens a pre-built index (`enzyme search --json`, `status --json`);
+//! index establishment and catalyst generation belong to `margins init`
+//! (`enzyme init`) and to the refresh after a sync (`enzyme refresh`).
+//! Querying never resolves credentials, provisions models, generates, or uses
+//! network.
 //!
 //! The primary lookup follows thematic bridges generated at index time, so a
-//! query can surface notes that share a theme without sharing words. Querying
-//! never resolves credentials, provisions models, generates, or uses network.
+//! query can surface notes that share a theme without sharing words.
 //!
 //! Interactive output mirrors the `enzyme catalyze` tree. Piped output is the
 //! Margins-owned typed result envelope: Enzyme's canonical catalyst text passes
@@ -18,20 +21,19 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use recall_engine::kernel::{Bridged, SearchIndex};
-use recall_engine::search::context::TopCatalyst;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::workspace_recall::{CatalogEntry, WorkspaceCorpus};
+use crate::enzyme_cli::{Engine, EngineError, Generator, SearchHit, StatusEnvelope, TopCatalyst};
+use crate::workspace_recall::CatalogEntry;
 use margins_workflows::integrations::{
     EvidenceFreshness, EvidenceHandle, FreshnessStatus, GoogleCalendarScope,
     GOOGLE_MEET_MATERIALIZATION_FINGERPRINT,
 };
+use margins_workflows::source_kinds::sqlite_document_ref_prefix;
 use margins_workflows::workspace::{ResolvedWorkspace, SourceKind, WorkspaceBinding};
-use margins_workflows::workspace_lowering::sqlite_document_ref_prefix;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 /// A vault with fewer than this many notes is not worth indexing: recall would
@@ -43,22 +45,41 @@ const USEFULNESS_THRESHOLD: usize = 5;
 /// How many related passages to return. A fixed, sensible default keeps the
 /// command flag-free.
 const RESULT_LIMIT: usize = 8;
-/// Cap on entities given thematic bridges per build, to bound LLM spend. Recall
-/// generates bridges for the most frequent entities. A bounded literal phrase
-/// lookup remains available across the declared document boundary so curation
-/// cannot make indexed Sources unreachable.
-const MAX_BRIDGED_ENTITIES: usize = crate::workspace_recall::ENGINE_ENTITY_LIMIT;
+
+/// The engine for this Margins home, with the home ready for it.
+fn engine() -> Result<Engine> {
+    Engine::for_home(&margins_home()?)
+}
+
+/// Engine status of a Workspace whose index exists; `None` when it was never
+/// built, without running the engine.
+fn indexed_status(workspace: &ResolvedWorkspace) -> Result<Option<(Engine, StatusEnvelope)>> {
+    if !workspace.recall_path().is_file() {
+        return Ok(None);
+    }
+    let engine = engine()?;
+    let status = engine
+        .status(&workspace.config.id)
+        .context("reading the Workspace index status")?;
+    Ok(status.initialized.then_some((engine, status)))
+}
 
 pub fn workspace_source_refresh_staleness(
     workspace: &ResolvedWorkspace,
 ) -> Result<BTreeMap<String, margins_cli::commands::workspace::SourceRefreshStalenessView>> {
+    let status = indexed_status(workspace)?.map(|(_, status)| status);
+    source_refresh_staleness(workspace, status.as_ref())
+}
+
+/// Per ledger source: the engine's refresh state of its SQLite source, made
+/// stale again when Margins' own materialization receipt says the ledger no
+/// longer matches the declaration.
+fn source_refresh_staleness(
+    workspace: &ResolvedWorkspace,
+    status: Option<&StatusEnvelope>,
+) -> Result<BTreeMap<String, margins_cli::commands::workspace::SourceRefreshStalenessView>> {
     use margins_cli::commands::workspace::SourceRefreshStalenessView;
 
-    let database = workspace
-        .recall_path()
-        .is_file()
-        .then(|| recall_engine::db::Database::open(workspace.recall_path()))
-        .transpose()?;
     let ledger = workspace
         .ledger_path()
         .is_file()
@@ -71,130 +92,106 @@ pub fn workspace_source_refresh_staleness(
         .bindings
         .iter()
         .filter_map(|(name, binding)| {
-            let (engine_source_name, materialization_receipt) = match binding {
-                WorkspaceBinding::Gmail { account, gmail } => Some((
-                    Ok::<_, anyhow::Error>(name.clone()),
-                    Some((
-                        "email",
-                        account.as_str(),
-                        gmail.materialization_fingerprint(),
-                        Ok(None),
-                    )),
-                )),
-                WorkspaceBinding::GoogleCalendar { account, calendar } => Some((
-                    Ok::<_, anyhow::Error>(name.clone()),
-                    Some((
-                        "gcal",
-                        account.as_str(),
-                        calendar.materialization_fingerprint(),
-                        GoogleCalendarScope::for_selector(calendar, Utc::now()).and_then(|scope| {
-                            serde_json::to_string(&scope.as_range())
-                                .context("failed to fingerprint Calendar rolling boundary")
-                                .map(Some)
-                        }),
-                    )),
-                )),
-                WorkspaceBinding::GoogleMeet { account } => Some((
-                    Ok::<_, anyhow::Error>(name.clone()),
-                    Some((
-                        "google_meet",
-                        account.as_str(),
-                        Ok(GOOGLE_MEET_MATERIALIZATION_FINGERPRINT.to_string()),
-                        Ok(None),
-                    )),
-                )),
+            let receipt = match binding {
+                WorkspaceBinding::Gmail { account, gmail } => (
+                    "email",
+                    account.as_str(),
+                    gmail.materialization_fingerprint(),
+                    Ok(None),
+                ),
+                WorkspaceBinding::GoogleCalendar { account, calendar } => (
+                    "gcal",
+                    account.as_str(),
+                    calendar.materialization_fingerprint(),
+                    GoogleCalendarScope::for_selector(calendar, Utc::now()).and_then(|scope| {
+                        serde_json::to_string(&scope.as_range())
+                            .context("failed to fingerprint Calendar rolling boundary")
+                            .map(Some)
+                    }),
+                ),
+                WorkspaceBinding::GoogleMeet { account } => (
+                    "google_meet",
+                    account.as_str(),
+                    Ok(GOOGLE_MEET_MATERIALIZATION_FINGERPRINT.to_string()),
+                    Ok(None),
+                ),
                 WorkspaceBinding::Granola {
                     account,
                     collection,
-                } => Some((
-                    Ok::<_, anyhow::Error>(name.clone()),
-                    Some((
-                        "granola",
-                        account.as_str(),
-                        collection.materialization_fingerprint(),
-                        Ok(None),
-                    )),
-                )),
-                _ => None,
-            }?;
-            Some(engine_source_name.and_then(|engine_source_name| {
-                let materialization_receipt = match materialization_receipt {
-                    Some((connector, account, fingerprint, scope)) => {
-                        Some((connector, account, fingerprint?, scope?))
-                    }
-                    None => None,
-                };
-                Ok((name, engine_source_name, materialization_receipt))
-            }))
-        })
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .map(|(name, engine_source_name, materialization_receipt)| {
-            let (last_refresh_ms, mut stale, mut stale_reason) = if let Some(database) = &database {
-                let last_refresh_ms = database
-                    .get_source_refresh_status(&engine_source_name)?
-                    .map(|(_, _, refreshed_at_ms)| refreshed_at_ms);
-                let freshness = recall_engine::sqlite_source::source_refresh_staleness(
-                    database,
-                    &engine_source_name,
-                    &workspace.ledger_path(),
-                )?;
-                (last_refresh_ms, freshness.stale, freshness.reason)
-            } else {
-                (None, true, Some("never_refreshed".to_string()))
+                } => (
+                    "granola",
+                    account.as_str(),
+                    collection.materialization_fingerprint(),
+                    Ok(None),
+                ),
+                _ => return None,
             };
-            if let Some((connector, account, expected_fingerprint, expected_scope)) =
-                materialization_receipt
-            {
-                let materialization = ledger
-                    .as_ref()
-                    .map(|ledger| {
-                        ledger
-                            .query_row(
-                                "SELECT materialization_fingerprint, health_status, scope_boundary_json
-                                 FROM connectors WHERE connector_id = ?1 AND account = ?2",
-                                [connector, account],
-                                |row| {
-                                    Ok((
-                                        row.get::<_, Option<String>>(0)?,
-                                        row.get::<_, String>(1)?,
-                                        row.get::<_, Option<String>>(2)?,
-                                    ))
-                                },
-                            )
-                            .optional()
-                    })
-                    .transpose()?
-                    .flatten();
-                match materialization {
-                    None => {
-                        stale = true;
-                        stale_reason = Some("never_refreshed".to_string());
-                    }
-                    Some((_, status, _)) if status == "error" => {
-                        stale = true;
-                        stale_reason = Some("refresh_failed".to_string());
-                    }
-                    Some((_, status, _)) if status == "needs-auth" => {
-                        stale = true;
-                        stale_reason = Some("credentials_unavailable".to_string());
-                    }
-                    Some((stored_fingerprint, status, stored_scope))
-                        if status == "stale"
-                            || status == "unknown"
-                            || stored_fingerprint.as_deref()
-                                != Some(expected_fingerprint.as_str())
-                            || expected_scope.as_ref().is_some_and(|expected| {
-                                stored_scope.as_deref() != Some(expected.as_str())
-                            }) =>
-                    {
-                        stale = true;
-                        stale_reason = Some("refresh_required".to_string());
-                    }
-                    Some((_, status, _)) if status == "fresh" => {}
-                    Some((_, status, _)) => {
-                        anyhow::bail!("unknown connector health status: {status}")
-                    }
+            Some((name, receipt))
+        })
+        .map(|(name, (connector, account, fingerprint, scope))| {
+            let expected_fingerprint = fingerprint?;
+            let expected_scope = scope?;
+            let source = status.and_then(|status| {
+                status
+                    .sources
+                    .iter()
+                    .find(|source| source.name == *name)
+            });
+            let (last_refresh_ms, mut stale, mut stale_reason) = match source {
+                Some(source) => (
+                    source.last_refresh_ms,
+                    source.stale,
+                    source.stale_reason.clone(),
+                ),
+                None => (None, true, Some("never_refreshed".to_string())),
+            };
+            let materialization = ledger
+                .as_ref()
+                .map(|ledger| {
+                    ledger
+                        .query_row(
+                            "SELECT materialization_fingerprint, health_status, scope_boundary_json
+                             FROM connectors WHERE connector_id = ?1 AND account = ?2",
+                            [connector, account],
+                            |row| {
+                                Ok((
+                                    row.get::<_, Option<String>>(0)?,
+                                    row.get::<_, String>(1)?,
+                                    row.get::<_, Option<String>>(2)?,
+                                ))
+                            },
+                        )
+                        .optional()
+                })
+                .transpose()?
+                .flatten();
+            match materialization {
+                None => {
+                    stale = true;
+                    stale_reason = Some("never_refreshed".to_string());
+                }
+                Some((_, status, _)) if status == "error" => {
+                    stale = true;
+                    stale_reason = Some("refresh_failed".to_string());
+                }
+                Some((_, status, _)) if status == "needs-auth" => {
+                    stale = true;
+                    stale_reason = Some("credentials_unavailable".to_string());
+                }
+                Some((stored_fingerprint, status, stored_scope))
+                    if status == "stale"
+                        || status == "unknown"
+                        || stored_fingerprint.as_deref() != Some(expected_fingerprint.as_str())
+                        || expected_scope.as_ref().is_some_and(|expected| {
+                            stored_scope.as_deref() != Some(expected.as_str())
+                        }) =>
+                {
+                    stale = true;
+                    stale_reason = Some("refresh_required".to_string());
+                }
+                Some((_, status, _)) if status == "fresh" => {}
+                Some((_, status, _)) => {
+                    anyhow::bail!("unknown connector health status: {status}")
                 }
             }
             Ok((
@@ -212,17 +209,20 @@ pub fn workspace_source_refresh_staleness(
 pub fn workspace_status_recall(
     workspace: &ResolvedWorkspace,
 ) -> Result<margins_workflows::local_recall::LocalRecallStatus> {
-    let index_path = workspace.recall_path();
-    if !index_path.is_file() {
+    let Some((_, status)) = indexed_status(workspace)? else {
         return margins_workflows::local_recall::status(workspace);
+    };
+    if status.needs_rebuild() {
+        anyhow::bail!(
+            "the recall index at {} was built by an older engine; run `margins init`",
+            workspace.recall_path().display()
+        );
     }
-    let documents = crate::recall_engine_seam::indexed_document_count(&index_path)
-        .with_context(|| format!("opening recall status index {}", index_path.display()))?;
     Ok(margins_workflows::local_recall::LocalRecallStatus {
         schema_version: "margins.indexed-recall.v1".to_string(),
         available: true,
         mode: "indexed".to_string(),
-        documents,
+        documents: status.documents,
     })
 }
 
@@ -335,62 +335,27 @@ pub fn recall(
         return Ok(empty("off", "opt_out", 0));
     }
 
-    let db_path = workspace.recall_path();
-    let Some(index) = crate::recall_engine_seam::open(&db_path)? else {
+    let Some((engine, status)) = indexed_status(workspace)? else {
         return Ok(empty("unavailable", "not_established", 0));
     };
-    let freshness =
-        require_retrieval_freshness(snapshot_index_freshness(workspace)?, materialization)?;
+    if status.needs_rebuild() {
+        anyhow::bail!(
+            "recall_unavailable_index_outdated: the recall index was built by an older engine; run `margins init`"
+        );
+    }
+    let freshness = require_retrieval_freshness(
+        snapshot_index_freshness(workspace, &status)?,
+        materialization,
+    )?;
 
     let started = std::time::Instant::now();
-    let (status, reason, search_strategy, hits, top_contributing_catalysts) =
-        search_index(workspace, &index, query, source_filter)?;
-
-    let results = recall_results_for_workspace(hits, workspace)?;
-
-    Ok(RecallOutput {
-        query: query.to_string(),
-        status,
-        reason,
-        freshness,
-        config_path: Some(workspace.config_path.clone()),
-        // The exact number of indexed documents recall just searched.
-        note_count: index.document_count,
-        results,
-        top_contributing_catalysts,
-        search_strategy,
-        processing_time: (started.elapsed().as_secs_f64() * 1000.0).round() / 1000.0,
-    })
-}
-
-fn recall_results(
-    hits: Vec<RecallHit>,
-    catalog: &BTreeMap<String, CatalogEntry>,
-) -> Vec<RecallResult> {
-    hits.into_iter()
-        .filter_map(|hit| {
-            let entry = catalog.get(&hit.path)?.clone();
-            Some(RecallResult {
-                document_ref: hit.path,
-                similarity: hit.score,
-                content: hit.content,
-                source: entry.source,
-                source_kind: entry.kind,
-                evidence: entry.evidence,
-                via_catalyst_id: hit.via_catalyst_id,
-                via_catalyst_text: hit.via_catalyst_text,
-            })
-        })
-        .collect()
-}
-
-fn recall_results_for_workspace(
-    hits: Vec<RecallHit>,
-    workspace: &ResolvedWorkspace,
-) -> Result<Vec<RecallResult>> {
-    hits.into_iter()
+    let (status_word, reason, search_strategy, hits, top_contributing_catalysts) =
+        search_index(workspace, &engine, &status, query, source_filter)?;
+    let mut refs = LedgerRefs::default();
+    let results = hits
+        .into_iter()
         .map(|hit| {
-            let entry = catalog_entry_for_document_ref(workspace, &hit.path)?;
+            let entry = catalog_entry_for_document_ref(workspace, &hit.path, &mut refs)?;
             Ok(RecallResult {
                 document_ref: hit.path,
                 similarity: hit.score,
@@ -402,14 +367,39 @@ fn recall_results_for_workspace(
                 via_catalyst_text: hit.via_catalyst_text,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(RecallOutput {
+        query: query.to_string(),
+        status: status_word,
+        reason,
+        freshness,
+        config_path: Some(workspace.config_path.clone()),
+        // The exact number of indexed documents recall just searched.
+        note_count: status.documents,
+        results,
+        top_contributing_catalysts,
+        search_strategy,
+        processing_time: (started.elapsed().as_secs_f64() * 1000.0).round() / 1000.0,
+    })
+}
+
+fn recall_hit(hit: SearchHit) -> RecallHit {
+    RecallHit {
+        path: hit.path,
+        score: hit.score,
+        content: hit.content,
+        via_catalyst_id: hit.via_catalyst_id,
+        via_catalyst_text: hit.via_catalyst_text,
+    }
 }
 
 /// Search primarily through generated thematic bridges, while preserving a
 /// bounded literal phrase path across the full declared document boundary.
 fn search_index(
     workspace: &ResolvedWorkspace,
-    index: &SearchIndex,
+    engine: &Engine,
+    status: &StatusEnvelope,
     query: &str,
     source_filter: Option<&str>,
 ) -> Result<(
@@ -419,114 +409,74 @@ fn search_index(
     Vec<RecallHit>,
     Vec<TopCatalyst>,
 )> {
+    let id = &workspace.config.id;
     let search_limit = source_filter
-        .map(|_| index.document_count.max(RESULT_LIMIT))
+        .map(|_| status.documents.max(RESULT_LIMIT))
         .unwrap_or(RESULT_LIMIT);
-    match index.bridged {
-        Bridged::Ready => {
-            let response = index.catalyst_search_response(query, search_limit)?;
-            let catalyst_hits = response
-                .results
-                .into_iter()
-                .map(|hit| RecallHit {
-                    path: hit.file_path,
-                    score: hit.similarity,
-                    content: hit.content,
-                    via_catalyst_id: hit.via_catalyst_id,
-                    via_catalyst_text: hit.via_catalyst_text,
-                })
-                .collect::<Vec<_>>();
-            let exact_hits = if is_distinctive_phrase(query) {
-                index
-                    .exact_phrase_search(query, search_limit)?
-                    .into_iter()
-                    .filter(|hit| native_markdown_hit(workspace, &hit.path))
-                    .map(|hit| RecallHit {
-                        path: hit.path,
-                        score: hit.score,
-                        content: hit.content,
-                        via_catalyst_id: None,
-                        via_catalyst_text: None,
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            let mut exact_hits = filter_recall_hits(workspace, exact_hits, source_filter);
-            let catalyst_hits = filter_recall_hits(workspace, catalyst_hits, source_filter);
-            // An exact hit that also has catalyst provenance below the result
-            // cut keeps that provenance rather than surfacing as a bare literal.
-            let missing = exact_hits
-                .iter()
-                .filter(|exact| !catalyst_hits.iter().any(|hit| hit.path == exact.path))
-                .count();
-            if missing > 0 && index.document_count > search_limit {
-                let deep = index.catalyst_search_response(query, index.document_count)?;
-                for exact in &mut exact_hits {
-                    if catalyst_hits.iter().any(|hit| hit.path == exact.path) {
-                        continue;
-                    }
-                    if let Some(hit) = deep.results.iter().find(|hit| hit.file_path == exact.path) {
-                        exact.score = hit.similarity;
-                        exact.content = hit.content.clone();
-                        exact.via_catalyst_id = hit.via_catalyst_id.clone();
-                        exact.via_catalyst_text = hit.via_catalyst_text.clone();
-                    }
+    let phrase = is_distinctive_phrase(query);
+    // A non-distinctive query gets no literal lookup: the engine's exact
+    // search would otherwise match on the query itself.
+    let response = engine.search(id, query, Some(if phrase { query } else { "" }), search_limit)?;
+    let exact_hits = response
+        .exact_hits
+        .iter()
+        .cloned()
+        .map(recall_hit)
+        .filter(|hit| native_markdown_hit(workspace, &hit.path))
+        .collect::<Vec<_>>();
+    if response.bridged == "ready" {
+        let catalyst_hits = response
+            .catalyst_hits
+            .into_iter()
+            .map(recall_hit)
+            .collect::<Vec<_>>();
+        let mut exact_hits = filter_recall_hits(workspace, exact_hits, source_filter);
+        let catalyst_hits = filter_recall_hits(workspace, catalyst_hits, source_filter);
+        // An exact hit that also has catalyst provenance below the result
+        // cut keeps that provenance rather than surfacing as a bare literal.
+        let missing = exact_hits
+            .iter()
+            .filter(|exact| !catalyst_hits.iter().any(|hit| hit.path == exact.path))
+            .count();
+        if missing > 0 && response.document_count > search_limit {
+            let deep = engine.search(id, query, Some(""), response.document_count)?;
+            for exact in &mut exact_hits {
+                if catalyst_hits.iter().any(|hit| hit.path == exact.path) {
+                    continue;
+                }
+                if let Some(hit) = deep.catalyst_hits.iter().find(|hit| hit.path == exact.path) {
+                    exact.score = hit.score;
+                    exact.content = hit.content.clone();
+                    exact.via_catalyst_id = hit.via_catalyst_id.clone();
+                    exact.via_catalyst_text = hit.via_catalyst_text.clone();
                 }
             }
-            let hits = merge_exact_and_catalyst_hits(exact_hits, catalyst_hits);
-            debug_strategy("catalyst");
-            Ok((
-                "ok",
-                "catalyst",
-                "catalyze",
-                hits,
-                response.top_contributing_catalysts,
-            ))
         }
-        Bridged::NoGenerator | Bridged::NoEntities => {
-            // Reopening an index with zero catalysts reports NoGenerator even
-            // when init had a usable generator and simply selected no link
-            // entities. Keep the declared notes searchable in that case.
-            let corpus = crate::workspace_recall::prepare(workspace, false)?;
-            if !corpus.selected_entity_names.is_empty() {
-                anyhow::bail!(RECALL_UNAVAILABLE_MESSAGE);
-            }
-            ensure_usable_generator()?;
-            let direct_hits = index
-                .direct_search(query, search_limit)?
-                .into_iter()
-                .map(|hit| RecallHit {
-                    path: hit.path,
-                    score: hit.score,
-                    content: hit.content,
-                    via_catalyst_id: None,
-                    via_catalyst_text: None,
-                })
-                .collect::<Vec<_>>();
-            let exact_hits = if is_distinctive_phrase(query) {
-                index
-                    .exact_phrase_search(query, search_limit)?
-                    .into_iter()
-                    .filter(|hit| native_markdown_hit(workspace, &hit.path))
-                    .map(|hit| RecallHit {
-                        path: hit.path,
-                        score: hit.score,
-                        content: hit.content,
-                        via_catalyst_id: None,
-                        via_catalyst_text: None,
-                    })
-                    .collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            };
-            let hits = merge_exact_and_catalyst_hits(
-                filter_recall_hits(workspace, exact_hits, source_filter),
-                filter_recall_hits(workspace, direct_hits, source_filter),
-            );
-            Ok(("ok", "no_entities", "direct", hits, Vec::new()))
-        }
+        let hits = merge_exact_and_catalyst_hits(exact_hits, catalyst_hits);
+        debug_strategy("catalyst");
+        return Ok(("ok", "catalyst", "catalyze", hits, response.top_catalysts));
     }
+    // An index without catalysts serves direct search only when selection
+    // chose no entities; otherwise catalysts are missing and recall fails
+    // closed.
+    if status
+        .selection
+        .as_ref()
+        .is_some_and(|selection| selection.selected > 0)
+    {
+        anyhow::bail!(RECALL_UNAVAILABLE_MESSAGE);
+    }
+    ensure_usable_generator()?;
+    let direct_hits = response
+        .direct_hits
+        .into_iter()
+        .map(recall_hit)
+        .collect::<Vec<_>>();
+    let hits = merge_exact_and_catalyst_hits(
+        filter_recall_hits(workspace, exact_hits, source_filter),
+        filter_recall_hits(workspace, direct_hits, source_filter),
+    );
+    Ok(("ok", "no_entities", "direct", hits, Vec::new()))
 }
 
 fn is_distinctive_phrase(query: &str) -> bool {
@@ -586,9 +536,44 @@ fn filter_recall_hits(
         .collect()
 }
 
+/// Ledger record ids by engine document ref, per source, built on first use
+/// within one recall. Refs of ledger documents are hashes
+/// ([`margins_workflows::source_kinds::sqlite_document_ref`]), so a hit maps
+/// back to its record through the source's own ledger rows.
+#[derive(Default)]
+struct LedgerRefs {
+    by_source: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+impl LedgerRefs {
+    fn source_id(
+        &mut self,
+        workspace: &ResolvedWorkspace,
+        source: &str,
+        document_ref: &str,
+    ) -> Result<Option<String>> {
+        if !self.by_source.contains_key(source) {
+            let ids = crate::workspace_recall::ledger_source_ids(workspace, source)?;
+            self.by_source.insert(
+                source.to_string(),
+                ids.into_iter()
+                    .map(|id| {
+                        (
+                            margins_workflows::source_kinds::sqlite_document_ref(source, &id),
+                            id,
+                        )
+                    })
+                    .collect(),
+            );
+        }
+        Ok(self.by_source[source].get(document_ref).cloned())
+    }
+}
+
 fn catalog_entry_for_document_ref(
     workspace: &ResolvedWorkspace,
     document_ref: &str,
+    refs: &mut LedgerRefs,
 ) -> Result<CatalogEntry> {
     if let Some((source, path)) = crate::workspace_recall::markdown_document(workspace, document_ref)
     {
@@ -609,7 +594,7 @@ fn catalog_entry_for_document_ref(
             WorkspaceBinding::NativeMarkdown { .. } | WorkspaceBinding::Captures { .. } => continue,
         };
         if document_ref_source_matches(document_ref, name) {
-            let source_id = sqlite_document_ref_source_id(document_ref);
+            let source_id = refs.source_id(workspace, name, document_ref)?;
             return Ok(CatalogEntry {
                 source: name.clone(),
                 kind: binding.kind(),
@@ -655,18 +640,6 @@ fn document_ref_source_matches(document_ref: &str, source_name: &str) -> bool {
     document_ref.starts_with(&sqlite_document_ref_prefix(source_name))
 }
 
-fn sqlite_document_ref_source_id(document_ref: &str) -> Option<String> {
-    let encoded = document_ref.strip_prefix("sqlite:")?.split_once('/')?.1;
-    if encoded.len() % 2 != 0 || !encoded.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        return None;
-    }
-    let bytes = (0..encoded.len())
-        .step_by(2)
-        .map(|idx| u8::from_str_radix(&encoded[idx..idx + 2], 16))
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .ok()?;
-    String::from_utf8(bytes).ok()
-}
 
 fn external_evidence_for_hit(
     workspace: &ResolvedWorkspace,
@@ -747,83 +720,65 @@ impl CatalystReadiness {
     }
 }
 
-fn catalyst_readiness(
-    index: &SearchIndex,
-    selected_entities: &BTreeSet<String>,
-) -> Result<CatalystReadiness> {
-    let database = index.database();
-    let catalyst_entities = database
-        .query_read("SELECT DISTINCT entity FROM catalysts", Vec::new(), |row| {
-            row.get::<String>(0)
-        })?
-        .into_iter()
-        .map(|entity| entity.trim().to_ascii_lowercase())
-        .collect::<BTreeSet<_>>();
-    let catalysts_present = database
-        .query_read("SELECT COUNT(*) FROM catalysts", Vec::new(), |row| {
-            row.get::<i64>(0)
-        })?
-        .into_iter()
-        .next()
-        .unwrap_or_default()
-        .max(0) as usize;
-    let pending = selected_entities
-        .difference(&catalyst_entities)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let latest_skips = latest_generation_skip_reasons(database)?;
+/// Catalyst readiness from the engine's own selection report: what it would
+/// select now and which of those entities have catalysts.
+fn catalyst_readiness(status: &StatusEnvelope) -> CatalystReadiness {
+    let selection = status.selection.clone().unwrap_or_default();
     let mut reasons = BTreeMap::new();
-    for entity in &pending {
-        let reason = latest_skips
-            .get(entity)
-            .map(String::as_str)
-            .unwrap_or("no-occurrence");
-        *reasons.entry(reason.to_string()).or_insert(0) += 1;
+    let mut pending = 0;
+    for entity in selection
+        .entities
+        .iter()
+        .filter(|entity| entity.state != "ready")
+    {
+        pending += 1;
+        let reason = match entity.state.as_str() {
+            "skipped" => entity
+                .skip_reason
+                .as_ref()
+                .and_then(|reason| reason.get("kind"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("skipped")
+                .replace('_', "-"),
+            "pending" => "no-catalyst".to_string(),
+            other => other.to_string(),
+        };
+        *reasons.entry(reason).or_insert(0) += 1;
     }
-    Ok(CatalystReadiness {
-        entities_curated: selected_entities.len(),
-        catalysts_present,
+    CatalystReadiness {
+        entities_curated: selection.selected,
+        catalysts_present: status.catalysts,
         // Preserve partial recall when at least one selected entity has a
         // catalyst. Suppressed entities remain auditable in `reasons`; a fully
         // suppressed selection is still catalysts_pending.
-        items_pending: if catalysts_present > 0 {
-            0
-        } else {
-            pending.len()
-        },
+        items_pending: if status.catalysts > 0 { 0 } else { pending },
         reasons,
-    })
+    }
 }
 
-/// Per-entity reasons from engines that audit skipped generations. Engines
-/// from v0.9.2 on no longer keep `catalyst_generation_skips`; pending entities
-/// then report `no-occurrence`/`no-catalyst` from occurrence data alone.
-fn latest_generation_skip_reasons(
-    database: &recall_engine::db::Database,
-) -> Result<BTreeMap<String, String>> {
-    let audited = database.query_read(
-        "SELECT COUNT(*) FROM sqlite_master
-         WHERE type = 'table' AND name = 'catalyst_generation_skips'",
-        Vec::new(),
-        |row| row.get::<i64>(0),
-    )?;
-    if audited.first().copied().unwrap_or_default() == 0 {
-        return Ok(BTreeMap::new());
+fn classify_init_status(status: &StatusEnvelope) -> InitStatus {
+    let readiness = catalyst_readiness(status);
+    let selected = readiness.entities_curated;
+    if readiness.items_pending > 0 || (status.catalysts == 0 && selected > 0) {
+        return InitStatus {
+            status: "catalysts_pending",
+            reason: "catalysts_pending",
+            readiness,
+        };
     }
-    let rows = database.query_read(
-        "SELECT entity, reason_code
-         FROM catalyst_generation_skips
-         ORDER BY created_at_ms DESC, id DESC",
-        Vec::new(),
-        |row| Ok((row.get::<String>(0)?, row.get::<String>(1)?)),
-    )?;
-    let mut latest = BTreeMap::new();
-    for (entity, reason) in rows {
-        latest
-            .entry(entity.trim().to_ascii_lowercase())
-            .or_insert(reason);
+    if status.catalysts > 0 {
+        InitStatus {
+            status: "ok",
+            reason: "catalyst",
+            readiness,
+        }
+    } else {
+        InitStatus {
+            status: "ok",
+            reason: "no_entities",
+            readiness,
+        }
     }
-    Ok(latest)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -833,32 +788,6 @@ pub struct InitStatus {
     pub readiness: CatalystReadiness,
 }
 
-fn classify_init_status(bridged: Bridged, readiness: CatalystReadiness) -> InitStatus {
-    if readiness.items_pending > 0 {
-        return InitStatus {
-            status: "catalysts_pending",
-            reason: "catalysts_pending",
-            readiness,
-        };
-    }
-    match bridged {
-        Bridged::Ready => InitStatus {
-            status: "ok",
-            reason: "catalyst",
-            readiness,
-        },
-        Bridged::NoGenerator => InitStatus {
-            status: "catalysts_pending",
-            reason: "catalysts_pending",
-            readiness,
-        },
-        Bridged::NoEntities => InitStatus {
-            status: "ok",
-            reason: "no_entities",
-            readiness,
-        },
-    }
-}
 
 /// Require the setup-selected generator to be usable without discovery,
 /// provisioning, network access, or environment-key fallback.
@@ -927,20 +856,16 @@ fn debug_strategy(strategy: &str) {
     }
 }
 
-fn snapshot_unknown_freshness() -> EvidenceFreshness {
-    EvidenceFreshness {
-        status: FreshnessStatus::NotApplicable,
-        stale: false,
-        reason: Some("snapshot_freshness_unknown".to_string()),
-        last_successful_refresh: None,
-    }
-}
 
-/// Validate the existing external-source snapshot from Margins-owned refresh
-/// metadata without rediscovering or rebuilding the workspace corpus. Native
-/// Markdown freshness remains intentionally unknown on this lookup-only path.
-fn snapshot_index_freshness(workspace: &ResolvedWorkspace) -> Result<EvidenceFreshness> {
-    let sources = workspace_source_refresh_staleness(workspace)?;
+/// Validate the external-source snapshot the index holds from the engine's
+/// source refresh state and Margins' materialization receipts. Native
+/// Markdown freshness does not block lookup; it is reported by `enzyme
+/// status` and repaired by the next init or sync.
+fn snapshot_index_freshness(
+    workspace: &ResolvedWorkspace,
+    status: &StatusEnvelope,
+) -> Result<EvidenceFreshness> {
+    let sources = source_refresh_staleness(workspace, Some(status))?;
     let Some(stale) = sources.values().find(|source| source.stale) else {
         return Ok(if sources.is_empty() {
             snapshot_unknown_freshness()
@@ -961,100 +886,122 @@ fn snapshot_index_freshness(workspace: &ResolvedWorkspace) -> Result<EvidenceFre
     })
 }
 
-/// Compare discovered paths and filesystem modification times with the index's
-/// per-document indexing timestamps. This reads local metadata and SQLite only;
-/// it never invokes indexing, embeddings, generators, credentials, or network.
-fn index_freshness(corpus: &WorkspaceCorpus, index: &SearchIndex) -> Result<EvidenceFreshness> {
-    let stale = |reason: &str| EvidenceFreshness {
-        status: FreshnessStatus::Stale,
-        stale: true,
-        reason: Some(reason.to_string()),
-        last_successful_refresh: None,
-    };
-    let indexed: BTreeMap<String, i64> = index
-        .database()
-        .query_read(
-            "SELECT source_ref, indexed_at FROM docs",
-            Vec::new(),
-            |row| Ok((row.get::<String>(0)?, row.get::<i64>(1)?)),
-        )?
-        .into_iter()
-        .collect();
-    let mut expected = corpus
-        .filesystem_documents
-        .keys()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    expected.extend(
-        corpus
-            .catalog
-            .iter()
-            .filter(|(source_ref, entry)| {
-                source_ref.starts_with("sqlite:") && source_kind_has_ledger_corpus(entry.kind)
-            })
-            .map(|(source_ref, _)| source_ref.clone()),
-    );
-    if indexed.keys().cloned().collect::<BTreeSet<_>>() != expected {
-        debug_strategy(&format!(
-            "workspace corpus mismatch: expected={expected:?} indexed={:?}",
-            indexed.keys().collect::<Vec<_>>()
-        ));
-        return Ok(stale("document_set_changed"));
-    }
-    for (source_ref, path) in &corpus.filesystem_documents {
-        let refreshed_at = indexed.get(source_ref);
-        let Some(refreshed_at) = refreshed_at else {
-            return Ok(stale("document_set_changed"));
-        };
-        if crate::workspace_recall::path_modified_ms(path)
-            .is_some_and(|modified| modified > *refreshed_at)
-        {
-            debug_strategy(&format!(
-                "workspace document newer than its refresh: source_ref={source_ref:?} modified_path={} refreshed_at_ms={refreshed_at}",
-                path.display()
-            ));
-            return Ok(stale("native_document_changed_after_index"));
-        }
-    }
-    for (source_name, source_path) in &corpus.sqlite_sources {
-        let freshness = recall_engine::sqlite_source::source_refresh_staleness(
-            index.database(),
-            source_name,
-            source_path,
-        )?;
-        let last_refresh_ms = index
-            .database()
-            .get_source_refresh_status(source_name)?
-            .map(|(_, _, refreshed_at_ms)| refreshed_at_ms);
-        if freshness.stale {
-            debug_strategy(&format!(
-                "workspace SQLite source stale: source={source_name:?} last_refresh_ms={last_refresh_ms:?} stale=true stale_reason={:?}",
-                freshness.reason
-            ));
-            return Ok(stale(
-                freshness
-                    .reason
-                    .as_deref()
-                    .unwrap_or("materialization_changed_after_index"),
-            ));
-        }
-    }
-    Ok(EvidenceFreshness {
-        status: FreshnessStatus::Fresh,
+fn snapshot_unknown_freshness() -> EvidenceFreshness {
+    EvidenceFreshness {
+        status: FreshnessStatus::NotApplicable,
         stale: false,
-        reason: None,
+        reason: Some("snapshot_freshness_unknown".to_string()),
         last_successful_refresh: None,
-    })
+    }
 }
 
-fn source_kind_has_ledger_corpus(kind: SourceKind) -> bool {
-    matches!(
-        kind,
-        SourceKind::GoogleMail
-            | SourceKind::GoogleCalendar
-            | SourceKind::GoogleMeet
-            | SourceKind::Granola
-    )
+/// Convenience for the CLI interception: run recall and return the JSON string
+/// to print to stdout.
+pub fn recall_json(
+    workspace: &ResolvedWorkspace,
+    query: &str,
+    source: Option<&str>,
+) -> Result<String> {
+    render_recall_json(&recall(workspace, query, source)?)
+}
+
+/// How Margins asks the engine to bring an index up to date.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Provision {
+    /// `enzyme init`: index, embed, select, and generate catalysts now.
+    Init,
+    /// `enzyme refresh`: bring documents up to date now; a due catalyst epoch
+    /// is built by a detached worker.
+    Refresh,
+}
+
+/// Build or update the Workspace index and generate its catalysts in the
+/// foreground (`margins init`).
+pub fn provision_workspace_for_init(workspace: &ResolvedWorkspace) -> Result<InitStatus> {
+    provision(workspace, Provision::Init)
+}
+
+/// Bring the Workspace index up to date after its sources changed (sync,
+/// connector reconcile, imports). Catalyst epochs that become due are built in
+/// the background by the engine.
+pub fn refresh_workspace(workspace: &ResolvedWorkspace) -> Result<InitStatus> {
+    provision(workspace, Provision::Refresh)
+}
+
+/// The marker an in-process Margins (before the engine ran as a process)
+/// kept beside the index to record its document identity.
+const LEGACY_IDENTITY_MARKER: &str = "index.identity";
+
+fn provision(workspace: &ResolvedWorkspace, mode: Provision) -> Result<InitStatus> {
+    std::fs::create_dir_all(&workspace.state_dir)
+        .with_context(|| format!("creating workspace state {}", workspace.state_dir.display()))?;
+    // Every Workspace declares a captures source, and ledger kinds read the
+    // ledger: the engine requires the database to exist before it indexes.
+    crate::workspace_recall::ensure_ledger(workspace)?;
+    let margins_home = margins_home()?;
+    let engine = Engine::for_home(&margins_home)?;
+    let generator = crate::enzyme_cli::selected_generator(&engine, &margins_home)?;
+    let id = &workspace.config.id;
+
+    // An index another Margins built in-process stays in use when the engine
+    // reads it (same `enzyme.db`, compatible schema); one it cannot read is
+    // rebuilt once with `init --force`.
+    let existing = if workspace.recall_path().is_file() {
+        Some(engine.status(id).context("reading the Workspace index status")?)
+    } else {
+        None
+    };
+    let rebuild = existing.as_ref().is_some_and(StatusEnvelope::needs_rebuild);
+    let legacy = workspace.state_dir.join(LEGACY_IDENTITY_MARKER);
+    debug_strategy(&match &existing {
+        None => "engine index first_build".to_string(),
+        Some(_) if rebuild => "engine index rebuild reason=schema_outdated".to_string(),
+        Some(_) if legacy.exists() => "engine index reuse reason=in_process_index".to_string(),
+        Some(_) => "engine index reuse".to_string(),
+    });
+
+    let generated = match mode {
+        Provision::Init => Some(
+            engine
+                .init(id, &generator, rebuild)
+                .map_err(provision_error)?,
+        ),
+        Provision::Refresh if rebuild || existing.is_none() => Some(
+            engine
+                .init(id, &generator, rebuild)
+                .map_err(provision_error)?,
+        ),
+        Provision::Refresh => {
+            engine.refresh(id, &generator).map_err(provision_error)?;
+            None
+        }
+    };
+    if legacy.exists() {
+        std::fs::remove_file(&legacy)
+            .with_context(|| format!("removing {}", legacy.display()))?;
+    }
+    let status = engine
+        .status(id)
+        .context("reading the Workspace index status")?;
+    let init_status = classify_init_status(&status);
+    debug_strategy(&format!(
+        "workspace index provisioned mode={mode:?} generator={generator:?} documents={} catalysts={} hosted_generation_calls={} status={}",
+        status.documents,
+        status.catalysts,
+        generated
+            .as_ref()
+            .filter(|_| matches!(generator, Generator::Env { .. }))
+            .map_or(0, |summary| summary.entities_generated),
+        init_status.status,
+    ));
+    if !generator.generates() && init_status.status == "catalysts_pending" {
+        anyhow::bail!(RECALL_UNAVAILABLE_MESSAGE);
+    }
+    Ok(init_status)
+}
+
+fn provision_error(error: EngineError) -> anyhow::Error {
+    anyhow::Error::new(error).context("indexing and generating recall catalysts")
 }
 
 fn combined_freshness(
@@ -1264,6 +1211,7 @@ fn materialization_freshness(
         .collect()
 }
 
+
 /// Render the Margins-owned machine result envelope. Enzyme's catalyst text is
 /// passed through unchanged, while source identity and freshness are resolved
 /// at this product boundary.
@@ -1461,295 +1409,6 @@ fn wrap_text(text: &str, width: usize, prefix: &str) -> Vec<String> {
     out
 }
 
-/// Convenience for the CLI interception: run recall and return the JSON string
-/// to print to stdout.
-pub fn recall_json(
-    workspace: &ResolvedWorkspace,
-    query: &str,
-    source: Option<&str>,
-) -> Result<String> {
-    render_recall_json(&recall(workspace, query, source)?)
-}
-
-/// A reusable in-process product search handle. Enzyme remains the search
-/// engine, but Margins owns result identity and freshness at this boundary.
-pub struct SearchHandle {
-    index: recall_engine::kernel::SearchIndex,
-    selected_entity_names: BTreeSet<String>,
-    catalog: BTreeMap<String, CatalogEntry>,
-    freshness: RecallFreshness,
-}
-
-impl SearchHandle {
-    /// Margins-owned typed catalyst result JSON.
-    pub fn catalyze_json(&self, query: &str, limit: usize) -> Result<String> {
-        let readiness = catalyst_readiness(&self.index, &self.selected_entity_names)?;
-        if readiness.items_pending > 0 {
-            anyhow::bail!(readiness.message());
-        }
-        let started = std::time::Instant::now();
-        let (reason, search_strategy, hits, top_contributing_catalysts) = match self.index.bridged {
-            Bridged::Ready => {
-                let response = self.index.catalyst_search_response(query, limit)?;
-                (
-                    "catalyst",
-                    "catalyze",
-                    response
-                        .results
-                        .into_iter()
-                        .map(|hit| RecallHit {
-                            path: hit.file_path,
-                            score: hit.similarity,
-                            content: hit.content,
-                            via_catalyst_id: hit.via_catalyst_id,
-                            via_catalyst_text: hit.via_catalyst_text,
-                        })
-                        .collect::<Vec<_>>(),
-                    response.top_contributing_catalysts,
-                )
-            }
-            Bridged::NoGenerator | Bridged::NoEntities => {
-                if !self.selected_entity_names.is_empty() {
-                    anyhow::bail!(RECALL_UNAVAILABLE_MESSAGE);
-                }
-                ensure_usable_generator()?;
-                let hits = self
-                    .index
-                    .direct_search(query, limit)?
-                    .into_iter()
-                    .map(|hit| RecallHit {
-                        path: hit.path,
-                        score: hit.score,
-                        content: hit.content,
-                        via_catalyst_id: None,
-                        via_catalyst_text: None,
-                    })
-                    .collect();
-                ("no_entities", "direct", hits, Vec::new())
-            }
-        };
-        let output = RecallOutput {
-            query: query.to_string(),
-            status: "ok",
-            reason,
-            freshness: self.freshness.clone(),
-            config_path: None,
-            note_count: self.index.document_count,
-            results: recall_results(hits, &self.catalog),
-            top_contributing_catalysts,
-            search_strategy,
-            processing_time: (started.elapsed().as_secs_f64() * 1000.0).round() / 1000.0,
-        };
-        render_recall_json(&output)
-    }
-
-    /// `enzyme petri`-compatible JSON (consumed-field subset).
-    pub fn petri_json(&self, query: &str, top: usize, catalyst_budget: usize) -> Result<String> {
-        let readiness = catalyst_readiness(&self.index, &self.selected_entity_names)?;
-        if readiness.items_pending > 0 {
-            anyhow::bail!(readiness.message());
-        }
-        self.index.petri_json(query, top, catalyst_budget)
-    }
-}
-
-/// Build or refresh the unified index for every declared source in a Workspace.
-pub fn provision_workspace(workspace: &ResolvedWorkspace) -> Result<SearchHandle> {
-    Ok(provision_workspace_inner(workspace)?.0)
-}
-
-pub fn provision_workspace_for_init(workspace: &ResolvedWorkspace) -> Result<InitStatus> {
-    Ok(provision_workspace_inner(workspace)?.1)
-}
-
-pub fn open_workspace(workspace: &ResolvedWorkspace) -> Result<Option<SearchHandle>> {
-    let corpus = crate::workspace_recall::prepare(workspace, false)?;
-    let Some(index) = crate::recall_engine_seam::open(&workspace.recall_path())? else {
-        return Ok(None);
-    };
-    let freshness = require_retrieval_freshness(
-        index_freshness(&corpus, &index)?,
-        materialization_freshness(workspace)?,
-    )?;
-    ensure_usable_generator()?;
-    let readiness = catalyst_readiness(&index, &corpus.selected_entity_names)?;
-    if readiness.items_pending > 0 {
-        anyhow::bail!(readiness.message());
-    }
-    Ok(Some(SearchHandle {
-        index,
-        selected_entity_names: corpus.selected_entity_names,
-        catalog: corpus.catalog,
-        freshness,
-    }))
-}
-
-fn provision_workspace_inner(workspace: &ResolvedWorkspace) -> Result<(SearchHandle, InitStatus)> {
-    std::fs::create_dir_all(&workspace.state_dir)
-        .with_context(|| format!("creating workspace state {}", workspace.state_dir.display()))?;
-    let corpus = crate::workspace_recall::prepare(workspace, true)?;
-    let provisioned = crate::recall_engine_seam::provision(
-        &corpus.engine,
-        crate::recall_engine_seam::ProvisionRequest {
-            max_bridged_entities: MAX_BRIDGED_ENTITIES
-                .max(corpus.entity_selection_debug.selected.len()),
-            selected_link_entities: corpus.selected_link_entities.clone(),
-            excluded_link_entities: corpus.excluded_link_entities.clone(),
-            generator_home: margins_home()?,
-        },
-    )?;
-    let hosted_generation_calls = provisioned.hosted_generation_calls;
-    let index = provisioned.index;
-    let catalysts_after = catalyst_ids_from_index(&index)?;
-    let materialization = entity_materialization_debug(&corpus, &index, &catalysts_after)?;
-    let readiness = catalyst_readiness(&index, &corpus.selected_entity_names)?;
-    let status = classify_init_status(index.bridged, readiness);
-    debug_strategy(&format!(
-        "workspace index provisioned ({:?})",
-        index.bridged
-    ));
-    debug_correspondent_selection(&corpus, hosted_generation_calls, Some(&materialization));
-    let freshness = combined_freshness(
-        index_freshness(&corpus, &index)?,
-        materialization_freshness(workspace)?,
-    );
-    Ok((
-        SearchHandle {
-            index,
-            selected_entity_names: corpus.selected_entity_names.clone(),
-            catalog: corpus.catalog.clone(),
-            freshness,
-        },
-        status,
-    ))
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct EntityMaterializationDebug {
-    materialized_count: usize,
-    selected_count: usize,
-    non_materialized: Vec<(String, String)>,
-}
-
-fn entity_materialization_debug(
-    corpus: &WorkspaceCorpus,
-    index: &SearchIndex,
-    catalysts: &BTreeMap<String, BTreeSet<String>>,
-) -> Result<EntityMaterializationDebug> {
-    let occurrences = index
-        .database()
-        .query_read(
-            "SELECT DISTINCT e.name
-             FROM entities e
-             JOIN entity_occurrences eo ON eo.entity_id = e.id
-             WHERE e.type = 'link'",
-            Vec::new(),
-            |row| row.get::<String>(0),
-        )?
-        .into_iter()
-        .map(|name| name.trim().to_ascii_lowercase())
-        .collect::<BTreeSet<_>>();
-    Ok(entity_materialization_debug_from_sets(
-        &corpus.selected_link_entities,
-        &occurrences,
-        &catalysts.keys().cloned().collect(),
-        &latest_generation_skip_reasons(index.database())?,
-    ))
-}
-
-fn entity_materialization_debug_from_sets(
-    selected: &BTreeSet<String>,
-    occurrences: &BTreeSet<String>,
-    materialized: &BTreeSet<String>,
-    generation_skips: &BTreeMap<String, String>,
-) -> EntityMaterializationDebug {
-    let non_materialized = selected
-        .difference(materialized)
-        .map(|entity| {
-            let reason = if let Some(reason) = generation_skips.get(entity) {
-                reason.clone()
-            } else if occurrences.contains(entity) {
-                "no-catalyst".to_string()
-            } else {
-                "no-occurrence".to_string()
-            };
-            (entity.clone(), reason)
-        })
-        .collect();
-    EntityMaterializationDebug {
-        materialized_count: selected.intersection(materialized).count(),
-        selected_count: selected.len(),
-        non_materialized,
-    }
-}
-
-fn debug_correspondent_selection(
-    corpus: &WorkspaceCorpus,
-    hosted_generation_calls: usize,
-    materialization: Option<&EntityMaterializationDebug>,
-) {
-    debug_strategy(&correspondent_selection_debug_message(
-        &corpus.entity_selection_debug,
-        hosted_generation_calls,
-        materialization,
-    ));
-}
-
-fn correspondent_selection_debug_message(
-    debug: &crate::workspace_recall::EntitySelectionDebug,
-    hosted_generation_calls: usize,
-    materialization: Option<&EntityMaterializationDebug>,
-) -> String {
-    let selected = debug
-        .selected
-        .iter()
-        .map(|(entity, weight)| match weight {
-            Some(weight) => format!("{entity}={weight}"),
-            None => format!("{entity}=selected"),
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    let (materialized, non_materialized) = materialization.map_or_else(
-        || ("unavailable".to_string(), String::new()),
-        |materialization| {
-            let missing = materialization
-                .non_materialized
-                .iter()
-                .map(|(entity, reason)| format!("[[{entity}]]={reason}"))
-                .collect::<Vec<_>>()
-                .join(",");
-            (
-                format!(
-                    "{}/{}",
-                    materialization.materialized_count, materialization.selected_count
-                ),
-                missing,
-            )
-        },
-    );
-    format!(
-        "correspondent_selection selected=[{selected}] suppressed={} correspondents_considered={} hosted_generation_calls={hosted_generation_calls} materialized={materialized} non_materialized=[{non_materialized}]",
-        debug.suppressed_count,
-        debug.correspondents_considered,
-    )
-}
-
-fn catalyst_ids_from_index(index: &SearchIndex) -> Result<BTreeMap<String, BTreeSet<String>>> {
-    catalyst_ids(index.database())
-}
-
-fn catalyst_ids(
-    database: &recall_engine::db::Database,
-) -> Result<BTreeMap<String, BTreeSet<String>>> {
-    let mut result = BTreeMap::new();
-    for catalyst in database.get_all_catalysts()? {
-        result
-            .entry(catalyst.entity)
-            .or_insert_with(BTreeSet::new)
-            .insert(catalyst.id);
-    }
-    Ok(result)
-}
 
 #[cfg(test)]
 mod tests {
@@ -1803,108 +1462,6 @@ mod tests {
         assert!(freshness[0].freshness.last_successful_refresh.is_some());
     }
 
-    #[test]
-    fn correspondent_debug_line_reports_considered_counts() {
-        let debug = crate::workspace_recall::EntitySelectionDebug {
-            selected: vec![("[[dk@example.test]]".to_string(), Some(10_002_007))],
-            suppressed_count: 52,
-            correspondents_considered: 41,
-        };
-        let materialization = EntityMaterializationDebug {
-            materialized_count: 1,
-            selected_count: 2,
-            non_materialized: vec![(
-                "missing@example.test".to_string(),
-                "no-occurrence".to_string(),
-            )],
-        };
-        assert_eq!(
-            correspondent_selection_debug_message(&debug, 1, Some(&materialization)),
-            "correspondent_selection selected=[[[dk@example.test]]=10002007] suppressed=52 correspondents_considered=41 hosted_generation_calls=1 materialized=1/2 non_materialized=[[[missing@example.test]]=no-occurrence]"
-        );
-    }
-
-    #[test]
-    fn materialization_debug_distinguishes_missing_occurrences_from_generation_gaps() {
-        let selected = BTreeSet::from([
-            "dk@example.test".to_string(),
-            "generated@example.test".to_string(),
-            "missing@example.test".to_string(),
-            "ungenerated@example.test".to_string(),
-        ]);
-        let occurrences = BTreeSet::from([
-            "generated@example.test".to_string(),
-            "ungenerated@example.test".to_string(),
-        ]);
-        let materialized = BTreeSet::from(["generated@example.test".to_string()]);
-        let generation_skips =
-            BTreeMap::from([("dk@example.test".to_string(), "thin_evidence".to_string())]);
-        assert_eq!(
-            entity_materialization_debug_from_sets(
-                &selected,
-                &occurrences,
-                &materialized,
-                &generation_skips,
-            ),
-            EntityMaterializationDebug {
-                materialized_count: 1,
-                selected_count: 4,
-                non_materialized: vec![
-                    ("dk@example.test".to_string(), "thin_evidence".to_string()),
-                    (
-                        "missing@example.test".to_string(),
-                        "no-occurrence".to_string(),
-                    ),
-                    (
-                        "ungenerated@example.test".to_string(),
-                        "no-catalyst".to_string(),
-                    ),
-                ],
-            }
-        );
-    }
-
-    #[test]
-    fn authoritative_link_selection_prunes_stale_and_suppressed_catalysts_only() {
-        recall_engine::initialize_sqlite_runtime().unwrap();
-        let temp = tempfile::tempdir().unwrap();
-        let db_path = temp.path().join("index.db");
-        drop(recall_engine::db::Database::open(&db_path).unwrap());
-        let connection = rusqlite::Connection::open(&db_path).unwrap();
-        for (id, entity, entity_type) in [
-            ("keep", "dk@example.test", "link"),
-            ("stale", "newsletter@example.test", "link"),
-            ("self", "owner@example.test", "link"),
-            ("folder", "people", "folder"),
-        ] {
-            connection
-                .execute(
-                    "INSERT INTO catalysts (id, text, entity, metadata)
-                     VALUES (?1, 'fixture', ?2, json_object('entity_type', ?3))",
-                    rusqlite::params![id, entity, entity_type],
-                )
-                .unwrap();
-        }
-        drop(connection);
-
-        crate::recall_engine_seam::reconcile_link_catalysts(
-            &recall_engine::db::Database::open(&db_path).unwrap(),
-            &BTreeSet::from(["dk@example.test".to_string()]),
-            &BTreeSet::from(["owner@example.test".to_string()]),
-        )
-        .unwrap();
-
-        let connection = rusqlite::Connection::open(&db_path).unwrap();
-        let mut statement = connection
-            .prepare("SELECT entity FROM catalysts ORDER BY entity")
-            .unwrap();
-        let entities = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        assert_eq!(entities, vec!["dk@example.test", "people"]);
-    }
 
     fn output(status: &'static str, results: Vec<RecallResult>) -> RecallOutput {
         RecallOutput {
@@ -1978,75 +1535,6 @@ mod tests {
     }
 
     #[test]
-    fn hosted_generator_uses_setup_bundle_without_broker_or_bootstrap_access() {
-        let _guard = crate::test_process_env_lock().lock().unwrap();
-        let _restore = EnvRestore::capture();
-        clear_resolver_env();
-        let home = tempfile::tempdir().unwrap();
-        crate::hosted_credentials::install_bundle(
-            home.path(),
-            "setup-machine-id",
-            "fixture-cached-key",
-            "https://fixture.invalid/v1",
-            "fixture-cached-model",
-            Some(4_102_444_800),
-        )
-        .unwrap();
-        std::fs::write(home.path().join("bootstrap.json"), b"not valid json").unwrap();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        std::env::set_var(
-            "ENZYME_FREE_CONFIG_URL",
-            format!("http://{}/llm/free-config", listener.local_addr().unwrap()),
-        );
-
-        let generator = crate::recall_engine_seam::resolve_generator(home.path()).unwrap();
-
-        assert_eq!(generator.model(), "fixture-cached-model");
-        assert!(matches!(
-            generator.provider(),
-            recall_engine::llm::ConfigProvider::Env
-        ));
-        assert!(matches!(
-            listener.accept(),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
-        ));
-    }
-
-    #[cfg(feature = "recall-local-model")]
-    #[tokio::test]
-    async fn configured_local_mode_wins_without_env_credentials() {
-        let _guard = crate::test_process_env_lock().lock().unwrap();
-        let _restore = EnvRestore::capture();
-        clear_resolver_env();
-        let home = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(home.path().join("models")).unwrap();
-        std::fs::write(
-            home.path().join("models/configured-catalyst.gguf"),
-            b"selection-fixture",
-        )
-        .unwrap();
-        // The engine reads the Margins home as an Enzyme home: the generator
-        // selection is the `configs/settings.enzyme` program.
-        std::fs::create_dir_all(home.path().join("configs")).unwrap();
-        std::fs::write(
-            home.path().join("configs/settings.enzyme"),
-            "settings {\n  generation local\n  model \"configured-catalyst\"\n  updates disabled\n}\n",
-        )
-        .unwrap();
-
-        let config = recall_engine::llm::resolve_api_config_in(home.path())
-            .await
-            .unwrap();
-
-        assert!(matches!(
-            config.provider,
-            recall_engine::llm::ConfigProvider::Local
-        ));
-        assert_eq!(config.model, "configured-catalyst");
-        assert!(!home.path().join("bootstrap.json").exists());
-    }
-    #[test]
     fn json_and_init_status_contracts_use_shared_vocabulary() {
         for status in ["thin", "off", "no_vault", "unavailable", "no_policy"] {
             let output = output(status, vec![]);
@@ -2058,60 +1546,53 @@ mod tests {
             assert_eq!(json["search_strategy"], "catalyze");
             assert_eq!(json["total_results"], 0);
         }
-        let readiness = CatalystReadiness {
-            entities_curated: 2,
-            catalysts_present: 6,
-            items_pending: 0,
-            reasons: BTreeMap::new(),
+        let status = |catalysts: usize, entities: serde_json::Value| -> StatusEnvelope {
+            let selected = entities.as_array().unwrap().len();
+            serde_json::from_value(serde_json::json!({
+                "schema": "enzyme.status.v1",
+                "initialized": true,
+                "documents": 4,
+                "catalysts": catalysts,
+                "selection": {"selected": selected, "entities": entities},
+            }))
+            .unwrap()
         };
+        let ready = classify_init_status(&status(
+            6,
+            serde_json::json!([
+                {"name": "projects", "type": "folder", "state": "ready", "catalysts": 6},
+                {"name": "Marisol", "type": "link", "state": "skipped", "catalysts": 0,
+                 "skip_reason": {"kind": "thin_context"}},
+            ]),
+        ));
+        assert_eq!(ready.status, "ok");
+        assert_eq!(ready.reason, "catalyst");
         assert_eq!(
-            classify_init_status(Bridged::Ready, readiness.clone()),
-            InitStatus {
-                status: "ok",
-                reason: "catalyst",
-                readiness: readiness.clone(),
+            ready.readiness,
+            CatalystReadiness {
+                entities_curated: 2,
+                catalysts_present: 6,
+                items_pending: 0,
+                reasons: BTreeMap::from([("thin-context".to_string(), 1)]),
             }
         );
+        let pending = classify_init_status(&status(
+            0,
+            serde_json::json!([
+                {"name": "projects", "type": "folder", "state": "pending", "catalysts": 0},
+                {"name": "radio", "type": "tag", "state": "pending", "catalysts": 0},
+            ]),
+        ));
+        assert_eq!(pending.status, "catalysts_pending");
+        assert_eq!(pending.readiness.items_pending, 2);
         assert_eq!(
-            classify_init_status(
-                Bridged::NoGenerator,
-                CatalystReadiness {
-                    items_pending: 2,
-                    ..readiness.clone()
-                }
-            ),
-            InitStatus {
-                status: "catalysts_pending",
-                reason: "catalysts_pending",
-                readiness: CatalystReadiness {
-                    items_pending: 2,
-                    ..readiness.clone()
-                },
-            }
+            pending.readiness.reasons,
+            BTreeMap::from([("no-catalyst".to_string(), 2)])
         );
-        assert_eq!(
-            classify_init_status(
-                Bridged::NoEntities,
-                CatalystReadiness {
-                    entities_curated: 0,
-                    catalysts_present: 0,
-                    items_pending: 0,
-                    reasons: BTreeMap::new(),
-                }
-            ),
-            InitStatus {
-                status: "ok",
-                reason: "no_entities",
-                readiness: CatalystReadiness {
-                    entities_curated: 0,
-                    catalysts_present: 0,
-                    items_pending: 0,
-                    reasons: BTreeMap::new(),
-                },
-            }
-        );
+        let none = classify_init_status(&status(0, serde_json::json!([])));
+        assert_eq!(none.status, "ok");
+        assert_eq!(none.reason, "no_entities");
     }
-
     #[test]
     fn json_uses_typed_margins_result_shape() {
         let mut output = output(
@@ -2323,7 +1804,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_hydration_reconstructs_external_evidence_without_catalog_walk() {
+    fn ledger_hits_map_back_to_external_evidence() {
         let _guard = crate::test_process_env_lock().lock().unwrap();
         let _restore = EnvRestore::capture();
         let tmp = tempfile::tempdir().unwrap();
@@ -2365,9 +1846,11 @@ mod tests {
             )
             .unwrap();
         let document_ref =
-            margins_workflows::workspace_lowering::sqlite_document_ref("mail", "thread-123");
+            margins_workflows::source_kinds::sqlite_document_ref("mail", "thread-123");
 
-        let entry = catalog_entry_for_document_ref(&workspace, &document_ref).unwrap();
+        let entry =
+            catalog_entry_for_document_ref(&workspace, &document_ref, &mut LedgerRefs::default())
+                .unwrap();
 
         assert_eq!(
             source_name_for_document_ref(&workspace, &document_ref).as_deref(),
@@ -2386,3 +1869,5 @@ mod tests {
         );
     }
 }
+
+
