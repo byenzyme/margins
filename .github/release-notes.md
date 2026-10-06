@@ -10,7 +10,7 @@ recall engine. The release archives contain `margins`, `margins-server`, and
 - Setup starts from the `margins-meetings` preset. It fills in readings for
   your notes folders and turns on automatic selection, so a new Workspace can
   recall from its notes without a scan or a review step.
-- Margins runs the bundled `enzyme` 0.12.0 that ships beside it. It keeps its
+- Margins runs the bundled `enzyme` 0.12.1 that ships beside it. It keeps its
   index, models, and settings in the Margins home and never reads or changes
   `~/.enzyme` or an `enzyme` you installed yourself.
 - Existing setups migrate on first run. Each Workspace's `config.toml` becomes
