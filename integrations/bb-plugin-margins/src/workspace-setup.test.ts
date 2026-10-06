@@ -24,7 +24,8 @@ describe("Workspace setup", () => {
       await writeFile(cli, `#!/usr/bin/env node
 const fs = require('node:fs');
 const a = process.argv.slice(2); fs.appendFileSync(${JSON.stringify(join(root, "calls"))}, a.join(' ') + '\\n');
-if (a.includes('list')) console.log(JSON.stringify({workspaces:[]}));
+if (a.includes('capabilities')) console.log(JSON.stringify({workspace:{setup:true, preset:!process.env.OLD_MARGINS}}));
+else if (a.includes('list')) console.log(JSON.stringify({workspaces:[]}));
 else if (a.includes('plan')) console.log(JSON.stringify({schema_version:'margins.workspace.plan.v2', workspace_id:'notes', actions:[{action:'set_policy', summary:'Attention policy: learn questions from folder:People'}], plan_id:'reviewed', desired_program:${JSON.stringify(program)}, program_path:${JSON.stringify(programPath)}, preset:{template:'/t', readings:['folder:People'], skipped_readings:['folder:Meetings','folder:Projects'], note_folder:'Meetings'}}));
 else if (a.includes('destination')) console.log(JSON.stringify({destination:${JSON.stringify(join(vault, "Meetings"))}}));
 else console.log('{}');
@@ -45,6 +46,10 @@ else console.log('{}');
       expect(calls).not.toMatch(/compile|scan|--desired/);
       expect(calls.indexOf("workspace apply")).toBeLessThan(calls.indexOf("workspace default --set notes"));
       await expect(previewWorkspaceSetup(target, root, "relative/notes")).rejects.toThrow("absolute notes folder");
+      process.env.OLD_MARGINS = "1";
+      try {
+        await expect(previewWorkspaceSetup(target, root, "")).rejects.toThrow("Update Margins");
+      } finally { delete process.env.OLD_MARGINS; }
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 });

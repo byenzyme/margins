@@ -34726,6 +34726,10 @@ function strings(value) {
 }
 async function previewWorkspaceSetup(target, dataDir, homeInput) {
   const homeRoot = await selectedHome(target, homeInput);
+  const capabilities = JSON.parse(await cli(["capabilities"]));
+  if (capabilities.workspace?.preset !== true) {
+    throw new Error("This Margins version can't set up a Workspace from the meetings preset. Update Margins, then try again.");
+  }
   const listing = JSON.parse(await cli(["workspace", "list", "--json"]));
   if (!Array.isArray(listing.workspaces)) throw new Error("Margins Workspace list is unavailable.");
   let workspaceId = null;
