@@ -1,0 +1,132 @@
+// Managed by Margins. Margins rewrites this file to its shipped text before it
+// runs Enzyme, so local edits do not last. Define your own source kinds in
+// another file under configs/.
+//
+// Each kind turns a Workspace source into the SQLite source Enzyme indexes,
+// read from the Workspace's ledger at
+// $MARGINS_HOME/workspaces/<workspace>/ledger.db. `accepts` names fields that
+// Margins reads when it syncs; Enzyme ignores them.
+
+// One document per synced email thread.
+source kind google-mail {
+  needs account
+  accepts query, backfill days
+  database "{home}/workspaces/{workspace}/ledger.db"
+  query """SELECT te.thread_id AS id,
+       CAST(strftime('%s', te.occurred_to) AS INTEGER) * 1000 AS occurred_at_ms,
+       te.body_text AS body,
+       COALESCE((SELECT json_group_array(ordered.participant) FROM (
+           SELECT DISTINCT pt.participant FROM participant_threads pt
+           WHERE pt.connector_id = te.connector_id
+             AND pt.source_account = te.source_account
+             AND pt.thread_id = te.thread_id
+           ORDER BY pt.participant
+       ) ordered), '[]') AS participants
+FROM thread_evidence te
+WHERE te.connector_id = 'email'
+  AND te.source_account = {account}
+  AND te.tombstoned_at IS NULL"""
+  id "id"
+  who json_array "participants"
+  when "occurred_at_ms" unit ms
+  what "body"
+}
+
+// One document per Calendar event inside the window the last sync covered.
+source kind google-calendar {
+  needs account
+  accepts lookback days, lookahead days
+  database "{home}/workspaces/{workspace}/ledger.db"
+  query """SELECT ce.source_id AS id,
+       CAST(strftime('%s', ce.occurred_from) AS INTEGER) * 1000 AS occurred_at_ms,
+       ce.title,
+       ce.body_text AS body,
+       COALESCE((SELECT json_group_array(participant) FROM (
+           SELECT COALESCE(NULLIF(ca.email, ''), ca.display_name) AS participant
+           FROM calendar_event_attendees ca
+           WHERE ca.connector_id = ce.connector_id
+             AND ca.source_account = ce.source_account
+             AND ca.source_id = ce.source_id
+           ORDER BY ca.position, ca.attendee_key
+       )), '[]') AS participants
+FROM calendar_event_evidence ce
+JOIN connectors c
+  ON c.connector_id = ce.connector_id AND c.account = ce.source_account
+WHERE ce.connector_id = 'gcal'
+  AND ce.source_account = {account}
+  AND ce.tombstoned_at IS NULL
+  AND julianday(ce.occurred_from)
+      >= julianday(json_extract(c.scope_boundary_json, '$.occurred_from'))
+  AND julianday(ce.occurred_from)
+      <= julianday(json_extract(c.scope_boundary_json, '$.occurred_to'))"""
+  id "id"
+  who json_array "participants"
+  when "occurred_at_ms" unit ms
+  what ["title", "body"]
+}
+
+// One document per Google Meet transcript.
+source kind google-meet {
+  needs account
+  database "{home}/workspaces/{workspace}/ledger.db"
+  query """SELECT ed.source_id AS id,
+       CAST(strftime('%s', ed.occurred_at) AS INTEGER) * 1000 AS occurred_at_ms,
+       ed.title,
+       ed.body_text AS body,
+       COALESCE((SELECT json_group_array(participant) FROM (
+           SELECT COALESCE(NULLIF(ep.email, ''), ep.display_name) AS participant
+           FROM external_document_participants ep
+           WHERE ep.connector_id = ed.connector_id
+             AND ep.source_account = ed.source_account
+             AND ep.source_id = ed.source_id
+             AND ep.ambiguous = 0
+           ORDER BY ep.position, ep.participant_key
+       )), '[]') AS participants
+FROM external_document_evidence ed
+WHERE ed.connector_id = 'google_meet'
+  AND ed.source_account = {account}
+  AND ed.tombstoned_at IS NULL"""
+  id "id"
+  who json_array "participants"
+  when "occurred_at_ms" unit ms
+  what ["title", "body"]
+}
+
+// One document per Granola note.
+source kind granola {
+  needs account
+  accepts time range, workspace only
+  database "{home}/workspaces/{workspace}/ledger.db"
+  query """SELECT ed.source_id AS id,
+       CAST(strftime('%s', ed.occurred_at) AS INTEGER) * 1000 AS occurred_at_ms,
+       ed.title,
+       ed.body_text AS body,
+       COALESCE((SELECT json_group_array(participant) FROM (
+           SELECT COALESCE(NULLIF(ep.email, ''), ep.display_name) AS participant
+           FROM external_document_participants ep
+           WHERE ep.connector_id = ed.connector_id
+             AND ep.source_account = ed.source_account
+             AND ep.source_id = ed.source_id
+             AND ep.ambiguous = 0
+           ORDER BY ep.position, ep.participant_key
+       )), '[]') AS participants
+FROM external_document_evidence ed
+WHERE ed.connector_id = 'granola'
+  AND ed.source_account = {account}
+  AND ed.tombstoned_at IS NULL"""
+  id "id"
+  who json_array "participants"
+  when "occurred_at_ms" unit ms
+  what ["title", "body"]
+}
+
+// Where Margins keeps recordings and transcripts. Not indexed: the query
+// returns no rows.
+source kind margins-captures {
+  accepts path
+  database "{home}/workspaces/{workspace}/ledger.db"
+  query "SELECT NULL AS id, 0 AS occurred_at_ms, NULL AS body WHERE 0"
+  id "id"
+  when "occurred_at_ms" unit ms
+  what "body"
+}

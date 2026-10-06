@@ -51,7 +51,7 @@ def compose() -> str:
         "recall-engine/local-llm",
     ]
     assert manifest["dependencies"]["recall-engine"]["optional"] is True
-    assert manifest["dependencies"]["recall-engine"]["rev"] == "624e539bc34ad7bb4855aaceb34492c85190ae9c"
+    assert manifest["dependencies"]["recall-engine"]["rev"] == "d9b1c5b484f5e335b7d35ff02eb3631e1902b252"
     return source
 
 

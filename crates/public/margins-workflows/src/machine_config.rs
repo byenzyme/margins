@@ -301,9 +301,56 @@ pub fn set_generation(margins_home: &Path, mode: &str) -> Result<()> {
     atomic_write(&path, enzyme_spec::render_program(&program).as_bytes())
 }
 
+/// Make `configs/settings.enzyme` exist with `updates disabled` before Margins
+/// runs `enzyme`: Margins ships the engine binary, so the engine must never
+/// update itself. Other settings are kept; an explicit `updates enabled` is
+/// turned off.
+pub fn ensure_engine_settings(margins_home: &Path) -> Result<()> {
+    let path = settings_program_path(margins_home);
+    if !margins_home.join(LEGACY_MACHINE_CONFIG).exists()
+        && read_settings_program(&path)?.is_some_and(|program| program.settings.updates == Some(false))
+    {
+        return Ok(());
+    }
+    let _lock = lock_machine(margins_home)?;
+    migrate_locked(margins_home)?;
+    let mut program = read_settings_program(&path)?.unwrap_or_default();
+    if program.settings.updates == Some(false) && path.exists() {
+        return Ok(());
+    }
+    if program.settings.updates == Some(true) {
+        log::warn!(
+            "{}: turning engine updates off; Margins updates the enzyme binary it ships",
+            path.display()
+        );
+    }
+    program.settings.updates = Some(false);
+    atomic_write(&path, enzyme_spec::render_program(&program).as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_settings_are_created_with_updates_disabled_and_kept() {
+        let home = home();
+        ensure_engine_settings(home.path()).unwrap();
+        let path = settings_program_path(home.path());
+        let settings = read_settings_program(&path).unwrap().unwrap().settings;
+        assert_eq!(settings.updates, Some(false));
+        assert_eq!(settings.generation, None);
+
+        std::fs::write(&path, "settings {\n  generation hosted\n  updates enabled\n}\n").unwrap();
+        ensure_engine_settings(home.path()).unwrap();
+        let settings = read_settings_program(&path).unwrap().unwrap().settings;
+        assert_eq!(settings.updates, Some(false));
+        assert_eq!(settings.generation.as_deref(), Some("hosted"));
+
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        ensure_engine_settings(home.path()).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before);
+    }
 
     fn home() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()

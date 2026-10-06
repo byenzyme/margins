@@ -14,12 +14,12 @@ pub mod note_artifacts;
 pub mod processing;
 pub mod project;
 pub mod session_index;
+pub mod source_kinds;
 pub mod transcript_view;
 /// The Workspace language crate, re-exported so every Margins crate uses the
 /// one copy margins-workflows declares.
 pub use enzyme_spec;
 pub mod workspace;
-pub mod workspace_lowering;
 pub mod workspace_program;
 pub mod workspace_service;
 pub mod remote_workspace;

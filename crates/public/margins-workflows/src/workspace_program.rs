@@ -977,24 +977,21 @@ fn qualify_folder(
 // Validation
 // ---------------------------------------------------------------------------
 
-/// Validate a program through `enzyme_spec::resolve` after the same host
-/// lowering the engine path uses ([`crate::workspace_lowering::lower_for_engine`]),
-/// so readings, profiles, folder qualification, and exclusions are checked by
-/// the engine's own resolver against the sources it will actually index.
-/// `ledger` is the Workspace's `ledger.db` (named, never opened); `profiles`
-/// is the optional shared `configs/profiles.enzyme` program.
+/// Validate a program through `enzyme_spec::resolve_in` with Margins' source
+/// kinds ([`crate::source_kinds`]), so readings, profiles, folder
+/// qualification, and exclusions are checked by the engine's own resolver
+/// against the sources it will actually index. `margins_home` fills `{home}`;
+/// `profiles` is the optional shared `configs/profiles.enzyme` program.
 pub fn validate_language(
     program: &WorkspaceProgram,
-    ledger: &Path,
+    margins_home: &Path,
     profiles: Option<&Program>,
 ) -> Result<()> {
-    let lowered =
-        crate::workspace_lowering::lower_for_engine(program.program(), ledger, chrono::Utc::now())?;
-    let mut programs = vec![lowered];
+    let mut programs = vec![program.program().clone()];
     if let Some(profiles) = profiles {
         programs.push(profiles.clone());
     }
-    enzyme_spec::resolve(programs, &user_home())?;
+    enzyme_spec::resolve_in(programs, &crate::source_kinds::environment(margins_home)?)?;
     Ok(())
 }
 
@@ -1155,7 +1152,7 @@ workspace "practice" {
                 ),
             ]
         );
-        validate_language(&parse(ALL_KINDS), Path::new("/state/ledger.db"), None).unwrap();
+        validate_language(&parse(ALL_KINDS), Path::new("/state"), None).unwrap();
     }
 
     #[test]
@@ -1291,7 +1288,7 @@ workspace "practice" {
         assert!(text.contains("learn questions from tags matching \"proj-*\""), "{text}");
         assert!(text.contains("\"Use grep for exact names.\""), "{text}");
         assert!(text.contains("\"A meeting ended.\""), "{text}");
-        validate_language(program, Path::new("/state/ledger.db"), None).unwrap();
+        validate_language(program, Path::new("/state"), None).unwrap();
     }
 
     #[test]
@@ -1445,7 +1442,7 @@ workspace "practice" {
         .unwrap();
         assert!(program.text().contains("learn questions from folder \"library/people\""), "{}", program.text());
         assert!(program.text().contains("learn questions from folder \"notes/library/x\""), "{}", program.text());
-        validate_language(&program, Path::new("/state/ledger.db"), None).unwrap();
+        validate_language(&program, Path::new("/state"), None).unwrap();
 
         // One root: the internal identity and plain refs are root-relative.
         let one = [("notes", markdown("/abs/notes", SourceRole::Home))];
@@ -1481,7 +1478,7 @@ workspace "practice" {
                     .unwrap(),
             )
             .unwrap();
-            validate_language(&program, Path::new("/state/ledger.db"), None).unwrap();
+            validate_language(&program, Path::new("/state"), None).unwrap();
         }
     }
 
