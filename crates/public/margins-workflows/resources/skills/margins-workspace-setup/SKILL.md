@@ -155,10 +155,10 @@ the user a message, in their terms, with the plan's plain-language consequences:
   (`program_path`).
 
 The consequences must reach the user before the apply command runs; reporting
-them only in the final summary, after apply, is not showing the plan. If `actions`
-is empty, explain that nothing needs to change and skip apply. Otherwise, once
-that message is out, apply the saved plan unchanged; you need not wait for a
-reply. The opening setup request authorizes this preset, so after the user has
+them only in the final summary, after apply, is not showing the plan.
+If `actions` is empty, explain that nothing needs to change and skip apply.
+Otherwise, once that message is out, apply the saved plan unchanged; you need
+not wait for a reply. The opening setup request authorizes this preset, so after the user has
 seen its consequences do not ask for a second “apply this plan” confirmation.
 
 ```bash
