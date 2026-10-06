@@ -18997,6 +18997,37 @@ var speechSetupResultSchema = external_exports.discriminatedUnion("ok", [
   external_exports.object({ ok: external_exports.literal(true), state: external_exports.enum(["preparing", "ready", "failed", "unavailable"]), message: external_exports.string(), progress: external_exports.number().min(0).max(1).nullable() }).strict(),
   external_exports.object({ ok: external_exports.literal(false), error: hostErrorSchema }).strict()
 ]);
+var programSchema = external_exports.object({
+  workspaceId: external_exports.string().min(1),
+  programPath: external_exports.string().min(1),
+  revision: external_exports.string().min(1),
+  program: external_exports.string()
+}).strict();
+var programErrorSchema = external_exports.object({
+  code: external_exports.string(),
+  message: external_exports.string(),
+  line: external_exports.number().int().positive().nullable(),
+  column: external_exports.number().int().positive().nullable(),
+  actualRevision: external_exports.string().optional()
+}).strict();
+var programPlanResultSchema = external_exports.discriminatedUnion("ok", [
+  external_exports.object({
+    ok: external_exports.literal(true),
+    previewId: external_exports.string().min(1),
+    workspaceId: external_exports.string().min(1),
+    baseRevision: external_exports.string().min(1),
+    noop: external_exports.boolean(),
+    actions: external_exports.array(external_exports.object({ action: external_exports.string(), summary: external_exports.string() }).strict()),
+    diff: external_exports.string()
+  }).strict(),
+  external_exports.object({ ok: external_exports.literal(false), error: programErrorSchema }).strict()
+]);
+var programApplyResultSchema = external_exports.discriminatedUnion("ok", [
+  external_exports.object({ ok: external_exports.literal(true), revision: external_exports.string().min(1) }).strict(),
+  external_exports.object({ ok: external_exports.literal(false), error: programErrorSchema }).strict()
+]);
+var MAX_PROGRAM_BYTES = 256 * 1024;
+var programTextSchema = external_exports.string().max(MAX_PROGRAM_BYTES);
 var ownedCaptureInputSchema = external_exports.object({ target: projectTargetSchema }).extend({
   recordingId: external_exports.string().min(1),
   ownerId: external_exports.string().min(1)
@@ -19030,6 +19061,18 @@ var marginsHostContract = defineRpcContract({
   applyWorkspaceSetup: {
     input: external_exports.object({ previewId: external_exports.string() }).strict(),
     output: external_exports.object({ workspaceId: external_exports.string(), destination: external_exports.string() }).strict()
+  },
+  readWorkspaceProgram: {
+    input: external_exports.object({ workspaceId: external_exports.string().min(1) }).strict(),
+    output: programSchema
+  },
+  planWorkspaceProgram: {
+    input: external_exports.object({ workspaceId: external_exports.string().min(1), program: programTextSchema }).strict(),
+    output: programPlanResultSchema
+  },
+  applyWorkspaceProgram: {
+    input: external_exports.object({ workspaceId: external_exports.string().min(1), previewId: external_exports.string().min(1) }).strict(),
+    output: programApplyResultSchema
   },
   listWorkspaceMeetings: {
     input: external_exports.object({ target: projectTargetSchema }).strict(),
@@ -19221,6 +19264,18 @@ var marginsRpcContract = defineRpcContract({
   applyWorkspaceSetup: {
     input: external_exports.object({ projectId: external_exports.string().min(1), previewId: external_exports.string() }).strict(),
     output: external_exports.object({ workspaceId: external_exports.string(), destination: external_exports.string() }).strict()
+  },
+  workspaceProgram: {
+    input: external_exports.object({ projectId: external_exports.string().min(1) }).strict(),
+    output: programSchema
+  },
+  planWorkspaceProgram: {
+    input: external_exports.object({ projectId: external_exports.string().min(1), workspaceId: external_exports.string().min(1), program: programTextSchema }).strict(),
+    output: programPlanResultSchema
+  },
+  applyWorkspaceProgram: {
+    input: external_exports.object({ projectId: external_exports.string().min(1), workspaceId: external_exports.string().min(1), previewId: external_exports.string().min(1) }).strict(),
+    output: programApplyResultSchema
   },
   availableProjects: {
     input: external_exports.object({}).strict(),
@@ -19568,7 +19623,7 @@ function marginsPlugin(bb) {
     try {
       return await host.call(method, input2, { hostId: target.hostId });
     } catch (cause) {
-      if (method === "workspaceOptions" || method === "workspacePaths" || method === "previewWorkspaceSetup" || method === "applyWorkspaceSetup") throw cause;
+      if (method === "workspaceOptions" || method === "workspacePaths" || method === "previewWorkspaceSetup" || method === "applyWorkspaceSetup" || method === "readWorkspaceProgram" || method === "planWorkspaceProgram" || method === "applyWorkspaceProgram") throw cause;
       return { ok: false, error: { code: "project_machine_offline", message: "Margins could not reach this bb project's machine. Audio already received there is safe; reconnect the project machine and try again.", retryable: true } };
     }
   }
@@ -19892,6 +19947,14 @@ function marginsPlugin(bb) {
       noteThreadLocks.delete(lockKey);
     }
   }
+  async function programWorkspace(target, expected) {
+    const workspaceId = target.workspaceId || (await callHost(target, "workspaceOptions", {})).defaultWorkspaceId;
+    if (!workspaceId) throw new Error("Set up a Margins Workspace for this project first.");
+    if (expected !== void 0 && expected !== workspaceId) {
+      throw new Error("This project now uses a different Margins Workspace. Reload the program.");
+    }
+    return workspaceId;
+  }
   bb.rpc.register(marginsRpcContract, {
     async availableWorkspaces({ projectId }) {
       const target = await targetForProject(projectId);
@@ -19915,6 +19978,22 @@ function marginsPlugin(bb) {
       const target = await targetForProject(projectId);
       const result = await callHost(target, "applyWorkspaceSetup", { previewId });
       bb.realtime.publish(REALTIME_CHANNEL, { projectId, reason: "workspace-setup" });
+      return result;
+    },
+    async workspaceProgram({ projectId }) {
+      const target = await targetForProject(projectId);
+      return callHost(target, "readWorkspaceProgram", { workspaceId: await programWorkspace(target) });
+    },
+    async planWorkspaceProgram({ projectId, workspaceId, program }) {
+      const target = await targetForProject(projectId);
+      await programWorkspace(target, workspaceId);
+      return callHost(target, "planWorkspaceProgram", { workspaceId, program });
+    },
+    async applyWorkspaceProgram({ projectId, workspaceId, previewId }) {
+      const target = await targetForProject(projectId);
+      await programWorkspace(target, workspaceId);
+      const result = await callHost(target, "applyWorkspaceProgram", { workspaceId, previewId });
+      if (result.ok) bb.realtime.publish(REALTIME_CHANNEL, { projectId, reason: "workspace-program" });
       return result;
     },
     async availableProjects() {

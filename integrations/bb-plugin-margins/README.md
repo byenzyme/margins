@@ -151,11 +151,32 @@ Continue starts from the Margins meetings preset: notes go to `Meetings`, and
 Margins learns from the `Meetings`, `People`, and `Projects` folders that exist.
 The panel shows the folders it learns from, the preset folders it skipped, the
 program path, and the exact Workspace plan before **Use this Workspace** applies
-it and sets the machine default. `margins workspace edit` changes the program
-later. A vault with no notes can
+it and sets the machine default. The program can be changed later in the panel
+(below) or with `margins workspace edit`. A vault with no notes can
 still be connected for recording. Existing People notes can inform recall; the
 first confirmed participant can create a People folder during distillation.
 SQLite sources require an explicit mapping later.
+
+## Workspace program editor
+
+The program at `$MARGINS_HOME/configs/<id>.enzyme` is the Workspace's whole
+configuration. **Edit program** in the setup result, **Workspace program** in
+the Meetings sidebar, and **Edit program** in Settings open it in Meetings
+(sub-path `<projectId>/@program`). The editor highlights the language with the
+live bb code theme and shows line numbers. Each pause in typing plans the text
+with `margins workspace plan --desired <file> --json` on the project's machine.
+Planning writes nothing to the Workspace. Syntax errors appear at their line
+and column. Errors without a location, such as a folder that does not exist,
+appear under the editor. **Review changes** shows the plan's summaries and
+diff, and **Apply** commits exactly that plan through `margins workspace
+apply`. When the saved program changed elsewhere since editing began, the
+editor refuses to apply and keeps the text. It then offers to review the edits
+against the saved version or to load the saved version. A replaced or reverted
+text can be restored, and an unsaved draft survives closing the panel.
+
+The highlighter mirrors enzyme-spec's lexer and keeps no keyword list. Every
+user-chosen name in the language is quoted, so a bare word is vocabulary.
+Position decides source-kind and profile names.
 
 ## Development
 
@@ -167,5 +188,9 @@ npm run typecheck
 npm test
 npm run build
 ```
+
+`src/workspace-program.test.ts` also runs the editor's read, plan, apply, and
+stale path against a real CLI when `MARGINS_PROGRAM_E2E_CLI` names a built
+`margins` binary.
 
 Do not install or reload this package into a live bb instance during repo tests.
