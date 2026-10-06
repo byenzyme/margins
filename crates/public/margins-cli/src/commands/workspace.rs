@@ -223,17 +223,30 @@ pub fn plan(
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("toml"));
+    let plan = plan_desired(&workspace, &body, legacy_toml)?;
+    serde_json::to_writer_pretty(&mut *stdout, &plan)
+        .map_err(|error| CliError::new("output_failed", error.to_string()))?;
+    writeln!(stdout).map_err(|error| CliError::new("output_failed", error.to_string()))
+}
+
+/// Plan a complete desired program (or legacy TOML config) against the
+/// Workspace, refusing folder readings that do not resolve under Home.
+fn plan_desired(
+    workspace: &ResolvedWorkspace,
+    body: &str,
+    legacy_toml: bool,
+) -> Result<WorkspacePlan, CliError> {
     let plan = if legacy_toml {
         // Older setup callers still write the retired config.toml shape.
-        let desired: WorkspaceConfig = toml::from_str(&body).map_err(|error| {
+        let desired: WorkspaceConfig = toml::from_str(body).map_err(|error| {
             CliError::new(
                 "workspace_desired_invalid",
                 format!("invalid desired workspace config: {error}"),
             )
         })?;
-        workspace::plan_legacy_workspace_config(&workspace, desired)
+        workspace::plan_legacy_workspace_config(workspace, desired)
     } else {
-        workspace::plan_workspace_program(&workspace, &body)
+        workspace::plan_workspace_program(workspace, body)
     }
     .map_err(|error| desired_error(error))?;
     let desired_view = WorkspaceProgram::parse(&plan.desired_program)
@@ -246,9 +259,198 @@ pub fn plan(
         })
         .map_err(|error| desired_error(error))?;
     validate_desired_home_folder_entities(&desired_view)?;
-    serde_json::to_writer_pretty(&mut *stdout, &plan)
-        .map_err(|error| CliError::new("output_failed", error.to_string()))?;
-    writeln!(stdout).map_err(|error| CliError::new("output_failed", error.to_string()))
+    Ok(plan)
+}
+
+/// Test/harness-only: treat the process as an interactive terminal for
+/// `workspace edit`, so a scripted `$EDITOR` and piped answers can drive it.
+pub const EDIT_ASSUME_TERMINAL_ENV: &str = "MARGINS_WORKSPACE_EDIT_ASSUME_TERMINAL";
+
+#[derive(Serialize)]
+struct ProgramView<'a> {
+    workspace_id: &'a str,
+    program_path: String,
+    revision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    program: Option<&'a str>,
+}
+
+/// Print where the selected Workspace's program lives (or its text).
+pub fn show(
+    selector: Option<&str>,
+    cwd: &Path,
+    text: bool,
+    json: bool,
+    stdout: &mut dyn Write,
+) -> Result<(), CliError> {
+    let workspace = resolve_existing(selector, cwd)?;
+    let output = |error: std::io::Error| CliError::new("output_failed", error.to_string());
+    if json {
+        let view = ProgramView {
+            workspace_id: &workspace.config.id,
+            program_path: workspace.config_path.to_string_lossy().into_owned(),
+            revision: workspace.program.sha256(),
+            program: text.then(|| workspace.program.text()),
+        };
+        serde_json::to_writer_pretty(&mut *stdout, &view)
+            .map_err(|error| CliError::new("output_failed", error.to_string()))?;
+        writeln!(stdout).map_err(output)
+    } else if text {
+        write!(stdout, "{}", workspace.program.text()).map_err(output)
+    } else {
+        writeln!(stdout, "{}", workspace.config_path.display()).map_err(output)
+    }
+}
+
+/// Open the Workspace program in `$VISUAL`/`$EDITOR` on a copy, then show the
+/// change and apply it through the same plan/apply path as `workspace plan`
+/// and `workspace apply`. An edit that does not validate is never applied;
+/// the user's text stays in a kept file they can reopen or plan from.
+pub fn edit(
+    selector: Option<&str>,
+    cwd: &Path,
+    stdin: &mut dyn std::io::BufRead,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<(), CliError> {
+    use std::io::IsTerminal;
+
+    let assume_terminal = std::env::var_os(EDIT_ASSUME_TERMINAL_ENV).is_some_and(|value| value == "1");
+    if !assume_terminal && !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
+        return Err(CliError::new(
+            "workspace_edit_requires_terminal",
+            "workspace edit opens an editor and asks before applying, so it needs an interactive terminal. \
+             Without one, read the program with `margins workspace show --text`, then use \
+             `margins workspace plan --workspace <id> --desired <file> --json` and `margins workspace apply`.",
+        ));
+    }
+    let editor = editor_command().ok_or_else(|| {
+        CliError::new(
+            "workspace_edit_no_editor",
+            "set $VISUAL or $EDITOR to the editor to open the Workspace program with",
+        )
+    })?;
+    let mut workspace = resolve_existing(selector, cwd)?;
+    let id = workspace.config.id.clone();
+    let output = |error: std::io::Error| CliError::new("output_failed", error.to_string());
+    let original = workspace.program.text().to_string();
+    let (_, edit_path) = tempfile::Builder::new()
+        .prefix(&format!("margins-{id}-"))
+        .suffix(".enzyme")
+        .tempfile()
+        .and_then(|file| file.keep().map_err(|error| error.error))
+        .map_err(|error| CliError::new("workspace_edit_failed", format!("creating an edit file: {error}")))?;
+    std::fs::write(&edit_path, &original).map_err(|error| {
+        CliError::new("workspace_edit_failed", format!("writing {}: {error}", edit_path.display()))
+    })?;
+    let kept = |message: String| {
+        CliError::new(
+            "workspace_edit_not_applied",
+            format!(
+                "{message}\nYour edit is kept at {path}. Reopen it with your editor, then run\n  \
+                 margins workspace plan --workspace {id} --desired {path} --json\n\
+                 and `margins workspace apply`, or start over with `margins workspace edit`.",
+                path = edit_path.display()
+            ),
+        )
+    };
+    writeln!(stderr, "Editing Workspace {id} ({})", workspace.config_path.display()).map_err(output)?;
+    loop {
+        run_editor(&editor, &edit_path)
+            .map_err(|error| kept(format!("the editor did not finish: {error:#}")))?;
+        let edited = std::fs::read_to_string(&edit_path)
+            .map_err(|error| kept(format!("could not read the edit: {error}")))?;
+        if edited == original {
+            let _ = std::fs::remove_file(&edit_path);
+            writeln!(stdout, "No changes to Workspace {id}.").map_err(output)?;
+            return Ok(());
+        }
+        let plan = match plan_desired(&workspace, &edited, false) {
+            Ok(plan) => plan,
+            Err(error) => {
+                writeln!(stderr, "The edited program is not valid: {}", error.message()).map_err(output)?;
+                if ask(stdin, stderr, "Reopen the editor to fix it? [Y/n] ", true).map_err(output)? {
+                    continue;
+                }
+                return Err(kept(format!("The edited program is not valid: {}", error.message())));
+            }
+        };
+        write!(stdout, "{}", plan.diff).map_err(output)?;
+        if !plan.diff.ends_with('\n') {
+            writeln!(stdout).map_err(output)?;
+        }
+        if !ask(stdin, stderr, &format!("Apply this change to Workspace {id}? [y/N] "), false)
+            .map_err(output)?
+        {
+            return Err(kept("Not applied.".to_string()));
+        }
+        let receipt = workspace::apply_workspace_plan(&mut workspace, &plan).map_err(|error| {
+            kept(format!("The change could not be applied: {error:#}"))
+        })?;
+        let _ = std::fs::remove_file(&edit_path);
+        writeln!(
+            stdout,
+            "Applied. Workspace {id} is at revision {}.",
+            receipt.after_revision
+        )
+        .map_err(output)?;
+        return Ok(());
+    }
+}
+
+fn editor_command() -> Option<String> {
+    ["VISUAL", "EDITOR"].into_iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+/// Run the editor command with the file as its last argument. The command is
+/// interpreted by the shell, so values such as `code --wait` work.
+fn run_editor(editor: &str, path: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$@\""))
+        .arg("sh")
+        .arg(path)
+        .status();
+    #[cfg(not(unix))]
+    let status = {
+        let mut parts = editor.split_whitespace();
+        std::process::Command::new(parts.next().unwrap_or(editor))
+            .args(parts)
+            .arg(path)
+            .status()
+    };
+    let status = status.with_context(|| format!("starting editor `{editor}`"))?;
+    if !status.success() {
+        anyhow::bail!("editor `{editor}` exited with {status}");
+    }
+    Ok(())
+}
+
+/// Ask a yes/no question on `stderr`; end of input takes the default.
+fn ask(
+    stdin: &mut dyn std::io::BufRead,
+    stderr: &mut dyn Write,
+    question: &str,
+    default: bool,
+) -> std::io::Result<bool> {
+    write!(stderr, "{question}")?;
+    stderr.flush()?;
+    let mut answer = String::new();
+    if stdin.read_line(&mut answer)? == 0 {
+        writeln!(stderr)?;
+        return Ok(default);
+    }
+    Ok(match answer.trim().to_ascii_lowercase().as_str() {
+        "" => default,
+        "y" | "yes" => true,
+        _ => false,
+    })
 }
 
 /// Typed mutation errors keep their codes; anything else in a desired program

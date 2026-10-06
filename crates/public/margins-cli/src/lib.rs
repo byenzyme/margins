@@ -232,6 +232,28 @@ fn run_inner(
             );
         }
         Some(Command::Workspace {
+            command: WorkspaceCommand::Show { text, json },
+        }) => {
+            return commands::workspace::show(
+                workspace_selector.as_deref(),
+                invocation_dir,
+                text,
+                json,
+                stdout,
+            );
+        }
+        Some(Command::Workspace {
+            command: WorkspaceCommand::Edit,
+        }) => {
+            return commands::workspace::edit(
+                workspace_selector.as_deref(),
+                invocation_dir,
+                &mut std::io::stdin().lock(),
+                stdout,
+                stderr,
+            );
+        }
+        Some(Command::Workspace {
             command: WorkspaceCommand::Compile { .. },
         }) => {
             return Err(CliError::new(

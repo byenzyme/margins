@@ -349,6 +349,18 @@ pub enum WorkspaceCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Print the path of the selected Workspace's program
+    Show {
+        /// Print the program text instead of its path
+        #[arg(long)]
+        text: bool,
+        /// Emit the id, program path, and revision (and text with --text) as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Edit the selected Workspace's program in $VISUAL or $EDITOR, then review
+    /// the change and apply it through plan/apply (interactive terminals only)
+    Edit,
     /// Compile a complete desired Workspace program into a revisioned plan
     Plan {
         /// `.enzyme` file with the complete desired `workspace "<id>" { … }`
