@@ -61,50 +61,6 @@ pub(crate) fn markdown_document(
     }
 }
 
-/// The ledger record ids the source `name` indexes, as its kind's query
-/// selects them (tombstoned records excluded).
-pub(crate) fn ledger_source_ids(workspace: &ResolvedWorkspace, name: &str) -> Result<Vec<String>> {
-    if !workspace.ledger_path().is_file() {
-        return Ok(Vec::new());
-    }
-    let (sql, connector, account) = match workspace.config.bindings.get(name) {
-        Some(WorkspaceBinding::Gmail { account, .. }) => (
-            "SELECT thread_id FROM thread_evidence
-             WHERE connector_id = ?1 AND source_account = ?2 AND tombstoned_at IS NULL",
-            "email",
-            account,
-        ),
-        Some(WorkspaceBinding::GoogleCalendar { account, .. }) => (
-            "SELECT source_id FROM calendar_event_evidence
-             WHERE connector_id = ?1 AND source_account = ?2 AND tombstoned_at IS NULL",
-            "gcal",
-            account,
-        ),
-        Some(WorkspaceBinding::GoogleMeet { account }) => (
-            "SELECT source_id FROM external_document_evidence
-             WHERE connector_id = ?1 AND source_account = ?2 AND tombstoned_at IS NULL",
-            "google_meet",
-            account,
-        ),
-        Some(WorkspaceBinding::Granola { account, .. }) => (
-            "SELECT source_id FROM external_document_evidence
-             WHERE connector_id = ?1 AND source_account = ?2 AND tombstoned_at IS NULL",
-            "granola",
-            account,
-        ),
-        _ => return Ok(Vec::new()),
-    };
-    let connection = Connection::open_with_flags(
-        workspace.ledger_path(),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?;
-    let mut statement = connection.prepare(sql)?;
-    let ids = statement
-        .query_map([connector, account.as_str()], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(ids)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

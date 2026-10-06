@@ -252,7 +252,7 @@ fn materialized_calendar_events_keep_stable_refs_and_multi_attendee_occurrences(
         .unwrap();
     let expected = |name: &str| {
         ids.iter()
-            .map(|id| margins_workflows::source_kinds::sqlite_document_ref(name, id))
+            .map(|id| margins_workflows::source_kinds::ledger_document_ref(name, id))
             .collect::<BTreeSet<_>>()
     };
     let refs = |hashes: &[(String, String)]| {
@@ -616,7 +616,7 @@ fn materialized_mail_threads_use_generic_shared_document_context() {
             .collect::<BTreeSet<_>>(),
         threads
             .iter()
-            .map(|thread| margins_workflows::source_kinds::sqlite_document_ref(
+            .map(|thread| margins_workflows::source_kinds::ledger_document_ref(
                 gmail_source,
                 &thread.thread_id
             ))

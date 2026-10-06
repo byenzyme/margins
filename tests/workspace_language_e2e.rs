@@ -1102,3 +1102,67 @@ fn preset_setup_keeps_existing_readings_recalls_and_is_safe_to_rerun() {
 
     env.assert_enzyme_untouched();
 }
+
+#[test]
+fn two_workspaces_share_one_notes_folder_and_index_independently() {
+    let env = Hermetic::new();
+    let notes = notes_fixture(&env);
+    // `alpha` leaves the archive out; `beta` reads the whole folder.
+    for (id, extra) in [("alpha", "\n  leave out folders [\"archive\"]"), ("beta", "")] {
+        env.ok(&[
+            "workspace",
+            "new",
+            id,
+            "--home",
+            notes.to_str().unwrap(),
+            "--json",
+        ]);
+        let desired = format!(
+            "workspace \"{id}\" {{\n  source markdown \"notes\" {{ path \"{}\" }}\n  remember in folder \"inbox\" create note{extra}\n}}\n",
+            notes.display()
+        );
+        env.plan_and_apply(id, &desired);
+    }
+
+    let _generator = fixture_generator::FixtureGenerator::start(&env.margins_home);
+    env.ok(&["--workspace", "alpha", "init"]);
+    let alpha = env.margins_home.join("workspaces/alpha");
+    let alpha_index = indexed_documents(&alpha);
+    assert_eq!(indexed_refs(&alpha), ["projects/harbor.md"]);
+    // Nothing of beta's exists until beta itself is initialized.
+    assert!(!env.margins_home.join("workspaces/beta/enzyme.db").exists());
+
+    env.ok(&["--workspace", "beta", "init"]);
+    let beta = env.margins_home.join("workspaces/beta");
+    assert_eq!(
+        indexed_refs(&beta),
+        ["archive/secret.md", "projects/harbor.md"]
+    );
+    // Building beta's index over the same folder leaves alpha's untouched,
+    // and nothing is written into the shared notes folder.
+    assert_eq!(indexed_documents(&alpha), alpha_index);
+    assert!(!notes.join(".enzyme").exists());
+
+    let harbor = "The quartz harbor ledger records every crossing";
+    let archive = "The obsidian lantern archive phrase must never be recalled";
+    for id in ["alpha", "beta"] {
+        let recalled = recall(&env, id, harbor, None);
+        assert_eq!(recalled["status"], "ok", "{id}: {recalled}");
+        assert!(
+            result_refs(&recalled).contains(&"projects/harbor.md".to_string()),
+            "{id}: {recalled}"
+        );
+    }
+    assert!(!result_refs(&recall(&env, "alpha", archive, None))
+        .contains(&"archive/secret.md".to_string()));
+    assert!(result_refs(&recall(&env, "beta", archive, None))
+        .contains(&"archive/secret.md".to_string()));
+
+    // Re-initializing one Workspace changes neither index.
+    let beta_index = indexed_documents(&beta);
+    env.ok(&["--workspace", "alpha", "init"]);
+    assert_eq!(indexed_documents(&alpha), alpha_index);
+    assert_eq!(indexed_documents(&beta), beta_index);
+
+    env.assert_enzyme_untouched();
+}

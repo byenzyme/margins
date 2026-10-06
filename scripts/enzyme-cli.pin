@@ -11,7 +11,7 @@
 #          enzyme-<platform>.tar.gz of tag v<version>, built from rev with
 #          `--features local-llm`, for each Margins release target. Empty
 #          until that enzyme release exists; release packaging then fails.
-rev = "d9b1c5b484f5e335b7d35ff02eb3631e1902b252"
+rev = "4e3bcfdc50c106f97141e230a0d848fc1b623ec2"
 version = "0.11.1"
 sha256.aarch64-apple-darwin = ""
 sha256.x86_64-unknown-linux-gnu = ""

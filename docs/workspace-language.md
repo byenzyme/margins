@@ -279,14 +279,12 @@ the server together.
   Margins' correspondent link readings are gone.
 - Document identity: one Markdown source gives root-relative refs
   (`people/ada.md`); several give `<source name>/<relative>`; ledger records
-  give the engine's `sqlite:<source name>/<sha256>` (name length, name, and
-  JSON id tuple; `margins_workflows::source_kinds::sqlite_document_ref`), which
-  Margins maps back to ledger records. A source rename is a new identity.
-  The in-process Margins used `sqlite:<source name>/<hex id>`, so the first
-  CLI run over its index re-identifies (re-embeds) every ledger document once
-  and may regenerate the affected catalysts. Once kind templates can name
-  their declaration (`{source}`, engine slice E4), the kinds emit the hex refs
-  and this cost goes away.
+  give `sqlite:<source name>/<lowercase hex of the record id>`, which each kind
+  in `margins-sources.enzyme` emits as its `document ref` through the
+  `{source}` placeholder and Margins decodes back to the record
+  (`margins_workflows::source_kinds::ledger_record_id`). A source rename is a
+  new identity. The in-process Margins used the same refs, so an index it built
+  keeps its ledger documents without re-embedding.
 - An index the in-process Margins built at `workspaces/<id>/enzyme.db` is
   reused when `enzyme status` reports a compatible schema (its marker
   `index.identity` is removed after the first CLI run); an index the engine
@@ -294,7 +292,7 @@ the server together.
   prints which (`engine index reuse …` or `engine index rebuild …`).
 - enzyme-spec unification: the engine and `margins-workflows` both depend on
   `enzyme-spec = { git = "https://github.com/byenzyme/enzyme-spec", tag =
-  "v0.2.0" }`. `scripts/enzyme-cli.pin` names the enzyme-rust `rev` that
+  "v0.3.0" }`. `scripts/enzyme-cli.pin` names the enzyme-rust `rev` that
   tests and gates build (`scripts/enzyme-bin`) and the `version` Margins
   requires at runtime.
 
