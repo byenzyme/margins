@@ -50,13 +50,18 @@ else
   }
 fi
 
-echo "Building official Margins CLI (profile: $PROFILE)..."
-(
-  cd "$REPO_ROOT"
-  scripts/with-private-recall scripts/cargo-lane shared -- cargo "${BUILD_ARGS[@]}"
-)
-
-SOURCE="$CARGO_TARGET_DIR/release/margins-private"
+# MARGINS_CLI_SOURCE installs an already-built margins-private instead of
+# building one (the bundled-engine e2e uses the gate's build).
+if [ -n "${MARGINS_CLI_SOURCE:-}" ]; then
+  SOURCE="$MARGINS_CLI_SOURCE"
+else
+  echo "Building official Margins CLI (profile: $PROFILE)..."
+  (
+    cd "$REPO_ROOT"
+    scripts/with-private-recall scripts/cargo-lane shared -- cargo "${BUILD_ARGS[@]}"
+  )
+  SOURCE="$CARGO_TARGET_DIR/release/margins-private"
+fi
 if [ ! -x "$SOURCE" ]; then
   echo "Built CLI was not found at $SOURCE" >&2
   exit 1

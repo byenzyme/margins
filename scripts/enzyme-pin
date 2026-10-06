@@ -11,10 +11,11 @@
 #
 # MARGINS_ENZYME_ASSET=/path/to/enzyme-<platform>.tar.gz makes fetch use a local
 # copy of the asset instead of downloading it. The sha256 check still applies.
+# MARGINS_ENZYME_PIN=/path/to/pin reads another pin file (tests only).
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-pin_file="$repo_root/scripts/enzyme-cli.pin"
+pin_file="${MARGINS_ENZYME_PIN:-$repo_root/scripts/enzyme-cli.pin}"
 release_base="https://github.com/byenzyme/enzyme/releases/download"
 work=""
 trap 'if [[ -n "$work" ]]; then rm -rf "$work"; fi' EXIT

@@ -261,6 +261,11 @@ def linux(gate: Gate) -> None:
         env={**os.environ, "MARGINS_E2E_BIN": str(binary)},
     )
     gate.run(
+        "installed margins finds and version-checks its bundled enzyme",
+        ["bash", "scripts/e2e-bundled-engine.sh"],
+        env={**os.environ, "MARGINS_E2E_BIN": str(binary)},
+    )
+    gate.run(
         "setup rollout capture contracts",
         ["bash", "tests/test_workspace_setup_rollout_review.sh"],
     )
