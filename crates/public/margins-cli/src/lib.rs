@@ -232,6 +232,11 @@ fn run_inner(
             );
         }
         Some(Command::Workspace {
+            command: WorkspaceCommand::Rename { old, new, json },
+        }) => {
+            return commands::workspace::rename(&old, &new, json, stdout);
+        }
+        Some(Command::Workspace {
             command: WorkspaceCommand::Show { text, json },
         }) => {
             return commands::workspace::show(

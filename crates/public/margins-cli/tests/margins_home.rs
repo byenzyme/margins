@@ -337,3 +337,72 @@ fn workspace_edit_never_applies_a_program_for_another_workspace() {
     assert_eq!(home.program(), before);
     assert!(Path::new(&home.leftover_edits()[0]).is_file());
 }
+
+#[test]
+fn workspace_edit_end_of_input_never_loops_or_applies() {
+    let home = Home::new();
+    let before = home.program();
+    let editor = home.editor("editor", &[&format!("{before}not enzyme\n")]);
+    let refused = home.edit(&editor, "");
+    assert!(!refused.status.success());
+    assert!(stderr(&refused).contains("The edited program is not valid"));
+    assert_eq!(
+        std::fs::read_to_string(home.path("editor/count")).unwrap().trim(),
+        "1",
+        "the editor opened once"
+    );
+    assert_eq!(home.program(), before);
+    assert_eq!(home.leftover_edits().len(), 1);
+}
+
+#[test]
+fn a_workspace_named_settings_is_renamed_through_the_binary() {
+    let home = Home::new();
+    let practice = home.program();
+    let settings_program = practice
+        .replace("workspace \"practice\"", "workspace \"settings\"")
+        .replace("workspaces/practice/captures", "workspaces/settings/captures");
+    std::fs::write(home.margins_home.join("configs/settings.enzyme"), &settings_program).unwrap();
+    let state = home.margins_home.join("workspaces/settings");
+    std::fs::create_dir_all(state.join("captures")).unwrap();
+    std::fs::write(state.join("enzyme.db"), b"index").unwrap();
+    std::fs::write(
+        home.margins_home.join("margins.toml"),
+        "[workspace]\ndefault = \"settings\"\n",
+    )
+    .unwrap();
+
+    let refused = home.run(&["workspace", "list", "--json"], &[], "");
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("margins workspace rename settings <new-id>"),
+        "{}",
+        stderr(&refused)
+    );
+
+    let renamed = home.run(&["workspace", "rename", "settings", "home-notes", "--json"], &[], "");
+    assert!(renamed.status.success(), "{}", stderr(&renamed));
+    let renamed: serde_json::Value = serde_json::from_slice(&renamed.stdout).unwrap();
+    assert_eq!(renamed["new_id"], "home-notes");
+
+    let listed = home.run(&["workspace", "list", "--json"], &[], "");
+    assert!(listed.status.success(), "{}", stderr(&listed));
+    let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["default_workspace"], "home-notes");
+    let ids = listed["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| (entry["id"].as_str().unwrap(), entry.get("error").is_none()))
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec![("home-notes", true), ("practice", true)]);
+    assert_eq!(
+        std::fs::read(home.margins_home.join("workspaces/home-notes/enzyme.db")).unwrap(),
+        b"index"
+    );
+    assert!(!home.margins_home.join("configs/settings.enzyme").exists());
+    assert!(home
+        .margins_home
+        .join("configs/settings.enzyme.renamed-to-home-notes")
+        .is_file());
+}

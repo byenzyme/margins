@@ -153,6 +153,24 @@ A Workspace's `index.db` (with its SQLite sidecars) is renamed to `enzyme.db` on
 first resolution, without reindexing; `index.identity` is unchanged. When both
 names exist, `enzyme.db` is the index and `index.db` is left alone.
 
+`settings`, `profiles`, and `margins-sources` are reserved program names in
+`configs/`. A Workspace that already uses one of them as its id (a legacy
+`workspaces/<id>/config.toml`, a program in the reserved slot, or the machine
+default) is never skipped or migrated into that slot: every command that meets
+it fails with `margins workspace rename <id> <new-id>`. The rename validates
+first, moves the state directory (leaving a `workspaces/<id>` symlink so
+recorded paths keep resolving), writes the program under the new id, keeps the
+old declaration (`configs/<id>.enzyme.renamed-to-<new-id>` or
+`config.toml.migrated`), moves the default, display name, and retention
+override, and resumes if interrupted. Only reserved ids can be renamed; other
+ids are referenced from sessions and server or plugin selections that the
+rename cannot update.
+
+The index rename never replaces an existing file (a hard link refuses an
+existing destination). An older CLI or `margins-server` that still has
+`index.db` open would keep writing to the renamed files, so upgrade the CLI and
+the server together.
+
 ## Engine changes (enzyme-rust)
 
 - Any number and mix of sources per workspace; vault-body statements

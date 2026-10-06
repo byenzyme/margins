@@ -114,9 +114,17 @@ pub fn migrate_locked(margins_home: &Path) -> Result<()> {
 
     // Everything is validated; a crash between these writes leaves the legacy
     // file in place, so the migration simply runs again.
-    let permissions = std::fs::metadata(&legacy_path)
-        .with_context(|| format!("reading {}", legacy_path.display()))?
-        .permissions();
+    // A new margins.toml takes the legacy file's mode; an existing one keeps
+    // its own, so a migration never loosens permissions.
+    let permissions = match std::fs::metadata(&config_path) {
+        Ok(existing) => existing.permissions(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => std::fs::metadata(&legacy_path)
+            .with_context(|| format!("reading {}", legacy_path.display()))?
+            .permissions(),
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading {}", config_path.display()))
+        }
+    };
     atomic_write(&config_path, config.to_string().as_bytes())?;
     std::fs::set_permissions(&config_path, permissions)
         .with_context(|| format!("setting permissions of {}", config_path.display()))?;
@@ -218,6 +226,15 @@ fn read_settings_program(path: &Path) -> Result<Option<enzyme_spec::Program>> {
     };
     let program = enzyme_spec::parse(&text)
         .with_context(|| format!("invalid settings program {}", path.display()))?;
+    if let Some(workspace) = program.workspaces.first() {
+        bail!(
+            "{} declares Workspace '{}' from when that was a legal id; its notes and state are kept. \
+             Rename it with `margins workspace rename {} <new-id>`",
+            path.display(),
+            workspace.name,
+            workspace.name
+        );
+    }
     if !program.workspaces.is_empty()
         || !program.vaults.is_empty()
         || !program.profiles.is_empty()
@@ -354,6 +371,26 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn migration_never_loosens_margins_toml_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let home = home();
+        let legacy = home.path().join("config.toml");
+        let config = home.path().join("margins.toml");
+        std::fs::write(&legacy, "[cli]\nnote_agent = \"codex\"\n").unwrap();
+        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o640)).unwrap();
+        ensure_migrated(home.path()).unwrap();
+        assert_eq!(mode(&config), 0o640, "a new margins.toml takes the legacy mode");
+
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&legacy, "[cli]\nnote_agent = \"cursor\"\n").unwrap();
+        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o644)).unwrap();
+        ensure_migrated(home.path()).unwrap();
+        assert_eq!(mode(&config), 0o600, "an existing margins.toml keeps its mode");
+    }
+
     #[test]
     fn existing_margins_toml_and_settings_are_merged_not_replaced() {
         let home = home();
@@ -414,7 +451,10 @@ mod tests {
         .unwrap();
         std::fs::write(home.path().join("config.toml"), "[llm]\nmode = \"local\"\n").unwrap();
         let error = ensure_migrated(home.path()).unwrap_err();
-        assert!(format!("{error:#}").contains("may only define settings"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("margins workspace rename settings <new-id>"),
+            "{error:#}"
+        );
         assert!(home.path().join("config.toml").is_file());
         assert!(!home.path().join("margins.toml").exists());
     }

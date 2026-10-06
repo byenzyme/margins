@@ -349,6 +349,16 @@ pub enum WorkspaceCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Rename a Workspace whose id is now reserved (settings, profiles,
+    /// margins-sources), keeping its notes and state
+    Rename {
+        /// The reserved id the Workspace has today
+        old: String,
+        /// The new Workspace id
+        new: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the path of the selected Workspace's program
     Show {
         /// Print the program text instead of its path

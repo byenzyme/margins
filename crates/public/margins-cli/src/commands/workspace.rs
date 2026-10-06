@@ -262,6 +262,33 @@ fn plan_desired(
     Ok(plan)
 }
 
+/// Rename a Workspace whose id became reserved; see
+/// [`workspace::rename_reserved_workspace`].
+pub fn rename(old: &str, new: &str, json: bool, stdout: &mut dyn Write) -> Result<(), CliError> {
+    let home = workspace::margins_home().map_err(CliError::from_anyhow)?;
+    let renamed = workspace::rename_reserved_workspace(&home, old, new)
+        .map_err(|error| CliError::new("workspace_rename_failed", format!("{error:#}")))?;
+    let output = |error: std::io::Error| CliError::new("output_failed", error.to_string());
+    if json {
+        serde_json::to_writer_pretty(&mut *stdout, &renamed)
+            .map_err(|error| CliError::new("output_failed", error.to_string()))?;
+        writeln!(stdout).map_err(output)
+    } else {
+        writeln!(
+            stdout,
+            "Renamed Workspace {old} to {new}: {}. The previous declaration is kept at {}.",
+            renamed.program_path.display(),
+            renamed.retired.display()
+        )
+        .map_err(output)?;
+        writeln!(
+            stdout,
+            "Use --workspace {new} from now on; update any saved selection of '{old}' (for example in the bb plugin)."
+        )
+        .map_err(output)
+    }
+}
+
 /// Test/harness-only: treat the process as an interactive terminal for
 /// `workspace edit`, so a scripted `$EDITOR` and piped answers can drive it.
 pub const EDIT_ASSUME_TERMINAL_ENV: &str = "MARGINS_WORKSPACE_EDIT_ASSUME_TERMINAL";
@@ -432,7 +459,8 @@ fn run_editor(editor: &str, path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Ask a yes/no question on `stderr`; end of input takes the default.
+/// Ask a yes/no question on `stderr`; an empty answer takes the default and
+/// end of input is always "no", so piped input can never loop.
 fn ask(
     stdin: &mut dyn std::io::BufRead,
     stderr: &mut dyn Write,
@@ -444,7 +472,7 @@ fn ask(
     let mut answer = String::new();
     if stdin.read_line(&mut answer)? == 0 {
         writeln!(stderr)?;
-        return Ok(default);
+        return Ok(false);
     }
     Ok(match answer.trim().to_ascii_lowercase().as_str() {
         "" => default,
