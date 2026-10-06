@@ -36,7 +36,7 @@ export function createMarginsHostEntry(transport: Transport) {
       async previewWorkspaceSetup(input, context) {
         retain(context);
         await transport.prepareCli(context.experimental_paths.dataDir);
-        return previewWorkspaceSetup(input.target, context.experimental_paths.dataDir, input.homeRoot, input.noteFolder);
+        return previewWorkspaceSetup(input.target, context.experimental_paths.dataDir, input.homeRoot);
       },
       async applyWorkspaceSetup(input, context) {
         retain(context);

@@ -113,10 +113,10 @@ export const marginsHostContract = defineRpcContract({
     output: z.object({ notes: z.string(), recordings: z.string() }).strict(),
   },
   previewWorkspaceSetup: {
-    input: z.object({ target: projectTargetSchema, homeRoot: z.string(), noteFolder: z.string() }).strict(),
+    input: z.object({ target: projectTargetSchema, homeRoot: z.string() }).strict(),
     output: z.object({ previewId: z.string(), workspaceId: z.string(), homeRoot: z.string(), destination: z.string(),
-      mode: z.enum(["jev", "automatic_fallback", "empty"]), warning: z.string().nullable(), filesScanned: z.number().int(),
-      selectedEntities: z.array(z.string()), actions: z.array(z.unknown()) }).strict(),
+      programPath: z.string(), readings: z.array(z.string()), skippedReadings: z.array(z.string()),
+      actions: z.array(z.unknown()) }).strict(),
   },
   applyWorkspaceSetup: {
     input: z.object({ previewId: z.string() }).strict(),
@@ -253,10 +253,10 @@ export const marginsRpcContract = defineRpcContract({
     output: z.object({ workspaceId: z.string().nullable(), notes: z.string().nullable(), recordings: z.string().nullable() }).strict(),
   },
   previewWorkspaceSetup: {
-    input: z.object({ projectId: z.string().min(1), homeRoot: z.string(), noteFolder: z.string() }).strict(),
+    input: z.object({ projectId: z.string().min(1), homeRoot: z.string() }).strict(),
     output: z.object({ previewId: z.string(), workspaceId: z.string(), homeRoot: z.string(), destination: z.string(),
-      mode: z.enum(["jev", "automatic_fallback", "empty"]), warning: z.string().nullable(), filesScanned: z.number().int(),
-      selectedEntities: z.array(z.string()), actions: z.array(z.unknown()) }).strict(),
+      programPath: z.string(), readings: z.array(z.string()), skippedReadings: z.array(z.string()),
+      actions: z.array(z.unknown()) }).strict(),
   },
   applyWorkspaceSetup: {
     input: z.object({ projectId: z.string().min(1), previewId: z.string() }).strict(),

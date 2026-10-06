@@ -33402,16 +33402,15 @@ var marginsHostContract = defineRpcContract2({
     output: external_exports2.object({ notes: external_exports2.string(), recordings: external_exports2.string() }).strict()
   },
   previewWorkspaceSetup: {
-    input: external_exports2.object({ target: projectTargetSchema, homeRoot: external_exports2.string(), noteFolder: external_exports2.string() }).strict(),
+    input: external_exports2.object({ target: projectTargetSchema, homeRoot: external_exports2.string() }).strict(),
     output: external_exports2.object({
       previewId: external_exports2.string(),
       workspaceId: external_exports2.string(),
       homeRoot: external_exports2.string(),
       destination: external_exports2.string(),
-      mode: external_exports2.enum(["jev", "automatic_fallback", "empty"]),
-      warning: external_exports2.string().nullable(),
-      filesScanned: external_exports2.number().int(),
-      selectedEntities: external_exports2.array(external_exports2.string()),
+      programPath: external_exports2.string(),
+      readings: external_exports2.array(external_exports2.string()),
+      skippedReadings: external_exports2.array(external_exports2.string()),
       actions: external_exports2.array(external_exports2.unknown())
     }).strict()
   },
@@ -33594,16 +33593,15 @@ var marginsRpcContract = defineRpcContract2({
     output: external_exports2.object({ workspaceId: external_exports2.string().nullable(), notes: external_exports2.string().nullable(), recordings: external_exports2.string().nullable() }).strict()
   },
   previewWorkspaceSetup: {
-    input: external_exports2.object({ projectId: external_exports2.string().min(1), homeRoot: external_exports2.string(), noteFolder: external_exports2.string() }).strict(),
+    input: external_exports2.object({ projectId: external_exports2.string().min(1), homeRoot: external_exports2.string() }).strict(),
     output: external_exports2.object({
       previewId: external_exports2.string(),
       workspaceId: external_exports2.string(),
       homeRoot: external_exports2.string(),
       destination: external_exports2.string(),
-      mode: external_exports2.enum(["jev", "automatic_fallback", "empty"]),
-      warning: external_exports2.string().nullable(),
-      filesScanned: external_exports2.number().int(),
-      selectedEntities: external_exports2.array(external_exports2.string()),
+      programPath: external_exports2.string(),
+      readings: external_exports2.array(external_exports2.string()),
+      skippedReadings: external_exports2.array(external_exports2.string()),
       actions: external_exports2.array(external_exports2.unknown())
     }).strict()
   },
@@ -34718,26 +34716,16 @@ async function selectedHome(target, input2) {
   }
   return root;
 }
-function validNoteFolder(value) {
-  const folder = value.trim();
-  if (!folder) return "";
-  if (isAbsolute2(folder) || folder.split(/[\\/]/).some((part) => !part || part === "." || part === "..")) {
-    throw new Error("Note folder must be a folder name relative to Home.");
-  }
-  return folder;
-}
 function workspaceIdFor(root, existing) {
   const slug = basename(root).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "notes";
   if (!existing.has(slug)) return slug;
   return `${slug}-${createHash2("sha256").update(root).digest("hex").slice(0, 8)}`;
 }
-function entityNames(value) {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((entry) => typeof entry === "string" ? [entry] : entry && typeof entry === "object" && !Array.isArray(entry) ? Object.keys(entry) : []);
+function strings(value) {
+  return Array.isArray(value) && value.every((item) => typeof item === "string") ? value : null;
 }
-async function previewWorkspaceSetup(target, dataDir, homeInput, noteFolderInput) {
+async function previewWorkspaceSetup(target, dataDir, homeInput) {
   const homeRoot = await selectedHome(target, homeInput);
-  const noteFolder = validNoteFolder(noteFolderInput);
   const listing = JSON.parse(await cli(["workspace", "list", "--json"]));
   if (!Array.isArray(listing.workspaces)) throw new Error("Margins Workspace list is unavailable.");
   let workspaceId = null;
@@ -34761,37 +34749,34 @@ async function previewWorkspaceSetup(target, dataDir, homeInput, noteFolderInput
       throw error108;
     }
   }
-  const compiled = JSON.parse(await cli([
+  const planJson = await cli([
     "--workspace",
     workspaceId,
     "workspace",
-    "compile",
-    ...noteFolder ? ["--note-folder", noteFolder] : [],
+    "plan",
+    "--preset",
+    "margins-meetings",
     "--json"
-  ], 12e4, 2e6));
-  if (compiled.schema_version !== "margins.workspace.compile.v2" || typeof compiled.desired_program !== "string" || !["jev", "automatic_fallback", "empty"].includes(compiled.mode || "")) {
-    throw new Error("Margins returned an invalid Workspace proposal.");
+  ], 6e4, 2e6);
+  const plan = JSON.parse(planJson);
+  const readings = strings(plan.preset?.readings);
+  const skippedReadings = strings(plan.preset?.skipped_readings);
+  const noteFolder = plan.preset?.note_folder;
+  if (plan.schema_version !== "margins.workspace.plan.v2" || plan.workspace_id !== workspaceId || !Array.isArray(plan.actions) || typeof plan.desired_program !== "string" || typeof plan.program_path !== "string" || !isAbsolute2(plan.program_path) || !readings || !skippedReadings || typeof noteFolder !== "string") {
+    throw new Error("Margins returned an invalid Workspace plan.");
   }
   const previewId = randomUUID2();
   const plansDir = join3(dataDir, "setup-plans");
   await mkdir3(plansDir, { recursive: true, mode: 448 });
-  const desiredFile = join3(plansDir, `${previewId}.desired.enzyme`);
-  await writeFile2(desiredFile, compiled.desired_program, { mode: 384, flag: "wx" });
-  const planJson = await cli(["--workspace", workspaceId, "workspace", "plan", "--desired", desiredFile, "--json"]);
-  const plan = JSON.parse(planJson);
-  if (plan.schema_version !== "margins.workspace.plan.v2" || plan.workspace_id !== workspaceId || !Array.isArray(plan.actions) || plan.desired_program !== compiled.desired_program) {
-    throw new Error("Margins returned an invalid Workspace plan.");
-  }
   await writeFile2(join3(plansDir, `${previewId}.plan.json`), planJson, { mode: 384, flag: "wx" });
   return {
     previewId,
     workspaceId,
     homeRoot,
-    destination: noteFolder ? resolve2(homeRoot, noteFolder) : homeRoot,
-    mode: compiled.mode,
-    warning: compiled.warning || null,
-    filesScanned: Number(compiled.files_scanned || 0),
-    selectedEntities: entityNames(compiled.selected_entities),
+    destination: resolve2(homeRoot, noteFolder),
+    programPath: plan.program_path,
+    readings,
+    skippedReadings,
     actions: plan.actions
   };
 }
@@ -34838,7 +34823,7 @@ function createMarginsHostEntry(transport) {
       async previewWorkspaceSetup(input2, context) {
         retain(context);
         await transport.prepareCli(context.experimental_paths.dataDir);
-        return previewWorkspaceSetup(input2.target, context.experimental_paths.dataDir, input2.homeRoot, input2.noteFolder);
+        return previewWorkspaceSetup(input2.target, context.experimental_paths.dataDir, input2.homeRoot);
       },
       async applyWorkspaceSetup(input2, context) {
         retain(context);
