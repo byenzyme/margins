@@ -1,1 +1,5 @@
-d9b1c5b484f5e335b7d35ff02eb3631e1902b252
+# The enzyme CLI that Margins runs: the enzyme-rust revision tests and gates
+# build (scripts/enzyme-bin), and the `enzyme --version` Margins requires of
+# the binary it finds at runtime (src/enzyme_cli.rs). Change both together.
+rev = "d9b1c5b484f5e335b7d35ff02eb3631e1902b252"
+version = "0.11.1"
