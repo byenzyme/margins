@@ -18,13 +18,15 @@ After it, a Workspace is one program in one grammar, parsed by one parser.
 ## Layout
 
 ```
-~/.margins/                          MARGINS_HOME, machine-local, never synced
-  config.toml                        host preferences: [workspace] default, [llm], [retention]
+~/.margins/                          MARGINS_HOME, machine-local, never synced; an Enzyme home
+  margins.toml                       host preferences: [workspace] default, [workspace.names], [retention]
   configs/                           one .enzyme namespace, owned by Margins
     <id>.enzyme                      workspace "<id>" { … } — the whole Workspace config
+    settings.enzyme                  engine settings { generation …; model …; updates disabled }
     profiles.enzyme                  optional shared custom profiles
   workspaces/<id>/                   state only, no configuration
-    index.db  ledger.db  receipts/  …
+    enzyme.db  ledger.db  receipts/  …
+  models/                            local model files
   google/<account>/  granola/<account>/   connection state and tokens (unchanged)
 ```
 
@@ -32,6 +34,9 @@ Nothing is written into a notes folder except notes Margins creates in its
 declared write folder. Nothing is shared with `~/.enzyme`: Margins parses its own
 `configs/` with `enzyme-spec` and hands the engine an in-memory configuration; the
 engine never reads Margins files or Enzyme's home.
+
+The engine's generator selection reads the Margins home as an Enzyme home
+(`configs/settings.enzyme`, `models/`); it never reads `~/.enzyme`.
 
 ## The program
 
@@ -67,7 +72,7 @@ Mapping from the retired `config.toml`:
 | `kind = "google-mail" / "google-calendar" / "google-meet" / "granola"` | host sources of the same kind name, fields as below |
 | `policy.excluded_folders / excluded_tags / excluded_entities` | `leave out folders / tags / links` |
 | `policy.entities` (`ref`, `profile`, `expandable`) | `learn questions from <kind> "<name>" [including linked pages] [about <profile>]` |
-| `[retention]` | machine `config.toml` `[retention]` (global) with optional `[retention.<id>]` override |
+| `[retention]` | machine `margins.toml` `[retention]` (global) with optional `[retention.<id>]` override |
 
 Host source fields (all optional unless noted):
 
@@ -98,6 +103,11 @@ note destination outside the declaring Markdown source.
 - `workspace apply --plan <plan.json>` refuses a plan whose digest does not match
   its text, or whose base no longer matches the file; otherwise atomically writes
   the program and a receipt. Re-applying an applied plan is a no-op.
+- `workspace show [--text] [--json]` prints the program path (or its text);
+  `workspace edit` opens a copy in `$VISUAL`/`$EDITOR`, shows the diff, and
+  applies it through this same plan/apply path after confirmation. An invalid
+  or declined edit is never applied; the text stays in a kept file. Without an
+  interactive terminal, `edit` refuses and points to `show`/`plan`/`apply`.
 - Commands that change sources (`connect`, `integrations`, `add/remove source`)
   edit the program AST and re-render it through `enzyme_spec::render_program`
   (comments are not preserved, matching Enzyme's own readable-file writes).
@@ -129,6 +139,19 @@ Workspace listing; `workspace list` shows it with its error. A `config.toml`
 found beside an existing program (a crash between the program write and the
 rename) is retired under the Workspace lock to the first free
 `config.toml.migrated[.<n>]`.
+
+### Machine config and index name
+
+A root `config.toml` (Enzyme's legacy machine file, which Margins used for its
+machine config) is migrated the first time machine configuration is read or
+written, under the machine lock: it is validated first; `[llm] mode` and
+`local_model` become `settings { generation …; model "…" }` in
+`configs/settings.enzyme`, which also gets `updates disabled` unless it already
+says otherwise; every other key moves to `margins.toml`; the original is kept as
+`config.toml.migrated[.<n>]`. An invalid file is left untouched and reported.
+A Workspace's `index.db` (with its SQLite sidecars) is renamed to `enzyme.db` on
+first resolution, without reindexing; `index.identity` is unchanged. When both
+names exist, `enzyme.db` is the index and `index.db` is left alone.
 
 ## Engine changes (enzyme-rust)
 

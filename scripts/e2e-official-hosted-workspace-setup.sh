@@ -51,7 +51,8 @@ mode = stat.S_IMODE(os.stat(sys.argv[1]).st_mode)
 if mode != 0o600:
     raise SystemExit(f"hosted bundle mode is {mode:o}, expected 600")
 PY
-printf '[llm]\nmode = "hosted"\n' > "$MARGINS_HOME/config.toml"
+mkdir -p "$MARGINS_HOME/configs"
+printf 'settings {\n  generation hosted\n  updates disabled\n}\n' > "$MARGINS_HOME/configs/settings.enzyme"
 
 printf '# Atlas\n\n[[Atlas Program]] tracks the phosphorescent handoff, accountable owner, review timing, delivery risk, and decision boundary. This substantive record preserves source-backed planning evidence and follow-up commitments.\n' \
   > "$NOTES/projects/Atlas.md"
@@ -225,7 +226,7 @@ cmp "$BEFORE" "$AFTER"
 test -f "$WORKSPACE_PROGRAM"
 test ! -e "$WORKSPACE_STATE/config.toml"
 grep -Fq 'leave out folders ["templates"]' "$WORKSPACE_PROGRAM"
-test -f "$WORKSPACE_STATE/index.db"
+test -f "$WORKSPACE_STATE/enzyme.db"
 test ! -e "$NOTES/.margins"
 test ! -e "$NOTES/.enzyme"
 test "$SOURCE_BUNDLE_SHA256" = "$(python3 - "$MARGINS_E2E_HOSTED_BUNDLE_SOURCE" <<'PY'

@@ -29,7 +29,7 @@ Run init first, then source the env file it prints before invoking another phase
 Set MARGINS_E2E_BIN before init to test a specific margins executable.
 Before phase2, verify-isolation/report require only the Workspace program
 ($MARGINS_HOME/configs/<id>.enzyme); phase2 writes a
-sandbox marker after completing and later checks also require ledger.db/index.db.
+sandbox marker after completing and later checks also require ledger.db/enzyme.db.
 EOF
 }
 
@@ -140,7 +140,7 @@ require_workspace_declaration() {
 assert_workspace_layout() {
   require_workspace_declaration
   if [ -f "$MARGINS_E2E_SANDBOX/.phase2-complete" ]; then
-    for filename in ledger.db index.db; do
+    for filename in ledger.db enzyme.db; do
       [ -f "$MARGINS_WORKSPACE_STATE/$filename" ] || \
         die "workspace state is missing $filename after phase2: $MARGINS_WORKSPACE_STATE/$filename"
     done
@@ -826,7 +826,7 @@ import time
 notes = Path(sys.argv[1])
 workspace = Path(sys.argv[2])
 markdown = [row for row in json.load(open(sys.argv[3])) if row.get("kind") == "notes"]
-db = workspace / "index.db"
+db = workspace / "enzyme.db"
 db.parent.mkdir(parents=True, exist_ok=True)
 if db.exists():
     db.unlink()
@@ -1590,7 +1590,7 @@ if not programs:
 for config in programs:
     state = home / "workspaces" / config.stem
     row = {"config_sha256": hashlib.sha256(config.read_bytes()).hexdigest()}
-    index = state / "index.db"
+    index = state / "enzyme.db"
     row["index_sha256"] = hashlib.sha256(index.read_bytes()).hexdigest() if index.exists() else None
     ledger = state / "ledger.db"
     if ledger.exists():
@@ -1636,7 +1636,7 @@ if not programs:
 for config in programs:
     state = home / "workspaces" / config.stem
     row = {"config_sha256": hashlib.sha256(config.read_bytes()).hexdigest()}
-    index = state / "index.db"
+    index = state / "enzyme.db"
     row["index_sha256"] = hashlib.sha256(index.read_bytes()).hexdigest() if index.exists() else None
     ledger = state / "ledger.db"
     if ledger.exists():
@@ -1704,7 +1704,7 @@ if not programs:
 for config in programs:
     state = home / "workspaces" / config.stem
     row = {"config_sha256": hashlib.sha256(config.read_bytes()).hexdigest()}
-    index = state / "index.db"
+    index = state / "enzyme.db"
     row["index_sha256"] = hashlib.sha256(index.read_bytes()).hexdigest() if index.exists() else None
     ledger = state / "ledger.db"
     if ledger.exists():
