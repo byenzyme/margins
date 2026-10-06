@@ -48,7 +48,6 @@ fn assert_stale_recall(
 #[test]
 fn materialized_calendar_events_keep_stable_refs_and_multi_attendee_occurrences() {
     let _env_guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    margins::initialize_sqlite_runtime().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let vault = temp.path().join("vault");
     let margins_home = temp.path().join("margins-home");
@@ -284,7 +283,6 @@ fn materialized_calendar_events_keep_stable_refs_and_multi_attendee_occurrences(
 #[test]
 fn materialized_mail_threads_use_generic_shared_document_context() {
     let _env_guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    margins::initialize_sqlite_runtime().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let vault = temp.path().join("vault");
     let margins_home = temp.path().join("margins-home");
@@ -735,7 +733,6 @@ fn materialized_mail_threads_use_generic_shared_document_context() {
 #[test]
 fn native_markdown_refs_are_qualified_by_source_name() {
     let _env_guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    margins::initialize_sqlite_runtime().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
     let reference = temp.path().join("reference");
@@ -837,7 +834,6 @@ fn native_markdown_refs_are_qualified_by_source_name() {
 #[test]
 fn scan_style_native_folder_entity_materializes_with_language_identity() {
     let _env_guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    margins::initialize_sqlite_runtime().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
     let margins_home = temp.path().join("margins-home");
@@ -922,7 +918,6 @@ fn scan_style_native_folder_entity_materializes_with_language_identity() {
 #[test]
 fn thin_source_qualified_folder_uses_expanded_link_catalysts() {
     let _env_guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    margins::initialize_sqlite_runtime().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
     let margins_home = temp.path().join("margins-home");

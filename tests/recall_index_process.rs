@@ -3,13 +3,10 @@
 #[path = "support/fixture_generator.rs"]
 mod fixture_generator;
 
-/// libsql configures SQLite's process-global threading mode. Keep this real
-/// index-opening assertion in its own integration-test process so unrelated
-/// rusqlite-backed unit tests cannot initialize SQLite first and poison it.
+/// Exact-phrase recall through the enzyme CLI returns the real source path.
 #[test]
 fn exact_phrase_recall_returns_actual_source_path() {
     let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    margins::initialize_sqlite_runtime().unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let margins_home = tmp.path().join("margins-home");
     let vault = tmp.path().join("vault");
@@ -82,7 +79,6 @@ fn exact_phrase_recall_returns_actual_source_path() {
 #[test]
 fn recall_without_readings_still_searches_declared_notes() {
     let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    margins::initialize_sqlite_runtime().unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let margins_home = tmp.path().join("margins-home");
     let vault = tmp.path().join("vault");
@@ -146,7 +142,6 @@ fn recall_without_readings_still_searches_declared_notes() {
 #[test]
 fn recall_missing_snapshot_does_not_create_or_migrate_state() {
     let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    margins::initialize_sqlite_runtime().unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let margins_home = tmp.path().join("margins-home");
     let vault = tmp.path().join("vault");

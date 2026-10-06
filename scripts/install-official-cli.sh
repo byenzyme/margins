@@ -58,7 +58,7 @@ else
   echo "Building official Margins CLI (profile: $PROFILE)..."
   (
     cd "$REPO_ROOT"
-    scripts/with-private-recall scripts/cargo-lane shared -- cargo "${BUILD_ARGS[@]}"
+    scripts/cargo-lane shared -- cargo "${BUILD_ARGS[@]}"
   )
   SOURCE="$CARGO_TARGET_DIR/release/margins-private"
 fi

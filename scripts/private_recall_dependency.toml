@@ -1,5 +1,0 @@
-# Applied only by scripts/with-private-recall to official build checkouts.
-# enzyme-rust branch margins/workspace-language (#23 merged): the CLI surfaces Margins drives, with the
-# kernel still present for the scan/setup composition until M2b/M3,
-# consuming the published enzyme-spec v0.2.0 (the same source margins-workflows uses).
-recall-engine = { git = "https://github.com/byenzyme/enzyme-rust.git", rev = "d9b1c5b484f5e335b7d35ff02eb3631e1902b252", package = "enzyme-core", features = ["embedder-compat"], optional = true }

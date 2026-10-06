@@ -88,10 +88,6 @@ case "$DURATION_SECS" in
 esac
 
 [ -x "$CARGO_LANE" ] || die "missing executable cargo lane wrapper: $CARGO_LANE"
-if { [ "$RUN_BUILD" = "1" ] || [ "$RUN_TESTS" = "1" ]; } \
-    && [ "${MARGINS_PRIVATE_RECALL_ACTIVE:-}" != "1" ]; then
-  die "release build and private tests require scripts/with-private-recall"
-fi
 
 run_logged() {
   local label="$1"
@@ -189,9 +185,10 @@ run_focused_tests() {
     --no-default-features --features "$OFFICIAL_MACOS_FEATURES" \
     packaged_binary_reports_private_native_composition
 
-  printf '\n== private recall integration ==\n'
-  cargo test -p margins --test recall_index_process \
-    --no-default-features --features "$OFFICIAL_MACOS_FEATURES"
+  printf '\n== recall integration through the pinned enzyme ==\n'
+  MARGINS_ENZYME_BIN="${MARGINS_ENZYME_BIN:-$("$REPO_ROOT/scripts/enzyme-bin")}" \
+    cargo test -p margins --test recall_index_process \
+      --no-default-features --features "$OFFICIAL_MACOS_FEATURES"
 }
 
 run_live_smoke() {

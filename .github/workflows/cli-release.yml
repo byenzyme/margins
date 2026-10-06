@@ -11,7 +11,7 @@ on:
         type: string
 
 # The public repository's token publishes its own release. A separate token
-# updates the Homebrew tap; official builds use a read-only Enzyme token.
+# updates the Homebrew tap. The enzyme engine is a public release download.
 # Every release secret is an environment secret on `official-cli-release`
 # (deployable only from v* tags and main), so each job declares it.
 permissions:
@@ -52,7 +52,7 @@ jobs:
           VERSION="${RELEASE_TAG#v}"
           PACKAGE_VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
           test "$VERSION" = "$PACKAGE_VERSION" || {
-            echo "::error::$RELEASE_TAG does not match private root package $PACKAGE_VERSION"
+            echo "::error::$RELEASE_TAG does not match root package $PACKAGE_VERSION"
             exit 1
           }
           echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
@@ -92,11 +92,10 @@ jobs:
           host-arch: ${{ matrix.host_arch }}
           features: ${{ matrix.features }}
           version: ${{ needs.validate.outputs.version }}
-          # The cache holds private enzyme-rust source. Tag-push runs save it
+          # The cache embeds the OAuth client. Tag-push runs save it
           # tag-scoped (unreadable from other refs); a workflow_dispatch runs on
           # its dispatching ref, usually main, so it must never save a cache.
           cache: ${{ startsWith(github.ref, 'refs/tags/') }}
-          enzyme-rust-deploy-key: ${{ secrets.ENZYME_RUST_DEPLOY_KEY }}
           google-oauth-client-json: ${{ secrets.MARGINS_GOOGLE_OAUTH_CLIENT_JSON }}
           apple-certificate-base64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           apple-certificate-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}

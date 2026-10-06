@@ -20,13 +20,10 @@ inputs:
     required: true
   cache:
     description: >-
-      "true" to restore and save the Rust cache. The cache contains the private
-      enzyme-rust source and artifacts, so pass "true" only from a tag ref:
-      tag-scoped caches are unreadable from other refs, while a cache saved on
-      main is restorable by any run, including fork pull requests.
-    required: true
-  enzyme-rust-deploy-key:
-    description: ENZYME_RUST_DEPLOY_KEY secret (read-only deploy key on byenzyme/enzyme-rust)
+      "true" to restore and save the Rust cache. Its build artifacts embed the
+      Google OAuth client, so pass "true" only from a tag ref: tag-scoped caches
+      are unreadable from other refs, while a cache saved on main is restorable
+      by any run, including fork pull requests.
     required: true
   google-oauth-client-json:
     description: MARGINS_GOOGLE_OAUTH_CLIENT_JSON secret
@@ -67,8 +64,9 @@ runs:
     - if: inputs.cache == 'true'
       uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       with:
-        # Distinct prefix so public-ci.yml's restore keys can never match.
-        prefix-key: v0-official-private
+        # Distinct prefix so public-ci.yml's restore keys can never match; v1
+        # never restores a pre-public (v0) cache holding private engine source.
+        prefix-key: v1-official
 
     - name: Assert native runner architecture
       shell: bash
@@ -81,16 +79,9 @@ runs:
       shell: bash
       run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
 
-    - name: Authenticate private recall source
-      uses: ./.github/actions/private-recall-ssh
-      with:
-        mode: setup
-        deploy-key: ${{ inputs.enzyme-rust-deploy-key }}
-
-    - name: Build the private root distributable
+    - name: Build the root distributable
       shell: bash
       env:
-        CARGO_NET_GIT_FETCH_WITH_CLI: "true"
         MARGINS_GOOGLE_OAUTH_CLIENT_JSON: ${{ inputs.google-oauth-client-json }}
         FEATURES: ${{ inputs.features }}
         TARGET: ${{ inputs.target }}
@@ -100,16 +91,9 @@ runs:
           echo "::error::Missing required secret: MARGINS_GOOGLE_OAUTH_CLIENT_JSON"
           exit 1
         fi
-        scripts/with-private-recall cargo build --release --locked --package margins --bin margins-private \
+        cargo build --release --locked --package margins --bin margins-private \
           --no-default-features --features "$FEATURES" \
           --target "$TARGET"
-
-    # The private engine is only fetched above; drop the key before signing.
-    - name: Remove private recall credentials
-      if: always()
-      uses: ./.github/actions/private-recall-ssh
-      with:
-        mode: cleanup
 
     - name: Compile the project recording service
       shell: bash

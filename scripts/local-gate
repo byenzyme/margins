@@ -12,7 +12,6 @@ import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 LANE = ROOT / "scripts" / "cargo-lane"
-PRIVATE_RECALL_WRAPPER = ROOT / "scripts" / "with-private-recall"
 BB_PLUGIN = ROOT / "integrations/bb-plugin-margins"
 BB_PLUGIN_DIST = "integrations/bb-plugin-margins/dist"
 ROOT_PACKAGES = {
@@ -34,7 +33,6 @@ if SERVER_MANIFEST.exists():
 # follows them transitively so a library edit also runs its consumers' tests.
 # Keep this map in sync when a root workspace crate adds a local dependency.
 REVERSE_DEPENDENTS = {
-    "enzyme-core": {"margins"},
     "margins-capture": {"margins"},
     "margins-cli": {"margins", "margins-capture"},
     "margins-core": {
@@ -118,24 +116,6 @@ def normalize_input(raw: str) -> str:
     return path.as_posix().removeprefix("./").rstrip("/")
 
 
-def cargo_graph_changed(inputs: list[str]) -> bool:
-    return any(
-        Path(normalize_input(raw)).name in {"Cargo.toml", "Cargo.lock", "Cargo.private-recall.lock"}
-        for raw in inputs
-    )
-
-
-def check_private_composition_lock(gate: Gate) -> None:
-    command = ["cargo", "metadata", "--locked", "--format-version", "1"]
-    if os.environ.get("MARGINS_PRIVATE_RECALL_ACTIVE") != "1":
-        command.insert(0, str(PRIVATE_RECALL_WRAPPER))
-    gate.run(
-        "verify private recall manifest and lock",
-        command,
-        quiet_stdout=True,
-    )
-
-
 def quick_selection(inputs: list[str]) -> tuple[list[str], bool, bool]:
     packages: set[str] = set()
     parked_desktop = False
@@ -186,11 +166,10 @@ def check_bb_plugin(gate: Gate) -> None:
 
 def check_shipped_linux(gate: Gate, *, cli_already_built: bool = False) -> None:
     if not cli_already_built:
-        private_recall = os.environ.get("MARGINS_PRIVATE_RECALL_ACTIVE") == "1"
         gate.cargo(
             "check portable CLI",
             "check", "-p", "margins", "--bin", "margins-private",
-            "--no-default-features", *(["--features", "recall"] if private_recall else []), "--locked",
+            "--no-default-features", "--features", "recall", "--locked",
         )
     if SERVER_MANIFEST.exists():
         gate.cargo(
@@ -201,14 +180,12 @@ def check_shipped_linux(gate: Gate, *, cli_already_built: bool = False) -> None:
 
 
 def quick(gate: Gate, inputs: list[str]) -> None:
-    if cargo_graph_changed(inputs):
-        check_private_composition_lock(gate)
     packages, parked_desktop, bb_plugin = quick_selection(inputs)
     if packages:
         args = ["test", "--locked", "--no-default-features"]
         for package in packages:
             args.extend(["-p", package])
-        if "margins" in packages and os.environ.get("MARGINS_PRIVATE_RECALL_ACTIVE") == "1":
+        if "margins" in packages:
             args.extend(["--features", "recall"])
             use_enzyme_binary(gate)
         gate.cargo("affected root workspace tests", *args)
@@ -235,17 +212,14 @@ def use_enzyme_binary(gate: Gate) -> None:
 
 
 def linux(gate: Gate) -> None:
-    if os.environ.get("MARGINS_PRIVATE_RECALL_ACTIVE") != "1":
-        raise ValueError("linux recall gate requires scripts/with-private-recall")
-    check_private_composition_lock(gate)
     check_bb_plugin(gate)
     use_enzyme_binary(gate)
     gate.cargo(
-        "portable workspace and private composition tests",
+        "portable workspace and recall composition tests",
         "test", "--workspace", "--no-default-features", "--features", "recall", "--locked",
     )
     gate.cargo(
-        "build portable private CLI for onboarding",
+        "build portable recall CLI for onboarding",
         "build", "-p", "margins", "--bin", "margins-private",
         "--no-default-features", "--features", "recall", "--locked",
     )
@@ -283,17 +257,15 @@ def public(gate: Gate) -> None:
         ],
     )
     gate.cargo(
-        "build and test workspace without private recall engine",
+        "build and test workspace without recall",
         "test", "--workspace", "--all-targets", "--no-default-features", "--locked",
     )
 
 
 def macos(gate: Gate) -> None:
-    if os.environ.get("MARGINS_PRIVATE_RECALL_ACTIVE") != "1":
-        raise ValueError("macos recall gate requires scripts/with-private-recall")
     use_enzyme_binary(gate)
     gate.cargo(
-        "build private release CLI",
+        "build official release CLI",
         "build", "--release", "-p", "margins", "--bin", "margins-private", "--locked",
         "--no-default-features", "--features",
         OFFICIAL_MACOS_FEATURES,
@@ -303,7 +275,7 @@ def macos(gate: Gate) -> None:
         "build", "--workspace", "--exclude", "margins", "--all-targets", "--locked",
     )
     gate.cargo(
-        "private composition, audio capture, CoreML, and recall integration",
+        "official composition, audio capture, CoreML, and recall integration",
         "test", "-p", "margins", "--locked", "--no-default-features", "--features",
         OFFICIAL_MACOS_FEATURES,
     )
