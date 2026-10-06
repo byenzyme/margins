@@ -968,21 +968,35 @@ fn provision(workspace: &ResolvedWorkspace, mode: Provision) -> Result<InitStatu
         Some(_) => "engine index reuse".to_string(),
     });
 
-    let generated = match mode {
-        Provision::Init => Some(
-            engine
-                .init(id, &generator, rebuild)
-                .map_err(provision_error)?,
-        ),
-        Provision::Refresh if rebuild || existing.is_none() => Some(
-            engine
-                .init(id, &generator, rebuild)
-                .map_err(provision_error)?,
-        ),
-        Provision::Refresh => {
-            engine.refresh(id, &generator).map_err(provision_error)?;
-            None
-        }
+    // `margins init` waits for another build as long as the engine does; a
+    // sync-triggered refresh waits briefly and reports busy instead.
+    let lock_timeout = match mode {
+        Provision::Init => None,
+        Provision::Refresh => Some(REFRESH_LOCK_TIMEOUT_SECS),
+    };
+    let built = match mode {
+        Provision::Refresh if !rebuild && existing.is_some() => engine
+            .refresh(id, &generator, lock_timeout)
+            .map(|summary| {
+                debug_strategy(&format!(
+                    "engine refresh background_spawned={}",
+                    summary
+                        .get("background_spawned")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                ));
+                None
+            }),
+        _ => engine
+            .init(id, &generator, rebuild, lock_timeout)
+            .map(Some),
+    };
+    // Exit 5: the index is built and searchable, but catalyst generation
+    // failed its quality gate. Report the catalysts as pending.
+    let (generated, catalysts_failed) = match built {
+        Ok(generated) => (generated, None),
+        Err(EngineError::CatalystsFailed(message)) => (None, Some(message)),
+        Err(error) => return Err(provision_error(error, mode)),
     };
     if legacy.exists() {
         std::fs::remove_file(&legacy)
@@ -991,7 +1005,12 @@ fn provision(workspace: &ResolvedWorkspace, mode: Provision) -> Result<InitStatu
     let status = engine
         .status(id)
         .context("reading the Workspace index status")?;
-    let init_status = classify_init_status(&status);
+    let mut init_status = classify_init_status(&status);
+    if let Some(message) = &catalysts_failed {
+        debug_strategy(&format!("engine catalysts failed: {message}"));
+        init_status.status = "catalysts_pending";
+        init_status.reason = "catalysts_pending";
+    }
     debug_strategy(&format!(
         "workspace index provisioned mode={mode:?} generator={generator:?} documents={} catalysts={} hosted_generation_calls={} status={}",
         status.documents,
@@ -1010,8 +1029,19 @@ fn provision(workspace: &ResolvedWorkspace, mode: Provision) -> Result<InitStatu
     Ok(init_status)
 }
 
-fn provision_error(error: EngineError) -> anyhow::Error {
-    anyhow::Error::new(error).context("indexing and generating recall catalysts")
+/// Seconds a sync-triggered index update waits for another build of the same
+/// Workspace before reporting it busy.
+const REFRESH_LOCK_TIMEOUT_SECS: u64 = 10;
+
+fn provision_error(error: EngineError, mode: Provision) -> anyhow::Error {
+    let busy = matches!(error, EngineError::Busy(_));
+    let error = anyhow::Error::new(error);
+    if busy && mode == Provision::Refresh {
+        return error.context(
+            "another Margins command is building this Workspace's index; this update is retried by the next `margins sync` or `margins init`",
+        );
+    }
+    error.context("indexing and generating recall catalysts")
 }
 
 fn combined_freshness(
