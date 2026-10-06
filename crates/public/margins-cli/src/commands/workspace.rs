@@ -211,6 +211,7 @@ pub fn plan(
     cwd: &Path,
     desired_path: &Path,
     json: bool,
+    color: bool,
     stdout: &mut dyn Write,
 ) -> Result<(), CliError> {
     let selector = require_explicit_workspace(selector)?;
@@ -234,7 +235,7 @@ pub fn plan(
             .write_all(&bytes)
             .map_err(|error| CliError::new("output_failed", error.to_string()));
     }
-    write_plan_text(&workspace, &plan, None, &bytes, stdout)
+    write_plan_text(&workspace, &plan, None, &bytes, color, stdout)
 }
 
 /// Human `workspace plan`: save the exact plan JSON (what `--json` prints) for
@@ -244,6 +245,7 @@ pub fn write_plan_text(
     plan: &WorkspacePlan,
     preset: Option<&workspace_text::PresetOutcome>,
     plan_json: &[u8],
+    color: bool,
     stdout: &mut dyn Write,
 ) -> Result<(), CliError> {
     let output = |error: std::io::Error| CliError::new("output_failed", error.to_string());
@@ -271,6 +273,7 @@ pub fn write_plan_text(
         plan,
         preset,
         saved.as_deref(),
+        color,
     )
     .map_err(output)
 }
@@ -391,6 +394,7 @@ pub fn show(
 pub fn edit(
     selector: Option<&str>,
     cwd: &Path,
+    color: bool,
     stdin: &mut dyn std::io::BufRead,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
@@ -474,10 +478,7 @@ pub fn edit(
                 writeln!(stdout, "  • {summary}").map_err(output)?;
             }
         }
-        write!(stdout, "{}", plan.diff).map_err(output)?;
-        if !plan.diff.ends_with('\n') {
-            writeln!(stdout).map_err(output)?;
-        }
+        workspace_text::write_diff(stdout, &plan.diff, color).map_err(output)?;
         if !ask(stdin, stderr, &format!("Apply this change to Workspace {id}? [y/N] "), false)
             .map_err(output)?
         {

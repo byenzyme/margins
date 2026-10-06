@@ -320,6 +320,14 @@ For `recall`, `workspace status`, and `sync` the exit code is:
 `recall` prints readable results; pass `--json` for the `margins.recall.v1`
 envelope.
 
+The readable `workspace plan` and `workspace edit` colour the program diff
+(added lines green, removed lines red) with `--color auto|always|never`.
+`auto`, the default, colours only a terminal and honours `NO_COLOR`, so piped
+output is byte-identical to `--color never`; JSON is never coloured.
+`workspace show --text` prints the program uncoloured: the bundled enzyme
+0.12.1 highlights only programs it generates (`compile --color`), not an
+existing file, and Margins keeps no highlighter of its own.
+
 ### Inspecting a Workspace with `margins enzyme`
 
 Margins ships its own `enzyme`, separate from any `enzyme` you install, and a

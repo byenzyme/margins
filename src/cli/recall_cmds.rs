@@ -281,7 +281,12 @@ fn generated_sync_request_id() -> String {
 /// desired program. The plan JSON also names the program and what the preset
 /// kept and skipped.
 #[cfg(feature = "recall")]
-fn run_workspace_plan_preset(workspace_selector: Option<&str>, preset: &str, json: bool) -> i32 {
+fn run_workspace_plan_preset(
+    workspace_selector: Option<&str>,
+    preset: &str,
+    json: bool,
+    color: bool,
+) -> i32 {
     let plan = match workspace_plan_preset(workspace_selector, preset) {
         Ok(plan) => plan,
         Err(error) if json => return report_json_cli_error(error),
@@ -292,7 +297,7 @@ fn run_workspace_plan_preset(workspace_selector: Option<&str>, preset: &str, jso
         println!("{text}");
         return 0;
     }
-    match workspace_plan_preset_text(workspace_selector, &plan, &format!("{text}\n")) {
+    match workspace_plan_preset_text(workspace_selector, &plan, &format!("{text}\n"), color) {
         Ok(()) => 0,
         Err(error) => report_cli_error(error),
     }
@@ -305,6 +310,7 @@ fn workspace_plan_preset_text(
     workspace_selector: Option<&str>,
     value: &serde_json::Value,
     plan_json: &str,
+    color: bool,
 ) -> Result<(), margins_cli::CliError> {
     use margins_cli::commands::workspace_text::PresetOutcome;
     use margins_cli::CliError;
@@ -325,6 +331,7 @@ fn workspace_plan_preset_text(
         &plan,
         Some(&outcome),
         plan_json.as_bytes(),
+        color,
         &mut io::stdout(),
     )
 }

@@ -439,10 +439,12 @@ where
                 desired: None,
                 preset: Some(preset),
                 json,
+                color,
             },
     }) = &parsed.command
     {
-        return run_workspace_plan_preset(workspace_selector.as_deref(), preset, *json);
+        let color = color.enabled(io::stdout().is_terminal());
+        return run_workspace_plan_preset(workspace_selector.as_deref(), preset, *json, color);
     }
 
     let interactive_command = match &parsed.command {

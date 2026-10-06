@@ -137,6 +137,43 @@ pub fn plain_summaries(action: &WorkspacePlanAction) -> Vec<String> {
     lines
 }
 
+const ADDED: &str = "\x1b[32m";
+const REMOVED: &str = "\x1b[31m";
+const RESET: &str = "\x1b[0m";
+
+/// A unified diff, ending in a newline. With `color`, added lines are green
+/// and removed lines red; the `---`/`+++` file headers stay plain. Without
+/// it, the diff is written byte for byte.
+pub fn write_diff(out: &mut dyn Write, diff: &str, color: bool) -> io::Result<()> {
+    if !color {
+        write!(out, "{diff}")?;
+    } else {
+        for line in diff.split_inclusive('\n') {
+            let (body, newline) = match line.strip_suffix('\n') {
+                Some(body) => (body, "\n"),
+                None => (line, ""),
+            };
+            let paint = if body.starts_with("+++") || body.starts_with("---") {
+                None
+            } else if body.starts_with('+') {
+                Some(ADDED)
+            } else if body.starts_with('-') {
+                Some(REMOVED)
+            } else {
+                None
+            };
+            match paint {
+                Some(paint) => write!(out, "{paint}{body}{RESET}{newline}")?,
+                None => write!(out, "{line}")?,
+            }
+        }
+    }
+    if !diff.is_empty() && !diff.ends_with('\n') {
+        writeln!(out)?;
+    }
+    Ok(())
+}
+
 /// Whether `id` is the machine default Workspace (false when that cannot be
 /// read), so printed commands can leave out `--workspace`.
 pub fn is_machine_default(id: &str) -> bool {
@@ -195,6 +232,42 @@ fn note_destination(view: &WorkspaceConfig) -> Option<PathBuf> {
 /// The private directory human-mode plans are saved in: `$MARGINS_HOME/plans`.
 pub const PLANS_DIR: &str = "plans";
 
+/// Saved plans kept: at most this many, newest first ...
+pub const MAX_KEPT_PLANS: usize = 40;
+/// ... and none older than this. A plan this old is almost always stale; its
+/// apply would be refused anyway once the program has changed.
+pub const PLAN_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Remove saved plans beyond [`MAX_KEPT_PLANS`] or older than
+/// [`PLAN_MAX_AGE`], like the bb plugin prunes its own. Only regular
+/// `*.plan.json` files are considered (never symlinks or directories), and
+/// pruning is best-effort: a file that cannot be read or removed is skipped.
+pub fn prune_plans(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let mut plans = entries
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".plan.json"))
+        .filter_map(|entry| {
+            let metadata = std::fs::symlink_metadata(entry.path()).ok()?;
+            metadata
+                .file_type()
+                .is_file()
+                .then(|| (entry.path(), metadata.modified().unwrap_or(now)))
+        })
+        .collect::<Vec<_>>();
+    plans.sort_by(|a, b| b.1.cmp(&a.1));
+    for (index, (path, modified)) in plans.into_iter().enumerate() {
+        let age = now.duration_since(modified).unwrap_or_default();
+        // Room for the plan about to be saved.
+        if index + 1 >= MAX_KEPT_PLANS || age > PLAN_MAX_AGE {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 /// Save a human-mode plan for `workspace apply --plan` in
 /// `$MARGINS_HOME/plans/` (mode 0700), as a new file with a random name and
 /// mode 0600. A `plans` that is a symlink or not a directory is refused, and
@@ -224,6 +297,7 @@ pub fn save_plan(margins_home: &Path, workspace_id: &str, plan_json: &[u8]) -> i
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
     }
+    prune_plans(&dir);
     // `tempfile` creates with O_CREAT|O_EXCL (never through a symlink) and 0600.
     let mut file = tempfile::Builder::new()
         .prefix(&format!("{workspace_id}-"))
@@ -246,6 +320,7 @@ pub fn write_plan(
     plan: &WorkspacePlan,
     preset: Option<&PresetOutcome>,
     saved: Option<&Path>,
+    color: bool,
 ) -> io::Result<()> {
     let id = &plan.workspace_id;
     writeln!(out, "Workspace {id}: plan for {}", program_path.display())?;
@@ -319,10 +394,7 @@ pub fn write_plan(
     if !plan.diff.is_empty() {
         writeln!(out)?;
         writeln!(out, "Exact change to the program:")?;
-        write!(out, "{}", plan.diff)?;
-        if !plan.diff.ends_with('\n') {
-            writeln!(out)?;
-        }
+        write_diff(out, &plan.diff, color)?;
     }
     writeln!(out)?;
     match saved {
@@ -469,6 +541,20 @@ mod tests {
             "Your Workspace is the program at /m/configs/practice.enzyme\n  \
              Read it:   margins workspace show --text\n  \
              Change it: margins workspace edit\n"
+        );
+    }
+
+    #[test]
+    fn diff_colours_added_and_removed_lines_but_not_headers() {
+        let diff = "--- a/x.enzyme\n+++ b/x.enzyme\n@@ -1 +1 @@\n-old\n+new\n same";
+        let mut plain = Vec::new();
+        write_diff(&mut plain, diff, false).unwrap();
+        assert_eq!(String::from_utf8(plain).unwrap(), format!("{diff}\n"));
+        let mut coloured = Vec::new();
+        write_diff(&mut coloured, diff, true).unwrap();
+        assert_eq!(
+            String::from_utf8(coloured).unwrap(),
+            "--- a/x.enzyme\n+++ b/x.enzyme\n@@ -1 +1 @@\n\x1b[31m-old\x1b[0m\n\x1b[32m+new\x1b[0m\n same\n"
         );
     }
 }
