@@ -1417,6 +1417,47 @@ pub fn inspect_or_create_workspace(
     resolve_or_create_workspace_with(Resolution::ReadOnly, roots, selector, cwd)
 }
 
+/// Resolve a Workspace for a command that must never create one (recall,
+/// status, sync, imports): an explicit or `MARGINS_WORKSPACE` selection, else
+/// the one Workspace that declares the cwd, else the machine default.
+/// `Ok(None)` when none applies; nothing is written.
+pub fn inspect_workspace_or_default(
+    margins_home: &Path,
+    selector: Option<&str>,
+    cwd: &Path,
+) -> Result<Option<ResolvedWorkspace>> {
+    let env_selector = std::env::var("MARGINS_WORKSPACE")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    if selector.is_some_and(|value| !value.trim().is_empty()) || env_selector.is_some() {
+        return resolve_workspace_with(Resolution::ReadOnly, margins_home, selector, cwd).map(Some);
+    }
+    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let mut matches = Resolution::ReadOnly
+        .list(margins_home)?
+        .into_iter()
+        .filter(|workspace| declares_folder(workspace, &cwd))
+        .collect::<Vec<_>>();
+    match matches.len() {
+        1 => Ok(Some(matches.remove(0))),
+        0 => match default_workspace(margins_home)? {
+            Some(id) => Resolution::ReadOnly.at(margins_home, &id).map(Some),
+            None => Ok(None),
+        },
+        _ => bail!("multiple workspaces declare this folder; pass --workspace <id> explicitly"),
+    }
+}
+
+fn declares_folder(workspace: &ResolvedWorkspace, cwd: &Path) -> bool {
+    cwd.starts_with(&workspace.home_dir)
+        || workspace
+            .config
+            .bindings
+            .values()
+            .filter_map(|binding| binding.local_path())
+            .any(|path| cwd.starts_with(path))
+}
+
 fn resolve_or_create_workspace_with(
     resolution: Resolution,
     roots: &ImplicitWorkspaceRoots,

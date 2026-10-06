@@ -450,7 +450,7 @@ grep -Fq "binary provenance: commit=$MARGINS_E2E_EXPECTED_COMMIT" "$RUN_ROOT/rep
 if [ "$RECALL_AVAILABLE" = 1 ]; then
   grep -Fq 'catalyst mode: hosted (hosted_bundle_ready)' "$RUN_ROOT/report.txt"
 
-  "$MARGINS_E2E_BIN" --workspace "$MARGINS_WORKSPACE" recall \
+  "$MARGINS_E2E_BIN" --workspace "$MARGINS_WORKSPACE" recall --json \
     "Tuesday pilot kickoff checkpoint" > "$RUN_ROOT/recall.json"
   python3 - "$RUN_ROOT/recall.json" <<'PY'
 import json, sys
@@ -476,7 +476,7 @@ PY
   wait "$FIXTURE_PID" 2>/dev/null || true
   FIXTURE_PID=""
   rm -f -- "$MARGINS_HOME/llm-config-cache.json" "$MARGINS_HOME/config.toml"
-  "$MARGINS_E2E_BIN" --workspace "$MARGINS_WORKSPACE" recall \
+  "$MARGINS_E2E_BIN" --workspace "$MARGINS_WORKSPACE" recall --json \
     "Tuesday pilot kickoff checkpoint" > "$RUN_ROOT/recall-without-generator.json"
   python3 - "$RUN_ROOT/recall.json" "$RUN_ROOT/recall-without-generator.json" <<'PY'
 import json, sys
@@ -487,7 +487,7 @@ assert after["results"] == before["results"], (before, after)
 PY
 else
   grep -Fq 'local recall mode: live_lexical' "$RUN_ROOT/report.txt"
-  "$MARGINS_E2E_BIN" --workspace "$MARGINS_WORKSPACE" recall \
+  "$MARGINS_E2E_BIN" --workspace "$MARGINS_WORKSPACE" recall --json \
     "Tuesday pilot kickoff checkpoint" > "$RUN_ROOT/recall.json"
   python3 - "$RUN_ROOT/recall.json" <<'PY'
 import json, sys

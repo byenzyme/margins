@@ -109,7 +109,7 @@ PUBLIC_HOME="$(sed -n 's/.* MARGINS_HOME=\([^ ]*\).*/\1/p' "$PUBLIC_LOG" | head 
 test -n "$PUBLIC_HOME" && test ! -e "$PUBLIC_HOME"
 grep -Fq 'fresh-workspace init' "$PUBLIC_LOG"
 grep -Fq 'fresh-workspace sync' "$PUBLIC_LOG"
-grep -Fq 'fresh-workspace recall phosphorescent handoff decision boundary' "$PUBLIC_LOG"
+grep -Fq 'fresh-workspace recall --json phosphorescent handoff decision boundary' "$PUBLIC_LOG"
 
 for script in \
   "$REPO_ROOT/scripts/e2e-fresh-workspace-setup.sh"; do

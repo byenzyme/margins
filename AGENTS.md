@@ -98,7 +98,9 @@ The Codex plugin is parked outside core; see
   for that flow.
 - There is no scan or grounded review in setup, and no promised-question recall
   test. Refinement is optional and later: `margins workspace edit`, or an agent
-  that wants evidence reads the engine's own `enzyme scan --workspace <id> --json`.
+  that wants evidence reads the engine's own inventory with
+  `margins enzyme scan --workspace <id> --json` (the bundled engine on the
+  Margins home).
   Margins keeps no copy of engine scan or selection logic.
 - A desired program is compiled with `workspace plan --desired` (or `--preset`).
   The **final reviewed** plan is applied unchanged—`workspace apply` reads the
@@ -332,7 +334,8 @@ The standalone `enzyme` CLI below is for the *agent research* pass and reads
 `~/.enzyme/enzyme.db`. Product retrieval is a different path: the Margins home
 is its own Enzyme home (`ENZYME_HOME=$MARGINS_HOME`), and Margins indexes and
 reads `$MARGINS_HOME/workspaces/<id>/enzyme.db` by running the shipped `enzyme`
-CLI (inspect it with `ENZYME_HOME=~/.margins enzyme --workspace <id> status`;
+CLI (inspect it with `margins enzyme --workspace <id> status|search`, which runs
+the bundled engine with `ENZYME_HOME=$MARGINS_HOME`;
 tests need `MARGINS_ENZYME_BIN`, see `scripts/enzyme-bin`). When testing
 product retrieval, declare Sources and pass `--workspace <id>` to `margins init`;
 initializing an Enzyme fixture leaves the product path unindexed.

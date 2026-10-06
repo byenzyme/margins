@@ -297,19 +297,25 @@ the server together.
   tests and gates build (`scripts/enzyme-bin`) and the `version` Margins
   requires at runtime.
 
-### Inspecting a Workspace with plain `enzyme`
+### Inspecting a Workspace with `margins enzyme`
 
-A Margins home is an Enzyme home, so the engine's own commands read the same
-programs and index:
+Margins ships its own `enzyme`, separate from any `enzyme` you install, and a
+Margins home is an Enzyme home. `margins enzyme <args…>` runs that bundled
+engine with the same lookup, version check, and scrubbed environment Margins
+uses, `ENZYME_HOME=$MARGINS_HOME` (never `~/.enzyme`), and the selected
+Workspace (`--workspace`, `MARGINS_WORKSPACE`, the one whose notes folder holds
+the current directory, or the default):
 
 ```bash
-ENZYME_HOME=~/.margins enzyme --workspace <id> status
-ENZYME_HOME=~/.margins enzyme --workspace <id> status --json
-ENZYME_HOME=~/.margins enzyme --workspace <id> search "a phrase" --json
+margins enzyme --workspace <id> status
+margins enzyme --workspace <id> status --json
+margins enzyme --workspace <id> search "a phrase" --json
+margins enzyme scan --workspace <id> --json
 ```
 
-These open the index read-only. Avoid `init`/`refresh` by hand on a live
-home: without `--llm` they use Enzyme's default generator, not Margins'.
+`init` and `refresh` get Margins' catalyst generator unless you pass `--llm`.
+`update`, `login`, and `logout` are refused: Margins pins the engine it ships
+and never uses an Enzyme account.
 
 ## Open items
 

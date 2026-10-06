@@ -320,7 +320,7 @@ fn workspace_edit_invalid_text_is_kept_and_can_be_fixed_in_the_editor() {
     assert!(!refused.status.success());
     let message = stderr(&refused);
     assert!(message.contains("The edited program is not valid"), "{message}");
-    assert!(message.contains("margins workspace plan --workspace practice --desired"), "{message}");
+    assert!(message.contains("margins --workspace practice workspace plan --desired"), "{message}");
     assert_eq!(home.program(), before);
     let kept = home.leftover_edits();
     assert_eq!(kept.len(), 1);

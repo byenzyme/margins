@@ -201,7 +201,7 @@ fn write(path: &Path, body: &str) {
 }
 
 fn recall(env: &Hermetic, id: &str, query: &str, source: Option<&str>) -> serde_json::Value {
-    let mut args = vec!["--workspace", id, "recall"];
+    let mut args = vec!["--workspace", id, "recall", "--json"];
     if let Some(source) = source {
         args.extend(["--source", source]);
     }
@@ -1247,4 +1247,166 @@ fn two_workspaces_share_one_notes_folder_and_index_independently() {
     assert_eq!(indexed_documents(&beta), beta_index);
 
     env.assert_enzyme_untouched();
+}
+
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// A CLI-only newcomer, without the bb plugin: every step names the one
+/// editable program, plan and apply read in plain language without `--json`,
+/// the readable plan applies exactly what `--json` would, status reports the
+/// engine's state word, and `margins enzyme` runs the bundled engine on the
+/// Margins home, never a canary `~/.enzyme` or the inherited `ENZYME_HOME`.
+#[test]
+fn cli_only_newcomer_learns_the_program_and_reaches_the_bundled_engine() {
+    let env = Hermetic::new();
+    let canary = env.home.join(".enzyme");
+    write(
+        &canary.join("configs/practice.enzyme"),
+        "workspace \"practice\" { canary that must never be read }\n",
+    );
+    write(&canary.join("config.toml"), "canary = = not toml\n");
+    let canary_before = snapshot(&canary);
+    let notes = env.path("notes");
+    write(
+        &notes.join("Meetings/2026-10-01 vendor sync.md"),
+        "# Vendor sync\n\nThe cobalt orchard review moved the launch to Thursday.\n",
+    );
+    people_fixture(&notes);
+    fs::create_dir_all(notes.join("templates")).unwrap();
+    env.ok(&["workspace", "new", "practice", "--home", notes.to_str().unwrap()]);
+    let program_path = env.margins_home.join("configs/practice.enzyme");
+    let block = format!(
+        "Your Workspace is the program at {}\n  Read it:   margins --workspace practice workspace show --text\n  Change it: margins --workspace practice workspace edit\n",
+        program_path.display()
+    );
+
+    // Readable plan: consequences, the exact diff, and a saved plan to apply.
+    let plan = text(
+        &env.ok(&["--workspace", "practice", "workspace", "plan", "--preset", "margins-meetings"])
+            .stdout,
+    );
+    for expected in [
+        format!("Workspace practice: plan for {}", program_path.display()),
+        "  • Learn from the Meetings folder (new)".to_string(),
+        "  • Leave out the templates folder".to_string(),
+        "  Learns from Meetings · people".to_string(),
+        "  Leaves out templates · Attachments".to_string(),
+        format!("  Notes will go to {}", notes.join("Meetings").display()),
+        "  Skipped, not in your notes: Projects (no such folder)".to_string(),
+        "Exact change to the program:\n--- a/practice.enzyme".to_string(),
+        "+  learn questions from folder \"Meetings\"".to_string(),
+        "Nothing is applied yet.".to_string(),
+    ] {
+        assert!(plan.contains(&expected), "missing {expected:?} in:\n{plan}");
+    }
+    assert!(serde_json::from_str::<serde_json::Value>(&plan).is_err());
+    let saved = plan
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("margins --workspace practice workspace apply --plan "))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("no apply command in:\n{plan}"));
+    // The saved plan is byte for byte what `--json` prints.
+    let json_plan = env.ok(&[
+        "--workspace", "practice", "workspace", "plan", "--preset", "margins-meetings", "--json",
+    ]);
+    assert_eq!(fs::read(&saved).unwrap(), json_plan.stdout);
+    assert!(!env.margins_home.join("presets").exists());
+
+    let applied = text(
+        &env.ok(&["--workspace", "practice", "workspace", "apply", "--plan", saved.to_str().unwrap()])
+            .stdout,
+    );
+    assert!(applied.starts_with("Applied to Workspace practice (revision "), "{applied}");
+    assert!(applied.contains("  • Learn from the people folder (new)\n"), "{applied}");
+    assert!(applied.ends_with(&format!("\n{block}")), "{applied}");
+    let _ = fs::remove_file(&saved);
+
+    // Init keeps its one-line receipt on stdout; the program block is on stderr.
+    let _generator = fixture_generator::FixtureGenerator::start(&env.margins_home);
+    let init = env.ok(&["--workspace", "practice", "init"]);
+    let init_stdout = text(&init.stdout);
+    assert_eq!(init_stdout.lines().count(), 1, "{init_stdout}");
+    assert!(init_stdout.starts_with("<margins_init "), "{init_stdout}");
+    assert!(text(&init.stderr).contains(&block), "{}", text(&init.stderr));
+
+    // Status speaks the same state word as --json, and names the program.
+    let status = text(&env.ok(&["--workspace", "practice", "workspace", "status"]).stdout);
+    let status_json = env.json(&["--workspace", "practice", "workspace", "status", "--json"]);
+    assert_eq!(status_json["recall"]["mode"], "indexed", "{status_json}");
+    assert!(status.contains("Recall: indexed (available=true"), "{status}");
+    assert!(status.contains(&format!("Program: {}\n", program_path.display())), "{status}");
+
+    // Show keeps the path alone on stdout, with the hint on stderr.
+    let show = env.ok(&["--workspace", "practice", "workspace", "show"]);
+    assert_eq!(text(&show.stdout), format!("{}\n", program_path.display()));
+    assert!(text(&show.stderr).contains("workspace show --text"));
+
+    // Recall reads as results for people, JSON on request.
+    let phrase = "The cobalt orchard review moved the launch to Thursday";
+    let readable = text(&env.ok(&["--workspace", "practice", "recall", phrase]).stdout);
+    assert!(readable.contains("Meetings/2026-10-01 vendor sync.md"), "{readable}");
+    assert!(serde_json::from_str::<serde_json::Value>(&readable).is_err(), "{readable}");
+    assert_eq!(recall(&env, "practice", phrase, None)["status"], "ok");
+
+    // Non-interactive edit points at the documented flag form.
+    let edit = env.run(&["--workspace", "practice", "workspace", "edit"]);
+    assert!(!edit.status.success());
+    assert!(
+        text(&edit.stderr).contains("margins --workspace practice workspace plan --desired program.enzyme"),
+        "{}",
+        text(&edit.stderr)
+    );
+
+    // `margins enzyme`: the bundled engine on the Margins home.
+    let engine_status = env.json(&["enzyme", "--workspace", "practice", "status", "--json"]);
+    assert_eq!(
+        engine_status["database"],
+        env.margins_home.join("workspaces/practice/enzyme.db").to_str().unwrap(),
+        "{engine_status}"
+    );
+    assert_eq!(engine_status["documents"], status_json["recall"]["documents"]);
+    let search = env.json(&["--workspace", "practice", "enzyme", "search", phrase, "--json"]);
+    assert!(search.to_string().contains("Meetings/2026-10-01 vendor sync.md"), "{search}");
+    // Inside the notes folder the Workspace is found from the cwd.
+    let inside = env
+        .command(Path::new(BIN), &["enzyme", "status", "--json"])
+        .current_dir(notes.join("Meetings"))
+        .output()
+        .unwrap();
+    assert!(inside.status.success(), "{}", text(&inside.stderr));
+    // Nowhere to go: refused rather than indexing the cwd as a vault.
+    let nowhere = env.run(&["enzyme", "status"]);
+    assert!(!nowhere.status.success());
+    assert!(text(&nowhere.stderr).contains("choose a Workspace"), "{}", text(&nowhere.stderr));
+    // init/refresh get Margins' generator unless the caller picks one.
+    let refresh = env.ok(&["enzyme", "--workspace", "practice", "refresh", "--quiet"]);
+    assert!(text(&refresh.stderr).contains("refresh --quiet --llm env"), "{}", text(&refresh.stderr));
+    let chosen = env.ok(&["enzyme", "--workspace", "practice", "refresh", "--quiet", "--llm", "none"]);
+    assert!(!text(&chosen.stderr).contains("--llm env"), "{}", text(&chosen.stderr));
+    let update = env.run(&["enzyme", "update"]);
+    assert!(!update.status.success());
+    assert!(text(&update.stderr).contains("Update Margins instead"));
+    let version = env.ok(&["enzyme", "--version"]);
+    assert_eq!(text(&version.stdout).trim(), format!("enzyme {}", enzyme_bin_version()));
+
+    // Setup names the program too.
+    let setup = env.run(&["--workspace", "practice", "setup", "--only", "skills"]);
+    assert!(setup.status.success(), "{}", text(&setup.stderr));
+    assert!(text(&setup.stderr).contains(&block), "{}", text(&setup.stderr));
+    assert!(text(&setup.stderr).contains("Setup finished.\n"), "{}", text(&setup.stderr));
+
+    assert_eq!(snapshot(&canary), canary_before, "~/.enzyme must be neither read-modified nor written");
+    assert_eq!(snapshot(&env.enzyme_home), env.enzyme_before, "ENZYME_HOME must be untouched");
+    assert!(!notes.join(".enzyme").exists());
+}
+
+fn enzyme_bin_version() -> String {
+    let pin = include_str!("../scripts/enzyme-cli.pin");
+    pin.lines()
+        .find_map(|line| line.strip_prefix("version = "))
+        .unwrap()
+        .trim_matches('"')
+        .to_string()
 }

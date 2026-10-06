@@ -132,6 +132,10 @@ fn run_setup_with(
     let mut hosted_ready = false;
     let mut local_model_failed = false;
     let mut selected_step_failed = false;
+    // `--local-model always` asked for a local model this build cannot install.
+    let mut local_model_unavailable = false;
+    // Steps that failed, for the closing summary.
+    let mut failures: Vec<&str> = Vec::new();
 
     if selection.catalyst {
         match margins_home {
@@ -174,11 +178,13 @@ fn run_setup_with(
                 )?,
                 Err(error) => {
                     selected_step_failed = true;
+                    failures.push("skills");
                     setup_status(stderr, "skills", false, &format!("{error:#}"))?;
                 }
             },
             None => {
                 selected_step_failed = true;
+                failures.push("skills");
                 setup_status(
                     stderr,
                     "skills",
@@ -209,6 +215,7 @@ fn run_setup_with(
             )?,
             Err(error) => {
                 selected_step_failed = true;
+                failures.push("speech");
                 setup_status(stderr, "speech", false, &format!("{error:#}"))?;
             }
         }
@@ -242,18 +249,32 @@ fn run_setup_with(
                         )?,
                         Err(error) => {
                             local_model_failed = true;
+                            failures.push("local catalyst");
                             setup_status(stderr, "local catalyst", false, &format!("{error:#}"))?;
                         }
                     }
                 }
-                Ok(None) => setup_status(
-                    stderr,
-                    "local catalyst",
-                    true,
-                    "selected without a bundled local-model installer",
-                )?,
+                // This build has no local-model installer: say so rather than
+                // quietly keeping hosted generation after `always` asked for
+                // local, or reporting a fallback that does not exist.
+                Ok(None) => {
+                    local_model_unavailable =
+                        selection.local_model == SetupLocalModelPolicyArg::Always;
+                    failures.push("local catalyst (not available in this build)");
+                    setup_status(
+                        stderr,
+                        "local catalyst",
+                        false,
+                        if local_model_unavailable {
+                            "this Margins build cannot install a local catalyst model, so --local-model always cannot be honored; generation was left unchanged"
+                        } else {
+                            "this Margins build cannot install a local catalyst model to fall back to"
+                        },
+                    )?;
+                }
                 Err(error) => {
                     local_model_failed = true;
+                    failures.push("local catalyst");
                     setup_status(stderr, "local catalyst", false, &format!("{error:#}"))?;
                 }
             }
@@ -296,15 +317,98 @@ fn run_setup_with(
         false
     };
 
+    // With the catalyst selected (including full setup), a usable generator is
+    // the success criterion, as before; other step failures are reported only,
+    // and the summary says so plainly.
+    let failed = if selection.catalyst {
+        !usable_generator || local_model_unavailable
+    } else {
+        selected_step_failed
+    };
+    if selection.catalyst && !usable_generator {
+        failures.push("catalyst");
+    }
+    if failures.is_empty() {
+        writeln!(stderr, "Setup finished.")?;
+    } else {
+        // Retrying cannot install what this build lacks.
+        let retry = failures
+            .iter()
+            .filter_map(|step| match *step {
+                "local catalyst" | "catalyst" => Some("catalyst"),
+                "skills" | "speech" => Some(*step),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(|step| format!("`margins setup --only {step}`"))
+            .collect::<Vec<_>>()
+            .join(" or ");
+        writeln!(
+            stderr,
+            "Setup finished with failures: {}.{}{}",
+            failures.join(", "),
+            if failed {
+                ""
+            } else {
+                " Recall can still work without them."
+            },
+            if retry.is_empty() {
+                String::new()
+            } else {
+                format!(" Retry with {retry}.")
+            }
+        )?;
+    }
+    write_setup_program_note(stderr, margins_home, workspace)?;
     margins_cli::commands::guide::setup_handoff(workspace, stdout)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    // With the catalyst selected (including full setup), a usable generator is
-    // the success criterion, as before; other step failures are reported only.
-    if selection.catalyst {
-        Ok(!usable_generator)
-    } else {
-        Ok(selected_step_failed)
+    Ok(failed)
+}
+
+/// Where the Workspace program is (or will be), so a CLI-only user learns it
+/// is one editable file. Never derives a Workspace from the process cwd: only
+/// the selected one or the machine default.
+fn write_setup_program_note(
+    report: &mut dyn Write,
+    margins_home: Option<&Path>,
+    workspace: Option<&str>,
+) -> Result<()> {
+    let Some(home) = margins_home else {
+        return Ok(());
+    };
+    let selected = match workspace.filter(|id| !id.trim().is_empty()) {
+        Some(id) => Some(id.to_string()),
+        None => margins_workflows::workspace::default_workspace(home).ok().flatten(),
+    };
+    writeln!(report)?;
+    let configs = home.join(margins_workflows::workspace::CONFIGS_DIR);
+    match selected {
+        Some(id) if configs.join(format!("{id}.enzyme")).is_file() => {
+            margins_cli::commands::workspace_text::write_program_block(
+                report,
+                &id,
+                &configs.join(format!("{id}.enzyme")),
+            )?;
+        }
+        _ => {
+            writeln!(
+                report,
+                "Your Workspace will be one editable program at {}/<id>.enzyme once you create it:",
+                configs.display()
+            )?;
+            writeln!(
+                report,
+                "  margins workspace new <id> --home /path/to/your/notes"
+            )?;
+            writeln!(
+                report,
+                "  Then read it with `margins --workspace <id> workspace show --text` and change it with `margins --workspace <id> workspace edit`."
+            )?;
+        }
     }
+    writeln!(report)?;
+    Ok(())
 }
 
 fn setup_status(report: &mut dyn Write, step: &str, ok: bool, reason: &str) -> Result<()> {

@@ -25,8 +25,10 @@ session, or draft a note as part of this workflow.
   Margins may write an approved note. Reference Sources may be searched but not
   modified.
 - Each Workspace is one **program**, `$MARGINS_HOME/configs/<id>.enzyme`
-  (`margins --workspace <id> workspace show` prints its path). It says which
-  folders Margins reads, where it writes notes, and what it leaves out.
+  (`margins --workspace <id> workspace show` prints its path and
+  `workspace show --text` its text). It says which folders Margins reads, where
+  it writes notes, and what it leaves out. `margins guide glossary` explains
+  these words for the user.
 - Setup starts every program from the **Margins meetings preset**: notes go to
   `Meetings`, `Templates` and `Attachments` are left out, and Margins learns
   questions from `Meetings` (open work and follow-ups), `People` (relationships,
@@ -169,6 +171,9 @@ margins --workspace practice workspace apply \
 
 Apply derives its revision check and retry identity from the plan. It rejects a
 stale or altered plan and commits atomically. Never hand-edit plan JSON.
+Without `--json`, `workspace plan` prints the same consequences in plain
+language and saves the plan for `workspace apply --plan`, and `workspace apply`
+prints what changed; that is the form a person at a terminal uses.
 
 If the user wants something different before apply—notes in another folder, a
 folder left out, a reading removed—apply the preset first, then change the program
@@ -197,9 +202,9 @@ Margins configuration.
 
 If `init` fails after an applied plan, preserve that program while you report and
 diagnose the failure. Do not remove readings or try another policy as a diagnostic
-shortcut. A `live_lexical` status only confirms that an index exists; it does not
-establish that the recall command is usable when catalyst readiness is still
-pending.
+shortcut. An `indexed` or `live_lexical` status only confirms that an index
+exists; it does not establish that the recall command is usable when catalyst
+readiness is still pending.
 
 Treat `workspace status`'s `live_lexical` document count as portable live Markdown
 coverage, not as the official semantic index size. Never relabel that number as
@@ -255,9 +260,11 @@ margins --workspace practice workspace plan \
 Show the user the plan's user-visible consequences before applying it, then
 apply that plan unchanged. An agent that
 wants evidence about the notes before proposing a change may read the engine's own
-read-only inventory, `enzyme scan --workspace <id> --json` (run with
-`ENZYME_HOME=$MARGINS_HOME`). The Knowledge Practice Review Contract below applies
-to that optional review only.
+read-only inventory, `margins enzyme scan --workspace <id> --json`. Margins ships
+its own `enzyme`, separate from any `enzyme` the user installed, and
+`margins enzyme` runs that bundled engine on the Margins home (never
+`~/.enzyme`). The Knowledge Practice Review Contract below applies to that
+optional review only.
 
 An entity is an existing thread—such as a folder, tag, linked note, or running
 log—that Margins can build recall catalysts around. In the program each one is a

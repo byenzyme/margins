@@ -5,7 +5,12 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(
     name = "margins",
-    about = "Record meetings and work with their notes and transcripts"
+    about = "Record meetings and work with their notes and transcripts",
+    after_help = "Your Workspace is one editable program, $MARGINS_HOME/configs/<id>.enzyme: it says which \
+notes Margins reads, what it leaves out, and where it writes new notes.\n  \
+Read it:   margins --workspace <id> workspace show --text\n  \
+Change it: margins --workspace <id> workspace edit\n\
+New to the words? Run `margins guide glossary`."
 )]
 pub struct Args {
     /// Select an opt-in remote Margins instance (ssh://alias or https://host)
@@ -33,7 +38,12 @@ pub enum Command {
         #[command(subcommand)]
         command: ServiceCommand,
     },
-    /// Define and inspect the memory boundary for one practice
+    /// See and change your Workspace: the program that says which notes
+    /// Margins reads and where it writes
+    #[command(after_help = "Each Workspace is one editable program, $MARGINS_HOME/configs/<id>.enzyme.\n  \
+Where it is: margins --workspace <id> workspace show\n  \
+Read it:     margins --workspace <id> workspace show --text\n  \
+Change it:   margins --workspace <id> workspace edit")]
     Workspace {
         #[command(subcommand)]
         command: WorkspaceCommand,
@@ -55,7 +65,7 @@ pub enum Command {
         #[arg(long, value_enum, default_value_t = SetupLocalModelPolicyArg::Fallback)]
         local_model: SetupLocalModelPolicyArg,
     },
-    /// Print embedded Margins guides for agents
+    /// Print embedded Margins guides, and a glossary of Margins words
     Guide {
         #[command(subcommand)]
         command: GuideCommand,
@@ -213,6 +223,9 @@ pub enum Command {
         /// Restrict results to one declared source name
         #[arg(long)]
         source: Option<String>,
+        /// Emit the margins.recall.v1 JSON envelope instead of readable results
+        #[arg(long)]
+        json: bool,
     },
     /// Refresh declared workspace sources and the recall snapshot
     Sync {
@@ -245,6 +258,19 @@ pub enum Command {
     },
     /// Print this installation's machine-readable capabilities as JSON
     Capabilities,
+    /// Run the enzyme engine that ships inside Margins, on Margins' own data
+    ///
+    /// Margins bundles its own `enzyme`, separate from any `enzyme` you
+    /// install yourself, and keeps its data in $MARGINS_HOME (never
+    /// ~/.enzyme). Arguments pass through unchanged, for example
+    /// `margins enzyme --workspace <id> status` or
+    /// `margins enzyme scan --workspace <id> --json`.
+    #[command(disable_help_flag = true)]
+    Enzyme {
+        /// Arguments for the bundled `enzyme`
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<std::ffi::OsString>,
+    },
     /// Establish or refresh a Margins vault in this folder
     Init,
 }
@@ -385,8 +411,9 @@ pub enum WorkspaceCommand {
         /// folder does not have are dropped.
         #[arg(long, value_name = "NAME|PATH")]
         preset: Option<String>,
-        /// Emit margins.workspace.plan.v2 JSON
-        #[arg(long, required = true)]
+        /// Emit margins.workspace.plan.v2 JSON instead of a readable summary
+        /// (without it, the plan is saved to a file for `workspace apply`)
+        #[arg(long)]
         json: bool,
     },
     /// Atomically apply an exact workspace plan
@@ -394,8 +421,8 @@ pub enum WorkspaceCommand {
         /// JSON plan emitted by `workspace plan`
         #[arg(long)]
         plan: PathBuf,
-        /// Emit margins.workspace.apply.v2 JSON
-        #[arg(long, required = true)]
+        /// Emit margins.workspace.apply.v2 JSON instead of a readable receipt
+        #[arg(long)]
         json: bool,
     },
     /// Convert retired `workspaces/<id>/config.toml` files to `configs/<id>.enzyme`
@@ -584,6 +611,8 @@ pub enum GuideCommand {
     WorkspaceSetup,
     /// Print the guided onboarding experience for an orchestrating agent
     Onboarding,
+    /// Explain the words Margins uses: Workspace, program, reading, catalyst, …
+    Glossary,
 }
 
 #[derive(Debug, Subcommand)]

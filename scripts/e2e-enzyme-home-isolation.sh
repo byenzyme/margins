@@ -216,7 +216,7 @@ margins --workspace practice init > "$MOCK_DIR/init.out" 2> "$MOCK_DIR/init.err"
   || { cat "$MOCK_DIR/init.err" >&2; fail "margins init"; }
 grep -q 'engine index first_build' "$MOCK_DIR/init.err" || fail "first init did not report first_build"
 [[ -f "$MARGINS_HOME/workspaces/practice/enzyme.db" ]] || fail "index not at MARGINS_HOME/workspaces/practice/enzyme.db"
-margins --workspace practice recall "$PHRASE" > "$MOCK_DIR/recall.json"
+margins --workspace practice recall --json "$PHRASE" > "$MOCK_DIR/recall.json"
 python3 - "$MOCK_DIR/recall.json" <<'PY' || fail "recall did not return the planted note"
 import json, sys
 recall = json.load(open(sys.argv[1]))
@@ -372,8 +372,8 @@ margins --workspace legacy init > /dev/null 2> "$MOCK_DIR/legacy-2.err" || fail 
 ! grep -q 'engine index rebuild\|in_process_index\|first_build' "$MOCK_DIR/legacy-2.err" \
   || fail "the transition repeated on the second init"
 LEGACY_PHRASE="$(cat "$FIXTURE/phrase.txt")"
-margins --workspace legacy recall "$LEGACY_PHRASE" > "$MOCK_DIR/legacy-recall.json"
-margins --workspace legacy recall --source mail "$(cat "$FIXTURE/mail-phrase.txt")" > "$MOCK_DIR/legacy-mail.json"
+margins --workspace legacy recall --json "$LEGACY_PHRASE" > "$MOCK_DIR/legacy-recall.json"
+margins --workspace legacy recall --json --source mail "$(cat "$FIXTURE/mail-phrase.txt")" > "$MOCK_DIR/legacy-mail.json"
 python3 - "$MOCK_DIR/legacy-recall.json" "$(cat "$FIXTURE/phrase-ref.txt")" "$MOCK_DIR/legacy-mail.json" <<'PY' \
   || fail "recall over the transitioned index"
 import json, sys

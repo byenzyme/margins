@@ -410,7 +410,9 @@ impl Engine {
         &self.bin
     }
 
-    fn command(&self, workspace: Option<&str>) -> Command {
+    /// The binary with the allowlisted environment and `ENZYME_HOME` set to
+    /// this home; nothing else from the parent reaches it.
+    fn scrubbed(&self) -> Command {
         let mut command = Command::new(&self.bin);
         command.env_clear();
         for name in INHERITED_ENV {
@@ -418,10 +420,13 @@ impl Engine {
                 command.env(name, value);
             }
         }
+        command.env("ENZYME_HOME", &self.home);
         command
-            .env("ENZYME_HOME", &self.home)
-            .env("NO_COLOR", "1")
-            .stdin(Stdio::null());
+    }
+
+    fn command(&self, workspace: Option<&str>) -> Command {
+        let mut command = self.scrubbed();
+        command.env("NO_COLOR", "1").stdin(Stdio::null());
         if let Some(workspace) = workspace {
             command.arg("--workspace").arg(workspace);
         }
@@ -603,6 +608,41 @@ impl Engine {
             .and_then(serde_json::Value::as_str)
             .map(str::to_string)
             .ok_or_else(|| EngineError::Protocol("compile printed no program".into()))
+    }
+
+    /// `margins enzyme <args>`: run the engine for a person, with the
+    /// terminal attached, and return its exit status. `args` come from
+    /// [`passthrough_args`]; with `generator`, the call gets that generator as
+    /// its `--llm` (and, for `env`, its endpoint).
+    pub fn passthrough(
+        &self,
+        args: &[std::ffi::OsString],
+        generator: Option<&Generator>,
+    ) -> Result<std::process::ExitStatus, EngineError> {
+        let mut command = self.scrubbed();
+        // Display only: let the engine see the terminal it is drawing on.
+        for name in ["TERM", "COLORTERM", "NO_COLOR", "COLUMNS"] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+        command.args(args);
+        if let Some(generator) = generator {
+            Self::generator_args(&mut command, generator);
+        }
+        debug(&format!(
+            "{} {}",
+            self.bin.display(),
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+        command.status().map_err(|error| EngineError::Failed {
+            code: None,
+            message: format!("starting {}: {error}", self.bin.display()),
+        })
     }
 
     /// `model list --json`: the registry and what is installed in
@@ -927,6 +967,102 @@ pub fn selected_generator(engine: &Engine, margins_home: &Path) -> Result<Genera
     })
 }
 
+/// Engine subcommands that take `--llm`; `margins enzyme` gives them Margins'
+/// generator unless the caller chose one.
+const GENERATOR_SUBCOMMANDS: &[&str] = &["init", "refresh"];
+
+/// Engine subcommands that read no vault or Workspace.
+const VAULTLESS_SUBCOMMANDS: &[&str] = &["help", "model", "spec"];
+
+/// Top-level engine options that take a value.
+const VALUE_OPTIONS: &[&str] = &["--workspace", "--collection", "-p", "--vault"];
+
+/// What `margins enzyme` runs: the arguments, and whether the call needs
+/// Margins' catalyst generator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Passthrough {
+    pub args: Vec<std::ffi::OsString>,
+    pub needs_generator: bool,
+}
+
+/// Arguments for `margins enzyme`. `workspace` is the Workspace Margins
+/// selected (`--workspace`, which Margins reads wherever it appears,
+/// `MARGINS_WORKSPACE`, or the default); it is passed on unless the caller
+/// named a vault or collection itself. `update`, `login`, and `logout` are
+/// refused: Margins pins the engine it ships and never uses Enzyme accounts.
+pub fn passthrough_args(
+    workspace: Option<&str>,
+    args: &[std::ffi::OsString],
+) -> Result<Passthrough, String> {
+    let text = |arg: &std::ffi::OsString| arg.to_string_lossy().into_owned();
+    let mut subcommand = None;
+    let mut located = false;
+    let mut chose_generator = false;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = text(&args[index]);
+        if arg == "--" {
+            break;
+        }
+        if arg == "--llm" || arg.starts_with("--llm=") || arg == "--use-env-llm" {
+            chose_generator = true;
+        }
+        if VALUE_OPTIONS.contains(&arg.as_str()) {
+            located = true;
+            index += 2;
+            continue;
+        }
+        if ["--workspace=", "--collection=", "--vault="]
+            .iter()
+            .any(|prefix| arg.starts_with(prefix))
+            || (arg.starts_with("-p") && !arg.starts_with("--"))
+        {
+            located = true;
+        } else if subcommand.is_none() && !arg.starts_with('-') {
+            subcommand = Some(arg);
+        }
+        index += 1;
+    }
+    match subcommand.as_deref() {
+        Some("update") => {
+            return Err(
+                "`enzyme update` is not available through Margins: Margins ships and pins its own engine. Update Margins instead."
+                    .to_string(),
+            )
+        }
+        Some(command @ ("login" | "logout")) => {
+            return Err(format!(
+                "`enzyme {command}` is not available through Margins: Margins never uses an Enzyme account. Use `margins setup` for catalyst access."
+            ))
+        }
+        _ => {}
+    }
+    // Without a Workspace or vault the engine would use the cwd as a vault and
+    // write `.enzyme/` into it; only commands that need no vault may run so.
+    let needs_vault = subcommand
+        .as_deref()
+        .is_some_and(|command| !VAULTLESS_SUBCOMMANDS.contains(&command));
+    if workspace.is_none() && !located && needs_vault {
+        return Err(
+            "choose a Workspace with `margins enzyme --workspace ID …`; `margins workspace list` shows them"
+                .to_string(),
+        );
+    }
+    let mut full = Vec::new();
+    if let Some(workspace) = workspace.filter(|_| !located) {
+        full.push("--workspace".into());
+        full.push(workspace.into());
+    }
+    full.extend(args.iter().cloned());
+    Ok(Passthrough {
+        args: full,
+        needs_generator: !chose_generator
+            && subcommand
+                .as_deref()
+                .is_some_and(|command| GENERATOR_SUBCOMMANDS.contains(&command)),
+    })
+}
+
 fn debug(message: &str) {
     if std::env::var_os("MARGINS_RECALL_DEBUG").is_some() {
         eprintln!("recall: enzyme {message}");
@@ -1126,5 +1262,55 @@ mod tests {
             None => std::env::remove_var(ENZYME_BIN_ENV),
         }
         assert!(error.to_string().contains(&missing.display().to_string()));
+    }
+
+    fn passthrough(workspace: Option<&str>, args: &[&str]) -> Result<Passthrough, String> {
+        let args = args.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        passthrough_args(workspace, &args)
+    }
+
+    fn strings(passthrough: &Passthrough) -> Vec<String> {
+        passthrough
+            .args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn passthrough_names_the_workspace_and_asks_for_a_generator_only_where_it_applies() {
+        let status = passthrough(Some("notes"), &["status"]).unwrap();
+        assert_eq!(strings(&status), ["--workspace", "notes", "status"]);
+        assert!(!status.needs_generator);
+
+        let init = passthrough(Some("notes"), &["init", "--quiet"]).unwrap();
+        assert!(init.needs_generator);
+        let refresh = passthrough(Some("notes"), &["-v", "refresh"]).unwrap();
+        assert!(refresh.needs_generator);
+        // The caller's own generator wins.
+        for chosen in [&["init", "--llm", "none"][..], &["init", "--llm=local"], &["refresh", "--use-env-llm"]] {
+            assert!(!passthrough(Some("notes"), chosen).unwrap().needs_generator, "{chosen:?}");
+        }
+        // A query that happens to say "init" is not the subcommand.
+        assert!(!passthrough(Some("notes"), &["search", "init"]).unwrap().needs_generator);
+
+        // A vault or collection the caller names is used instead.
+        for located in [&["-p", "/v", "status"][..], &["--vault=/v", "status"], &["--collection", "x", "status"]] {
+            let run = passthrough(Some("notes"), located).unwrap();
+            assert_eq!(strings(&run), located.to_vec(), "{located:?}");
+        }
+    }
+
+    #[test]
+    fn passthrough_never_falls_back_to_the_cwd_vault_or_runs_account_commands() {
+        let error = passthrough(None, &["status"]).unwrap_err();
+        assert!(error.contains("--workspace ID"), "{error}");
+        for vaultless in [&["--version"][..], &["model", "list"], &["spec", "profiles"], &[]] {
+            assert_eq!(strings(&passthrough(None, vaultless).unwrap()), vaultless.to_vec());
+        }
+        assert!(passthrough(Some("notes"), &["update"]).unwrap_err().contains("Update Margins"));
+        for account in ["login", "logout"] {
+            assert!(passthrough(Some("notes"), &[account]).unwrap_err().contains("Enzyme account"));
+        }
     }
 }

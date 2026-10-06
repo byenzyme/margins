@@ -164,11 +164,8 @@ fn run_inner(
                     "integrations reconcile requires literal --workspace <id>",
                 ));
             }
-            let workspace = commands::workspace::resolve(
-                workspace_selector.as_deref(),
-                invocation_dir,
-                stderr,
-            )?;
+            let workspace =
+                commands::workspace::resolve_read_only(workspace_selector.as_deref(), invocation_dir)?;
             return match command {
                 IntegrationsCommand::Reconcile {
                     connector,
@@ -236,7 +233,6 @@ fn run_inner(
                 invocation_dir,
                 json,
                 stdout,
-                stderr,
             );
         }
         Some(Command::Workspace {
@@ -253,6 +249,7 @@ fn run_inner(
                 text,
                 json,
                 stdout,
+                stderr,
             );
         }
         Some(Command::Workspace {
@@ -270,6 +267,7 @@ fn run_inner(
             command:
                 WorkspaceCommand::Plan {
                     desired: Some(desired),
+                    json,
                     ..
                 },
         }) => {
@@ -277,6 +275,7 @@ fn run_inner(
                 workspace_selector.as_deref(),
                 invocation_dir,
                 &absolute_from(invocation_dir, &desired),
+                json,
                 stdout,
             );
         }
@@ -299,12 +298,13 @@ fn run_inner(
             );
         }
         Some(Command::Workspace {
-            command: WorkspaceCommand::Apply { plan, .. },
+            command: WorkspaceCommand::Apply { plan, json },
         }) => {
             return commands::workspace::apply(
                 workspace_selector.as_deref(),
                 invocation_dir,
                 &absolute_from(invocation_dir, &plan),
+                json,
                 stdout,
             );
         }
@@ -350,7 +350,6 @@ fn run_inner(
                 invocation_dir,
                 json,
                 stdout,
-                stderr,
             );
         }
         Some(Command::Source {
@@ -422,11 +421,9 @@ fn run_inner(
         Some(Command::Import {
             command: ImportCommand::Granola { path },
         }) => {
-            let workspace = commands::workspace::resolve(
-                workspace_selector.as_deref(),
-                invocation_dir,
-                stderr,
-            )?;
+            // Importing writes notes; it never creates a Workspace to hold them.
+            let workspace =
+                commands::workspace::resolve_read_only(workspace_selector.as_deref(), invocation_dir)?;
             let project = workspace_project_adapter(&workspace);
             return commands::import::granola(
                 &workspace.state_dir,
@@ -472,6 +469,17 @@ fn run_inner(
             command: GuideCommand::Onboarding,
         }) => {
             return commands::guide::onboarding(stdout);
+        }
+        Some(Command::Guide {
+            command: GuideCommand::Glossary,
+        }) => {
+            return commands::guide::glossary(stdout);
+        }
+        Some(Command::Enzyme { .. }) => {
+            return Err(CliError::new(
+                "composition_unavailable",
+                "this build has no bundled enzyme engine; install the official Margins CLI",
+            ));
         }
         Some(Command::Capabilities) => {
             return commands::capabilities::public(stdout);
@@ -541,20 +549,18 @@ fn run_inner(
                 margins_workflows::workspace::margins_home().map_err(CliError::from_anyhow)?;
             return commands::connect::forget_granola(&home, &account, json, stdout);
         }
-        Some(Command::Recall { query, source }) => {
-            let workspace = commands::workspace::resolve(
-                workspace_selector.as_deref(),
-                invocation_dir,
-                stderr,
-            )?;
-            return commands::recall::run(&workspace, &query, source.as_deref(), stdout);
+        Some(Command::Recall {
+            query,
+            source,
+            json,
+        }) => {
+            let workspace =
+                commands::workspace::resolve_read_only(workspace_selector.as_deref(), invocation_dir)?;
+            return commands::recall::run(&workspace, &query, source.as_deref(), json, stdout);
         }
         Some(Command::Sync { source, json }) => {
-            let workspace = commands::workspace::resolve(
-                workspace_selector.as_deref(),
-                invocation_dir,
-                stderr,
-            )?;
+            let workspace =
+                commands::workspace::resolve_read_only(workspace_selector.as_deref(), invocation_dir)?;
             return commands::recall::sync(&workspace, source.as_deref(), json, stdout);
         }
         Some(Command::Transcribe {
@@ -783,6 +789,7 @@ fn run_inner(
         Some(Command::Capabilities) => unreachable!("handled before project resolution"),
         Some(Command::Init) => unreachable!("handled before project resolution"),
         Some(Command::Note { .. }) => unreachable!("handled before project resolution"),
+        Some(Command::Enzyme { .. }) => unreachable!("handled before project resolution"),
         Some(Command::Setup { .. }) | Some(Command::Guide { .. }) => {
             unreachable!("handled before project resolution")
         }

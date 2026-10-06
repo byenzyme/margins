@@ -143,7 +143,7 @@ Form focused queries from consequential, distinctive language in the input.
 Usually one to four searches are enough:
 
 ```bash
-"$MARGINS_CLI" --workspace "<workspace-id>" recall "<specific query>"
+"$MARGINS_CLI" --workspace "<workspace-id>" recall --json "<specific query>"
 ```
 
 `recall` returns matching excerpts with their note paths. Read the best three to

@@ -1,16 +1,22 @@
-/// Resolve the vault git-style and run associative recall against it. Interactive
-/// terminals receive Enzyme's catalyze tree; piped consumers receive the
-/// compatible JSON envelope. Recall fails closed when catalysts cannot serve
-/// the request; callers receive a non-zero command result and an explicit hint.
+/// Resolve the vault git-style and run associative recall against it. People
+/// get the readable catalyst tree; `--json` emits the margins.recall.v1
+/// envelope for agents and scripts. Recall fails closed when catalysts cannot
+/// serve the request; callers receive a non-zero command result and an
+/// explicit hint.
 #[cfg(feature = "recall")]
-fn run_recall(workspace_selector: Option<&str>, query: &str, source: Option<&str>) -> i32 {
-    let workspace = match resolve_workspace(workspace_selector) {
+fn run_recall(
+    workspace_selector: Option<&str>,
+    query: &str,
+    source: Option<&str>,
+    json: bool,
+) -> i32 {
+    // Read-only: never creates a Workspace.
+    let workspace = match read_only_workspace(workspace_selector) {
         Ok(workspace) => workspace,
-        Err(error) => return report_error(&error.to_string()),
+        Err(error) => return report_cli_error(error),
     };
-    let terminal = io::stdout().is_terminal();
     match crate::recall::recall(&workspace, query, source) {
-        Ok(output) => match crate::recall::render_recall_for_stdout(&output, terminal) {
+        Ok(output) => match crate::recall::render_recall_for_stdout(&output, !json) {
             Ok(rendered) => {
                 print!("{rendered}");
                 0
@@ -23,9 +29,11 @@ fn run_recall(workspace_selector: Option<&str>, query: &str, source: Option<&str
 
 #[cfg(feature = "recall")]
 fn run_sync(workspace_selector: Option<&str>, source_filter: Option<&str>, json: bool) -> i32 {
-    let workspace = match resolve_workspace(workspace_selector) {
+    // Sync refreshes an existing Workspace; it never creates one.
+    let workspace = match read_only_workspace(workspace_selector) {
         Ok(workspace) => workspace,
-        Err(error) => return report_error(&error.to_string()),
+        Err(error) if json => return report_json_cli_error(error),
+        Err(error) => return report_cli_error(error),
     };
     if let Some(source) = source_filter {
         if !workspace.config.bindings.contains_key(source) {
@@ -256,17 +264,52 @@ fn generated_sync_request_id() -> String {
 /// desired program. The plan JSON also names the program and what the preset
 /// kept and skipped.
 #[cfg(feature = "recall")]
-fn run_workspace_plan_preset(workspace_selector: Option<&str>, preset: &str) -> i32 {
-    match workspace_plan_preset(workspace_selector, preset) {
-        Ok(plan) => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&plan).unwrap_or_else(|_| plan.to_string())
-            );
-            0
-        }
-        Err(error) => report_json_cli_error(error),
+fn run_workspace_plan_preset(workspace_selector: Option<&str>, preset: &str, json: bool) -> i32 {
+    let plan = match workspace_plan_preset(workspace_selector, preset) {
+        Ok(plan) => plan,
+        Err(error) if json => return report_json_cli_error(error),
+        Err(error) => return report_cli_error(error),
+    };
+    let text = serde_json::to_string_pretty(&plan).unwrap_or_else(|_| plan.to_string());
+    if json {
+        println!("{text}");
+        return 0;
     }
+    match workspace_plan_preset_text(workspace_selector, &plan, &format!("{text}\n")) {
+        Ok(()) => 0,
+        Err(error) => report_cli_error(error),
+    }
+}
+
+/// Human `workspace plan --preset`: the same plan, saved for `apply --plan`
+/// and described with what the preset kept and skipped.
+#[cfg(feature = "recall")]
+fn workspace_plan_preset_text(
+    workspace_selector: Option<&str>,
+    value: &serde_json::Value,
+    plan_json: &str,
+) -> Result<(), margins_cli::CliError> {
+    use margins_cli::commands::workspace_text::PresetOutcome;
+    use margins_cli::CliError;
+    let invalid = |error: serde_json::Error| CliError::new("output_failed", error.to_string());
+    let plan: margins_workflows::workspace::WorkspacePlan =
+        serde_json::from_value(value.clone()).map_err(invalid)?;
+    let preset = &value["preset"];
+    let outcome = PresetOutcome {
+        template: preset["template"].as_str().unwrap_or_default().to_string(),
+        skipped_readings: serde_json::from_value(preset["skipped_readings"].clone())
+            .map_err(invalid)?,
+        skip_reasons: serde_json::from_value(preset["skip_reasons"].clone()).map_err(invalid)?,
+    };
+    let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+    let workspace = margins_cli::commands::workspace::inspect_existing(workspace_selector, &cwd)?;
+    margins_cli::commands::workspace::write_plan_text(
+        &workspace,
+        &plan,
+        Some(&outcome),
+        plan_json.as_bytes(),
+        &mut io::stdout(),
+    )
 }
 
 #[cfg(feature = "recall")]
@@ -359,19 +402,34 @@ fn run_init(workspace_selector: Option<&str>) -> i32 {
                 return report_error(&status.readiness.message());
             }
             let catalyst = margins_workflows::catalyst::selected_status(&margins_home);
-            match margins_cli::commands::projects::write_init(
+            if let Err(error) = margins_cli::commands::projects::write_init(
                 &mut io::stdout(),
                 &workspace.home_dir,
                 status.status,
                 Some(&workspace.config_path),
                 Some(&catalyst),
             ) {
-                Ok(()) => 0,
-                Err(error) => report_error(&error.to_string()),
+                return report_error(&error.to_string());
             }
+            // stdout stays the one-line init receipt; the reminder is for people.
+            let _ = margins_cli::commands::workspace_text::write_program_block(
+                &mut io::stderr(),
+                &workspace.config.id,
+                &workspace.config_path,
+            );
+            0
         }
         Err(error) => report_error(&format!("indexing vault: {error:#}")),
     }
+}
+
+/// [`margins_cli::commands::workspace::resolve_read_only`] from the process cwd.
+#[cfg(feature = "recall")]
+fn read_only_workspace(
+    selector: Option<&str>,
+) -> Result<margins_workflows::workspace::ResolvedWorkspace, margins_cli::CliError> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    margins_cli::commands::workspace::resolve_read_only(selector, &cwd)
 }
 
 fn resolve_workspace(
@@ -392,14 +450,51 @@ fn resolve_workspace(
     Ok(resolution.workspace)
 }
 
+/// `margins enzyme <args>`: the bundled engine on the Margins home, never
+/// `~/.enzyme` or an inherited `ENZYME_HOME`.
 #[cfg(feature = "recall")]
-fn run_workspace_status(selector: Option<&str>) -> i32 {
+fn run_enzyme(workspace_selector: Option<&str>, args: &[OsString]) -> i32 {
+    let run = || -> anyhow::Result<i32> {
+        let margins_home = margins_workflows::workspace::margins_home()?;
+        let env_workspace = std::env::var("MARGINS_WORKSPACE")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        // The selected Workspace, else the one whose notes folder holds the
+        // cwd, else the machine default; never the engine's own cwd vault.
+        let workspace = match workspace_selector.or(env_workspace.as_deref()) {
+            Some(workspace) => Some(workspace.to_string()),
+            None => {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+                match margins_workflows::workspace::inspect_workspace(&margins_home, None, &cwd) {
+                    Ok(workspace) => Some(workspace.config.id),
+                    Err(_) => margins_workflows::workspace::default_workspace(&margins_home)?,
+                }
+            }
+        };
+        let passthrough = crate::enzyme_cli::passthrough_args(workspace.as_deref(), args)
+            .map_err(anyhow::Error::msg)?;
+        let engine = crate::enzyme_cli::Engine::for_home(&margins_home)?;
+        let generator = if passthrough.needs_generator {
+            Some(crate::enzyme_cli::selected_generator(&engine, &margins_home)?)
+        } else {
+            None
+        };
+        let status = engine.passthrough(&passthrough.args, generator.as_ref())?;
+        Ok(status.code().unwrap_or(1))
+    };
+    match run() {
+        Ok(code) => code,
+        Err(error) => report_error(&format!("{error:#}")),
+    }
+}
+
+#[cfg(feature = "recall")]
+fn run_workspace_status(selector: Option<&str>, json: bool) -> i32 {
     // Status is read-only: an existing Workspace is inspected, never migrated.
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let mut stderr = io::stderr();
-    let workspace = match margins_cli::commands::workspace::inspect(selector, &cwd, &mut stderr) {
+    let workspace = match read_only_workspace(selector) {
         Ok(workspace) => workspace,
-        Err(error) => return report_error(&error.to_string()),
+        Err(error) if json => return report_json_cli_error(error),
+        Err(error) => return report_cli_error(error),
     };
     let source_refresh_staleness =
         match crate::recall::workspace_source_refresh_staleness(&workspace) {
@@ -414,7 +509,7 @@ fn run_workspace_status(selector: Option<&str>) -> i32 {
     };
     match margins_cli::commands::workspace::render_status(
         &workspace,
-        true,
+        json,
         recall,
         &source_refresh_staleness,
         &mut io::stdout(),
@@ -431,6 +526,13 @@ fn report_error(message: &str) -> i32 {
         margins_cli::output::xml_escape_text(&message)
     );
     1
+}
+
+#[cfg(feature = "recall")]
+fn report_cli_error(error: margins_cli::CliError) -> i32 {
+    let exit_code = error.exit_code();
+    let _ = margins_cli::output::write_error(&mut io::stderr(), &error);
+    exit_code
 }
 
 fn report_json_cli_error(error: margins_cli::CliError) -> i32 {

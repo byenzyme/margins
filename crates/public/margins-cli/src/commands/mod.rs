@@ -15,3 +15,4 @@ pub mod retention;
 pub mod sessions;
 pub mod transcript;
 pub mod workspace;
+pub mod workspace_text;

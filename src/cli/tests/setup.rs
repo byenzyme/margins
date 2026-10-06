@@ -542,7 +542,15 @@
         let stderr = String::from_utf8(stderr).unwrap();
         assert!(stderr.contains("setup hosted catalyst: ok"));
         assert!(stderr.contains("ready with fixture-model"));
-        assert!(!stderr.contains(&margins_home.to_string_lossy().to_string()));
+        // The only Margins-home path setup prints is the Workspace program.
+        let home_text = margins_home.to_string_lossy().to_string();
+        assert!(
+            stderr
+                .lines()
+                .filter(|line| line.contains(&home_text))
+                .all(|line| line.contains(&format!("{home_text}/configs/"))),
+            "{stderr}"
+        );
         assert!(stderr.contains("setup local catalyst: ok — not installed under fallback policy"));
         assert!(stderr.contains("setup skills: ok"));
         assert!(stderr.contains(&format!(
@@ -815,8 +823,23 @@
             hosted < skills && skills < speech && speech < local,
             "{stderr}"
         );
+        // Exit 0 by the catalyst contract, but the failure is said plainly.
+        assert!(
+            stderr.contains(
+                "Setup finished with failures: speech. Recall can still work without them. Retry with `margins setup --only speech`.\n"
+            ),
+            "{stderr}"
+        );
         assert!(stderr.contains("catalyst mode: hosted — hosted_bundle_ready"));
-        assert!(!stderr.contains(&margins_home.to_string_lossy().to_string()));
+        // The only Margins-home path setup prints is the Workspace program.
+        let home_text = margins_home.to_string_lossy().to_string();
+        assert!(
+            stderr
+                .lines()
+                .filter(|line| line.contains(&home_text))
+                .all(|line| line.contains(&format!("{home_text}/configs/"))),
+            "{stderr}"
+        );
         assert!(!stderr.contains(crate::hosted_credentials::BUNDLE_FILE));
         assert!(!stderr.contains("sk-or-v1-secret-shaped-setup-fixture"));
         assert_eq!(
@@ -881,7 +904,15 @@
         let stderr = String::from_utf8(stderr).unwrap();
         assert!(stderr.contains("setup hosted catalyst: ok"));
         assert!(stderr.contains("setup local catalyst: ok — not installed under fallback policy"));
-        assert!(!stderr.contains(&margins_home.to_string_lossy().to_string()));
+        // The only Margins-home path setup prints is the Workspace program.
+        let home_text = margins_home.to_string_lossy().to_string();
+        assert!(
+            stderr
+                .lines()
+                .filter(|line| line.contains(&home_text))
+                .all(|line| line.contains(&format!("{home_text}/configs/"))),
+            "{stderr}"
+        );
         assert!(!stderr.contains(crate::hosted_credentials::BUNDLE_FILE));
         assert!(!stderr.contains("sk-or-v1-secret-shaped-setup-fixture"));
         assert!(!stderr.contains("setup skills:"));
@@ -926,6 +957,75 @@
         let stderr = String::from_utf8(stderr).unwrap();
         assert!(stderr.contains("setup hosted catalyst: failed — fixture broker offline"));
         assert!(stderr.contains("catalyst mode: none — setup_required"));
+    }
+
+    #[test]
+    fn setup_local_model_always_fails_plainly_when_this_build_cannot_install_one() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::hosted_credentials::install_bundle(
+            temp.path(),
+            "fixture-machine",
+            "fixture-key",
+            "https://fixture.invalid/v1",
+            "fixture-model",
+            Some(4_102_444_800),
+        )
+        .unwrap();
+        margins_workflows::machine_config::set_generation(temp.path(), "hosted").unwrap();
+        let provisioner = SpySetupProvisioner {
+            hosted_calls: AtomicUsize::new(0),
+            speech_calls: AtomicUsize::new(0),
+            local_calls: AtomicUsize::new(0),
+            hosted: HostedCatalystSetup::Hosted {
+                model: "fixture-model".into(),
+            },
+            speech_model: None,
+            speech_error: None,
+            // A build without the local-model installer.
+            local_model: None,
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let failed = run_setup_with(
+            &provisioner,
+            SetupSelection::from_args(
+                &[SetupStepArg::Catalyst],
+                None,
+                SetupLocalModelPolicyArg::Always,
+            ),
+            Some(temp.path()),
+            None,
+            None,
+            None,
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
+
+        assert!(failed, "`always` without a local model must not succeed");
+        assert_eq!(provisioner.local_calls.load(Ordering::SeqCst), 1);
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(
+            stderr.contains(
+                "setup local catalyst: failed — this Margins build cannot install a local catalyst model, so --local-model always cannot be honored"
+            ),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("selected without a bundled local-model installer"));
+        assert!(
+            stderr.contains("Setup finished with failures: local catalyst (not available in this build)."),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("Retry with"), "{stderr}");
+        // Generation is left as it was; it is not silently claimed as local.
+        assert_eq!(
+            margins_workflows::machine_config::engine_settings(temp.path())
+                .unwrap()
+                .generation
+                .as_deref(),
+            Some("hosted")
+        );
     }
 
     #[test]

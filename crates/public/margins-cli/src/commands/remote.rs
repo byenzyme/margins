@@ -344,7 +344,7 @@ pub fn run(
                     .map_err(CliError::from_anyhow)?,
             )
         }
-        Command::Recall { query, source } => serde_json::to_value(
+        Command::Recall { query, source, .. } => serde_json::to_value(
             connection
                 .client
                 .recall(&query, source.as_deref())
