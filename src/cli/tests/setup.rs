@@ -975,8 +975,18 @@
 
         assert!(!failed);
         assert_eq!(provisioner.local_calls.load(Ordering::SeqCst), 1);
-        assert!(String::from_utf8(stderr).unwrap().contains(&format!(
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(stderr.contains(&format!(
             "setup local catalyst: ok — installed at {}",
             local_model.display()
         )));
+        // `always` selects the local model even though hosted is ready.
+        assert_eq!(
+            margins_workflows::machine_config::engine_settings(temp.path())
+                .unwrap()
+                .generation
+                .as_deref(),
+            Some("local")
+        );
+        assert!(stderr.contains("catalyst mode: local"), "{stderr}");
     }

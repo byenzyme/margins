@@ -47,8 +47,13 @@ Important boundaries:
   environment variable values.
 - Do not run recall before `init` and `sync` have completed for the selected
   Workspace.
-- Do not apply a workspace plan until the user has seen the plan; the setup
-  request authorizes applying the preset plan unchanged.
+- Do not apply a workspace plan until the user has seen its plain-language
+  consequences: before running `workspace apply`, tell the user the folders it
+  learns from (the preset readings kept), the preset folders skipped because
+  the notes do not have them, what it leaves out, and the folder new notes go
+  to. Reporting them only after apply is not showing the plan. Once the user
+  has seen them, the setup request authorizes applying the preset plan
+  unchanged; do not ask for a second confirmation.
 
 When setup finishes, report the Workspace, its home and reference Sources, what
 changed, the `init` and `sync` result, the recall proof, and where to edit the

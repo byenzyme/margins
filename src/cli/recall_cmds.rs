@@ -284,13 +284,21 @@ fn workspace_plan_preset(
         ));
     };
     let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
-    let workspace = margins_cli::commands::workspace::resolve_existing(Some(selector), &cwd)?;
+    // A preview writes nothing to the Margins home: the Workspace is inspected
+    // (not migrated), and the engine fills the preset in a throwaway home.
+    // Migration and managed files happen at `workspace apply`.
+    let workspace = margins_cli::commands::workspace::inspect_existing(Some(selector), &cwd)?;
     let invalid = |error: anyhow::Error| CliError::new("workspace_preset_invalid", format!("{error:#}"));
     let margins_home = margins_workflows::workspace::margins_home().map_err(CliError::from_anyhow)?;
-    let template = if preset == workspace_preset::MEETINGS_PRESET {
-        workspace_preset::ensure_meetings_preset(&margins_home).map_err(CliError::from_anyhow)?
+    let scratch = tempfile::tempdir()
+        .map_err(|error| CliError::new("engine_unavailable", format!("creating a scratch engine home: {error}")))?;
+    let (template, template_label) = if preset == workspace_preset::MEETINGS_PRESET {
+        let path = scratch.path().join(format!("{preset}.enzyme.in"));
+        std::fs::write(&path, workspace_preset::MEETINGS_PRESET_TEXT)
+            .map_err(|error| CliError::from_anyhow(error.into()))?;
+        (path, std::path::PathBuf::from(preset))
     } else if Path::new(preset).is_file() {
-        cwd.join(preset)
+        (cwd.join(preset), cwd.join(preset))
     } else {
         return Err(CliError::new(
             "workspace_preset_unknown",
@@ -313,7 +321,7 @@ fn workspace_plan_preset(
             _ => None,
         })
         .ok_or_else(|| CliError::new("workspace_preset_invalid", "Workspace has no Home notes source"))?;
-    let engine = crate::enzyme_cli::Engine::for_home(&margins_home)
+    let engine = crate::enzyme_cli::Engine::for_scratch_home(&margins_home, &scratch.path().join("home"))
         .map_err(|error| CliError::new("engine_unavailable", format!("{error:#}")))?;
     let filled = engine
         .compile_preset(&workspace.config.id, &template, &home)
@@ -325,7 +333,7 @@ fn workspace_plan_preset(
         .map_err(|error| CliError::new("output_failed", error.to_string()))?;
     value["program_path"] = serde_json::json!(workspace.config_path);
     value["preset"] = serde_json::json!({
-        "template": template,
+        "template": template_label,
         "readings": proposal.readings,
         "skipped_readings": proposal.skipped_readings,
         "skip_reasons": proposal.skip_reasons,
@@ -386,7 +394,10 @@ fn resolve_workspace(
 
 #[cfg(feature = "recall")]
 fn run_workspace_status(selector: Option<&str>) -> i32 {
-    let workspace = match resolve_workspace(selector) {
+    // Status is read-only: an existing Workspace is inspected, never migrated.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let mut stderr = io::stderr();
+    let workspace = match margins_cli::commands::workspace::inspect(selector, &cwd, &mut stderr) {
         Ok(workspace) => workspace,
         Err(error) => return report_error(&error.to_string()),
     };

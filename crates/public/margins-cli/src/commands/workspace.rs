@@ -72,7 +72,7 @@ pub fn new(
 
 pub fn list(json: bool, stdout: &mut dyn Write) -> Result<(), CliError> {
     let home = workspace::margins_home().map_err(CliError::from_anyhow)?;
-    let workspaces = workspace::list_workspace_entries(&home).map_err(CliError::from_anyhow)?;
+    let workspaces = workspace::inspect_workspace_entries(&home).map_err(CliError::from_anyhow)?;
     let default = workspace::default_workspace(&home).map_err(CliError::from_anyhow)?;
     if json {
         let entries = workspaces
@@ -168,7 +168,7 @@ pub fn destination(
                 "choose a Workspace with --workspace or set a machine default",
             )
         })?;
-    let resolved = resolve_existing(Some(&selected), cwd)?;
+    let resolved = inspect_existing(Some(&selected), cwd)?;
     let (source_id, folder) = resolved
         .config
         .bindings
@@ -201,7 +201,7 @@ pub fn status(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> Result<(), CliError> {
-    let workspace = resolve(selector, cwd, stderr)?;
+    let workspace = inspect(selector, cwd, stderr)?;
     render_workspace(&workspace, json, &BTreeMap::new(), stdout)
 }
 
@@ -212,7 +212,7 @@ pub fn plan(
     stdout: &mut dyn Write,
 ) -> Result<(), CliError> {
     let selector = require_explicit_workspace(selector)?;
-    let workspace = resolve_existing(Some(selector), cwd)?;
+    let workspace = inspect_existing(Some(selector), cwd)?;
     let body = std::fs::read_to_string(desired_path).map_err(|error| {
         CliError::new(
             "workspace_desired_unreadable",
@@ -310,7 +310,7 @@ pub fn show(
     json: bool,
     stdout: &mut dyn Write,
 ) -> Result<(), CliError> {
-    let workspace = resolve_existing(selector, cwd)?;
+    let workspace = inspect_existing(selector, cwd)?;
     let output = |error: std::io::Error| CliError::new("output_failed", error.to_string());
     if json {
         let view = ProgramView {
@@ -857,7 +857,7 @@ pub fn list_sources(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> Result<(), CliError> {
-    let workspace = resolve(selector, cwd, stderr)?;
+    let workspace = inspect(selector, cwd, stderr)?;
     render_sources(&workspace, json, stdout)
 }
 
@@ -900,6 +900,37 @@ pub fn resolve(
 pub fn resolve_existing(selector: Option<&str>, cwd: &Path) -> Result<ResolvedWorkspace, CliError> {
     let margins_home = workspace::margins_home().map_err(CliError::from_anyhow)?;
     workspace::resolve_workspace(&margins_home, selector, cwd).map_err(CliError::from_anyhow)
+}
+
+/// [`resolve`] for read-only commands: an existing Workspace is inspected
+/// without migrating or writing anything (only creating a new implicit
+/// Workspace writes).
+pub fn inspect(
+    selector: Option<&str>,
+    cwd: &Path,
+    stderr: &mut dyn Write,
+) -> Result<ResolvedWorkspace, CliError> {
+    let margins_home = workspace::margins_home().map_err(CliError::from_anyhow)?;
+    let roots = workspace::ImplicitWorkspaceRoots::from_process(&margins_home)
+        .map_err(CliError::from_anyhow)?;
+    let resolution = workspace::inspect_or_create_workspace(&roots, selector, cwd)
+        .map_err(CliError::from_anyhow)?;
+    if resolution.created_implicitly {
+        writeln!(
+            stderr,
+            "Created workspace {} with home {}",
+            resolution.workspace.config.id,
+            resolution.workspace.home_dir.display()
+        )
+        .map_err(|error| CliError::from_anyhow(error.into()))?;
+    }
+    Ok(resolution.workspace)
+}
+
+/// [`resolve_existing`] for read-only commands; writes nothing.
+pub fn inspect_existing(selector: Option<&str>, cwd: &Path) -> Result<ResolvedWorkspace, CliError> {
+    let margins_home = workspace::margins_home().map_err(CliError::from_anyhow)?;
+    workspace::inspect_workspace(&margins_home, selector, cwd).map_err(CliError::from_anyhow)
 }
 
 fn render_workspace(

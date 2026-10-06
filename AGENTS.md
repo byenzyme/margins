@@ -88,9 +88,10 @@ The Codex plugin is parked outside core; see
   settings that keep recall true. A Workspace is the durable read/write/attention
   boundary for a single practice; `init`/`sync` materialize it. Setup is one
   preset-only flow: choose the notes folder → `workspace new` → `workspace plan
-  --preset margins-meetings` (the engine fills Margins' managed
-  `$MARGINS_HOME/presets/margins-meetings.enzyme.in` through `enzyme compile
-  --preset`; Margins drops folder readings whose folders do not exist) → reviewed
+  --preset margins-meetings` (the engine fills Margins' shipped
+  `margins-meetings.enzyme.in` through `enzyme compile --preset` in a throwaway
+  engine home, so the preview writes nothing; Margins drops folder readings
+  whose folders do not exist) → reviewed
   `workspace apply` → `init` → exact-phrase recall proves a declared Source is
   reachable → tell the user the program path and `margins workspace edit`. The
   setup skill and `margins guide workspace-setup` are the single source of truth

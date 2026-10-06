@@ -39,6 +39,7 @@
     "users.noreply.github.com"
   ],
   "synthetic_secret_paths": [
+    "scripts/smoke-official-cli.sh",
     "tests/test_workspace_setup_rollout_review.sh"
   ],
   "documented_personal_path_paths": [

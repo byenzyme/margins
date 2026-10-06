@@ -18,6 +18,7 @@ fn public_workspace_status_reports_only_live_local_runtime() {
             "--json",
         ])
         .env_clear()
+        .env("HOME", temp.path())
         .env("MARGINS_HOME", &margins_home)
         .output()
         .unwrap();

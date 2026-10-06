@@ -54,6 +54,21 @@ fn engine() -> Result<Engine> {
 /// Engine status of a Workspace whose index exists; `None` when it was never
 /// built, without running the engine.
 fn indexed_status(workspace: &ResolvedWorkspace) -> Result<Option<(Engine, StatusEnvelope)>> {
+    indexed_status_with(workspace, engine)
+}
+
+/// [`indexed_status`] for status reporting: the engine is only queried, and
+/// the Margins home is not prepared or migrated (see
+/// [`Engine::for_inspection`]).
+fn inspected_status(workspace: &ResolvedWorkspace) -> Result<Option<StatusEnvelope>> {
+    Ok(indexed_status_with(workspace, || Engine::for_inspection(&margins_home()?))?
+        .map(|(_, status)| status))
+}
+
+fn indexed_status_with(
+    workspace: &ResolvedWorkspace,
+    engine: impl FnOnce() -> Result<Engine>,
+) -> Result<Option<(Engine, StatusEnvelope)>> {
     if !workspace.recall_path().is_file() {
         return Ok(None);
     }
@@ -67,7 +82,7 @@ fn indexed_status(workspace: &ResolvedWorkspace) -> Result<Option<(Engine, Statu
 pub fn workspace_source_refresh_staleness(
     workspace: &ResolvedWorkspace,
 ) -> Result<BTreeMap<String, margins_cli::commands::workspace::SourceRefreshStalenessView>> {
-    let status = indexed_status(workspace)?.map(|(_, status)| status);
+    let status = inspected_status(workspace)?;
     source_refresh_staleness(workspace, status.as_ref())
 }
 
@@ -209,7 +224,7 @@ fn source_refresh_staleness(
 pub fn workspace_status_recall(
     workspace: &ResolvedWorkspace,
 ) -> Result<margins_workflows::local_recall::LocalRecallStatus> {
-    let Some((_, status)) = indexed_status(workspace)? else {
+    let Some(status) = inspected_status(workspace)? else {
         return margins_workflows::local_recall::status(workspace);
     };
     if status.needs_rebuild() {

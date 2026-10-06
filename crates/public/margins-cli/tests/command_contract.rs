@@ -2609,6 +2609,14 @@ fn workspace_setup_guide_is_the_preset_flow_and_is_read_only() {
     assert!(stdout.contains("apply the saved plan unchanged"));
     assert!(stdout.contains("Never hand-edit plan JSON"));
     assert!(stdout.contains("do not ask for a second “apply this plan”"));
+    // The plan's consequences are shown before apply, not only afterwards; the
+    // no-second-confirmation rule applies once they have been seen.
+    assert!(stdout.contains("**Show the plan before you apply it.**"));
+    assert!(stdout.contains("The consequences must reach the user before the apply command runs"));
+    assert!(stdout.contains("`preset.skipped_readings`"));
+    assert!(stdout.contains("`preset.note_folder`"));
+    assert!(stdout.contains("after the user has\nseen its consequences"));
+    assert!(!stdout.contains("apply the saved plan unchanged in the same turn"));
     assert!(stdout.contains("machine-level catalyst mode"));
     assert!(stdout.contains("not an exact-phrase boundary proof"));
     assert!(stdout.contains("contiguous, verbatim phrase"));

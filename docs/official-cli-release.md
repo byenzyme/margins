@@ -267,7 +267,13 @@ one JSON object:
 
 `scripts/smoke-official-cli.sh` rejects non-JSON output, an invalid embedded
 OAuth client, a missing provider, false capability flags, `UnavailableCaptureProvider`, or
-`capture_unavailable`. The contract tests composition and linkage, not hardware
+`capture_unavailable`. It runs the probe with `MARGINS_GOOGLE_OAUTH_CLIENT_JSON`
+and `MARGINS_GOOGLE_OAUTH_CLIENT_FILE` cleared and against a throwaway
+`HOME`/`MARGINS_HOME`, so only the client embedded at build time counts and the
+probe cannot touch user data. Local builds without the secret can set
+`MARGINS_SMOKE_OAUTH_CLIENT=runtime-dummy`, which supplies a structurally valid
+dummy client at run time and prints that the embedded client was not verified;
+the release action never sets it. The contract tests composition and linkage, not hardware
 behavior. It is a required integration point from sibling thread
 `thr_dny6tqhx9m`; the release workflow must not be enabled until that command
 and its unit/integration test land.
@@ -284,8 +290,12 @@ MARGINS_FLUID_COREML_MODEL_DIR="$HOME/Library/Application Support/FluidAudio/Mod
 
 The full gate compiles the focused tests once in one disposable Cargo lane,
 builds the canonical release binary once, checks its composition, exercises a
-hermetic workspace and live capture, and inspects WAV/SQLite durability and
-shutdown health. Logs are preserved under `/tmp/margins-core-product-smoke.*`.
+hermetic workspace (the preset setup plan and apply, through the pinned engine
+from `MARGINS_ENZYME_BIN` or `scripts/enzyme-bin`) and live capture, and
+inspects WAV/SQLite durability and shutdown health. A local build has no
+embedded Google OAuth client, so the composition check falls back to the
+runtime dummy (logged as a NOTE) unless the binary embeds one;
+`MARGINS_CORE_PRODUCT_OAUTH_CLIENT=embedded` requires it. Logs are preserved under `/tmp/margins-core-product-smoke.*`.
 
 For repeated audio iteration after building the release binary from the same
 checkout, avoid recompilation with:
