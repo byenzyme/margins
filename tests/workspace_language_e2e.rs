@@ -190,7 +190,7 @@ fn result_refs(recalled: &serde_json::Value) -> Vec<String> {
 }
 
 fn indexed_refs(state_dir: &Path) -> Vec<String> {
-    let index = rusqlite::Connection::open(state_dir.join("index.db")).unwrap();
+    let index = rusqlite::Connection::open(state_dir.join("enzyme.db")).unwrap();
     let mut statement = index
         .prepare("SELECT source_ref FROM docs ORDER BY source_ref")
         .unwrap();
@@ -478,7 +478,7 @@ fn mixed_host_sources_lower_to_ledger_sources_and_resolve_source_readings() {
     assert!(refs.iter().all(|r| !r.contains("gmail_") && !r.contains("markdown_")));
 
     // The source reading resolved to the lowered SQLite collection.
-    let index = rusqlite::Connection::open(state.join("index.db")).unwrap();
+    let index = rusqlite::Connection::open(state.join("enzyme.db")).unwrap();
     let collection: i64 = index
         .query_row(
             "SELECT COUNT(*) FROM entities WHERE name = 'sqlite:mail' AND type = 'collection'",
@@ -640,7 +640,7 @@ backfill_days = 365
     assert!(refs.iter().all(|r| !r.starts_with("markdown_") && !r.contains("gmail_")));
     assert!(!refs.iter().any(|r| r.contains("archive")));
     if legacy_bin.is_some() {
-        let index = rusqlite::Connection::open(state.join("index.db")).unwrap();
+        let index = rusqlite::Connection::open(state.join("enzyme.db")).unwrap();
         let stale: i64 = index
             .query_row(
                 "SELECT COUNT(*) FROM catalysts WHERE entity LIKE 'markdown\\_%' ESCAPE '\\'",
@@ -791,7 +791,7 @@ fn adding_a_second_markdown_source_reindexes_home_identities() {
 
     let refs = indexed_refs(&state);
     assert_eq!(refs, ["library/book.md", "notes/projects/harbor.md"], "{refs:?}");
-    let index = rusqlite::Connection::open(state.join("index.db")).unwrap();
+    let index = rusqlite::Connection::open(state.join("enzyme.db")).unwrap();
     let orphan_chunks: i64 = index
         .query_row(
             "SELECT count(*) FROM chunks WHERE doc_id NOT IN (SELECT id FROM docs)",
