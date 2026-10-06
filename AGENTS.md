@@ -318,7 +318,9 @@ user's Obsidian notes. The hosted/MCP route may be unavailable in this workspace
 The standalone `enzyme` CLI below is for the *agent research* pass and reads
 `~/.enzyme/enzyme.db`. Product retrieval is a different path: the Margins home
 is its own Enzyme home (`ENZYME_HOME=$MARGINS_HOME`), and Margins indexes and
-reads `$MARGINS_HOME/workspaces/<id>/enzyme.db` in-process. When testing
+reads `$MARGINS_HOME/workspaces/<id>/enzyme.db` by running the shipped `enzyme`
+CLI (inspect it with `ENZYME_HOME=~/.margins enzyme --workspace <id> status`;
+tests need `MARGINS_ENZYME_BIN`, see `scripts/enzyme-bin`). When testing
 product retrieval, declare Sources and pass `--workspace <id>` to `margins init`;
 initializing an Enzyme fixture leaves the product path unindexed.
 
