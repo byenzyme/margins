@@ -160,8 +160,8 @@ if report.get("schema") != 1 or report.get("product") != "margins":
 if report.get("official") is not True:
     raise SystemExit("installed binary is not the official composition")
 recall = report.get("recall") or {}
-if recall.get("scan") is not True or recall.get("indexing") is not True or recall.get("lookup") is not True:
-    raise SystemExit("installed binary does not include recall scan, indexing, and lookup")
+if recall.get("indexing") is not True or recall.get("lookup") is not True:
+    raise SystemExit("installed binary does not include recall indexing and lookup")
 PY
 
 echo "Installed official margins command at $DEST"

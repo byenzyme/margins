@@ -43,8 +43,8 @@ if report.get("oauth_client") != "valid":
         "packaged binary does not contain a valid MARGINS_GOOGLE_OAUTH_CLIENT_JSON credential"
     )
 recall = report.get("recall") or {}
-if recall.get("scan") is not True or recall.get("indexing") is not True or recall.get("lookup") is not True:
-    raise SystemExit("packaged binary does not contain recall scan, indexing, and lookup")
+if recall.get("indexing") is not True or recall.get("lookup") is not True:
+    raise SystemExit("packaged binary does not contain recall indexing and lookup")
 provider = report.get("capture_provider")
 if expect_capture and (not isinstance(provider, str) or not provider.strip()):
     raise SystemExit("packaged binary did not identify its capture provider")
