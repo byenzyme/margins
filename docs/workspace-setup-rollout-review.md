@@ -117,7 +117,8 @@ root-config entry metadata and hashes, generated config, and the transcript.
 They do not copy note bodies, call a model, prescribe command transitions, or
 infer setup authority. The hard gate fails if Markdown changed, recognizable credential
 material appears in the transcript or observer-facing status/config views,
-pre-existing setup cannot be restored exactly, or the generated Workspace
+pre-existing setup cannot be restored exactly, the rollout created no Workspace
+program (`workspace_program_created`), or the generated Workspace
 program has a folder reading (`learn questions from folder "…"`) for a folder
 the notes do not have (`readings_match_notes`). That last gate also records,
 as evidence for the reviewer rather than a blocker, which preset folders
