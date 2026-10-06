@@ -11,7 +11,9 @@ a private repository, at the exact revision in
 `.github/workflows/cli-release.yml` checks out an existing public source tag
 and builds the root `margins` package's internal `margins-private` target with
 `scripts/with-private-recall`, then stages it in each archive as
-the user-facing `margins` executable alongside `margins-server`, for:
+the user-facing `margins` executable alongside `margins-server` and the pinned
+`enzyme` engine (see [The bundled enzyme engine](#the-bundled-enzyme-engine)),
+for:
 
 - `aarch64-apple-darwin` on the `macos-15` Apple Silicon runner with
   `audio-capture,coreml-asr,polyvoice-coreml,recall,recall-local-model`;
@@ -52,6 +54,76 @@ The publish job uploads archives to the release for that same public source
 tag. It does not transform, rsync, commit, or tag a second source tree. Tags
 and releases are not created by setup or validation work.
 
+## The bundled enzyme engine
+
+Margins runs the `enzyme` CLI for indexing, recall, status and models, so every
+archive ships one next to `margins`:
+
+```text
+margins-X.Y.Z-<target>.tar.gz
+  margins
+  margins-server
+  enzyme
+```
+
+`margins-server` never runs `enzyme`; only `margins` does.
+
+**Source.** The archive's `enzyme` is the official `byenzyme/enzyme` release
+asset `enzyme-<platform>.tar.gz`, which enzyme-rust's release workflow builds
+with `--features local-llm` for each target. Margins does not build enzyme
+itself, because:
+
+- it is the binary Enzyme users get (no Margins-only build);
+- it is a public download, so the Margins release needs no enzyme-rust
+  credential for it, which a fully public Margins build requires;
+- a sha256 pins it exactly, and no Margins release rebuilds llama.cpp a second
+  time.
+
+**Pin.** `scripts/enzyme-cli.pin` is the one place that names the engine:
+`rev` (the enzyme-rust commit that tests and gates build with
+`scripts/enzyme-bin`), `version` (what `enzyme --version` prints for it), and
+`sha256.<target>` (the official asset for each Margins release target).
+`scripts/enzyme-pin fetch <target> <dir>` downloads
+`https://github.com/byenzyme/enzyme/releases/download/v<version>/<asset>`,
+checks its sha256 against the pin, requires it to contain exactly one regular
+file named `enzyme`, and on a native runner checks `enzyme --version`. A target
+with no sha256 fails the build: Margins cannot release before the enzyme
+release it pins exists. The packaged-archive smoke step runs
+`scripts/enzyme-pin check` on the extracted `enzyme` again. On macOS the
+release re-signs `enzyme` with the Margins Developer ID and hardened runtime
+and notarizes it with the other two binaries, so the shipped file's bytes
+differ from the asset; the asset's sha256 is checked before signing.
+
+**Install layout.** In the archive and in the BB plugin's runtime directory,
+`enzyme` sits next to `margins`. Installers that put `margins` in a shared
+`bin` directory put the engine at `<prefix>/libexec/margins/enzyme`, off
+`PATH`, so it never replaces or shadows an `enzyme` the user installed:
+
+| Installer | `margins` | engine |
+| --- | --- | --- |
+| Homebrew formula | `$(brew --prefix)/bin/margins` | `<keg>/libexec/margins/enzyme` |
+| `install.sh` | `~/.local/bin/margins` | `~/.local/libexec/margins/enzyme` |
+| BB plugin | `~/.local/bin/margins` (when the plugin manages it) | `~/.local/libexec/margins/enzyme` |
+
+**Run-time check.** `margins` locates its engine (next to its resolved
+executable, then `../libexec/margins/enzyme`) and refuses an `enzyme` whose
+`--version` differs from the pin, with an error naming what it found.
+
+**No self-update.** Margins runs `enzyme` with `ENZYME_HOME=$MARGINS_HOME`,
+whose `configs/settings.enzyme` has `settings { updates disabled }`. Enzyme
+updates its binary in only two ways: a background worker that `refresh`
+spawns, and the explicit `enzyme update` command, which Margins never runs.
+That setting turns the worker off (and the worker rechecks it before
+downloading); independently, `refresh` never spawns it under an explicit
+`--llm env|local|none`, which Margins always passes. Enzyme only ever swaps a binary installed in `~/.local/bin` by its own
+installer; neither of the engine locations above is one.
+
+**Bumping the engine.** Publish the enzyme release first (an enzyme-rust
+`vX.Y.Z` tag at the commit Margins needs). Then, in one Margins PR, set `rev`
+to that tag's commit, `version` to `X.Y.Z`, and each `sha256.<target>` to the
+value in the release's `enzyme-<platform>.tar.gz.sha256`; run the gates
+against it.
+
 ## Release order and BB plugin runtime pairing
 
 The BB plugin pins its runtime exactly (`RUNTIME_RELEASE_VERSION` in
@@ -62,12 +134,17 @@ fails with an explicit "upgrade both" error.
 
 Release in this order:
 
-1. The full local Linux gate passes on `main` (`scripts/with-private-recall scripts/local-gate linux`).
-2. The macOS gate and the Mac smoke checklist pass on the attached Mac bb host.
-3. Merge the PR that bumps `RUNTIME_RELEASE_VERSION` and its rebuilt `dist/`
+1. The enzyme release named in `scripts/enzyme-cli.pin` is published on
+   `byenzyme/enzyme`, and the pin on `main` carries its `version` and a
+   `sha256` for every release target (see
+   [Bumping the engine](#the-bundled-enzyme-engine)). Without them the build
+   job fails at "Fetch the pinned enzyme engine".
+2. The full local Linux gate passes on `main` (`scripts/with-private-recall scripts/local-gate linux`).
+3. The macOS gate and the Mac smoke checklist pass on the attached Mac bb host.
+4. Merge the PR that bumps `RUNTIME_RELEASE_VERSION` and its rebuilt `dist/`
    **immediately** before tagging. Between that merge and the published release,
    fresh plugin installs point at a runtime that does not exist yet.
-4. Bump and tag:
+5. Bump and tag:
    1. Run the **Version Bump** workflow (`version-bump.yml`) from `main` with
       `X.Y.Z`. It runs in the `official-cli-release` environment, bumps the
       package versions and both lockfiles, commits `Release vX.Y.Z` and pushes
@@ -84,8 +161,9 @@ Release in this order:
    3. That tag push triggers `cli-release.yml`, which builds, signs, notarizes
       and publishes on GitHub. This is the only validation-adjacent work that
       runs on GitHub runners besides the optional dry run below.
-5. Verify the published archives and a fresh BB plugin install against the new
-   release.
+6. Verify the published archives and a fresh BB plugin install against the new
+   release, including that the plugin placed `enzyme` beside the runtime and
+   at `~/.local/libexec/margins/enzyme`.
 
 ## Required secrets and permissions
 
@@ -239,7 +317,11 @@ the exact Apple-Silicon archive on a real Mac and verify:
 5. A second attach/record segment and a normal processing command work from the
    installed archive.
 6. `brew install`/upgrade from a staged formula selects the correct architecture
-   and `brew test margins` passes.
+   and `brew test margins` passes; the test checks the bundled engine's
+   version.
+7. The bundled `enzyme` (re-signed, hardened runtime) starts from the archive
+   and from the Homebrew keg without a Gatekeeper prompt, `margins` finds it,
+   and a local-model catalyst run works through it.
 
 Repeat the basic installed-binary/capture check on an Intel Mac when Intel is a
 supported release tier. Linux CI can validate the linked provider and TUI
