@@ -539,10 +539,20 @@ fn read_like_commands_never_create_a_workspace_and_only_init_establishes_one() {
         &["integrations", "status", "--json"],
     ] {
         let output = run(args);
-        assert!(!output.status.success(), "{args:?} succeeded without a Workspace");
+        // Documented in docs/workspace-language.md: exit 1, code on stderr.
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
         assert!(output.stdout.is_empty(), "{args:?}");
         let stderr = String::from_utf8(output.stderr).unwrap();
-        assert!(stderr.contains("workspace_required"), "{args:?}: {stderr}");
+        if args.contains(&"--json") {
+            let error: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap();
+            assert_eq!(error["schema_version"], "margins.error.v1", "{args:?}");
+            assert_eq!(error["error"]["code"], "workspace_required", "{args:?}");
+        } else {
+            assert!(
+                stderr.starts_with("<margins_error code=\"workspace_required\">"),
+                "{args:?}: {stderr}"
+            );
+        }
         assert!(stderr.contains("did not create one"), "{args:?}: {stderr}");
         assert!(stderr.contains("margins workspace new"), "{args:?}: {stderr}");
         assert!(!stderr.contains("Created workspace"), "{args:?}: {stderr}");
@@ -551,6 +561,11 @@ fn read_like_commands_never_create_a_workspace_and_only_init_establishes_one() {
             "{args:?} created Workspace state"
         );
     }
+
+    // Invalid arguments exit 2.
+    assert_eq!(run(&["recall"]).status.code(), Some(2));
+    assert_eq!(run(&["workspace", "status", "--bogus"]).status.code(), Some(2));
+    assert_eq!(run(&["sync", "--bogus"]).status.code(), Some(2));
 
     // `init` is the one command that establishes the cwd as a Workspace.
     let init = run(&["init"]);

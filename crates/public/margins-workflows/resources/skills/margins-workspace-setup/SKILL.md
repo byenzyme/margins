@@ -92,7 +92,7 @@ Run these commands from the notes folder:
 cd "/absolute/path/to/notes"
 margins init
 margins sync --json
-margins recall "an exact phrase from these notes"
+margins recall --json "an exact phrase from these notes"
 margins workspace status --json
 ```
 
@@ -217,8 +217,8 @@ Then initialize and prove recall in this order:
 ```bash
 margins --workspace practice init
 margins --workspace practice sync --json
-margins --workspace practice recall "<distinctive phrase from a note>"
-margins --workspace practice recall "<distinctive phrase from research>" --source research
+margins --workspace practice recall --json "<distinctive phrase from a note>"
+margins --workspace practice recall --json "<distinctive phrase from research>" --source research
 ```
 
 Copy one contiguous, verbatim phrase of roughly 5–10 words from the body of a real

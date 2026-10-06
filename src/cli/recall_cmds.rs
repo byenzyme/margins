@@ -13,7 +13,13 @@ fn run_recall(
     // Read-only: never creates a Workspace.
     let workspace = match read_only_workspace(workspace_selector) {
         Ok(workspace) => workspace,
-        Err(error) => return report_cli_error(error),
+        Err(error) => return report_for(json, error),
+    };
+    let failed = |message: String| {
+        report_for(
+            json,
+            margins_cli::CliError::new("command_failed", margins_user_message(&message)),
+        )
     };
     match crate::recall::recall(&workspace, query, source) {
         Ok(output) => match crate::recall::render_recall_for_stdout(&output, !json) {
@@ -21,16 +27,27 @@ fn run_recall(
                 print!("{rendered}");
                 0
             }
-            Err(error) => report_error(&format!("rendering recall: {error:#}")),
+            Err(error) => failed(format!("rendering recall: {error:#}")),
         },
-        Err(error) => report_error(&format!("{error:#}")),
+        Err(error) => failed(format!("{error:#}")),
+    }
+}
+
+/// A failure as `margins.error.v1` JSON with `--json`, else the readable form;
+/// either way the exit code is the error's (1 for these commands).
+#[cfg(feature = "recall")]
+fn report_for(json: bool, error: margins_cli::CliError) -> i32 {
+    if json {
+        report_json_cli_error(error)
+    } else {
+        report_cli_error(error)
     }
 }
 
 #[cfg(feature = "recall")]
 fn run_sync(workspace_selector: Option<&str>, source_filter: Option<&str>, json: bool) -> i32 {
-    // Sync refreshes an existing Workspace; it never creates one.
-    let workspace = match read_only_workspace(workspace_selector) {
+    // Sync refreshes (and migrates) an existing Workspace; it never creates one.
+    let workspace = match writable_workspace(workspace_selector) {
         Ok(workspace) => workspace,
         Err(error) if json => return report_json_cli_error(error),
         Err(error) => return report_cli_error(error),
@@ -416,6 +433,7 @@ fn run_init(workspace_selector: Option<&str>) -> i32 {
                 &mut io::stderr(),
                 &workspace.config.id,
                 &workspace.config_path,
+                margins_cli::commands::workspace_text::is_machine_default(&workspace.config.id),
             );
             0
         }
@@ -429,7 +447,16 @@ fn read_only_workspace(
     selector: Option<&str>,
 ) -> Result<margins_workflows::workspace::ResolvedWorkspace, margins_cli::CliError> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    margins_cli::commands::workspace::resolve_read_only(selector, &cwd)
+    margins_cli::commands::workspace::resolve_read_only(selector, &cwd, &mut io::stderr())
+}
+
+/// [`margins_cli::commands::workspace::resolve_for_write`] from the process cwd.
+#[cfg(feature = "recall")]
+fn writable_workspace(
+    selector: Option<&str>,
+) -> Result<margins_workflows::workspace::ResolvedWorkspace, margins_cli::CliError> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    margins_cli::commands::workspace::resolve_for_write(selector, &cwd, &mut io::stderr())
 }
 
 fn resolve_workspace(
@@ -456,30 +483,22 @@ fn resolve_workspace(
 fn run_enzyme(workspace_selector: Option<&str>, args: &[OsString]) -> i32 {
     let run = || -> anyhow::Result<i32> {
         let margins_home = margins_workflows::workspace::margins_home()?;
-        let env_workspace = std::env::var("MARGINS_WORKSPACE")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
         // The selected Workspace, else the one whose notes folder holds the
         // cwd, else the machine default; never the engine's own cwd vault.
-        let workspace = match workspace_selector.or(env_workspace.as_deref()) {
-            Some(workspace) => Some(workspace.to_string()),
-            None => {
-                let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
-                match margins_workflows::workspace::inspect_workspace(&margins_home, None, &cwd) {
-                    Ok(workspace) => Some(workspace.config.id),
-                    Err(_) => margins_workflows::workspace::default_workspace(&margins_home)?,
-                }
-            }
-        };
-        let passthrough = crate::enzyme_cli::passthrough_args(workspace.as_deref(), args)
+        let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+        let selected = margins_workflows::workspace::inspect_workspace_or_default(
+            &margins_home,
+            workspace_selector,
+            &cwd,
+        )?;
+        if let Some(selected) = selected.as_ref().filter(|selected| selected.via_default) {
+            eprintln!("Using Workspace {} (default)", selected.workspace.config.id);
+        }
+        let workspace = selected.map(|selected| selected.workspace.config.id);
+        let args = crate::enzyme_cli::passthrough_args(workspace.as_deref(), args)
             .map_err(anyhow::Error::msg)?;
         let engine = crate::enzyme_cli::Engine::for_home(&margins_home)?;
-        let generator = if passthrough.needs_generator {
-            Some(crate::enzyme_cli::selected_generator(&engine, &margins_home)?)
-        } else {
-            None
-        };
-        let status = engine.passthrough(&passthrough.args, generator.as_ref())?;
+        let status = engine.passthrough(&args)?;
         Ok(status.code().unwrap_or(1))
     };
     match run() {
@@ -493,19 +512,22 @@ fn run_workspace_status(selector: Option<&str>, json: bool) -> i32 {
     // Status is read-only: an existing Workspace is inspected, never migrated.
     let workspace = match read_only_workspace(selector) {
         Ok(workspace) => workspace,
-        Err(error) if json => return report_json_cli_error(error),
-        Err(error) => return report_cli_error(error),
+        Err(error) => return report_for(json, error),
+    };
+    let failed = |message: String| {
+        report_for(
+            json,
+            margins_cli::CliError::new("command_failed", margins_user_message(&message)),
+        )
     };
     let source_refresh_staleness =
         match crate::recall::workspace_source_refresh_staleness(&workspace) {
             Ok(status) => status,
-            Err(error) => {
-                return report_error(&format!("reading recall source freshness: {error:#}"))
-            }
+            Err(error) => return failed(format!("reading recall source freshness: {error:#}")),
         };
     let recall = match crate::recall::workspace_status_recall(&workspace) {
         Ok(status) => status,
-        Err(error) => return report_error(&format!("reading recall index status: {error:#}")),
+        Err(error) => return failed(format!("reading recall index status: {error:#}")),
     };
     match margins_cli::commands::workspace::render_status(
         &workspace,

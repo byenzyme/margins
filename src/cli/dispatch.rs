@@ -305,9 +305,10 @@ where
         let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let workspace = match margins_cli::commands::workspace::resolve_read_only(
+        let workspace = match margins_cli::commands::workspace::resolve_for_write(
             workspace_selector.as_deref(),
             &cwd,
+            &mut stderr,
         ) {
             Ok(workspace) => workspace,
             Err(error) => return report_json_cli_error(error),
@@ -486,7 +487,7 @@ where
         };
         #[cfg(feature = "recall")]
         if granola_import && code == 0 {
-            let workspace = match read_only_workspace(workspace_selector.as_deref()) {
+            let workspace = match writable_workspace(workspace_selector.as_deref()) {
                 Ok(workspace) => workspace,
                 Err(error) => return report_cli_error(error),
             };

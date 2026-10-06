@@ -137,18 +137,39 @@ pub fn plain_summaries(action: &WorkspacePlanAction) -> Vec<String> {
     lines
 }
 
+/// Whether `id` is the machine default Workspace (false when that cannot be
+/// read), so printed commands can leave out `--workspace`.
+pub fn is_machine_default(id: &str) -> bool {
+    margins_workflows::workspace::margins_home()
+        .and_then(|home| margins_workflows::workspace::default_workspace(&home))
+        .is_ok_and(|default| default.as_deref() == Some(id))
+}
+
+/// The start of a printed command for Workspace `id`: `margins`, plus
+/// `--workspace <id>` unless it is the machine default.
+pub fn margins_for(id: &str, is_default: bool) -> String {
+    if is_default {
+        "margins".to_string()
+    } else {
+        format!("margins --workspace {id}")
+    }
+}
+
 /// "Your Workspace is the program at …", with how to read and change it.
-pub fn write_program_block(out: &mut dyn Write, id: &str, program_path: &Path) -> io::Result<()> {
+pub fn write_program_block(
+    out: &mut dyn Write,
+    id: &str,
+    program_path: &Path,
+    is_default: bool,
+) -> io::Result<()> {
+    let margins = margins_for(id, is_default);
     writeln!(
         out,
         "Your Workspace is the program at {}",
         program_path.display()
     )?;
-    writeln!(
-        out,
-        "  Read it:   margins --workspace {id} workspace show --text"
-    )?;
-    writeln!(out, "  Change it: margins --workspace {id} workspace edit")
+    writeln!(out, "  Read it:   {margins} workspace show --text")?;
+    writeln!(out, "  Change it: {margins} workspace edit")
 }
 
 /// The desired program's view, for what Margins will do once it is applied.
@@ -171,12 +192,49 @@ fn note_destination(view: &WorkspaceConfig) -> Option<PathBuf> {
     })
 }
 
-/// Where a human-mode plan is saved for `workspace apply --plan`: the system
-/// temp directory, named by Workspace and plan id, so planning the same change
-/// twice reuses one file. Nothing is written into the Margins home.
-pub fn plan_file_path(workspace_id: &str, plan_id: &str) -> PathBuf {
-    let short = plan_id.get(..12).unwrap_or(plan_id);
-    std::env::temp_dir().join(format!("margins-{workspace_id}-plan-{short}.json"))
+/// The private directory human-mode plans are saved in: `$MARGINS_HOME/plans`.
+pub const PLANS_DIR: &str = "plans";
+
+/// Save a human-mode plan for `workspace apply --plan` in
+/// `$MARGINS_HOME/plans/` (mode 0700), as a new file with a random name and
+/// mode 0600. A `plans` that is a symlink or not a directory is refused, and
+/// the file is created exclusively, so no existing path is ever followed or
+/// overwritten.
+pub fn save_plan(margins_home: &Path, workspace_id: &str, plan_json: &[u8]) -> io::Result<PathBuf> {
+    let dir = margins_home.join(PLANS_DIR);
+    match std::fs::symlink_metadata(&dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{} is not a private directory", dir.display()),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let mut builder = std::fs::DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+            builder.create(&dir)?;
+        }
+        Err(error) => return Err(error),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    // `tempfile` creates with O_CREAT|O_EXCL (never through a symlink) and 0600.
+    let mut file = tempfile::Builder::new()
+        .prefix(&format!("{workspace_id}-"))
+        .suffix(".plan.json")
+        .rand_bytes(12)
+        .tempfile_in(&dir)?;
+    file.write_all(plan_json)?;
+    file.as_file().sync_all()?;
+    file.keep()
+        .map(|(_, path)| path)
+        .map_err(|error| error.error)
 }
 
 /// The consequences of a plan in plain language, the exact diff, and how to
@@ -270,11 +328,7 @@ pub fn write_plan(
     match saved {
         Some(saved) => {
             writeln!(out, "Nothing is applied yet. To apply exactly this plan:")?;
-            writeln!(
-                out,
-                "  margins --workspace {id} workspace apply --plan {}",
-                saved.display()
-            )
+            writeln!(out, "  margins workspace apply --plan {}", saved.display())
         }
         None => writeln!(out, "Nothing to apply."),
     }
@@ -285,6 +339,7 @@ pub fn write_applied(
     out: &mut dyn Write,
     receipt: &WorkspaceApplyReceipt,
     program_path: &Path,
+    is_default: bool,
 ) -> io::Result<()> {
     let id = &receipt.workspace_id;
     let revision = receipt
@@ -310,7 +365,7 @@ pub fn write_applied(
         }
     }
     writeln!(out)?;
-    write_program_block(out, id, program_path)
+    write_program_block(out, id, program_path, is_default)
 }
 
 #[cfg(test)]
@@ -391,18 +446,29 @@ mod tests {
 
     #[test]
     fn program_block_names_the_program_and_how_to_read_and_change_it() {
-        let mut out = Vec::new();
-        write_program_block(
-            &mut out,
-            "practice",
-            Path::new("/m/configs/practice.enzyme"),
-        )
-        .unwrap();
+        let block = |is_default| {
+            let mut out = Vec::new();
+            write_program_block(
+                &mut out,
+                "practice",
+                Path::new("/m/configs/practice.enzyme"),
+                is_default,
+            )
+            .unwrap();
+            String::from_utf8(out).unwrap()
+        };
         assert_eq!(
-            String::from_utf8(out).unwrap(),
+            block(false),
             "Your Workspace is the program at /m/configs/practice.enzyme\n  \
              Read it:   margins --workspace practice workspace show --text\n  \
              Change it: margins --workspace practice workspace edit\n"
+        );
+        // The machine default needs no selector.
+        assert_eq!(
+            block(true),
+            "Your Workspace is the program at /m/configs/practice.enzyme\n  \
+             Read it:   margins workspace show --text\n  \
+             Change it: margins workspace edit\n"
         );
     }
 }

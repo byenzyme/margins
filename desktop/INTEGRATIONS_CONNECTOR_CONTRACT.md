@@ -585,7 +585,7 @@ line describes the sandbox's setup result rather than ambient host credentials.
 
 ## Agent-side contract: `margins recall` JSON
 
-Piped or otherwise non-interactive `margins recall` emits `margins.recall.v1`:
+`margins recall --json` emits `margins.recall.v1` (without `--json`, recall prints readable results):
 
 ```text
 schema_version: "margins.recall.v1"

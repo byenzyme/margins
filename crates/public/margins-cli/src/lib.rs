@@ -164,8 +164,19 @@ fn run_inner(
                     "integrations reconcile requires literal --workspace <id>",
                 ));
             }
-            let workspace =
-                commands::workspace::resolve_read_only(workspace_selector.as_deref(), invocation_dir)?;
+            let workspace = if matches!(command, IntegrationsCommand::Reconcile { .. }) {
+                commands::workspace::resolve_for_write(
+                    workspace_selector.as_deref(),
+                    invocation_dir,
+                    stderr,
+                )?
+            } else {
+                commands::workspace::resolve_read_only(
+                    workspace_selector.as_deref(),
+                    invocation_dir,
+                    stderr,
+                )?
+            };
             return match command {
                 IntegrationsCommand::Reconcile {
                     connector,
@@ -233,6 +244,7 @@ fn run_inner(
                 invocation_dir,
                 json,
                 stdout,
+                stderr,
             );
         }
         Some(Command::Workspace {
@@ -350,6 +362,7 @@ fn run_inner(
                 invocation_dir,
                 json,
                 stdout,
+                stderr,
             );
         }
         Some(Command::Source {
@@ -422,8 +435,11 @@ fn run_inner(
             command: ImportCommand::Granola { path },
         }) => {
             // Importing writes notes; it never creates a Workspace to hold them.
-            let workspace =
-                commands::workspace::resolve_read_only(workspace_selector.as_deref(), invocation_dir)?;
+            let workspace = commands::workspace::resolve_for_write(
+                workspace_selector.as_deref(),
+                invocation_dir,
+                stderr,
+            )?;
             let project = workspace_project_adapter(&workspace);
             return commands::import::granola(
                 &workspace.state_dir,
@@ -554,13 +570,19 @@ fn run_inner(
             source,
             json,
         }) => {
-            let workspace =
-                commands::workspace::resolve_read_only(workspace_selector.as_deref(), invocation_dir)?;
+            let workspace = commands::workspace::resolve_read_only(
+                workspace_selector.as_deref(),
+                invocation_dir,
+                stderr,
+            )?;
             return commands::recall::run(&workspace, &query, source.as_deref(), json, stdout);
         }
         Some(Command::Sync { source, json }) => {
-            let workspace =
-                commands::workspace::resolve_read_only(workspace_selector.as_deref(), invocation_dir)?;
+            let workspace = commands::workspace::resolve_for_write(
+                workspace_selector.as_deref(),
+                invocation_dir,
+                stderr,
+            )?;
             return commands::recall::sync(&workspace, source.as_deref(), json, stdout);
         }
         Some(Command::Transcribe {

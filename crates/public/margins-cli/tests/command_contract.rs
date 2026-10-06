@@ -2590,7 +2590,7 @@ fn workspace_setup_guide_is_the_preset_flow_and_is_read_only() {
     assert!(stdout.contains("margins workspace new practice"));
     assert!(stdout.contains("margins init"));
     assert!(stdout.contains("margins sync --json"));
-    assert!(stdout.contains("margins recall \"an exact phrase from these notes\""));
+    assert!(stdout.contains("margins recall --json \"an exact phrase from these notes\""));
     assert!(stdout.contains("source add notes"));
     assert!(stdout.contains("Run these commands from the notes folder"));
     assert!(stdout.contains("cd \"/absolute/path/to/notes\""));

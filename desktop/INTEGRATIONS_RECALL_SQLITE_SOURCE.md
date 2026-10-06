@@ -373,7 +373,7 @@ the `source_refreshes` table.
 
 ## Product recall JSON envelope (`margins.recall.v1`)
 
-Piped or otherwise non-interactive `margins recall` is a Margins-owned envelope, not raw engine
+`margins recall --json` is a Margins-owned envelope, not raw engine
 output. Required top-level fields are `schema_version`, retrieval `status`,
 `reason`, and `freshness`. `freshness` contains `status`, `stale`, optional
 `reason`, a separate `index` object, and per-source `materialization[]` entries

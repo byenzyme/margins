@@ -1304,7 +1304,7 @@ fn cli_only_newcomer_learns_the_program_and_reaches_the_bundled_engine() {
     assert!(serde_json::from_str::<serde_json::Value>(&plan).is_err());
     let saved = plan
         .lines()
-        .find_map(|line| line.trim().strip_prefix("margins --workspace practice workspace apply --plan "))
+        .find_map(|line| line.trim().strip_prefix("margins workspace apply --plan "))
         .map(PathBuf::from)
         .unwrap_or_else(|| panic!("no apply command in:\n{plan}"));
     // The saved plan is byte for byte what `--json` prints.
@@ -1380,21 +1380,37 @@ fn cli_only_newcomer_learns_the_program_and_reaches_the_bundled_engine() {
     let nowhere = env.run(&["enzyme", "status"]);
     assert!(!nowhere.status.success());
     assert!(text(&nowhere.stderr).contains("choose a Workspace"), "{}", text(&nowhere.stderr));
-    // init/refresh get Margins' generator unless the caller picks one.
-    let refresh = env.ok(&["enzyme", "--workspace", "practice", "refresh", "--quiet"]);
-    assert!(text(&refresh.stderr).contains("refresh --quiet --llm env"), "{}", text(&refresh.stderr));
-    let chosen = env.ok(&["enzyme", "--workspace", "practice", "refresh", "--quiet", "--llm", "none"]);
-    assert!(!text(&chosen.stderr).contains("--llm env"), "{}", text(&chosen.stderr));
-    let update = env.run(&["enzyme", "update"]);
-    assert!(!update.status.success());
-    assert!(text(&update.stderr).contains("Update Margins instead"));
+    // Only read-only engine commands run; the rest say what to use instead.
+    for (refused, hint) in [
+        (&["enzyme", "--workspace", "practice", "refresh"][..], "margins sync"),
+        (&["enzyme", "-vp", "/x", "update"], "update Margins"),
+        (&["enzyme", "--workspace", "practice", "workspace", "apply", "p.json"], "margins workspace edit"),
+        (&["enzyme", "install"], "margins setup --only skills"),
+        (&["enzyme", "model", "install"], "--local-model always"),
+    ] {
+        let output = env.run(refused);
+        assert!(!output.status.success(), "{refused:?}");
+        assert!(text(&output.stderr).contains(hint), "{refused:?}: {}", text(&output.stderr));
+    }
+    let models = env.json(&["enzyme", "model", "list", "--json"]);
+    assert_eq!(models["schema"], "enzyme.models.v1", "{models}");
+    // The machine default is used, and said, when nothing else applies.
+    env.ok(&["workspace", "default", "--set", "practice"]);
+    let defaulted = env.ok(&["enzyme", "status", "--json"]);
+    assert!(
+        text(&defaulted.stderr).starts_with("Using Workspace practice (default)\n"),
+        "{}",
+        text(&defaulted.stderr)
+    );
     let version = env.ok(&["enzyme", "--version"]);
     assert_eq!(text(&version.stdout).trim(), format!("enzyme {}", enzyme_bin_version()));
 
     // Setup names the program too.
     let setup = env.run(&["--workspace", "practice", "setup", "--only", "skills"]);
     assert!(setup.status.success(), "{}", text(&setup.stderr));
-    assert!(text(&setup.stderr).contains(&block), "{}", text(&setup.stderr));
+    // `practice` is now the machine default, so its commands need no selector.
+    let default_block = block.replace("margins --workspace practice ", "margins ");
+    assert!(text(&setup.stderr).contains(&default_block), "{}", text(&setup.stderr));
     assert!(text(&setup.stderr).contains("Setup finished.\n"), "{}", text(&setup.stderr));
 
     assert_eq!(snapshot(&canary), canary_before, "~/.enzyme must be neither read-modified nor written");
@@ -1409,4 +1425,43 @@ fn enzyme_bin_version() -> String {
         .unwrap()
         .trim_matches('"')
         .to_string()
+}
+
+/// A Workspace from before programs, upgraded and synced before any `init`,
+/// through the machine default: sync announces the default it used and
+/// migrates the program as any writing command does, creating nothing else.
+#[test]
+fn sync_before_init_migrates_a_legacy_default_workspace_and_says_which_it_used() {
+    let env = Hermetic::new();
+    let notes = notes_fixture(&env);
+    let state = env.margins_home.join("workspaces/legacy");
+    fs::create_dir_all(&state).unwrap();
+    let legacy = format!(
+        "id = \"legacy\"\n\n[policy]\nexcluded_folders = [\"archive\"]\n\n[retention]\n\n\
+         [bindings.captures]\nkind = \"captures\"\npath = \"{}\"\n\n\
+         [bindings.home]\nkind = \"notes\"\npath = \"{}\"\nrole = \"home\"\n",
+        state.join("captures").display(),
+        notes.display()
+    );
+    fs::write(state.join("config.toml"), &legacy).unwrap();
+    // The default as the release wrote it (setting it now would migrate).
+    fs::write(env.margins_home.join("margins.toml"), "[workspace]\ndefault = \"legacy\"\n").unwrap();
+    assert!(!env.margins_home.join("configs/legacy.enzyme").exists());
+
+    let _generator = fixture_generator::FixtureGenerator::start(&env.margins_home);
+    // The cwd (the temp HOME) is no Workspace's folder: the default is used.
+    let synced = env.ok(&["sync", "--json"]);
+    assert!(
+        text(&synced.stderr).starts_with("Using Workspace legacy (default)\n"),
+        "{}",
+        text(&synced.stderr)
+    );
+    let sync: serde_json::Value = serde_json::from_slice(&synced.stdout).unwrap();
+    assert_eq!(sync["workspace"]["id"], "legacy", "{sync}");
+    assert!(env.program("legacy").contains("archive"), "the program was migrated");
+    assert!(!state.join("config.toml").exists());
+    assert!(state.join("enzyme.db").is_file(), "sync indexed the migrated program");
+    let workspaces = fs::read_dir(env.margins_home.join("workspaces")).unwrap().count();
+    assert_eq!(workspaces, 1, "no Workspace was created");
+    env.assert_enzyme_untouched();
 }

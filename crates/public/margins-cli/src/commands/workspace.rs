@@ -200,8 +200,9 @@ pub fn status(
     cwd: &Path,
     json: bool,
     stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
 ) -> Result<(), CliError> {
-    let workspace = resolve_read_only(selector, cwd)?;
+    let workspace = resolve_read_only(selector, cwd, stderr)?;
     render_workspace(&workspace, json, &BTreeMap::new(), stdout)
 }
 
@@ -250,13 +251,17 @@ pub fn write_plan_text(
     let saved = if noop {
         None
     } else {
-        let path = workspace_text::plan_file_path(&plan.workspace_id, &plan.plan_id);
-        std::fs::write(&path, plan_json).map_err(|error| {
-            CliError::new(
-                "workspace_plan_unwritable",
-                format!("could not save the plan to {}: {error}", path.display()),
-            )
-        })?;
+        let margins_home = workspace::margins_home().map_err(CliError::from_anyhow)?;
+        let path = workspace_text::save_plan(&margins_home, &plan.workspace_id, plan_json)
+            .map_err(|error| {
+                CliError::new(
+                    "workspace_plan_unwritable",
+                    format!(
+                        "could not save the plan in {}: {error}",
+                        margins_home.join(workspace_text::PLANS_DIR).display()
+                    ),
+                )
+            })?;
         Some(path)
     };
     workspace_text::write_plan(
@@ -369,10 +374,11 @@ pub fn show(
     } else {
         // The path stays the only stdout line, for `$(margins workspace show)`.
         writeln!(stdout, "{}", workspace.config_path.display()).map_err(output)?;
+        let id = &workspace.config.id;
+        let margins = workspace_text::margins_for(id, workspace_text::is_machine_default(id));
         writeln!(
             stderr,
-            "That file is the program for Workspace {id}. Read it with `margins --workspace {id} workspace show --text`; change it with `margins --workspace {id} workspace edit`.",
-            id = workspace.config.id
+            "That file is the program for Workspace {id}. Read it with `{margins} workspace show --text`; change it with `{margins} workspace edit`."
         )
         .map_err(output)
     }
@@ -393,17 +399,21 @@ pub fn edit(
 
     let assume_terminal = std::env::var_os(EDIT_ASSUME_TERMINAL_ENV).is_some_and(|value| value == "1");
     if !assume_terminal && !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
-        let id = inspect_existing(selector, cwd)
-            .map(|workspace| workspace.config.id)
-            .unwrap_or_else(|_| "<id>".to_string());
+        let margins = match inspect_existing(selector, cwd) {
+            Ok(workspace) => {
+                let id = &workspace.config.id;
+                workspace_text::margins_for(id, workspace_text::is_machine_default(id))
+            }
+            Err(_) => "margins --workspace <id>".to_string(),
+        };
         return Err(CliError::new(
             "workspace_edit_requires_terminal",
             format!(
                 "workspace edit opens an editor and asks before applying, so it needs an interactive terminal. \
-                 Without one: print the program with `margins --workspace {id} workspace show --text`, \
+                 Without one: print the program with `{margins} workspace show --text`, \
                  save a changed copy as program.enzyme, review it with \
-                 `margins --workspace {id} workspace plan --desired program.enzyme`, \
-                 then run the `margins --workspace {id} workspace apply --plan …` command it prints."
+                 `{margins} workspace plan --desired program.enzyme`, \
+                 then run the `margins workspace apply --plan …` command it prints."
             ),
         ));
     }
@@ -426,13 +436,14 @@ pub fn edit(
     std::fs::write(&edit_path, &original).map_err(|error| {
         CliError::new("workspace_edit_failed", format!("writing {}: {error}", edit_path.display()))
     })?;
+    let margins = workspace_text::margins_for(&id, workspace_text::is_machine_default(&id));
     let kept = |message: String| {
         CliError::new(
             "workspace_edit_not_applied",
             format!(
                 "{message}\nYour edit is kept at {path}. Reopen it with your editor, then review it with\n  \
-                 margins --workspace {id} workspace plan --desired {path}\n\
-                 and run the apply command it prints, or start over with `margins --workspace {id} workspace edit`.",
+                 {margins} workspace plan --desired {path}\n\
+                 and run the apply command it prints, or start over with `{margins} workspace edit`.",
                 path = edit_path.display()
             ),
         )
@@ -628,8 +639,6 @@ pub fn apply(
     json: bool,
     stdout: &mut dyn Write,
 ) -> Result<(), CliError> {
-    let selector = require_explicit_workspace(selector)?;
-    let mut workspace = resolve_existing(Some(selector), cwd)?;
     let bytes = std::fs::read(plan_path).map_err(|error| {
         CliError::new(
             "workspace_plan_unreadable",
@@ -642,7 +651,8 @@ pub fn apply(
             format!("invalid workspace plan JSON: {error}"),
         )
     })?;
-    if plan.workspace_id != selector {
+    // The plan names its Workspace; an explicit `--workspace` must agree.
+    if let Some(selector) = selector.filter(|selector| *selector != plan.workspace_id) {
         return Err(CliError::new(
             "workspace_mismatch",
             format!(
@@ -651,10 +661,12 @@ pub fn apply(
             ),
         ));
     }
+    let mut workspace = resolve_existing(Some(&plan.workspace_id), cwd)?;
     let receipt =
         workspace::apply_workspace_plan(&mut workspace, &plan).map_err(CliError::from_anyhow)?;
     if !json {
-        return workspace_text::write_applied(stdout, &receipt, &workspace.config_path)
+        let is_default = workspace_text::is_machine_default(&receipt.workspace_id);
+        return workspace_text::write_applied(stdout, &receipt, &workspace.config_path, is_default)
             .map_err(|error| CliError::new("output_failed", error.to_string()));
     }
     serde_json::to_writer_pretty(&mut *stdout, &receipt)
@@ -921,8 +933,9 @@ pub fn list_sources(
     cwd: &Path,
     json: bool,
     stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
 ) -> Result<(), CliError> {
-    let workspace = resolve_read_only(selector, cwd)?;
+    let workspace = resolve_read_only(selector, cwd, stderr)?;
     render_sources(&workspace, json, stdout)
 }
 
@@ -968,16 +981,50 @@ Pick one with `margins --workspace <id> …` (`margins workspace list` shows the
 `margins workspace default --set <id>` makes one the default), or create one for your notes with \
 `margins workspace new <id> --home /path/to/notes`.";
 
-/// Resolution for read-like commands (recall, status, sync, source list,
-/// integrations, imports): never creates a Workspace. Uses the selected one,
-/// else the one declaring `cwd`, else the machine default, and otherwise
-/// fails with `workspace_required`. Only `margins init` establishes a new
-/// Workspace for the current folder.
-pub fn resolve_read_only(selector: Option<&str>, cwd: &Path) -> Result<ResolvedWorkspace, CliError> {
+/// Resolution for read-only commands (recall, status, source list,
+/// integrations status): never creates or migrates a Workspace. Uses the
+/// selected one, else the one declaring `cwd`, else the machine default
+/// (announced on `stderr`), and otherwise fails with `workspace_required`.
+/// Only `margins init` establishes a new Workspace for the current folder.
+pub fn resolve_read_only(
+    selector: Option<&str>,
+    cwd: &Path,
+    stderr: &mut dyn Write,
+) -> Result<ResolvedWorkspace, CliError> {
     let margins_home = workspace::margins_home().map_err(CliError::from_anyhow)?;
-    workspace::inspect_workspace_or_default(&margins_home, selector, cwd)
-        .map_err(CliError::from_anyhow)?
-        .ok_or_else(|| CliError::new("workspace_required", NO_WORKSPACE_MESSAGE))
+    announce(
+        workspace::inspect_workspace_or_default(&margins_home, selector, cwd)
+            .map_err(CliError::from_anyhow)?,
+        stderr,
+    )
+}
+
+/// [`resolve_read_only`] for commands that write (sync, imports, reconcile):
+/// the Workspace is migrated as needed, like `resolve_at`, but never created.
+pub fn resolve_for_write(
+    selector: Option<&str>,
+    cwd: &Path,
+    stderr: &mut dyn Write,
+) -> Result<ResolvedWorkspace, CliError> {
+    let margins_home = workspace::margins_home().map_err(CliError::from_anyhow)?;
+    announce(
+        workspace::resolve_workspace_or_default(&margins_home, selector, cwd)
+            .map_err(CliError::from_anyhow)?,
+        stderr,
+    )
+}
+
+fn announce(
+    selected: Option<workspace::SelectedWorkspace>,
+    stderr: &mut dyn Write,
+) -> Result<ResolvedWorkspace, CliError> {
+    let selected =
+        selected.ok_or_else(|| CliError::new("workspace_required", NO_WORKSPACE_MESSAGE))?;
+    if selected.via_default {
+        writeln!(stderr, "Using Workspace {} (default)", selected.workspace.config.id)
+            .map_err(|error| CliError::from_anyhow(error.into()))?;
+    }
+    Ok(selected.workspace)
 }
 
 pub fn resolve_existing(selector: Option<&str>, cwd: &Path) -> Result<ResolvedWorkspace, CliError> {
@@ -1053,10 +1100,10 @@ fn render_workspace(
             view.recall.mode, view.recall.available, view.recall.documents,
         )
         .map_err(|error| CliError::from_anyhow(error.into()))?;
+        let margins = workspace_text::margins_for(view.id, workspace_text::is_machine_default(view.id));
         writeln!(
             stdout,
-            "Read the program with `margins --workspace {id} workspace show --text`; change it with `margins --workspace {id} workspace edit`.",
-            id = view.id
+            "Read the program with `{margins} workspace show --text`; change it with `{margins} workspace edit`."
         )
         .map_err(|error| CliError::from_anyhow(error.into()))
     }
@@ -1104,10 +1151,10 @@ fn render_runtime_workspace(
             view.recall.mode, view.recall.available, view.recall.documents,
         )
         .map_err(|error| CliError::from_anyhow(error.into()))?;
+        let margins = workspace_text::margins_for(view.id, workspace_text::is_machine_default(view.id));
         writeln!(
             stdout,
-            "Read the program with `margins --workspace {id} workspace show --text`; change it with `margins --workspace {id} workspace edit`.",
-            id = view.id
+            "Read the program with `{margins} workspace show --text`; change it with `{margins} workspace edit`."
         )
         .map_err(|error| CliError::from_anyhow(error.into()))
     }

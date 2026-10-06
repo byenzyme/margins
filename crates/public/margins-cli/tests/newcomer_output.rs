@@ -280,7 +280,9 @@ fn readable_plan_saves_the_exact_json_plan_and_apply_names_the_program() {
     let (readable, _) = fixture.ok(&plan_args);
     let (json, _) = fixture.ok(&[&plan_args[..], &["--json"]].concat());
     let parsed: workspace::WorkspacePlan = serde_json::from_str(&json).unwrap();
-    let saved = margins_cli::commands::workspace_text::plan_file_path("practice", &parsed.plan_id);
+    let saved = saved_plan(&readable);
+    let plans = fixture.root().join("machine/plans");
+    assert_eq!(saved.parent(), Some(plans.as_path()), "{readable}");
     assert_eq!(
         std::fs::read_to_string(&saved).unwrap(),
         json,
@@ -305,7 +307,7 @@ fn readable_plan_saves_the_exact_json_plan_and_apply_names_the_program() {
     assert!(readable.contains(&parsed.diff), "{readable}");
     assert!(
         readable.ends_with(&format!(
-            "\nNothing is applied yet. To apply exactly this plan:\n  margins --workspace practice workspace apply --plan {}\n",
+            "\nNothing is applied yet. To apply exactly this plan:\n  margins workspace apply --plan {}\n",
             saved.display()
         )),
         "{readable}"
@@ -341,7 +343,63 @@ fn readable_plan_saves_the_exact_json_plan_and_apply_names_the_program() {
         "{same}"
     );
     assert!(same.ends_with("\nNothing to apply.\n"), "{same}");
-    assert!(!saved.exists());
+    assert_eq!(std::fs::read_dir(&plans).unwrap().count(), 0);
+}
+
+/// The plan path in a readable plan's apply command.
+fn saved_plan(readable: &str) -> std::path::PathBuf {
+    readable
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("margins workspace apply --plan "))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| panic!("no apply command in:\n{readable}"))
+}
+
+#[cfg(unix)]
+#[test]
+fn readable_plans_are_private_files_with_random_names_and_never_follow_symlinks() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let desired = fixture.desired();
+    let args = [
+        "--workspace",
+        "practice",
+        "workspace",
+        "plan",
+        "--desired",
+        desired.to_str().unwrap(),
+    ];
+    let plans = fixture.root().join("machine/plans");
+    let (first, _) = fixture.ok(&args);
+    let (second, _) = fixture.ok(&args);
+    let (first, second) = (saved_plan(&first), saved_plan(&second));
+    assert_ne!(first, second, "each plan gets its own random name");
+    assert_eq!(
+        plans.metadata().unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    for saved in [&first, &second] {
+        assert_eq!(
+            saved.metadata().unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    // A pre-planted `plans` symlink is refused and its target is untouched.
+    std::fs::remove_dir_all(&plans).unwrap();
+    let elsewhere = fixture.root().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &plans).unwrap();
+    let (refused, stdout, stderr) = fixture.invoke(&args);
+    assert_eq!(
+        refused.unwrap_err().code(),
+        "workspace_plan_unwritable",
+        "{stderr}"
+    );
+    assert!(stdout.is_empty());
+    assert!(stderr.contains("is not a private directory"), "{stderr}");
+    assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+    assert!(plans.symlink_metadata().unwrap().file_type().is_symlink());
 }
 
 #[test]
@@ -402,7 +460,7 @@ fn status_show_and_edit_point_at_the_program() {
     for expected in [
         "margins --workspace practice workspace show --text",
         "margins --workspace practice workspace plan --desired program.enzyme",
-        "margins --workspace practice workspace apply --plan",
+        "margins workspace apply --plan",
     ] {
         assert!(stderr.contains(expected), "{expected}: {stderr}");
     }
@@ -473,4 +531,81 @@ fn help_and_guide_explain_the_program_in_plain_words() {
     // The public build has no bundled engine to run.
     let (result, _, _) = fixture.invoke(&["enzyme", "status"]);
     assert_eq!(result.unwrap_err().code(), "composition_unavailable");
+}
+
+#[test]
+fn apply_takes_the_workspace_from_the_plan_and_hints_drop_the_default_selector() {
+    let fixture = Fixture::new();
+    // A second Workspace, so a disagreeing --workspace exists.
+    std::fs::create_dir_all(fixture.root().join("other")).unwrap();
+    fixture.ok(&[
+        "workspace",
+        "new",
+        "other",
+        "--home",
+        fixture.root().join("other").to_str().unwrap(),
+    ]);
+    let desired = fixture.desired();
+    let (readable, _) = fixture.ok(&[
+        "--workspace",
+        "practice",
+        "workspace",
+        "plan",
+        "--desired",
+        desired.to_str().unwrap(),
+    ]);
+    let saved = saved_plan(&readable);
+
+    // An explicit --workspace that disagrees with the plan is refused.
+    let (mismatch, _, stderr) = fixture.invoke(&[
+        "--workspace",
+        "other",
+        "workspace",
+        "apply",
+        "--plan",
+        saved.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        mismatch.unwrap_err().code(),
+        "workspace_mismatch",
+        "{stderr}"
+    );
+    assert!(std::fs::read_to_string(fixture.program_path())
+        .unwrap()
+        .contains("remember in folder"));
+
+    // With practice as the machine default, apply needs only the plan and its
+    // hints name no Workspace.
+    fixture.ok(&["workspace", "default", "--set", "practice"]);
+    let (applied, _) = fixture.ok(&["workspace", "apply", "--plan", saved.to_str().unwrap()]);
+    assert!(
+        applied.starts_with("Applied to Workspace practice"),
+        "{applied}"
+    );
+    assert!(
+        applied.ends_with(
+            "  Read it:   margins workspace show --text\n  Change it: margins workspace edit\n"
+        ),
+        "{applied}"
+    );
+    let (_, hint) = fixture.ok(&["workspace", "show"]);
+    assert!(
+        hint.contains("Read it with `margins workspace show --text`"),
+        "{hint}"
+    );
+
+    // Replaying the applied plan is idempotent; once the program changes
+    // again, the same plan is stale and refused.
+    let (replayed, _, stderr) =
+        fixture.invoke(&["workspace", "apply", "--plan", saved.to_str().unwrap()]);
+    assert!(replayed.is_ok(), "{stderr}");
+    let current = std::fs::read_to_string(fixture.program_path()).unwrap();
+    std::fs::write(fixture.program_path(), format!("{current}\n")).unwrap();
+    let (refused, _, stderr) =
+        fixture.invoke(&["workspace", "apply", "--plan", saved.to_str().unwrap()]);
+    assert_eq!(
+        refused.unwrap_err().code(),
+        "workspace_revision_conflict",
+        "{stderr}"
+    );
 }

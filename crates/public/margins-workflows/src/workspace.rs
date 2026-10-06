@@ -1417,35 +1417,78 @@ pub fn inspect_or_create_workspace(
     resolve_or_create_workspace_with(Resolution::ReadOnly, roots, selector, cwd)
 }
 
-/// Resolve a Workspace for a command that must never create one (recall,
-/// status, sync, imports): an explicit or `MARGINS_WORKSPACE` selection, else
-/// the one Workspace that declares the cwd, else the machine default.
-/// `Ok(None)` when none applies; nothing is written.
+/// A Workspace chosen for a command that never creates one, and whether it
+/// is the machine default (nothing selected it and no Workspace declares the
+/// cwd), so the command can say which Workspace it used.
+#[derive(Debug)]
+pub struct SelectedWorkspace {
+    pub workspace: ResolvedWorkspace,
+    pub via_default: bool,
+}
+
+/// Choose a Workspace for a read-only command (recall, status, source list):
+/// an explicit or `MARGINS_WORKSPACE` selection, else the one Workspace that
+/// declares the cwd, else the machine default. `Ok(None)` when none applies;
+/// nothing is written.
 pub fn inspect_workspace_or_default(
     margins_home: &Path,
     selector: Option<&str>,
     cwd: &Path,
-) -> Result<Option<ResolvedWorkspace>> {
+) -> Result<Option<SelectedWorkspace>> {
+    select_workspace(Resolution::ReadOnly, margins_home, selector, cwd)
+}
+
+/// [`inspect_workspace_or_default`] for commands that write (sync, imports,
+/// reconcile): the chosen Workspace is resolved as `resolve_at` does,
+/// migrating a retired `config.toml` and renaming `index.db`, but a Workspace
+/// is never created.
+pub fn resolve_workspace_or_default(
+    margins_home: &Path,
+    selector: Option<&str>,
+    cwd: &Path,
+) -> Result<Option<SelectedWorkspace>> {
+    select_workspace(Resolution::Writable, margins_home, selector, cwd)
+}
+
+fn select_workspace(
+    resolution: Resolution,
+    margins_home: &Path,
+    selector: Option<&str>,
+    cwd: &Path,
+) -> Result<Option<SelectedWorkspace>> {
     let env_selector = std::env::var("MARGINS_WORKSPACE")
         .ok()
         .filter(|value| !value.trim().is_empty());
     if selector.is_some_and(|value| !value.trim().is_empty()) || env_selector.is_some() {
-        return resolve_workspace_with(Resolution::ReadOnly, margins_home, selector, cwd).map(Some);
+        return resolve_workspace_with(resolution, margins_home, selector, cwd).map(|workspace| {
+            Some(SelectedWorkspace {
+                workspace,
+                via_default: false,
+            })
+        });
     }
     let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    // Matching only reads; only the chosen Workspace is resolved for writing.
     let mut matches = Resolution::ReadOnly
         .list(margins_home)?
         .into_iter()
         .filter(|workspace| declares_folder(workspace, &cwd))
+        .map(|workspace| workspace.config.id)
         .collect::<Vec<_>>();
-    match matches.len() {
-        1 => Ok(Some(matches.remove(0))),
+    let (id, via_default) = match matches.len() {
+        1 => (matches.remove(0), false),
         0 => match default_workspace(margins_home)? {
-            Some(id) => Resolution::ReadOnly.at(margins_home, &id).map(Some),
-            None => Ok(None),
+            Some(id) => (id, true),
+            None => return Ok(None),
         },
         _ => bail!("multiple workspaces declare this folder; pass --workspace <id> explicitly"),
-    }
+    };
+    resolution.at(margins_home, &id).map(|workspace| {
+        Some(SelectedWorkspace {
+            workspace,
+            via_default,
+        })
+    })
 }
 
 fn declares_folder(workspace: &ResolvedWorkspace, cwd: &Path) -> bool {

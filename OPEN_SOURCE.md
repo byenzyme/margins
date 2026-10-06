@@ -51,7 +51,7 @@ memo evidence, and produces a reviewed connected note. Users can instead select
 a session or supply a transcript, memo, or supported audio file. The published
 CLI searches declared Markdown at query time and returns paths to the supporting
 notes. Other builds can provide additional recall modes through the same
-`margins recall` result contract.
+`margins recall --json` result contract.
 
 This boundary reuses the existing Workspace plan and recall evidence contracts
 rather than introducing a second setup format.

@@ -377,9 +377,10 @@ fn write_setup_program_note(
     let Some(home) = margins_home else {
         return Ok(());
     };
+    let default = margins_workflows::workspace::default_workspace(home).ok().flatten();
     let selected = match workspace.filter(|id| !id.trim().is_empty()) {
         Some(id) => Some(id.to_string()),
-        None => margins_workflows::workspace::default_workspace(home).ok().flatten(),
+        None => default.clone(),
     };
     writeln!(report)?;
     let configs = home.join(margins_workflows::workspace::CONFIGS_DIR);
@@ -389,6 +390,7 @@ fn write_setup_program_note(
                 report,
                 &id,
                 &configs.join(format!("{id}.enzyme")),
+                default.as_deref() == Some(id.as_str()),
             )?;
         }
         _ => {
