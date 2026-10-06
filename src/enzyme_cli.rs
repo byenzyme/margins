@@ -70,10 +70,12 @@ pub fn required_version() -> &'static str {
     static VERSION: OnceLock<String> = OnceLock::new();
     VERSION.get_or_init(|| {
         include_str!("../scripts/enzyme-cli.pin")
-            .lines()
-            .find_map(|line| line.trim().strip_prefix("version = "))
-            .map(|value| value.trim_matches('"').to_string())
+            .parse::<toml::Table>()
+            .expect("scripts/enzyme-cli.pin is TOML")
+            .get("version")
+            .and_then(toml::Value::as_str)
             .expect("scripts/enzyme-cli.pin names a version")
+            .to_string()
     })
 }
 
@@ -183,9 +185,11 @@ impl Generator {
     }
 }
 
-/// Locate `enzyme`: [`ENZYME_BIN_ENV`], next to the running executable, then
-/// `$MARGINS_HOME/bin/enzyme`. `PATH` is never searched: an `enzyme` the user
-/// installed for themselves may be another release that updates itself.
+/// Locate `enzyme`: [`ENZYME_BIN_ENV`], next to the running executable, the
+/// installers' `<exe dir>/../libexec/margins/enzyme` (Homebrew keg,
+/// `~/.local` installs), then `$MARGINS_HOME/bin/enzyme`. `PATH` is never
+/// searched: an `enzyme` the user installed for themselves may be another
+/// release that updates itself.
 pub fn locate_binary(margins_home: &Path) -> Result<PathBuf, EngineError> {
     let name = format!("enzyme{}", std::env::consts::EXE_SUFFIX);
     let mut candidates = Vec::new();
@@ -198,6 +202,9 @@ pub fn locate_binary(margins_home: &Path) -> Result<PathBuf, EngineError> {
             .and_then(|exe| exe.parent().map(Path::to_path_buf))
         {
             candidates.push(dir.join(&name));
+            if let Some(prefix) = dir.parent() {
+                candidates.push(prefix.join("libexec").join("margins").join(&name));
+            }
         }
         candidates.push(margins_home.join("bin").join(&name));
     }

@@ -239,7 +239,8 @@ the server together.
   `ENZYME_HOME=$MARGINS_HOME`, `--workspace <id>`, and an allowlisted
   environment (plus proxy and CA variables: `HTTP(S)_PROXY`, `NO_PROXY`,
   `ALL_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`). It finds the binary through
-  `MARGINS_ENZYME_BIN`, then beside `margins`, then `$MARGINS_HOME/bin/enzyme`;
+  `MARGINS_ENZYME_BIN`, then beside `margins`, then
+  `<exe dir>/../libexec/margins/enzyme`, then `$MARGINS_HOME/bin/enzyme`;
   never `PATH`, where a user's own `enzyme` may be another release. Before the
   first call in a process it requires `enzyme --version` to equal the
   `version` in `scripts/enzyme-cli.pin`. The generator is
