@@ -466,7 +466,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
             temp.path().join("config.toml"),
-            "# existing policy\n[llm]\nlocal_model = \"fixture\"\n",
+            "# existing policy\n[audio]\ninput_name = \"Mic\"\n\n[llm]\nlocal_model = \"fixture\"\n",
         )
         .unwrap();
 
@@ -475,6 +475,7 @@ mod tests {
         assert_eq!(read_remembered_agent(temp.path()).unwrap(), Some(Agent::Codex));
         let saved = std::fs::read_to_string(temp.path().join("margins.toml")).unwrap();
         assert!(saved.contains("# existing policy"));
+        assert!(saved.contains("input_name = \"Mic\""));
         assert!(saved.contains("[cli]"));
         assert!(saved.contains("note_agent = \"codex\""));
         let settings =
