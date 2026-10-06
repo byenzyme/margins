@@ -17,7 +17,7 @@ import { promisify } from "node:util";
 
 const execFile = promisify(execFileCallback);
 
-const RUNTIME_RELEASE_VERSION = "0.4.16";
+const RUNTIME_RELEASE_VERSION = "0.4.17";
 const RELEASE_API = `https://api.github.com/repos/byenzyme/margins/releases/tags/v${RUNTIME_RELEASE_VERSION}`;
 const MAX_ARCHIVE_BYTES = 128 * 1024 * 1024;
 
@@ -44,10 +44,10 @@ function targetName(hostPlatform: NodeJS.Platform, arch: string) {
   return null;
 }
 
-const RELEASE_EXECUTABLES = ["margins", "margins-server"] as const;
 // The pinned enzyme engine that margins runs. Archives carry it next to
 // margins; the shared CLI copy finds it at <prefix>/libexec/margins/enzyme.
 const RELEASE_ENGINE = "enzyme";
+const RELEASE_EXECUTABLES = ["margins", "margins-server", RELEASE_ENGINE] as const;
 
 async function isRegularExecutable(path: string) {
   try {
@@ -180,18 +180,18 @@ async function installRuntime(input: {
     await input.execFileImpl("/usr/bin/tar", ["-xzf", archivePath, "-C", unpacked], {
       signal: input.signal,
     });
+    // Check every binary before copying any, so a release without the engine
+    // never leaves a runtime that looks installed.
     for (const name of input.executables) {
-      const source = join(unpacked, name);
-      const stat = await lstat(source).catch(() => null);
+      const stat = await lstat(join(unpacked, name)).catch(() => null);
       if (!stat?.isFile() || stat.isSymbolicLink()) {
         throw new Error(`the Margins release did not contain a regular ${name} executable`);
       }
-      await copyRuntimeBinary(source, join(input.runtimeBinDir, name));
+    }
+    for (const name of input.executables) {
+      await copyRuntimeBinary(join(unpacked, name), join(input.runtimeBinDir, name));
     }
     const engine = join(unpacked, RELEASE_ENGINE);
-    const engineStat = await lstat(engine).catch(() => null);
-    const hasEngine = Boolean(engineStat?.isFile() && !engineStat.isSymbolicLink());
-    if (hasEngine) await copyRuntimeBinary(engine, join(input.runtimeBinDir, RELEASE_ENGINE));
 
     // Make the normal command available to agents and shells when that path is
     // free or already belongs to this plugin. An existing Margins command is
@@ -204,11 +204,9 @@ async function installRuntime(input: {
       .catch(() => false);
     if (!cliExists || pluginManaged) {
       // The engine lands first so the new margins never runs without it.
-      if (hasEngine) {
-        const engineDir = join(dirname(input.cliBinDir), "libexec", "margins");
-        await mkdir(engineDir, { recursive: true });
-        await copyRuntimeBinary(engine, join(engineDir, RELEASE_ENGINE));
-      }
+      const engineDir = join(dirname(input.cliBinDir), "libexec", "margins");
+      await mkdir(engineDir, { recursive: true });
+      await copyRuntimeBinary(engine, join(engineDir, RELEASE_ENGINE));
       await replaceManagedBinary(join(unpacked, "margins"), cliDestination);
     }
   } finally {
@@ -235,7 +233,10 @@ export function createRuntimeManager(options: RuntimeManagerOptions = {}) {
       }
       const runtimeBinDir = join(input.dataDir, "runtime", `v${RUNTIME_RELEASE_VERSION}`);
       const serverPath = join(runtimeBinDir, "margins-server");
-      if (await isRegularExecutable(serverPath)) return serverPath;
+      if (
+        (await isRegularExecutable(serverPath))
+        && (await isRegularExecutable(join(runtimeBinDir, RELEASE_ENGINE)))
+      ) return serverPath;
       const target = targetName(hostPlatform, hostArch);
       if (!target) throw new Error("Recording is not available on this project machine");
       const expectedName = `margins-${RUNTIME_RELEASE_VERSION}-${target}.tar.gz`;
@@ -248,7 +249,7 @@ export function createRuntimeManager(options: RuntimeManagerOptions = {}) {
         cliBinDir: env.MARGINS_CLI_BIN_DIR?.trim() || join(home, ".local", "bin"),
         execFileImpl,
         signal: input.signal,
-        executables: ["margins", "margins-server"],
+        executables: RELEASE_EXECUTABLES,
       });
       if (!(await isRegularExecutable(serverPath))) {
         throw new Error("The Margins recorder was not installed correctly");

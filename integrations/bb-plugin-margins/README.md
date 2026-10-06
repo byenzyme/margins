@@ -54,13 +54,13 @@ digest-verified Margins release when needed. That release contains:
 
 - `margins`, the normal CLI;
 - `margins-server`, the project-side recording service;
-- `enzyme`, the pinned recall engine that `margins` runs, in archives from the
-  first release that ships it. The plugin copies it next to the runtime and,
+- `enzyme`, the pinned recall engine that `margins` runs. The plugin requires
+  it in the archive, copies it next to the runtime and,
   when it manages the CLI in `~/.local/bin`, to `~/.local/libexec/margins/enzyme`,
   off `PATH`, so it never replaces a user's own `enzyme`.
 
-The plugin pins `v0.4.16`, whose Linux and Apple Silicon macOS archives include
-both executables. That release must be published before a clean installation
+The plugin pins `v0.4.17`, whose Linux and Apple Silicon macOS archives include
+all three executables. That release must be published before a clean installation
 can start the project service. Development builds can use
 `MARGINS_CLI_BIN` and `MARGINS_PROJECT_SERVER_PATH` as explicit overrides.
 
@@ -140,7 +140,7 @@ memo through Finish and Linux transcription. This was a development bundle,
 not an installed-app first-run test. A menu-owned meeting's memo is editable in
 bb through the Workspace service; the native bridge itself carries audio and
 control only. The plugin's release-pinned installation also requires a published
-release archive containing both `margins` and `margins-server`. The 0.4.16 CLI
+release archive containing `margins`, `margins-server`, and `enzyme`. The 0.4.17 CLI
 includes `native-bridge` for this path.
 
 `@Margins` is also withheld until the project recording service exposes a
