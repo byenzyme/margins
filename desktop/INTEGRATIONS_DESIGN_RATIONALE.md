@@ -896,7 +896,7 @@ temporary per-IP cap.
   137 derived rows with zero ownership or source-ref mismatches; eras are
   non-empty (18 across 2 epochs); Bob's hypotheses are 4/4 about Bob (1/7 in
   round 11, 0/0 in round 12) because every-chunk span scanning now credits
-  his cc-only messages; DK 1/1; Steven 5/7 specific with no hypothesis about
+  his cc-only messages; DK 1/1; Owen 5/7 specific with no hypothesis about
   another participant; 17 of 30 selected entities materialized, the other 13
   correctly skipped as thin evidence at one document; zero noise entities;
   Keychain and real home untouched. Remaining questions are design, not

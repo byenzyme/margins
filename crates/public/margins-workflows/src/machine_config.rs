@@ -9,10 +9,22 @@
 //!
 //! A root `config.toml` is Enzyme's legacy machine file. One left by an earlier
 //! Margins is migrated automatically, under the machine lock, the first time
-//! any reader or writer touches machine configuration: it is validated before
+//! a command writes machine configuration (readers see the migrated values in
+//! memory and never write the home): it is validated before
 //! anything is written, `[llm] mode`/`local_model` move to `settings.enzyme`,
 //! every other key moves to `margins.toml`, and the original is kept as
 //! `config.toml.migrated`. Re-running is idempotent.
+//!
+//! Comments survive only where they belong to a key that is copied: a comment
+//! above a key, or above a table `margins.toml` does not have yet. A header
+//! comment on a table both files already have, and one above an `[llm]` table
+//! the migration empties, are dropped, as are comments on the moved `[llm]`
+//! keys. The backup keeps the original file, comments and all.
+//!
+//! Read-only commands (status, show, source list, plan previews, capabilities)
+//! never migrate. Commands that write the home migrate under the machine lock,
+//! and so does `margins-server` at startup: it is a writer and is upgraded
+//! together with the CLI.
 
 use anyhow::{bail, Context, Result};
 use fs4::fs_std::FileExt;
@@ -78,10 +90,63 @@ pub fn ensure_migrated(margins_home: &Path) -> Result<()> {
 /// legacy file that is still present was written after (or instead of) the
 /// last migration, for example by an earlier Margins.
 pub fn migrate_locked(margins_home: &Path) -> Result<()> {
+    let Some(migrated) = migrated_view(margins_home)? else {
+        return Ok(());
+    };
+    let legacy_path = margins_home.join(LEGACY_MACHINE_CONFIG);
+    let config_path = machine_config_path(margins_home);
+    let settings_path = settings_program_path(margins_home);
+    let settings_text = enzyme_spec::render_program(&migrated.settings);
+
+    // Everything is validated; a crash between these writes leaves the legacy
+    // file in place, so the migration simply runs again.
+    // margins.toml is owner-only (at most 0600, see `atomic_write`); a new one
+    // also keeps a stricter mode of the legacy file it replaces, but always
+    // stays writable by its owner.
+    let new_config = !config_path.exists();
+    atomic_write(&config_path, migrated.config.to_string().as_bytes())?;
+    #[cfg(unix)]
+    if new_config {
+        use std::os::unix::fs::PermissionsExt;
+        let legacy_mode = std::fs::metadata(&legacy_path)
+            .with_context(|| format!("reading {}", legacy_path.display()))?
+            .permissions()
+            .mode();
+        let mode = crate::workspace::owner_only(legacy_mode);
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(mode))
+            .with_context(|| format!("setting permissions of {}", config_path.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = new_config;
+    atomic_write(&settings_path, settings_text.as_bytes())?;
+    let backup = first_free(margins_home, LEGACY_MACHINE_CONFIG_MIGRATED);
+    std::fs::rename(&legacy_path, &backup)
+        .with_context(|| format!("retiring {}", legacy_path.display()))?;
+    sync_parent_directory(&backup)?;
+    log::info!(
+        "migrated machine config {} to {} and {}",
+        legacy_path.display(),
+        config_path.display(),
+        settings_path.display()
+    );
+    Ok(())
+}
+
+/// What a legacy root `config.toml` migrates to, computed without writing.
+struct MigratedView {
+    config: DocumentMut,
+    settings: enzyme_spec::Program,
+}
+
+/// The machine configuration a migration of a legacy root `config.toml`
+/// would produce, validated, or `None` when there is no legacy file. Readers
+/// use this view so that reading machine configuration never writes the home;
+/// only writers (under the machine lock) commit it with [`migrate_locked`].
+fn migrated_view(margins_home: &Path) -> Result<Option<MigratedView>> {
     let legacy_path = margins_home.join(LEGACY_MACHINE_CONFIG);
     let raw = match std::fs::read_to_string(&legacy_path) {
         Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(error).with_context(|| format!("reading {}", legacy_path.display()))
         }
@@ -108,38 +173,9 @@ pub fn migrate_locked(margins_home: &Path) -> Result<()> {
         settings.settings.local_model = model;
     }
     settings.settings.updates.get_or_insert(false);
-    let settings_text = enzyme_spec::render_program(&settings);
-    enzyme_spec::parse(&settings_text)
+    enzyme_spec::parse(&enzyme_spec::render_program(&settings))
         .with_context(|| format!("rendering {}", settings_path.display()))?;
-
-    // Everything is validated; a crash between these writes leaves the legacy
-    // file in place, so the migration simply runs again.
-    // A new margins.toml takes the legacy file's mode; an existing one keeps
-    // its own, so a migration never loosens permissions.
-    let permissions = match std::fs::metadata(&config_path) {
-        Ok(existing) => existing.permissions(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => std::fs::metadata(&legacy_path)
-            .with_context(|| format!("reading {}", legacy_path.display()))?
-            .permissions(),
-        Err(error) => {
-            return Err(error).with_context(|| format!("reading {}", config_path.display()))
-        }
-    };
-    atomic_write(&config_path, config.to_string().as_bytes())?;
-    std::fs::set_permissions(&config_path, permissions)
-        .with_context(|| format!("setting permissions of {}", config_path.display()))?;
-    atomic_write(&settings_path, settings_text.as_bytes())?;
-    let backup = first_free(margins_home, LEGACY_MACHINE_CONFIG_MIGRATED);
-    std::fs::rename(&legacy_path, &backup)
-        .with_context(|| format!("retiring {}", legacy_path.display()))?;
-    sync_parent_directory(&backup)?;
-    log::info!(
-        "migrated machine config {} to {} and {}",
-        legacy_path.display(),
-        config_path.display(),
-        settings_path.display()
-    );
-    Ok(())
+    Ok(Some(MigratedView { config, settings }))
 }
 
 /// Remove `[llm] mode` and `[llm] local_model` from a legacy document,
@@ -176,7 +212,8 @@ fn take_engine_settings(document: &mut DocumentMut) -> Result<(Option<String>, O
     Ok((generation, model))
 }
 
-/// Merge `from` into `into`, table by table; leaf values in `from` win.
+/// Merge `from` into `into`, table by table; leaf values in `from` win, with
+/// their comments.
 fn merge_tables(into: &mut dyn TableLike, from: &dyn TableLike) {
     for (key, item) in from.iter() {
         match (into.get_mut(key), item.as_table_like()) {
@@ -185,6 +222,11 @@ fn merge_tables(into: &mut dyn TableLike, from: &dyn TableLike) {
             }
             _ => {
                 into.insert(key, item.clone());
+                if let (Some((source, _)), Some(mut target)) =
+                    (from.get_key_value(key), into.key_mut(key))
+                {
+                    *target.leaf_decor_mut() = source.leaf_decor().clone();
+                }
             }
         }
     }
@@ -246,9 +288,13 @@ fn read_settings_program(path: &Path) -> Result<Option<enzyme_spec::Program>> {
     Ok(Some(program))
 }
 
-/// The raw text of `margins.toml` after migration, or `None` when absent.
+/// The raw text of `margins.toml` as a migration would leave it, or `None`
+/// when absent. Never writes: a legacy root `config.toml` is migrated in
+/// memory only.
 pub fn read_machine_config_text(margins_home: &Path) -> Result<Option<String>> {
-    ensure_migrated(margins_home)?;
+    if let Some(migrated) = migrated_view(margins_home)? {
+        return Ok(Some(migrated.config.to_string()));
+    }
     read_machine_config_text_locked(margins_home)
 }
 
@@ -277,10 +323,12 @@ pub fn update_machine_document(
     atomic_write(&path, document.to_string().as_bytes())
 }
 
-/// Engine settings from `configs/settings.enzyme`, after migration; defaults
-/// when the program does not exist.
+/// Engine settings from `configs/settings.enzyme` as a migration would leave
+/// them; defaults when the program does not exist. Never writes.
 pub fn engine_settings(margins_home: &Path) -> Result<enzyme_spec::Settings> {
-    ensure_migrated(margins_home)?;
+    if let Some(migrated) = migrated_view(margins_home)? {
+        return Ok(migrated.settings.settings);
+    }
     Ok(read_settings_program(&settings_program_path(margins_home))?
         .map(|program| program.settings)
         .unwrap_or_default())
@@ -429,13 +477,41 @@ mod tests {
         std::fs::write(&legacy, "[cli]\nnote_agent = \"codex\"\n").unwrap();
         std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o640)).unwrap();
         ensure_migrated(home.path()).unwrap();
-        assert_eq!(mode(&config), 0o640, "a new margins.toml takes the legacy mode");
+        assert_eq!(mode(&config), 0o600, "a new margins.toml is owner-only");
 
-        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o640)).unwrap();
         std::fs::write(&legacy, "[cli]\nnote_agent = \"cursor\"\n").unwrap();
         std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o644)).unwrap();
         ensure_migrated(home.path()).unwrap();
-        assert_eq!(mode(&config), 0o600, "an existing margins.toml keeps its mode");
+        assert_eq!(mode(&config), 0o600, "an existing margins.toml is restricted, never loosened");
+
+        std::fs::remove_file(&config).unwrap();
+        std::fs::write(&legacy, "[cli]\nnote_agent = \"pi\"\n").unwrap();
+        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o400)).unwrap();
+        ensure_migrated(home.path()).unwrap();
+        assert_eq!(mode(&config), 0o600, "a read-only legacy file still yields a writable margins.toml");
+        update_machine_document(home.path(), |_| Ok(())).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn machine_config_writes_are_owner_only_and_keep_stricter_modes() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let home = home();
+        let config = machine_config_path(home.path());
+        update_machine_document(home.path(), |document| {
+            document["cli"]["note_agent"] = toml_edit::value("codex");
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(mode(&config), 0o600);
+        set_generation(home.path(), "local").unwrap();
+        assert_eq!(mode(&settings_program_path(home.path())), 0o600);
+
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644)).unwrap();
+        update_machine_document(home.path(), |_| Ok(())).unwrap();
+        assert_eq!(mode(&config), 0o600, "a looser existing mode is restricted");
     }
 
     #[test]

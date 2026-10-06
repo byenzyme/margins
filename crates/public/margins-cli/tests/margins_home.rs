@@ -140,7 +140,7 @@ fn with_learning(program: &str) -> String {
 }
 
 #[test]
-fn legacy_machine_config_and_index_name_migrate_on_first_use() {
+fn legacy_machine_config_and_index_name_migrate_on_first_write() {
     let home = Home::new();
     let legacy = "# machine\n[workspace]\ndefault = \"practice\"\n\n[workspace.names]\npractice = \"Practice\"\n\n[retention]\nraw_cache_max_age_days = 30\n\n[llm]\nmode = \"local\"\nlocal_model = \"fixture-model\"\n\n[cli]\nnote_agent = \"codex\"\n";
     std::fs::write(home.margins_home.join("config.toml"), legacy).unwrap();
@@ -157,6 +157,18 @@ fn legacy_machine_config_and_index_name_migrate_on_first_use() {
         serde_json::json!([{ "id": "practice", "name": "Practice" }]),
         "settings.enzyme is not a Workspace"
     );
+    // Listing is read-only: it shows the migrated values without writing.
+    assert_eq!(
+        std::fs::read_to_string(home.margins_home.join("config.toml")).unwrap(),
+        legacy
+    );
+    assert!(!home.margins_home.join("margins.toml").exists());
+    assert!(!home.margins_home.join("configs/settings.enzyme").exists());
+    assert!(state.join("index.db").exists());
+
+    // The first command that writes the home migrates it.
+    let set = home.run(&["workspace", "default", "--set", "practice", "--json"], &[], "");
+    assert!(set.status.success(), "{}", stderr(&set));
 
     assert!(!home.margins_home.join("config.toml").exists());
     assert_eq!(

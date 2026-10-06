@@ -52,7 +52,7 @@ entities = [
     "folder:meetings",
     "folder:inbox",
     { "folder:people" = { profile = "relational", expandable = true } },
-    "#careerdev",
+    "#research",
     "#gtm",
     ...
 ]

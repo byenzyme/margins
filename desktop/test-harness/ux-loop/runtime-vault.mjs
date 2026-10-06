@@ -39,7 +39,7 @@ export async function setupRuntimeVault({ runId, fixture = "customer-call" } = {
     writeFile(resolve(marginsDir, `${sessionName}_aligned.md`), aligned, "utf8"),
     writeFile(resolve(marginsDir, `${sessionName}_capture-context.md`), captureContext, "utf8"),
     writeFile(resolve(vaultDir, `${sessionName}_memo.md`), memo, "utf8"),
-    writeFile(resolve(peopleDir, "Kevin Smith.md"), "# Kevin Smith\n\nDesign partner evaluating Margins for customer calls.\n", "utf8"),
+    writeFile(resolve(peopleDir, "Marcus Webb.md"), "# Marcus Webb\n\nDesign partner evaluating Margins for customer calls.\n", "utf8"),
     writeFile(resolve(peopleDir, "Joshua Pham.md"), "# Joshua Pham\n\nMargins product lead.\n", "utf8"),
     writeFile(
       resolve(inboxDir, "pilot-design.md"),
@@ -85,8 +85,8 @@ export async function setupRuntimeVault({ runId, fixture = "customer-call" } = {
       anchors: ["status ritual", "coordination debt", "related-note language", "developer plumbing"],
     },
     {
-      path: "people/Kevin Smith.md",
-      title: "Kevin Smith",
+      path: "people/Marcus Webb.md",
+      title: "Marcus Webb",
       anchors: ["design partner", "customer calls"],
     },
     {

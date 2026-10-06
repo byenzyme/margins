@@ -145,7 +145,9 @@ mkdir -p "$PACK/asset"
 install -m 0755 "$ENZYME_BIN" "$PACK/asset/enzyme"
 ASSET="$PACK/$("$REPO_ROOT/scripts/enzyme-pin" asset "$HOST_TARGET")"
 tar -czf "$ASSET" -C "$PACK/asset" enzyme
-ASSET_SHA="$(sha256sum "$ASSET" | cut -d ' ' -f1)"
+# sha256sum is GNU coreutils; macOS ships shasum.
+ASSET_SHA="$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$ASSET")"
+[[ "$ASSET_SHA" =~ ^[0-9a-f]{64}$ ]] || fail "cannot hash $ASSET"
 sed -e "s/^sha256\.$HOST_TARGET = .*/sha256.$HOST_TARGET = \"$ASSET_SHA\"/" \
   "$REPO_ROOT/scripts/enzyme-cli.pin" > "$PACK/enzyme-cli.pin"
 grep -q "^sha256\.$HOST_TARGET = \"$ASSET_SHA\"" "$PACK/enzyme-cli.pin" \

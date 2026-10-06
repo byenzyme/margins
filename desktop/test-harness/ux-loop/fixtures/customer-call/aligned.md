@@ -27,7 +27,7 @@
 [00:09:10] ch0: What would make the first generated note feel wrong?
 [00:09:15] ch1: If it flattened the conversation into generic bullets. Or if it over-indexed on my quick notes and missed what the other person contributed.
 [00:09:31] ch0: Your team wants both sides represented.
-[00:09:35] ch1: Yes. If Kevin explains the constraint and I only see my own framing, I cannot trust the note.
+[00:09:35] ch1: Yes. If Marcus explains the constraint and I only see my own framing, I cannot trust the note.
 [00:09:49] ch0: That is useful. The app should show that memo is an attention signal, not the whole source.
 [00:09:58] ch1: Exactly.
 

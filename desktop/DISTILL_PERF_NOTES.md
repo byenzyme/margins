@@ -3,10 +3,10 @@
 ## Session Investigated
 
 - Session: `2026-06-24-13-47`
-- Topic: Cameron / DGX Spark / local AI box conversation
+- Topic: Theo / home server conversation
 - Final note: `/Users/example/obsidian/inbox/2026-06-24-13-47-27-2026-06-24-13-47.md`
 - Margins artifacts: `/Users/example/obsidian/inbox/.margins/2026-06-24-13-47_*`
-- Pi session: `/Users/example/obsidian/inbox/.margins/pi-sessions/--Users-joshuapham-obsidian--/2026-06-24T21-33-02.222Z_fd99524c.jsonl`
+- Pi session: `/Users/example/obsidian/inbox/.margins/pi-sessions/--Users-example-obsidian--/2026-06-24T21-33-02.222Z_fd99524c.jsonl`
 
 ## Timing Evidence
 
@@ -34,7 +34,7 @@ From the Pi session JSONL:
 - `21:35:38.236Z` - first assistant response, calling `enzyme_petri`
 - `21:35:38.237Z` - `enzyme_petri` result recorded
 - `21:35:38.237Z` - three `enzyme_catalyze` calls/results recorded
-- `21:36:42.096Z` - user refine request: `other person is [[Cameron Reynoldson]]`
+- `21:36:42.096Z` - user refine request: `other person is [[Theo Lindqvist]]`
 - `21:38:32.905Z` - refine complete
 
 Known model-side costs:
@@ -115,7 +115,7 @@ The implementation thread should not just patch the schema. It should produce
 evidence:
 
 - A code change that prevents full unqueried Petri output in normal distillation.
-- A local reproduction command or script that can run against the Cameron session
+- A local reproduction command or script that can run against the Theo session
   artifacts without re-recording audio.
 - Before/after metrics:
   - total first-pass wall time
@@ -140,12 +140,12 @@ This parses the persisted Pi session JSONL, measures the historical unqueried
 
 ```bash
 enzyme petri --vault /Users/example/obsidian \
-  --query "Cameron DGX Spark local AI box visible agent thinking home appliance trust Qwen VPS workflow" \
+  --query "Theo home server visible agent thinking appliance trust local model workflow" \
   --top 8 \
   --catalyst-budget 2
 ```
 
-and writes a replay fixture from the existing Cameron memo, aligned timeline,
+and writes a replay fixture from the existing Theo memo, aligned timeline,
 and capture context. The fixture command it prints is the opt-in real split
 replay path. It spends model/API resources.
 

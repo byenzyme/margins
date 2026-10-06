@@ -6,7 +6,7 @@ If a session restart or rate limit killed work, resume from here. Workflow runs 
 `Workflow({scriptPath: ".claude/workflows/design-roadmap-implement.js", args: <args>, resumeFromRunId: "<id>"})` — agents with completed results in the run's journal.jsonl return cached; only unfinished agents re-run.
 
 Transcript dirs live under:
-`~/.claude/projects/-Users-joshuapham-Hacks-margins/d6a2737c-ebbc-4d4b-a4fa-b31f6e2d560a/subagents/workflows/<runId>/`
+`~/.claude/projects/-Users-example-Hacks-margins/d6a2737c-ebbc-4d4b-a4fa-b31f6e2d560a/subagents/workflows/<runId>/`
 
 ## Run ledger
 

@@ -1,7 +1,7 @@
 ---
 title: Acme Pilot Kickoff
 date: 2026-06-30
-people: [Kevin Smith, Annie Zhang]
+people: [Marcus Webb, Elena Ruiz]
 tags: [acme, pilot, strategy]
 ---
 
@@ -16,9 +16,9 @@ meeting with a lighter decision-memory loop that survives people being out.
 - Success = at least one decision per week captured and re-found later.
 
 ## Follow-ups
-- [ ] Kevin to share the current status-doc template.
+- [ ] Marcus to share the current status-doc template.
 - [ ] Send the pilot charter by Wednesday.
 
 ## Related
 - [[Operating cadence]]
-- [[Kevin Smith]]
+- [[Marcus Webb]]

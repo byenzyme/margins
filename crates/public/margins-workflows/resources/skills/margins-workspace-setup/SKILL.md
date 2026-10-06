@@ -144,12 +144,22 @@ change. The preset only adds to the program, so running setup again on a set-up
 Workspace changes nothing; its note folder, including a chosen Home root, is
 kept.
 
-Tell the user, in their terms, which folders Margins will learn from, which preset
-folders were skipped because they do not exist, what it leaves out, and where new
-notes will go. If `actions` is empty, explain that nothing needs to change and skip
-apply. Otherwise apply the saved plan unchanged in the same turn. The opening setup
-request authorizes this preset; do not ask for a second “apply this plan”
-confirmation.
+**Show the plan before you apply it.** Before running `workspace apply`, write
+the user a message, in their terms, with the plan's plain-language consequences:
+
+- the folders Margins will learn from (the `preset.readings` it kept);
+- the preset folders it skipped because the notes folder does not have them
+  (`preset.skipped_readings`);
+- what it leaves out; and
+- where new notes will go (`preset.note_folder`) and where the program lives
+  (`program_path`).
+
+The consequences must reach the user before the apply command runs; reporting
+them only in the final summary, after apply, is not showing the plan.
+If `actions` is empty, explain that nothing needs to change and skip apply.
+Otherwise, once that message is out, apply the saved plan unchanged; you need
+not wait for a reply. The opening setup request authorizes this preset, so after the user has
+seen its consequences do not ask for a second “apply this plan” confirmation.
 
 ```bash
 margins --workspace practice workspace apply \
@@ -242,7 +252,8 @@ margins --workspace practice workspace plan \
   > /tmp/margins-workspace-plan.json
 ```
 
-Show the user-visible consequences and apply that plan unchanged. An agent that
+Show the user the plan's user-visible consequences before applying it, then
+apply that plan unchanged. An agent that
 wants evidence about the notes before proposing a change may read the engine's own
 read-only inventory, `enzyme scan --workspace <id> --json` (run with
 `ENZYME_HOME=$MARGINS_HOME`). The Knowledge Practice Review Contract below applies

@@ -55,8 +55,21 @@ pass() { echo "isolation: ok: $*"; }
 
 # A host-wide hosted lease cache must not appear (or change) during the run.
 API_CACHE=/tmp/enzyme-api-cache
-api_cache_state() { stat -c '%Y %s' "$API_CACHE" 2>/dev/null || echo absent; }
-API_CACHE_BEFORE="$(api_cache_state)"
+# Portable probe (GNU `stat -c` is not BSD/macOS `stat`); a probe that cannot
+# run fails the script instead of reading as "absent".
+api_cache_state() {
+  python3 - "$API_CACHE" <<'PY'
+import os, sys
+try:
+    st = os.lstat(sys.argv[1])
+except FileNotFoundError:
+    print("absent")
+else:
+    print(st.st_mtime_ns, st.st_size, oct(st.st_mode))
+PY
+}
+API_CACHE_BEFORE="$(api_cache_state)" || fail "cannot probe $API_CACHE"
+[[ -n "$API_CACHE_BEFORE" ]] || fail "cannot probe $API_CACHE"
 
 python3 "$REPO_ROOT/tests/fixture_openai_server.py" \
   --port-file "$MOCK_DIR/port" --count-file "$MOCK_DIR/count" >"$MOCK_DIR/log" 2>&1 &
@@ -166,7 +179,9 @@ assert_tmp_clean() {
   local leftover
   leftover="$(find "$TMPDIR" -mindepth 1 -print -quit)"
   [[ -z "$leftover" ]] || fail "$1: TMPDIR scratch left behind: $(find "$TMPDIR" -mindepth 1 | head -5)"
-  [[ "$(api_cache_state)" == "$API_CACHE_BEFORE" ]] || fail "$1: $API_CACHE was created or changed"
+  local api_cache_after
+  api_cache_after="$(api_cache_state)" || fail "$1: cannot probe $API_CACHE"
+  [[ "$api_cache_after" == "$API_CACHE_BEFORE" ]] || fail "$1: $API_CACHE was created or changed"
 }
 
 margins() { "$MARGINS_BIN" "$@"; }

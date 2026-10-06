@@ -2002,7 +2002,7 @@ mod tests {
                             "internalDate": 1_787_220_300_000_i64,
                             "headers": {
                                 "from": "DK Kim <dk@matching.test>",
-                                "to": "Owner <owner.round9@gmail.com>, Bob Zhao <bob@matching.test>, Carter <carter@other.test>",
+                                "to": "Owner <owner.round9@gmail.com>, Bob Reyes <bob@matching.test>, Carter <carter@other.test>",
                                 "cc": "Carter <carter@other.test>",
                                 "bcc": "Bea <bea@hidden.test>",
                                 "subject": "Complete Matching Survey",
@@ -2017,7 +2017,7 @@ mod tests {
                             "internalDate": 1_787_221_200_000_i64,
                             "headers": {
                                 "from": "Owner <owner.round9@gmail.com>",
-                                "to": "DK Kim <dk@matching.test>, Bob Zhao <bob@matching.test>",
+                                "to": "DK Kim <dk@matching.test>, Bob Reyes <bob@matching.test>",
                                 "subject": "Re: Complete Matching Survey",
                                 "date": "Thu, 20 Aug 2026 10:20:00 +0000",
                                 "in_reply_to": "<shared-in@matching.test>",

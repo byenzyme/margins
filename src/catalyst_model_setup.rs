@@ -42,7 +42,8 @@ fn default_model(models: &ModelsEnvelope) -> Result<&ModelEntry> {
         .context("the enzyme model registry lists no catalyst model")
 }
 
-/// Whether a correctly-sized model is already installed.
+/// Whether a correctly-sized model is already installed. Read-only: the
+/// engine is only asked for its model list (see [`Engine::for_inspection`]).
 pub fn is_installed() -> bool {
     margins_home()
         .ok()
@@ -53,7 +54,9 @@ pub fn is_installed() -> bool {
 /// Status reporting uses this form so it never depends on ambient process
 /// environment when inspecting another configured home.
 pub fn is_installed_at(home: &Path) -> bool {
-    models(home).is_ok_and(|models| models.active.is_some())
+    Engine::for_inspection(home)
+        .and_then(|engine| Ok(engine.models()?))
+        .is_ok_and(|models| models.active.is_some())
 }
 
 /// Download and verify the catalyst model into `$MARGINS_HOME/models`. No-op if a

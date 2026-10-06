@@ -12,7 +12,7 @@ const defaults = {
   marginsDir: process.env.MARGINS_DISTILL_PERF_DIR || join(process.env.HOME || "/tmp", "obsidian/inbox/.margins"),
   piSession: process.env.MARGINS_DISTILL_PERF_PI_SESSION || "",
   query:
-    "Cameron DGX Spark local AI box visible agent thinking home appliance trust Qwen VPS workflow",
+    "Theo home server visible agent thinking appliance trust local model workflow",
 };
 
 const args = parseArgs(process.argv.slice(2));
@@ -106,7 +106,7 @@ if (args.writeFixture) {
     `${JSON.stringify(
       {
         session_name: sessionName,
-        event_title: "Cameron / DGX Spark local AI box session",
+        event_title: "Theo / home server session",
         people: [],
         inbox_folder: "inbox",
         people_folder: "people",
@@ -180,7 +180,7 @@ const summary = {
           `MARGINS_UX_E2E_AI_PROVIDER=openai-codex ` +
           `MARGINS_UX_E2E_OPENAI_MODEL=gpt-5.5 ` +
           `cargo run --manifest-path desktop/src-tauri/Cargo.toml --example pi_distill_fixture -- ${fixtureDir}`,
-        note: "This replays the Cameron artifacts with OpenRouter/Gemini only for prep and ChatGPT subscription GPT-5.5 as the final writer. It spends model/API resources.",
+        note: "This replays the Theo artifacts with OpenRouter/Gemini only for prep and ChatGPT subscription GPT-5.5 as the final writer. It spends model/API resources.",
       }
     : null,
 };
@@ -208,7 +208,7 @@ function parseArgs(raw) {
 
 Options:
   --run-enzyme            Run bounded enzyme petri locally. No model/API calls.
-  --write-fixture <dir>   Copy Cameron artifacts into a fixture for opt-in real replay.
+  --write-fixture <dir>   Copy Theo artifacts into a fixture for opt-in real replay.
   --json                  Print JSON instead of a text report.
   --query <text>          Query for bounded Petri comparison.
   --vault <path>          Vault path. Default: ${defaults.vault}

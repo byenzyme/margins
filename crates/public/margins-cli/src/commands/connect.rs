@@ -361,7 +361,12 @@ pub fn status(
             }
         }
     }
-    for declared in workspace::list_workspaces(margins_home).map_err(CliError::from_anyhow)? {
+    // Status is read-only: inspect Workspaces without migrating any.
+    for declared in workspace::inspect_workspace_entries(margins_home)
+        .map_err(CliError::from_anyhow)?
+        .into_iter()
+        .filter_map(|(_, resolved)| resolved.ok())
+    {
         for account in declared
             .config
             .bindings

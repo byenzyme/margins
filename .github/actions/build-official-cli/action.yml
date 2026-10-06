@@ -287,6 +287,8 @@ runs:
       shell: bash
       env:
         ARCHIVE: ${{ steps.package.outputs.archive }}
+        # Only the client embedded at build time may satisfy the release smoke.
+        MARGINS_SMOKE_OAUTH_CLIENT: embedded
       run: |
         set -euo pipefail
         mkdir packaged-smoke

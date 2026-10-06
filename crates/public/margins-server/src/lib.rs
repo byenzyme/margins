@@ -36,6 +36,8 @@ fn selected_workspace(
         // BB starts the service for a Workspace the CLI has already declared.
         // Its Home and capture bindings are authoritative; the server's cwd
         // is only a launcher detail and must never rewrite those paths.
+        // The server is a writer (it records sessions), so resolving here may
+        // migrate a retired layout; it is upgraded together with the CLI.
         workspace::resolve_workspace(margins_home, Some(workspace_id), work_dir)
     } else if provision {
         workspace::ensure_service_workspace(
