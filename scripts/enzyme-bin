@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Print the path of the `enzyme` binary that Margins tests and gates run.
+#
+# MARGINS_ENZYME_BIN wins when set. Otherwise the enzyme-rust revision in
+# scripts/enzyme-cli.pin is built once per host (debug, no local model) into
+# MARGINS_ENZYME_CACHE (default ~/.cache/margins-enzyme/<rev>) and reused. Run
+# it inside scripts/cargo-lane so the build uses a managed target.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -n "${MARGINS_ENZYME_BIN:-}" ]]; then
+  if [[ ! -x "$MARGINS_ENZYME_BIN" ]]; then
+    echo "enzyme-bin: MARGINS_ENZYME_BIN is not an executable: $MARGINS_ENZYME_BIN" >&2
+    exit 1
+  fi
+  echo "$MARGINS_ENZYME_BIN"
+  exit 0
+fi
+
+rev="$(tr -d '[:space:]' < "$repo_root/scripts/enzyme-cli.pin")"
+cache="${MARGINS_ENZYME_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/margins-enzyme}/$rev"
+if [[ ! -x "$cache/bin/enzyme" ]]; then
+  echo "enzyme-bin: building enzyme $rev into $cache" >&2
+  staging="$cache.partial.$$"
+  trap 'rm -rf "$staging"' EXIT
+  CARGO_NET_GIT_FETCH_WITH_CLI="${CARGO_NET_GIT_FETCH_WITH_CLI:-true}" \
+    cargo install --git https://github.com/byenzyme/enzyme-rust.git --rev "$rev" \
+      --locked --debug --bin enzyme --root "$staging" enzyme-cli >&2
+  mkdir -p "$(dirname "$cache")"
+  rm -rf "$cache"
+  mv "$staging" "$cache"
+fi
+echo "$cache/bin/enzyme"
