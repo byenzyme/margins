@@ -62,8 +62,8 @@ function stateCopy(state: PanelState["state"], sourceLabel: string | null, error
       primaryAction: "start" as const, primaryLabel: "Use browser microphone",
     };
     case "getting_ready": return {
-      title: "Getting recording ready", detail: "Nothing is being recorded until your microphone and the project are both ready.",
-      primaryAction: "none" as const, primaryLabel: "Getting ready",
+      title: "Starting… don't speak yet", detail: "Nothing is recorded until your microphone delivers audio. Start speaking when this says Recording.",
+      primaryAction: "none" as const, primaryLabel: "Starting…",
     };
     case "recording": return {
       title: "Recording", detail: `${sourceLabel}. Audio and notes are being saved to your Workspace.`,

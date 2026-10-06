@@ -33813,7 +33813,7 @@ import { homedir, platform } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 var execFile = promisify(execFileCallback);
-var RUNTIME_RELEASE_VERSION = "0.4.15";
+var RUNTIME_RELEASE_VERSION = "0.4.16";
 var RELEASE_API = `https://api.github.com/repos/byenzyme/margins/releases/tags/v${RUNTIME_RELEASE_VERSION}`;
 var MAX_ARCHIVE_BYTES = 128 * 1024 * 1024;
 function targetName(hostPlatform, arch) {
@@ -34134,6 +34134,22 @@ async function verifyServerCompatibility(baseUrl, token, workspaceId, signal) {
 }
 function hostError(code, message, retryable = true) {
   return { code, message, retryable };
+}
+var PERMANENT_CHUNK_CODES = /* @__PURE__ */ new Set(["browser_chunk_conflict", "browser_lease_expired", "browser_already_saved"]);
+var GENERIC_SERVICE_CODES = /* @__PURE__ */ new Set([
+  "invalid_request",
+  "conflict",
+  "forbidden",
+  "unauthorized",
+  "not_found",
+  "too_large",
+  "capability_unavailable",
+  "owner_required"
+]);
+function chunkPermanentlyRefused(status, code, retryable) {
+  if (PERMANENT_CHUNK_CODES.has(code)) return true;
+  if (status === 401 || status === 403 || GENERIC_SERVICE_CODES.has(code)) return false;
+  return retryable === false;
 }
 var WorkspaceRequestError = class extends Error {
   constructor(code, message, retryable) {
@@ -34700,9 +34716,17 @@ var ProjectMarginsTransport = class {
         },
         body: Buffer.from(bytesBase64, "base64")
       });
-      if (!response.ok) throw new Error(`audio upload failed (${response.status})`);
-      const value = await response.json();
-      if (!value.ok) throw new Error(value.error || "audio upload failed");
+      const value = await response.json().catch(() => null);
+      if (!response.ok || !value?.ok) {
+        const structured = typeof value?.error === "object" ? value.error : void 0;
+        const detail = typeof value?.error === "string" ? value.error : structured?.message;
+        const code = structured?.code || "audio_upload_failed";
+        return { ok: false, error: hostError(
+          code,
+          detail ? `audio upload failed (${response.status}): ${detail}` : `audio upload failed (${response.status})`,
+          !chunkPermanentlyRefused(response.status, code, structured?.retryable)
+        ) };
+      }
       return { ok: true };
     } catch (cause) {
       return { ok: false, error: hostError("audio_upload_failed", cause instanceof Error ? cause.message : String(cause)) };

@@ -90,6 +90,12 @@ fn official_capabilities_json() -> serde_json::Value {
     })
 }
 
+/// `margins --version`: the same version, commit, and composition that
+/// `__release-smoke` reports in its `build` and `composition` fields.
+fn official_version_line() -> String {
+    margins_cli::build_info::version_line(env!("CARGO_PKG_VERSION"), "official")
+}
+
 /// Side-effect-free packaged-binary probe used by the release pipeline.
 ///
 /// Keeping this command in the private composition (rather than the public CLI
@@ -137,6 +143,10 @@ where
             return error.exit_code();
         }
     };
+    if parsed.version {
+        println!("{}", official_version_line());
+        return 0;
+    }
     let remote_selected = !parsed.local
         && (parsed.remote.is_some()
             || std::env::var("MARGINS_REMOTE")

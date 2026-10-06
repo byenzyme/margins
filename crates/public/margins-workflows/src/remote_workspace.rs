@@ -1604,6 +1604,19 @@ pub fn native_create_session_command(
     title: Option<String>,
     producer: &str,
 ) -> ClientMessageV1 {
+    native_create_session_command_at(session_id, idempotency_key, title, producer, unix_ms())
+}
+
+/// As [`native_create_session_command`], with the session clock anchored at
+/// `started_at_unix_ms`: a recorder that captured before reserving dates the
+/// session from when capture began, so memo edits and audio share one clock.
+pub fn native_create_session_command_at(
+    session_id: &str,
+    idempotency_key: &str,
+    title: Option<String>,
+    producer: &str,
+    started_at_unix_ms: u64,
+) -> ClientMessageV1 {
     let sources = [
         ("mic", CaptureSourceKindV1::Microphone),
         ("system", CaptureSourceKindV1::SystemAudio),
@@ -1638,7 +1651,7 @@ pub fn native_create_session_command(
         sent_at_unix_ms: margins_meeting_protocol::UnixMillis(now),
         body: ClientMessageBodyV1::CreateSession(CreateSessionV1 {
             idempotency_key: idempotency_key.to_string(),
-            started_at_unix_ms: margins_meeting_protocol::UnixMillis(now),
+            started_at_unix_ms: margins_meeting_protocol::UnixMillis(started_at_unix_ms),
             title,
             sources,
             lanes,

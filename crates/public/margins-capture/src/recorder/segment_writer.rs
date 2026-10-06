@@ -1452,6 +1452,8 @@ impl LaneActor {
             generation: sink.generation,
             session_offset_ms: generation_clock.session_offset_ms,
             sample_rate: self.rate,
+            start_frame: self.live_frame_enqueued,
+            synthesized: !count_drop_on_failure,
             samples,
         };
         let current_queued = sink.queued_samples.load(Ordering::Relaxed);
@@ -2017,6 +2019,8 @@ mod tests {
                 generation: 0,
                 session_offset_ms: 0,
                 sample_rate: 48_000,
+                start_frame: 0,
+                synthesized: false,
                 samples: vec![9.0],
             })
             .unwrap();

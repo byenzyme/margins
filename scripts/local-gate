@@ -48,6 +48,17 @@ REVERSE_DEPENDENTS = {
     "margins-store": {"margins", "margins-capture", "margins-cli", "margins-server", "margins-workflows"},
     "margins-workflows": {"margins", "margins-cli", "margins-server"},
 }
+# Fast, hermetic script tests (temp dirs and temp git repos only). Each maps to
+# the paths whose edits should rerun it under quick; linux and public run them
+# all. A new tests/test_*.py is picked up automatically by linux and public.
+SCRIPT_TESTS = {
+    "tests/test_cargo_lane.py": ("scripts/cargo-lane",),
+    "tests/test_design_docs.py": ("desktop/INTEGRATIONS_",),
+    "tests/test_setup_e2e_lanes.sh": (
+        "scripts/e2e-fresh-workspace-setup.sh",
+        "scripts/e2e-official-hosted-workspace-setup.sh",
+    ),
+}
 USAGE = "usage: scripts/local-gate quick <paths-or-crates>... | public | linux | macos | scan [git-range]"
 
 
@@ -129,6 +140,8 @@ def quick_selection(inputs: list[str]) -> tuple[list[str], bool, bool]:
             parked_desktop = True
         elif item in {"Cargo.toml", "Cargo.lock"}:
             global_rust = True
+        elif is_script_test(item):
+            continue
         elif item in {"src", "tests", "examples"} or item.startswith(("src/", "tests/", "examples/")):
             packages.add("margins")
         elif item == "crates/public":
@@ -150,6 +163,35 @@ def quick_selection(inputs: list[str]) -> tuple[list[str], bool, bool]:
                 packages.add(dependent)
                 pending.append(dependent)
     return sorted(packages), parked_desktop, bb_plugin
+
+
+def all_script_tests() -> list[str]:
+    discovered = {path.relative_to(ROOT).as_posix() for path in (ROOT / "tests").glob("test_*.py")}
+    return sorted(discovered | SCRIPT_TESTS.keys())
+
+
+def is_script_test(item: str) -> bool:
+    return item.startswith("tests/test_") and item.endswith((".py", ".sh"))
+
+
+def quick_script_tests(inputs: list[str]) -> list[str]:
+    selected: set[str] = set()
+    for raw in inputs:
+        item = normalize_input(raw)
+        if item in {"scripts", "tests", "scripts/local-gate"}:
+            return all_script_tests()
+        if is_script_test(item) and item in all_script_tests():
+            selected.add(item)
+        for test, triggers in SCRIPT_TESTS.items():
+            if any(item == trigger or item.startswith(trigger) for trigger in triggers):
+                selected.add(test)
+    return sorted(selected)
+
+
+def run_script_tests(gate: Gate, tests: list[str]) -> None:
+    for test in tests:
+        interpreter = sys.executable if test.endswith(".py") else "bash"
+        gate.run(f"script test {test}", [interpreter, test])
 
 
 def check_bb_plugin(gate: Gate) -> None:
@@ -180,6 +222,7 @@ def check_shipped_linux(gate: Gate, *, cli_already_built: bool = False) -> None:
 
 
 def quick(gate: Gate, inputs: list[str]) -> None:
+    run_script_tests(gate, quick_script_tests(inputs))
     packages, parked_desktop, bb_plugin = quick_selection(inputs)
     if packages:
         args = ["test", "--locked", "--no-default-features"]
@@ -212,6 +255,7 @@ def use_enzyme_binary(gate: Gate) -> None:
 
 
 def linux(gate: Gate) -> None:
+    run_script_tests(gate, all_script_tests())
     check_bb_plugin(gate)
     use_enzyme_binary(gate)
     gate.cargo(
@@ -256,6 +300,7 @@ def public(gate: Gate) -> None:
             "--fail-on-personal",
         ],
     )
+    run_script_tests(gate, all_script_tests())
     gate.cargo(
         "build and test workspace without recall",
         "test", "--workspace", "--all-targets", "--no-default-features", "--locked",

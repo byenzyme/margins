@@ -482,6 +482,35 @@ fn invoke(
 }
 
 #[test]
+fn version_flags_report_version_commit_and_public_composition() {
+    let temp = tempfile::tempdir().unwrap();
+    let services = services(temp.path());
+    let expected = format!(
+        "{}\n",
+        margins_cli::build_info::version_line(env!("CARGO_PKG_VERSION"), "public")
+    );
+    assert!(expected.starts_with(&format!("margins {} (", env!("CARGO_PKG_VERSION"))));
+    assert!(expected.contains(margins_cli::build_info::get().short));
+    for flag in ["--version", "-V"] {
+        let (result, stdout, stderr) = invoke(&services, temp.path(), &["margins", flag]);
+        assert!(result.is_ok(), "{flag}: {stderr}");
+        assert_eq!(stdout, expected, "{flag}");
+        assert!(stderr.is_empty(), "{flag}: {stderr}");
+    }
+    assert!(!temp.path().join(".margins").exists());
+}
+
+#[test]
+fn version_flag_is_top_level_only_and_leaves_subcommand_parsing_alone() {
+    let parsed = Args::try_parse_from(["margins", "--version"]).unwrap();
+    assert!(parsed.version);
+    assert!(parsed.command.is_none());
+    let parsed = Args::try_parse_from(["margins", "capabilities"]).unwrap();
+    assert!(!parsed.version);
+    assert!(Args::try_parse_from(["margins", "capabilities", "--version"]).is_err());
+}
+
+#[test]
 fn project_preprocessing_accepts_both_historical_spellings_anywhere() {
     let temp = tempfile::tempdir().unwrap();
     let services = services(temp.path());

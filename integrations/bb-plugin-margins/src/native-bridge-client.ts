@@ -6,6 +6,8 @@ export interface NativeStatus extends CaptureAuthority {
   sessionId: string | null;
   transferId: string | null;
   microphoneSamples: number;
+  /** Captured mic duration from newer helpers. Older helpers send samples only. */
+  microphoneDurationMs?: number;
   systemSamples: number;
   microphoneDroppedSamples: number;
   systemDroppedSamples: number;
@@ -15,6 +17,11 @@ export interface NativeStatus extends CaptureAuthority {
   microphoneDeviceName?: string | null;
   microphoneDevicePinned?: boolean;
   error: string | null;
+}
+
+export function nativeMicrophoneDurationMs(status: Pick<NativeStatus, "microphoneDurationMs" | "microphoneSamples">): number {
+  return typeof status.microphoneDurationMs === "number" && Number.isFinite(status.microphoneDurationMs)
+    ? status.microphoneDurationMs : (status.microphoneSamples || 0) / 16;
 }
 interface Pairing extends CaptureAuthority { token: string; port: number; grantExpiresAt: number | null }
 interface MenuGrant extends CaptureAuthority {

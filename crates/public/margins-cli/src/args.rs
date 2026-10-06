@@ -14,6 +14,9 @@ pub struct Args {
     /// Force the direct local adapter even when MARGINS_REMOTE is set
     #[arg(long, global = true, conflicts_with = "remote")]
     pub local: bool,
+    /// Print the version, build commit, and composition
+    #[arg(short = 'V', long)]
+    pub version: bool,
     #[command(subcommand)]
     pub command: Option<Command>,
 }

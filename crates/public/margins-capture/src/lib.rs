@@ -45,6 +45,8 @@ pub mod recorder {
         pub generation: u64,
         pub session_offset_ms: u64,
         pub sample_rate: u32,
+        pub start_frame: u64,
+        pub synthesized: bool,
         pub samples: Vec<f32>,
     }
 

@@ -13,6 +13,9 @@ use margins_server::{
 };
 use margins_store::canonical;
 use margins_workflows::{
+    remote_workspace::{
+        native_create_session_command, DurableTransferSpool, NativeRemoteLane, NativeRemoteTransfer,
+    },
     workspace::ensure_service_workspace,
     workspace_service::{ScopedCredentialStore, ServicePrincipal, WorkspaceService},
 };
@@ -188,7 +191,10 @@ fn finalize_pcm(service: &WorkspaceService, principal: &ServicePrincipal) {
         .unwrap();
 }
 
-fn finalize_native_pcm(service: &WorkspaceService, principal: &ServicePrincipal) {
+fn prepare_native_pcm(
+    service: &WorkspaceService,
+    principal: &ServicePrincipal,
+) -> (String, ClientMessageV1) {
     let segment_id = format!("{SESSION}-seg-0");
     let reservation = service
         .reserve_session(
@@ -271,22 +277,91 @@ fn finalize_native_pcm(service: &WorkspaceService, principal: &ServicePrincipal)
             ),
         )
         .unwrap();
-    service
-        .execute_capture(
+    (
+        reservation.producer_token,
+        command(
+            "native-finalize",
+            ClientMessageBodyV1::FinalizeSession(FinalizeSessionV1 {
+                ended_at_ms: SessionMillis(200),
+                segment_closes: vec![SegmentCloseReferenceV1 {
+                    segment_id: segment_id.into(),
+                    close_message_id: "native-close".into(),
+                }],
+                reason: SessionFinalizeReasonV1::Completed,
+            }),
+        ),
+    )
+}
+
+fn prepare_native_opus(
+    root: &Path,
+    service: &WorkspaceService,
+    principal: &ServicePrincipal,
+) -> (String, ClientMessageV1) {
+    let reservation = service
+        .reserve_session(
             principal,
-            &reservation.producer_token,
-            command(
-                "native-finalize",
-                ClientMessageBodyV1::FinalizeSession(FinalizeSessionV1 {
-                    ended_at_ms: SessionMillis(200),
-                    segment_closes: vec![SegmentCloseReferenceV1 {
-                        segment_id: segment_id.into(),
-                        close_message_id: "native-close".into(),
-                    }],
-                    reason: SessionFinalizeReasonV1::Completed,
-                }),
+            native_create_session_command(
+                SESSION,
+                "native-asr-http-opus",
+                Some("Native ASR HTTP fixture".into()),
+                "native-bridge",
             ),
         )
+        .unwrap();
+    let spool = DurableTransferSpool::create(
+        root,
+        "native-asr-http-transfer",
+        "test-instance",
+        "https://example.test",
+        "practice",
+        SESSION,
+        &reservation.producer_token,
+        0,
+    )
+    .unwrap();
+    let mut transfer = NativeRemoteTransfer::new(spool);
+    transfer.begin_segment("segment-opus".into(), 0).unwrap();
+    let mic = (0..9_600)
+        .map(|index| ((index * 271) % 30_000) as i16 - 15_000)
+        .flat_map(i16::to_le_bytes)
+        .collect::<Vec<_>>();
+    let system = vec![0_u8; 19_200];
+    transfer
+        .append_s16le(NativeRemoteLane::Microphone, 16_000, &mic)
+        .unwrap();
+    transfer
+        .append_s16le(NativeRemoteLane::System, 16_000, &system)
+        .unwrap();
+    let close = transfer.close_segment(SegmentCloseReasonV1::Stop).unwrap();
+    let finalize = transfer
+        .seal_session(600, SessionFinalizeReasonV1::Completed)
+        .unwrap();
+    let chunks = transfer
+        .spool()
+        .pending_chunks()
+        .unwrap()
+        .into_iter()
+        .map(|chunk| chunk.command)
+        .collect();
+    service
+        .execute_audio_batch(
+            principal,
+            &reservation.producer_token,
+            &SessionId(SESSION.into()),
+            chunks,
+        )
+        .unwrap();
+    service
+        .execute_capture(principal, &reservation.producer_token, close)
+        .unwrap();
+    (reservation.producer_token, finalize)
+}
+
+fn finalize_native_pcm(service: &WorkspaceService, principal: &ServicePrincipal) {
+    let (token, finalize) = prepare_native_pcm(service, principal);
+    service
+        .execute_capture(principal, &token, finalize)
         .unwrap();
 }
 
@@ -366,6 +441,67 @@ async fn typed_transcribe_route_runs_durable_job_against_runtime_audio() {
     let stale = service.transcript(&principal, SESSION).unwrap();
     assert!(!stale.terminal);
     assert!(!stale.body.contains("spoken evidence"));
+}
+
+#[tokio::test]
+async fn native_finalize_after_ready_wakes_durable_asr_job() {
+    let temp = tempfile::tempdir().unwrap();
+    let (app, service, principal) = fixture(temp.path());
+    let (token, finalize) = prepare_native_opus(temp.path(), &service, &principal);
+    assert!(service
+        .latest_job(&principal, &SessionId(SESSION.into()))
+        .unwrap()
+        .is_none());
+
+    // Native bridge and TUI captures finalize through this command route. The
+    // model is already ready, and this test never calls jobs/transcribe.
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(format!(
+            "/v1/workspaces/practice/sessions/{SESSION}/commands"
+        ))
+        .header("authorization", format!("Bearer {TOKEN}"))
+        .header("x-margins-instance-id", "test-instance")
+        .header("x-margins-producer-token", token)
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&finalize).unwrap()))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 2 * 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+    for _ in 0..100 {
+        let job = service
+            .latest_job(&principal, &SessionId(SESSION.into()))
+            .unwrap()
+            .expect("finalize must durably admit a job");
+        match job.status.as_str() {
+            "complete" => break,
+            "failed" => panic!("ASR job failed: {:?}", job.failure),
+            _ => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    }
+    let job = service
+        .latest_job(&principal, &SessionId(SESSION.into()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.status, "complete", "native finalize stranded {job:?}");
+    assert_eq!(job.attempt, 1);
+    let (status, transcript) = call(
+        &app,
+        Method::GET,
+        &format!("/v1/workspaces/practice/sessions/{SESSION}/transcript"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{transcript}");
+    assert_eq!(transcript["result"]["terminal"], true);
+    assert!(transcript["result"]["body"]
+        .as_str()
+        .unwrap()
+        .contains("spoken evidence"));
 }
 
 #[tokio::test]

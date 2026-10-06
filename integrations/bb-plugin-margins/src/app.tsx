@@ -3,7 +3,7 @@ import { definePluginApp, useBbContext, useBbNavigate, useRpc } from "@get-bb/pl
 import { AlertCircle, Pause, Play, Square } from "lucide-react";
 import type { marginsRpcContract } from "../server.js";
 import { browserCaptureOwner } from "./browser-capture.js";
-import { nativeBridgeOwner, type CaptureAuthority, type NativeStatus } from "./native-bridge-client.js";
+import { nativeBridgeOwner, nativeMicrophoneDurationMs, type CaptureAuthority, type NativeStatus } from "./native-bridge-client.js";
 import { MeetingLevelDot, MeetingsAccessory, MeetingsPage, PROGRAM_SEGMENT, rememberStopAck } from "./meetings-page.js";
 import { MarginsThreadTab } from "./thread-tab.js";
 
@@ -91,7 +91,7 @@ function RecordingOverlay() {
   const paused = status === "paused";
   const recording = status === "recording";
   const noAudio = recording && (nativeLive ? nativeBridgeOwner.noAudioWarning : browserCaptureOwner.noAudioWarning);
-  const seconds = nativeLive ? Math.floor((native!.microphoneSamples || 0) / 16_000) : Math.floor(browserCaptureOwner.elapsedMs / 1_000);
+  const seconds = nativeLive ? Math.floor(nativeMicrophoneDurationMs(native!) / 1_000) : Math.floor(browserCaptureOwner.elapsedMs / 1_000);
   const elapsed = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
   async function control(action: "pause" | "resume" | "stop") {
     setBusy(true);
@@ -204,7 +204,7 @@ function NativeCapturePanel({ projectId, title }: { projectId: string; title?: s
       {status?.state === "ready" && <button disabled={busy} onClick={() => void act(async () => { if (browserCaptureOwner.active) throw new Error("Stop the microphone-only recording before starting Mac audio."); await nativeBridgeOwner.verify(await authority()); try { sessionStorage.setItem("margins.bb.meetings-project", projectId); } catch { /* private browser */ } await nativeBridgeOwner.control("start", title); })}>Start Mac recording</button>}
       {status?.state === "recording" && <div className="margins-native-actions"><button disabled={busy} onClick={() => void act(() => nativeBridgeOwner.control("pause"))}>Pause</button><button disabled={busy} onClick={() => void act(() => nativeBridgeOwner.control("stop"))}>Stop and save</button></div>}
       {status?.state === "paused" && <div className="margins-native-actions"><button disabled={busy} onClick={() => void act(() => nativeBridgeOwner.control("resume"))}>Resume</button><button disabled={busy} onClick={() => void act(() => nativeBridgeOwner.control("stop"))}>Stop and save</button></div>}
-      {status?.state === "getting_ready" && <p>Getting microphone and computer audio ready…</p>}
+      {status?.state === "getting_ready" && <p>Starting the microphone and computer audio. Don't speak yet; recording begins when this says Recording.</p>}
       {status?.microphoneDeviceName && <p>Microphone: {status.microphoneDeviceName} · Change it in Margins Menu before recording.</p>}
       {status?.state === "saving" && <p>Saving the meeting…</p>}
       {status?.state === "saved" && <p>Mac recording saved. The connected note action will appear in this thread once BB confirms the session.</p>}

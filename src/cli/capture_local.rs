@@ -116,12 +116,20 @@ fn create_native_session(work_dir: &Path, title: Option<&str>) -> Result<()> {
         checkpoint_path,
         initial_offset_ms as u64,
         live_status.clone(),
+        Some(local_live_durable_source(
+            &margins_dir,
+            &name,
+            live_artifact_ordinal,
+        )),
     );
 
     // A failed first device open must not reserve an empty meeting or move the
     // current-session pointer. The recorder can be bound after reservation.
     let (initial_input, (owner, mut meeting)) = open_before_reserving_session(
-        || prepare_initial_native_input(live.as_ref().map(|worker| worker.sink_for_offset(0))),
+        || prepare_initial_native_input(
+            live.as_ref()
+                .map(|worker| worker.sink_for_segment(0, live_artifact_ordinal)),
+        ),
         || {
             std::fs::create_dir_all(&margins_dir).context("failed to create .margins directory")?;
             let owner = capture_local_runtime::SessionOwnerLock::acquire(&margins_dir, &name)?;
@@ -158,6 +166,7 @@ fn create_native_session(work_dir: &Path, title: Option<&str>) -> Result<()> {
             app.live_mic_dropped_samples,
             app.live_system_dropped_samples,
         ) = worker.dropped_counters();
+        app.live_unrecovered_frames = worker.unrecovered_counter();
     }
 
     let outcome = run_segment(
@@ -217,6 +226,11 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
         checkpoint_path,
         initial_offset_ms as u64,
         live_status.clone(),
+        Some(local_live_durable_source(
+            &margins_dir,
+            &name,
+            live_artifact_ordinal,
+        )),
     );
     margins_cli::commands::sessions::write_current_session(
         &margins_cli::standalone_services(),
@@ -238,6 +252,7 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
             app.live_mic_dropped_samples,
             app.live_system_dropped_samples,
         ) = worker.dropped_counters();
+        app.live_unrecovered_frames = worker.unrecovered_counter();
     }
 
     let outcome = run_segment(
@@ -252,6 +267,23 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
     )?;
     drop(owner);
     complete_post_capture(outcome, None, work_dir, &name)
+}
+
+/// The live worker can recover audio its bounded queue missed (for example
+/// during a cold model warmup) from the session's durable runtime chunks.
+#[cfg(feature = "audio-capture")]
+fn local_live_durable_source(
+    margins_dir: &Path,
+    name: &str,
+    first_ordinal: i64,
+) -> margins_capture::live_asr::LiveDurableSource {
+    margins_capture::live_asr::LiveDurableSource {
+        audio: Box::new(capture_local_runtime::RuntimeLiveAudioReader::new(
+            margins_dir,
+            name,
+        )),
+        first_ordinal,
+    }
 }
 
 #[cfg(feature = "audio-capture")]
@@ -515,7 +547,7 @@ fn run_segment(
             // Advancing its generation here makes every live send look stale.
             let live_sink = sink_for_new_recorder(preopened.is_some(), || {
                 live.as_ref()
-                    .map(|worker| worker.sink_for_offset(segment_offset_ms as u64))
+                    .map(|worker| worker.sink_for_segment(segment_offset_ms as u64, ordinal))
             });
             let (recorder, stop) = if let Some(initial) = preopened.take() {
                 initial

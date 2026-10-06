@@ -1,0 +1,158 @@
+import "fake-indexeddb/auto";
+import { IDBFactory } from "fake-indexeddb";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { BrowserChunkStore } from "./browser-chunk-store.js";
+
+const timing = (start: number) => ({ capturedStartUnixMs: start, capturedEndUnixMs: start + 3_000 });
+const text = (bytes: ArrayBuffer) => new TextDecoder().decode(bytes);
+
+describe("browser chunk store", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("survives a new page instance and returns chunks in sequence order", async () => {
+    const factory = new IDBFactory();
+    const before = new BrowserChunkStore(() => factory);
+    await before.persist("rec-1", 2, new Blob(["two"]), timing(2));
+    await before.persist("rec-1", 1, new Blob(["one"]), timing(1));
+    await before.persist("rec-2", 1, new Blob(["other"]), timing(1));
+
+    const after = new BrowserChunkStore(() => factory);
+    const pending = await after.pending("rec-1");
+    expect(pending.map((chunk) => [chunk.sequence, text(chunk.bytes)])).toEqual([[1, "one"], [2, "two"]]);
+    expect(pending[0]!.timing).toEqual(timing(1));
+  });
+
+  it("deletes a chunk once acknowledged, even when the write is still in flight", async () => {
+    const store = new BrowserChunkStore(() => new IDBFactory());
+    void store.persist("rec-1", 0, new Blob(["zero"]), timing(0));
+    await store.acknowledge("rec-1", 0);
+    expect(await store.pending("rec-1")).toEqual([]);
+  });
+
+  it("keeps chunks past the byte budget memory-only and admits more after acknowledgements", async () => {
+    const store = new BrowserChunkStore(() => new IDBFactory(), { maxBytes: 8 });
+    expect(await store.persist("rec-1", 0, new Blob(["12345"]), timing(0))).toBe(true);
+    expect(await store.persist("rec-1", 1, new Blob(["67890"]), timing(1))).toBe(false);
+    expect(store.isDegraded("rec-1")).toBe(false);
+    await store.acknowledge("rec-1", 0);
+    expect(await store.persist("rec-1", 2, new Blob(["abcde"]), timing(2))).toBe(true);
+    expect((await store.pending("rec-1")).map((chunk) => chunk.sequence)).toEqual([2]);
+  });
+
+  it("falls back to memory-only retention after a quota error", async () => {
+    const store = new BrowserChunkStore(() => new IDBFactory());
+    await store.pending("rec-1");
+    const put = vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(() => {
+      throw new DOMException("Quota exceeded", "QuotaExceededError");
+    });
+    expect(await store.persist("rec-1", 0, new Blob(["zero"]), timing(0))).toBe(false);
+    expect(store.isDegraded("rec-1")).toBe(true);
+    put.mockRestore();
+    // The degraded recording does not resume partial persistence.
+    expect(await store.persist("rec-1", 1, new Blob(["one"]), timing(1))).toBe(false);
+    expect(await store.pending("rec-1")).toEqual([]);
+    // Other recordings are unaffected.
+    expect(await store.persist("rec-2", 0, new Blob(["zero"]), timing(0))).toBe(true);
+  });
+
+  it("is a no-op when IndexedDB is unavailable", async () => {
+    const missing = new BrowserChunkStore(() => undefined);
+    expect(await missing.persist("rec-1", 0, new Blob(["zero"]), timing(0))).toBe(false);
+    expect(await missing.pending("rec-1")).toEqual([]);
+    await expect(missing.acknowledge("rec-1", 0)).resolves.toBeUndefined();
+    await expect(missing.forgetSession("rec-1")).resolves.toBeUndefined();
+
+    const blocked = new BrowserChunkStore(() => { throw new DOMException("denied", "SecurityError"); });
+    expect(await blocked.persist("rec-1", 0, new Blob(["zero"]), timing(0))).toBe(false);
+  });
+
+  it("forgets a finalized recording and sweeps abandoned ones by age", async () => {
+    const factory = new IDBFactory();
+    let now = 1_000;
+    const store = new BrowserChunkStore(() => factory, { maxAgeMs: 10_000, now: () => now });
+    await store.persist("done", 0, new Blob(["a"]), timing(0));
+    await store.persist("abandoned", 0, new Blob(["b"]), timing(0));
+    now = 6_000;
+    await store.persist("fresh", 0, new Blob(["c"]), timing(0));
+    await store.forgetSession("done");
+    expect(await store.pending("done")).toEqual([]);
+
+    now = 12_000;
+    const reloaded = new BrowserChunkStore(() => factory, { maxAgeMs: 10_000, now: () => now });
+    expect(await reloaded.pending("abandoned")).toEqual([]);
+    expect((await reloaded.pending("fresh")).map((chunk) => text(chunk.bytes))).toEqual(["c"]);
+  });
+
+  it("budgets per recording so another tab's entries do not shrink this one", async () => {
+    const factory = new IDBFactory();
+    await new BrowserChunkStore(() => factory, { maxBytes: 8 }).persist("other-tab", 0, new Blob(["1234567"]), timing(0));
+    const store = new BrowserChunkStore(() => factory, { maxBytes: 8 });
+    expect(await store.persist("rec-1", 0, new Blob(["1234567"]), timing(0))).toBe(true);
+    expect(await store.persist("rec-1", 1, new Blob(["89"]), timing(1))).toBe(false);
+  });
+
+  it("looks up and forgets entries by key without listing audio", async () => {
+    const store = new BrowserChunkStore(() => new IDBFactory());
+    for (const sequence of [1, 2, 3, 5]) await store.persist("rec-1", sequence, new Blob([`c${sequence}`]), timing(sequence));
+    expect(await store.has("rec-1", 2)).toBe(true);
+    expect(await store.has("rec-1", 4)).toBe(false);
+    expect(text((await store.get("rec-1", 3))!.bytes)).toBe("c3");
+    expect(await store.get("rec-1", 4)).toBeNull();
+    await store.forgetBelow("rec-1", 3);
+    expect(await store.sequences("rec-1")).toEqual([3, 5]);
+  });
+
+  it("falls back to memory-only instead of failing silently after another page upgrades the schema", async () => {
+    const factory = new IDBFactory();
+    const store = new BrowserChunkStore(() => factory);
+    expect(await store.persist("rec-1", 0, new Blob(["a"]), timing(0))).toBe(true);
+    // A newer page version bumps the schema; this page must not hang or
+    // silently lose writes against a closed connection.
+    await new Promise<void>((resolve, reject) => {
+      const request = factory.open("margins.bb.browser-chunks", 3);
+      request.onsuccess = () => { request.result.close(); resolve(); };
+      request.onerror = () => reject(request.error);
+    });
+    expect(await store.persist("rec-1", 1, new Blob(["b"]), timing(1))).toBe(false);
+    expect(await store.sequences("rec-1")).toEqual([]);
+  });
+
+  it("upgrades a v1 database, indexing and sweeping its entries", async () => {
+    const factory = new IDBFactory();
+    // The shape the first version of this store wrote: no index, no size.
+    await new Promise<void>((resolve, reject) => {
+      const request = factory.open("margins.bb.browser-chunks", 1);
+      request.onupgradeneeded = () => {
+        const store = request.result.createObjectStore("chunks", { keyPath: ["sessionId", "sequence"] });
+        store.put({ sessionId: "old", sequence: 0, bytes: new TextEncoder().encode("stale").buffer, timing: timing(0), storedAtMs: 1_000 });
+        store.put({ sessionId: "kept", sequence: 0, bytes: new TextEncoder().encode("fresh").buffer, timing: timing(0), storedAtMs: 50_000 });
+      };
+      request.onsuccess = () => { request.result.close(); resolve(); };
+      request.onerror = () => reject(request.error);
+    });
+    const store = new BrowserChunkStore(() => factory, { maxAgeMs: 10_000, now: () => 55_000, maxBytes: 8 });
+    await store.sweep();
+    expect(await store.sequences("old")).toEqual([]);
+    expect(text((await store.get("kept", 0))!.bytes)).toBe("fresh");
+    // The upgraded entry counts toward its recording's budget.
+    expect(await store.persist("kept", 1, new Blob(["1234"]), timing(1))).toBe(false);
+  });
+
+  it("retries opening after an older tab stops blocking the upgrade", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const factory = new IDBFactory();
+    // An older tab holds a v1 connection and ignores versionchange.
+    const older = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = factory.open("margins.bb.browser-chunks", 1);
+      request.onupgradeneeded = () => { request.result.createObjectStore("chunks", { keyPath: ["sessionId", "sequence"] }); };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const store = new BrowserChunkStore(() => factory, { reopenAfterMs: 0 });
+    expect(await store.persist("rec-1", 0, new Blob(["a"]), timing(0))).toBe(false);
+    expect(warn).toHaveBeenCalledOnce();
+    older.close();
+    await vi.waitFor(async () => expect(await store.persist("rec-1", 1, new Blob(["b"]), timing(1))).toBe(true));
+    expect(await store.sequences("rec-1")).toEqual([1]);
+  });
+});

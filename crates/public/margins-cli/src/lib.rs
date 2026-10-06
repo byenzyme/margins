@@ -65,6 +65,14 @@ fn run_inner(
     let (project_selector, args) = args::strip_project_arg(args).map_err(CliError::usage)?;
     let mut args =
         Args::try_parse_from(args).map_err(|error| CliError::usage(error.to_string()))?;
+    if args.version {
+        return writeln!(
+            stdout,
+            "{}",
+            build_info::version_line(env!("CARGO_PKG_VERSION"), "public")
+        )
+        .map_err(|error| CliError::from_anyhow(error.into()));
+    }
     let env_workspace = std::env::var("MARGINS_WORKSPACE")
         .ok()
         .filter(|value| !value.trim().is_empty());
