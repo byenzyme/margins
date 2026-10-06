@@ -162,14 +162,17 @@ SQLite sources require an explicit mapping later.
 The program at `$MARGINS_HOME/configs/<id>.enzyme` is the Workspace's whole
 configuration. **Edit program** in the setup result, **Workspace program** in
 the Meetings sidebar, and **Edit program** in Settings open it in Meetings
-(sub-path `<projectId>/@program`). The editor highlights the language with the
-live bb code theme and shows line numbers. Each pause in typing plans the text
+(sub-path `<projectId>/@program`). It needs a Margins CLI that reports
+`workspace.program` in `margins capabilities`; an older CLI gets an "Update
+Margins" message. The editor colours strings, source kinds, and profile names
+from the live bb code theme, keeps keywords a muted foreground, and shows line
+numbers. Tab indents; Escape, then Tab, leaves the editor. Each pause in typing plans the text
 with `margins workspace plan --desired <file> --json` on the project's machine.
 Planning writes nothing to the Workspace. Syntax errors appear at their line
 and column. Errors without a location, such as a folder that does not exist,
 appear under the editor. **Review changes** shows the plan's summaries and
-diff, and **Apply** commits exactly that plan through `margins workspace
-apply`. When the saved program changed elsewhere since editing began, the
+diff in plain language, and **Save program** commits exactly that plan through
+`margins workspace apply`. A review whose plan expired is checked again. When the saved program changed elsewhere since editing began, the
 editor refuses to apply and keeps the text. It then offers to review the edits
 against the saved version or to load the saved version. A replaced or reverted
 text can be restored, and an unsaved draft survives closing the panel.

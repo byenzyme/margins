@@ -6,7 +6,7 @@ import { codeThemeStyle, ProgramEditor } from "./program-editor.js";
 const SAVED = 'workspace "notes" {\n  source markdown "home" { path "/notes" }\n  remember in folder "." create note\n}\n';
 const PREVIEW = "11111111-2222-3333-4444-555555555555";
 const mocks = vi.hoisted(() => ({
-  saved: { workspaceId: "notes", programPath: "/m/configs/notes.enzyme", revision: "rev-1", program: "" },
+  saved: { workspaceId: "notes", workspaceName: "My Notes" as string | null, programPath: "/m/configs/notes.enzyme", revision: "rev-1", program: "" },
   planBase: "rev-1",
   apply: { ok: true, revision: "rev-2" } as unknown,
   call: vi.fn(),
@@ -35,7 +35,7 @@ vi.mock("@get-bb/plugin-sdk/app", () => ({
 }));
 
 function reset() {
-  mocks.saved = { workspaceId: "notes", programPath: "/m/configs/notes.enzyme", revision: "rev-1", program: SAVED };
+  mocks.saved = { workspaceId: "notes", workspaceName: "My Notes", programPath: "/m/configs/notes.enzyme", revision: "rev-1", program: SAVED };
   mocks.planBase = "rev-1";
   mocks.apply = { ok: true, revision: "rev-2" };
   mocks.call.mockImplementation(defaultCall);
@@ -52,9 +52,9 @@ async function openEditor() {
 const withPeople = SAVED.replace('create note\n}', 'create note\n  learn questions from folder "People"\n}');
 
 describe("Workspace program editor", () => {
-  it("shows the program path with highlighted tokens and line numbers", async () => {
+  it("names the Workspace, with highlighted tokens and line numbers", async () => {
     const { container } = render(<ProgramEditor projectId="proj-1" />);
-    await screen.findByText("/m/configs/notes.enzyme");
+    expect((await screen.findByText("My Notes Workspace")).getAttribute("title")).toBe("/m/configs/notes.enzyme");
     const token = (cls: string) => Array.from(container.querySelectorAll(`pre [data-token="${cls}"]`)).map((node) => node.textContent);
     await waitFor(() => expect(token("kind")).toEqual(["markdown"]));
     expect(token("keyword")).toEqual(expect.arrayContaining(["workspace", "source", "path", "remember", "in", "folder", "create", "note"]));
@@ -75,7 +75,11 @@ describe("Workspace program editor", () => {
     expect(container.querySelector(".margins-code-gutter span.is-error")?.textContent).toBe("3");
     expect(container.querySelector("pre .enz-error")?.textContent).toBe("lern");
     expect((container.querySelector(".margins-code-error-line") as HTMLElement).style.getPropertyValue("--enz-line")).toBe("2");
-    expect(container.querySelector(".margins-code-error-callout")?.textContent).toBe('expected "}"; found "lern"');
+    // The inline callout stays short; the full message is under the editor, once.
+    expect(container.querySelector(".margins-code-error-callout")?.textContent).toBe('Unexpected "lern"');
+    expect(screen.getAllByText('expected "}"; found "lern"')).toHaveLength(1);
+    await waitFor(() => expect((container.querySelector("[role=status].margins-visually-hidden") as HTMLElement).textContent)
+      .toBe('Not valid at line 3, column 3: expected "}"; found "lern"'));
     expect(area.getAttribute("aria-invalid")).toBe("true");
     fireEvent.click(screen.getByRole("button", { name: "Go to line 3" }));
     expect(area.selectionStart).toBe(area.value.indexOf("lern"));
@@ -83,6 +87,8 @@ describe("Workspace program editor", () => {
     fireEvent.change(area, { target: { value: SAVED.replace('"."', '"Nope"') } });
     expect(await screen.findByText('folder reading "Nope" does not exist under Home')).toBeTruthy();
     expect(screen.getByText("Not valid")).toBeTruthy();
+    // A long message without a location gets no inline callout.
+    expect(container.querySelector(".margins-code-error-callout")).toBeNull();
     expect(container.querySelector(".margins-code-gutter span.is-error")).toBeNull();
     expect(mocks.call.mock.calls.filter(([method]) => method === "applyWorkspaceProgram")).toHaveLength(0);
   });
@@ -94,17 +100,18 @@ describe("Workspace program editor", () => {
     fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
     const review = screen.getByRole("dialog", { name: "Review program changes" });
     expect(review.textContent).toContain("Attention policy: learn questions from folder:People");
+    expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Review changes" }));
     expect(review.querySelector("pre")?.textContent).toContain('+  learn questions from folder "People"');
     mocks.saved = { ...mocks.saved, revision: "rev-2", program: withPeople };
-    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
-    expect(await screen.findByText("Saved to /m/configs/notes.enzyme.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Save program" }));
+    expect(await screen.findByText("Saved.")).toBeTruthy();
     expect(mocks.call).toHaveBeenCalledWith("applyWorkspaceProgram", { projectId: "proj-1", workspaceId: "notes", previewId: PREVIEW });
     expect(mocks.call).toHaveBeenCalledWith("planWorkspaceProgram", { projectId: "proj-1", workspaceId: "notes", program: withPeople });
-    expect(localStorage.getItem("margins.program-draft.notes")).toBeNull();
+    expect(localStorage.getItem("margins.program-draft.proj-1.notes")).toBeNull();
   });
 
   it("refuses a stale plan, keeps the user's text, and offers a reload with a way back", async () => {
-    const area = await openEditor();
+    let area = await openEditor();
     fireEvent.change(area, { target: { value: withPeople } });
     await screen.findByText("Valid · 1 change");
     fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
@@ -112,7 +119,7 @@ describe("Workspace program editor", () => {
     const external = SAVED.replace('"."', '"Inbox"');
     mocks.saved = { ...mocks.saved, revision: "rev-9", program: external };
     mocks.apply = { ok: false, error: { code: "stale", message: "changed", line: null, column: null, actualRevision: "rev-9" } };
-    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save program" }));
     expect((await screen.findByRole("alert")).textContent).toContain("changed outside this editor");
     expect(area.value).toBe(withPeople);
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -120,7 +127,12 @@ describe("Workspace program editor", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Load the saved version" }));
     await waitFor(() => expect(area.value).toBe(external));
-    fireEvent.click(screen.getByRole("button", { name: "Restore it" }));
+    // The set-aside text survives closing the panel.
+    cleanup();
+    render(<ProgramEditor projectId="proj-1" />);
+    area = await screen.findByLabelText("Workspace program", { selector: "textarea" }) as HTMLTextAreaElement;
+    await waitFor(() => expect(area.value).toBe(external));
+    fireEvent.click(await screen.findByRole("button", { name: "Restore it" }));
     expect(area.value).toBe(withPeople);
     // The restored text is still based on the old revision, so planning flags it again.
     mocks.planBase = "rev-9";
@@ -132,23 +144,58 @@ describe("Workspace program editor", () => {
   });
 
   it("restores an unsaved draft and reverts to the saved program with an undo", async () => {
-    localStorage.setItem("margins.program-draft.notes", JSON.stringify({ text: withPeople, baseRevision: "rev-1" }));
+    localStorage.setItem("margins.program-draft.proj-1.notes", JSON.stringify({ text: withPeople, baseRevision: "rev-1" }));
+    // Another project's draft for a Workspace with the same id is not this one.
+    localStorage.setItem("margins.program-draft.proj-2.notes", JSON.stringify({ text: "other", baseRevision: "rev-1" }));
     render(<ProgramEditor projectId="proj-1" />);
     const area = await screen.findByLabelText("Workspace program", { selector: "textarea" }) as HTMLTextAreaElement;
     await waitFor(() => expect(area.value).toBe(withPeople));
     expect(screen.getByText("Restored your unsaved edits.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Revert to saved" }));
     await waitFor(() => expect(area.value).toBe(SAVED));
-    await waitFor(() => expect(localStorage.getItem("margins.program-draft.notes")).toBeNull());
     fireEvent.click(screen.getByRole("button", { name: "Restore it" }));
     expect(area.value).toBe(withPeople);
+    fireEvent.click(screen.getByRole("button", { name: "Revert to saved" }));
+    await waitFor(() => expect(area.value).toBe(SAVED));
+    fireEvent.click(screen.getByRole("button", { name: "Restore it" }));
+    await waitFor(() => expect(localStorage.getItem("margins.program-draft.proj-1.notes")).toContain("learn questions"));
+    fireEvent.change(area, { target: { value: SAVED } });
+    await waitFor(() => expect(localStorage.getItem("margins.program-draft.proj-1.notes")).toBeNull());
   });
 
-  it("indents with Tab instead of leaving the editor", async () => {
+  it("indents with Tab, and Escape then Tab leaves the editor", async () => {
     const area = await openEditor();
     area.setSelectionRange(0, 0);
-    fireEvent.keyDown(area, { key: "Tab" });
+    expect(fireEvent.keyDown(area, { key: "Tab" })).toBe(false);
     expect(area.value.startsWith("  workspace")).toBe(true);
+    fireEvent.keyDown(area, { key: "Escape" });
+    // Not prevented: the browser moves focus on.
+    expect(fireEvent.keyDown(area, { key: "Tab" })).toBe(true);
+    expect(fireEvent.keyDown(area, { key: "Tab" })).toBe(false);
+  });
+
+  it("re-checks an expired review instead of failing", async () => {
+    const area = await openEditor();
+    fireEvent.change(area, { target: { value: withPeople } });
+    await screen.findByText("Valid · 1 change");
+    fireEvent.click(screen.getByRole("button", { name: "Review changes" }));
+    mocks.apply = { ok: false, error: { code: "expired", message: "This review expired before it was saved. Your text is unchanged; review the changes again.", line: null, column: null } };
+    const plans = mocks.call.mock.calls.filter(([method]) => method === "planWorkspaceProgram").length;
+    fireEvent.click(screen.getByRole("button", { name: "Save program" }));
+    expect(await screen.findByText(/This review expired/)).toBeTruthy();
+    expect(area.value).toBe(withPeople);
+    await waitFor(() => expect(mocks.call.mock.calls.filter(([method]) => method === "planWorkspaceProgram").length).toBe(plans + 1));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Review changes" }) as HTMLButtonElement).disabled).toBe(false));
+  });
+
+  it("announces results, not every check", async () => {
+    const area = await openEditor();
+    const live = document.querySelector("[role=status].margins-visually-hidden") as HTMLElement;
+    await waitFor(() => expect(live.textContent).toBe("No changes"));
+    fireEvent.change(area, { target: { value: withPeople } });
+    expect(screen.getByText("Checking…")).toBeTruthy();
+    expect(live.textContent).toBe("No changes");
+    await waitFor(() => expect(live.textContent).toBe("Valid, 1 change"));
   });
 });
 
@@ -166,7 +213,10 @@ describe("bb code theme", () => {
         { scope: "entity.name.type", settings: { foreground: "#00aaff" } },
       ] } }) as Record<string, string>;
     expect(style).toMatchObject({ "--enz-bg": "#101010", "--enz-fg": "#eeeeee", "--enz-gutter": "#555555",
-      "--enz-keyword": "#bb00ff", "--enz-string": "#00aa00", "--enz-comment": "#777777", "--enz-kind": "#00aaff" });
+      "--enz-string": "#00aa00", "--enz-comment": "#777777", "--enz-kind": "#00aaff" });
+    // Keywords and punctuation keep the muted foreground, never the theme's (often red) keyword colour.
+    expect(style["--enz-keyword"]).toBeUndefined();
+    expect(style["--enz-punctuation"]).toBeUndefined();
     expect(style["--enz-number"]).toBeUndefined();
     expect(codeThemeStyle(null)).toEqual({});
   });

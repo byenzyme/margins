@@ -711,7 +711,11 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
       {resolvedWorkspaceName && <button className={`margins-program-link${programOpen ? " selected" : ""}`}
         onClick={() => void (programOpen ? closeProgram() : openProgram())}>Workspace program</button>}
     </aside>
-    {programOpen && resolvedWorkspaceName ? <ProgramEditor key={projectId} projectId={projectId} onClose={closeProgram} />
+    {programOpen && resolvedWorkspaceName ? <div className="margins-program-pane">
+      {live.length > 0 && <div className="margins-workspace-notice margins-program-entry" role="status">
+        <span>Recording in progress. Pause and Stop stay in the recording bar.</span>
+        <button onClick={() => void choose(live[0].sessionId)}>Back to the meeting</button></div>}
+      <ProgramEditor key={projectId} projectId={projectId} onClose={closeProgram} /></div>
       : <section className={`margins-meeting-pad${selected?.inputFinalized ? " finished" : ""}`}>
       {setupDone && panel?.state !== "unavailable" && <div className="margins-workspace-notice margins-program-entry" role="status">
         <span>Workspace ready. Its settings live in one program you can read and change.</span>

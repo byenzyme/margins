@@ -33386,6 +33386,7 @@ var speechSetupResultSchema = external_exports2.discriminatedUnion("ok", [
 ]);
 var programSchema = external_exports2.object({
   workspaceId: external_exports2.string().min(1),
+  workspaceName: external_exports2.string().nullable(),
   programPath: external_exports2.string().min(1),
   revision: external_exports2.string().min(1),
   program: external_exports2.string()
@@ -33414,7 +33415,10 @@ var programApplyResultSchema = external_exports2.discriminatedUnion("ok", [
   external_exports2.object({ ok: external_exports2.literal(false), error: programErrorSchema }).strict()
 ]);
 var MAX_PROGRAM_BYTES = 256 * 1024;
-var programTextSchema = external_exports2.string().max(MAX_PROGRAM_BYTES);
+var programTextSchema = external_exports2.string().refine(
+  (text) => new TextEncoder().encode(text).length <= MAX_PROGRAM_BYTES,
+  { message: `The program must be at most ${MAX_PROGRAM_BYTES / 1024} KiB.` }
+);
 var ownedCaptureInputSchema = external_exports2.object({ target: projectTargetSchema }).extend({
   recordingId: external_exports2.string().min(1),
   ownerId: external_exports2.string().min(1)
@@ -34818,10 +34822,10 @@ async function previewWorkspaceSetup(target, dataDir, homeInput) {
     "--json"
   ], 6e4, 2e6);
   const plan = JSON.parse(planJson);
-  const readings = strings(plan.preset?.readings);
+  const readings2 = strings(plan.preset?.readings);
   const skippedReadings = strings(plan.preset?.skipped_readings);
   const noteFolder = plan.preset?.note_folder;
-  if (plan.schema_version !== "margins.workspace.plan.v2" || plan.workspace_id !== workspaceId || !Array.isArray(plan.actions) || typeof plan.desired_program !== "string" || typeof plan.program_path !== "string" || !isAbsolute2(plan.program_path) || !readings || !skippedReadings || typeof noteFolder !== "string") {
+  if (plan.schema_version !== "margins.workspace.plan.v2" || plan.workspace_id !== workspaceId || !Array.isArray(plan.actions) || typeof plan.desired_program !== "string" || typeof plan.program_path !== "string" || !isAbsolute2(plan.program_path) || !readings2 || !skippedReadings || typeof noteFolder !== "string") {
     throw new Error("Margins returned an invalid Workspace plan.");
   }
   const previewId = randomUUID2();
@@ -34834,7 +34838,7 @@ async function previewWorkspaceSetup(target, dataDir, homeInput) {
     homeRoot,
     destination: resolve2(homeRoot, noteFolder),
     programPath: plan.program_path,
-    readings,
+    readings: readings2,
     skippedReadings,
     actions: plan.actions
   };
@@ -34926,17 +34930,74 @@ async function prunePlans(dir) {
   const now = Date.now();
   await Promise.all(plans.filter((item, index) => index >= MAX_KEPT_PLANS || now - item.mtime > PLAN_TTL_MS).map((item) => unlink2(join4(dir, item.name)).catch(() => void 0)));
 }
+function describeRef(ref) {
+  if (ref.startsWith("folder:")) return `the ${ref.slice(7)} folder`;
+  if (ref.startsWith("#")) return `notes tagged ${ref}`;
+  if (ref.startsWith("tag:")) return `notes tagged #${ref.slice(4)}`;
+  if (ref.startsWith("source:")) return `the ${ref.slice(7)} source`;
+  return ref;
+}
+function readings(value) {
+  const out = /* @__PURE__ */ new Map();
+  for (const item of Array.isArray(value) ? value : []) {
+    if (typeof item === "string") out.set(item, "");
+    else if (item && typeof item === "object") {
+      for (const [ref, options] of Object.entries(item)) out.set(ref, JSON.stringify(options));
+    }
+  }
+  return out;
+}
+var stringSet = (value) => new Set(Array.isArray(value) ? value.filter((item) => typeof item === "string") : []);
+function plainSummaries(action) {
+  const name = typeof action.name === "string" ? `"${action.name}"` : "a source";
+  if (action.action === "add_binding") return [`Add the source ${name}`];
+  if (action.action === "remove_binding") return [`Remove the source ${name}`];
+  if (action.action === "update_binding") return [`Change the source ${name}`];
+  if (action.action === "update_program") return ["Other changes, such as learning settings, profiles, or layout (see the diff)"];
+  if (action.action !== "set_policy" || !action.before || !action.after) return [String(action.summary)];
+  const lines = [];
+  const before = readings(action.before.entities);
+  const after = readings(action.after.entities);
+  for (const [ref, options] of after) {
+    if (!before.has(ref)) lines.push(`Learn from ${describeRef(ref)} (new)`);
+    else if (before.get(ref) !== options) lines.push(`Change how Margins learns from ${describeRef(ref)}`);
+  }
+  for (const ref of before.keys()) if (!after.has(ref)) lines.push(`Stop learning from ${describeRef(ref)}`);
+  const sets = [
+    ["excluded_folders", (item) => `the ${item} folder`, "Leave out", "Stop leaving out"],
+    ["excluded_tags", (item) => `notes tagged #${item.replace(/^#/, "")}`, "Leave out", "Stop leaving out"],
+    ["excluded_entities", describeRef, "Leave out", "Stop leaving out"]
+  ];
+  for (const [key, describe5, added, removed] of sets) {
+    const was = stringSet(action.before[key]);
+    const now = stringSet(action.after[key]);
+    for (const item of now) if (!was.has(item)) lines.push(`${added} ${describe5(item)}`);
+    for (const item of was) if (!now.has(item)) lines.push(`${removed} ${describe5(item)}`);
+  }
+  return lines.length ? lines : [String(action.summary)];
+}
 function programError(error108) {
   const location = programErrorLocation(error108.message);
   return { code: error108.code, message: error108.message, line: location?.line ?? null, column: location?.column ?? null };
 }
+var UPDATE_MARGINS_FOR_PROGRAM = "This Margins version can't edit the Workspace program from bb. Update Margins, then try again.";
 async function readWorkspaceProgram(workspaceId) {
   requireWorkspaceId(workspaceId);
+  const capabilities = JSON.parse(await cli2(["capabilities"]));
+  if (capabilities.workspace?.program !== true) throw new Error(UPDATE_MARGINS_FOR_PROGRAM);
+  const listing = JSON.parse(await cli2(["workspace", "list", "--json"]));
+  const name = listing.workspaces?.find((item) => item.id === workspaceId)?.name;
   const shown = JSON.parse(await cli2(["--workspace", workspaceId, "workspace", "show", "--text", "--json"]));
   if (shown.workspace_id !== workspaceId || typeof shown.program_path !== "string" || !isAbsolute3(shown.program_path) || typeof shown.revision !== "string" || typeof shown.program !== "string") {
     throw new Error("Margins returned an invalid Workspace program.");
   }
-  return { workspaceId, programPath: shown.program_path, revision: shown.revision, program: shown.program };
+  return {
+    workspaceId,
+    workspaceName: typeof name === "string" && name ? name : null,
+    programPath: shown.program_path,
+    revision: shown.revision,
+    program: shown.program
+  };
 }
 async function planWorkspaceProgram(dataDir, workspaceId, program) {
   requireWorkspaceId(workspaceId);
@@ -34956,9 +35017,9 @@ async function planWorkspaceProgram(dataDir, workspaceId, program) {
     await unlink2(desired).catch(() => void 0);
   }
   const plan = JSON.parse(planJson);
-  const actions = Array.isArray(plan.actions) ? plan.actions.map((item) => {
+  const actions = Array.isArray(plan.actions) ? plan.actions.flatMap((item) => {
     const action = item;
-    return typeof action.action === "string" && typeof action.summary === "string" ? { action: action.action, summary: action.summary } : null;
+    return typeof action.action === "string" && typeof action.summary === "string" ? plainSummaries(action).map((summary) => ({ action: action.action, summary })) : [null];
   }) : null;
   if (plan.schema_version !== "margins.workspace.plan.v2" || plan.workspace_id !== workspaceId || typeof plan.base_revision !== "string" || typeof plan.desired_sha256 !== "string" || typeof plan.diff !== "string" || !actions || actions.some((item) => item === null)) {
     throw new Error("Margins returned an invalid Workspace plan.");
@@ -34978,9 +35039,14 @@ async function applyWorkspaceProgram(dataDir, workspaceId, previewId) {
   requireWorkspaceId(workspaceId);
   if (!previewIdPattern2.test(previewId)) throw new Error("Invalid Workspace program plan.");
   const planFile = join4(plansDir(dataDir), `${previewId}.plan.json`);
-  const plan = JSON.parse(await readFile4(planFile, "utf8").catch(() => {
-    throw new Error("This review expired. Review the changes again.");
-  }));
+  const text = await readFile4(planFile, "utf8").catch(() => null);
+  if (text === null) return { ok: false, error: {
+    code: "expired",
+    line: null,
+    column: null,
+    message: "This review expired before it was saved. Your text is unchanged; review the changes again."
+  } };
+  const plan = JSON.parse(text);
   if (plan.workspace_id !== workspaceId) throw new Error("The reviewed plan is for a different Workspace.");
   let receipt;
   try {

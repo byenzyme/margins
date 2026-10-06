@@ -131,6 +131,11 @@
 .margins-program-banner div { display:flex; flex-wrap:wrap; gap:6px; }
 .margins-program-notice { display:flex; align-items:center; gap:6px; margin:0; color:var(--muted-foreground); font-size:12px; }
 .margins-program-status { display:flex; flex-direction:column; gap:4px; min-height:20px; font-size:12px; }
+.margins-program-status-row { display:flex; flex-wrap:wrap; justify-content:space-between; gap:4px 12px; }
+.margins-program-status-row small { color:var(--muted-foreground); font-size:11px; }
+.margins-visually-hidden { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
+/* The heading takes focus so the dialog is announced; it is not a control. */
+.margins-program-review h3:focus { outline:none; }
 .margins-program-state { display:inline-flex; align-items:center; gap:5px; color:var(--muted-foreground); }
 .margins-program-state.is-error { color:var(--destructive); }
 .margins-program-state.is-valid { color:var(--foreground); }
@@ -139,8 +144,8 @@
 .margins-program-review h3 { margin:0; font-size:13px; }
 .margins-program-review ul { margin:0; padding-left:18px; font-size:12px; line-height:1.5; }
 .margins-program-diff { max-height:320px; overflow:auto; border:1px solid var(--border); border-radius:7px; background:var(--background); }
-.margins-program-diff .is-added { color:var(--enz-string,#15803d); background:color-mix(in srgb,#22c55e 12%,transparent); }
-.margins-program-diff .is-removed { color:var(--destructive); background:color-mix(in srgb,var(--destructive) 10%,transparent); }
+.margins-program-diff .is-added { color:var(--foreground); background:color-mix(in srgb,#22c55e 20%,transparent); }
+.margins-program-diff .is-removed { color:var(--foreground); background:color-mix(in srgb,var(--destructive) 18%,transparent); }
 .margins-program-diff pre { margin:0; padding:8px 10px; font-family:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,monospace); font-size:12px; white-space:pre; }
 
 /* Code editor: a transparent textarea over a highlighted <pre> of identical
@@ -150,23 +155,26 @@
   --enz-lh:20px; --enz-pad:10px;
   --enz-fg:var(--foreground); --enz-bg:var(--background); --enz-gutter:color-mix(in srgb,var(--muted-foreground) 70%,transparent);
   --enz-caret:var(--foreground); --enz-selection:color-mix(in srgb,#3b82f6 26%,transparent);
-  --enz-keyword:#7c3aed; --enz-string:#15803d; --enz-number:#b45309; --enz-comment:#6b7280;
-  --enz-punctuation:#64748b; --enz-kind:#0369a1; --enz-profile:#be185d;
+  --enz-keyword:color-mix(in srgb,var(--enz-fg) 74%,var(--enz-bg)); --enz-punctuation:color-mix(in srgb,var(--enz-fg) 52%,var(--enz-bg));
+  --enz-string:#15803d; --enz-number:#b45309; --enz-comment:#6b7280; --enz-kind:#0369a1; --enz-profile:#9333ea;
   display:grid; grid-template-columns:auto minmax(0,1fr); min-height:260px; max-height:calc(100vh - 280px); overflow:auto;
   border:1px solid var(--border); border-radius:9px; background:var(--enz-bg); color:var(--enz-fg);
   font-family:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,Consolas,monospace); font-size:12.5px; line-height:var(--enz-lh); tab-size:2;
 }
 .margins-code.is-dark, :where(.dark) .margins-code:not([data-theme-mode="light"]) {
-  --enz-keyword:#c4b5fd; --enz-string:#86efac; --enz-number:#fcd34d; --enz-comment:#9ca3af;
-  --enz-punctuation:#94a3b8; --enz-kind:#7dd3fc; --enz-profile:#f9a8d4; --enz-selection:color-mix(in srgb,#60a5fa 32%,transparent);
+  --enz-string:#86efac; --enz-number:#fcd34d; --enz-comment:#9ca3af; --enz-kind:#7dd3fc; --enz-profile:#d8b4fe; --enz-selection:color-mix(in srgb,#60a5fa 32%,transparent);
 }
 .margins-code:focus-within { border-color:color-mix(in srgb,var(--enz-caret) 45%,var(--border)); }
 .margins-code-gutter { position:sticky; left:0; z-index:2; display:flex; flex-direction:column; padding:var(--enz-pad) 8px var(--enz-pad) 12px; border-right:1px solid color-mix(in srgb,var(--border) 70%,transparent); background:var(--enz-bg); color:var(--enz-gutter); text-align:right; user-select:none; font-variant-numeric:tabular-nums; }
 .margins-code-gutter span { height:var(--enz-lh); }
-.margins-code-gutter span.is-error { color:var(--destructive); font-weight:650; }
-.margins-code-body { position:relative; min-width:max-content; }
+.margins-code-gutter span.is-error { margin-right:-4px; padding-right:4px; border-radius:4px 0 0 4px; background:var(--destructive); color:var(--enz-bg); font-weight:650; }
+/* clip: an inline error callout must not widen the scrollable area. */
+.margins-code-body { position:relative; min-width:max-content; overflow:clip; }
+.margins-code-measure { position:absolute; visibility:hidden; white-space:pre; pointer-events:none; }
 .margins-code-body pre, .margins-code-body textarea { box-sizing:border-box; margin:0; padding:var(--enz-pad) 14px; border:0; font:inherit; line-height:inherit; letter-spacing:normal; white-space:pre; tab-size:inherit; }
-.margins-code-body pre { position:relative; z-index:1; min-height:100%; color:var(--enz-fg); pointer-events:none; }
+/* The highlighted layer is wider than the textarea's text by more than a
+   caret, so the textarea never needs to scroll inside itself. */
+.margins-code-body pre { position:relative; z-index:1; min-height:100%; padding-right:48px; color:var(--enz-fg); pointer-events:none; }
 .margins-code-body textarea { position:absolute; inset:0; z-index:1; width:100%; height:100%; overflow:hidden; resize:none; outline:0; background:transparent; color:transparent; caret-color:var(--enz-caret); }
 .margins-code-body textarea::selection { background:var(--enz-selection); color:transparent; }
 .margins-code .enz-keyword { color:var(--enz-keyword); }
@@ -177,7 +185,7 @@
 .margins-code .enz-kind { color:var(--enz-kind); font-weight:600; }
 .margins-code .enz-profile { color:var(--enz-profile); }
 .margins-code .enz-error { text-decoration:underline wavy var(--destructive); text-decoration-skip-ink:none; text-underline-offset:3px; }
-.margins-code-error-line { position:absolute; left:0; right:0; top:calc(var(--enz-pad) + var(--enz-line) * var(--enz-lh)); height:var(--enz-lh); background:color-mix(in srgb,var(--destructive) 11%,transparent); }
+.margins-code-error-line { position:absolute; left:0; right:0; top:calc(var(--enz-pad) + var(--enz-line) * var(--enz-lh)); height:var(--enz-lh); background:color-mix(in srgb,var(--destructive) 18%,transparent); box-shadow:inset 3px 0 0 var(--destructive); }
 /* Positioned in the editor's monospace `ch` after the end of the error line;
    the message itself is set in the UI font. */
 .margins-code-error-callout { position:absolute; z-index:0; top:calc(var(--enz-pad) + var(--enz-line) * var(--enz-lh)); left:calc(14px + var(--enz-col) * 1ch); display:flex; height:var(--enz-lh); align-items:center; pointer-events:none; }
@@ -185,3 +193,5 @@
 .margins-program-entry { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
 .margins-meeting-list .margins-program-link { margin-top:auto; border:0; border-radius:7px; padding:7px 8px; background:transparent; color:var(--muted-foreground); font:inherit; font-size:12px; text-align:left; cursor:pointer; }
 .margins-meeting-list .margins-program-link:hover, .margins-meeting-list .margins-program-link.selected { background:var(--muted); color:var(--foreground); }
+.margins-program-pane { display:flex; min-width:0; flex-direction:column; }
+.margins-program-pane > .margins-workspace-notice { margin:14px 22px 0; }

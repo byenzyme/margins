@@ -18999,6 +18999,7 @@ var speechSetupResultSchema = external_exports.discriminatedUnion("ok", [
 ]);
 var programSchema = external_exports.object({
   workspaceId: external_exports.string().min(1),
+  workspaceName: external_exports.string().nullable(),
   programPath: external_exports.string().min(1),
   revision: external_exports.string().min(1),
   program: external_exports.string()
@@ -19027,7 +19028,10 @@ var programApplyResultSchema = external_exports.discriminatedUnion("ok", [
   external_exports.object({ ok: external_exports.literal(false), error: programErrorSchema }).strict()
 ]);
 var MAX_PROGRAM_BYTES = 256 * 1024;
-var programTextSchema = external_exports.string().max(MAX_PROGRAM_BYTES);
+var programTextSchema = external_exports.string().refine(
+  (text) => new TextEncoder().encode(text).length <= MAX_PROGRAM_BYTES,
+  { message: `The program must be at most ${MAX_PROGRAM_BYTES / 1024} KiB.` }
+);
 var ownedCaptureInputSchema = external_exports.object({ target: projectTargetSchema }).extend({
   recordingId: external_exports.string().min(1),
   ownerId: external_exports.string().min(1)

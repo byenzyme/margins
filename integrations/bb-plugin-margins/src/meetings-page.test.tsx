@@ -295,20 +295,20 @@ describe("Meetings Mac recorder choice", () => {
   it("opens the Workspace program from the Meetings sidebar and from a deep link", async () => {
     mocks.call.mockImplementation((async (method: string, input?: { sessionId?: string; text?: string }) => {
       if (method === "availableWorkspaces") return { workspaces: [{ id: "obsidian", name: "Obsidian" }], resolvedWorkspaceId: "obsidian", autoSelected: false };
-      if (method === "workspaceProgram") return { workspaceId: "obsidian", programPath: "/m/configs/obsidian.enzyme", revision: "r1", program: 'workspace "obsidian" {}\n' };
+      if (method === "workspaceProgram") return { workspaceId: "obsidian", workspaceName: "Obsidian", programPath: "/m/configs/obsidian.enzyme", revision: "r1", program: 'workspace "obsidian" {}\n' };
       if (method === "planWorkspaceProgram") return { ok: true, previewId: "p", workspaceId: "obsidian", baseRevision: "r1", noop: true, actions: [], diff: "" };
       return defaultCall(method, input);
     }) as unknown as typeof defaultCall);
     const view = render(<MeetingsPage subPath="proj-mac" />);
     fireEvent.click(await screen.findByRole("button", { name: "Workspace program" }));
-    expect(await screen.findByText("/m/configs/obsidian.enzyme")).toBeTruthy();
+    expect(await screen.findByTitle("/m/configs/obsidian.enzyme")).toBeTruthy();
     expect(mocks.navigate).toHaveBeenLastCalledWith("meetings", { subPath: "proj-mac/@program" });
     fireEvent.click(screen.getByRole("button", { name: "Close program editor" }));
-    await waitFor(() => expect(screen.queryByText("/m/configs/obsidian.enzyme")).toBeNull());
+    await waitFor(() => expect(screen.queryByTitle("/m/configs/obsidian.enzyme")).toBeNull());
     view.unmount();
 
     render(<MeetingsPage subPath="proj-mac/@program" />);
-    expect(await screen.findByText("/m/configs/obsidian.enzyme")).toBeTruthy();
+    expect(await screen.findByTitle("/m/configs/obsidian.enzyme")).toBeTruthy();
     expect(mocks.call.mock.calls.some(([method, input]) => method === "readWorkspaceMeeting" && (input as { sessionId?: string })?.sessionId === "@program")).toBe(false);
   });
 
@@ -323,7 +323,7 @@ describe("Meetings Mac recorder choice", () => {
         programPath: "/m/configs/notes.enzyme", readings: ["folder:People"], skippedReadings: [], actions: [] };
       if (method === "applyWorkspaceSetup") { setUp = true; return { workspaceId: "notes", destination: "/notes/Meetings" }; }
       if (method === "speechSetup") return null;
-      if (method === "workspaceProgram") return { workspaceId: "notes", programPath: "/m/configs/notes.enzyme", revision: "r1", program: 'workspace "notes" {}\n' };
+      if (method === "workspaceProgram") return { workspaceId: "notes", workspaceName: "notes", programPath: "/m/configs/notes.enzyme", revision: "r1", program: 'workspace "notes" {}\n' };
       if (method === "planWorkspaceProgram") return { ok: true, previewId: "p", workspaceId: "notes", baseRevision: "r1", noop: true, actions: [], diff: "" };
       return defaultCall(method, input);
     }) as unknown as typeof defaultCall);
@@ -332,5 +332,23 @@ describe("Meetings Mac recorder choice", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Use this Workspace" }));
     fireEvent.click(await screen.findByRole("button", { name: "Edit program" }));
     expect(await screen.findByLabelText("Workspace program", { selector: "textarea" })).toHaveProperty("value", 'workspace "notes" {}\n');
+  });
+  it("keeps a live meeting one click away while the program editor is open", async () => {
+    mocks.meetings = [{ sessionId: "live-1", title: "Standup", startedAt: "2026-10-06T10:00:00Z", inputFinalized: false,
+      notePath: null, threadIds: [], distilledMemoRevision: null }];
+    mocks.call.mockImplementation((async (method: string, input?: { sessionId?: string; text?: string }) => {
+      if (method === "availableWorkspaces") return { workspaces: [{ id: "obsidian", name: "Obsidian" }], resolvedWorkspaceId: "obsidian", autoSelected: false };
+      if (method === "workspaceProgram") return { workspaceId: "obsidian", workspaceName: "Obsidian", programPath: "/m/configs/obsidian.enzyme", revision: "r1", program: "x" };
+      if (method === "planWorkspaceProgram") return { ok: true, previewId: "p", workspaceId: "obsidian", baseRevision: "r1", noop: true, actions: [], diff: "" };
+      return defaultCall(method, input);
+    }) as unknown as typeof defaultCall);
+    render(<MeetingsPage subPath="proj-mac/live-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Workspace program" }));
+    await screen.findByTitle("/m/configs/obsidian.enzyme");
+    expect(screen.getByText(/Recording in progress/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Standup" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Back to the meeting" }));
+    await waitFor(() => expect(screen.queryByTitle("/m/configs/obsidian.enzyme")).toBeNull());
+    expect(mocks.navigate).toHaveBeenLastCalledWith("meetings", { subPath: "proj-mac/live-1" });
   });
 });
