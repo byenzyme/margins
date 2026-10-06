@@ -503,6 +503,15 @@ fn help_and_guide_explain_the_program_in_plain_words() {
     // Plan and apply no longer require --json.
     Args::try_parse_from(["margins", "workspace", "plan", "--desired", "d.enzyme"]).unwrap();
     Args::try_parse_from(["margins", "workspace", "apply", "--plan", "p.json"]).unwrap();
+    // --color on the readable plan and edit; auto by default.
+    for args in [
+        &["margins", "workspace", "plan", "--desired", "d.enzyme", "--color", "always"][..],
+        &["margins", "workspace", "edit", "--color", "never"],
+        &["margins", "workspace", "edit"],
+    ] {
+        Args::try_parse_from(args).unwrap();
+    }
+    assert!(Args::try_parse_from(["margins", "workspace", "edit", "--color", "sometimes"]).is_err());
     // `margins enzyme` passes everything through, help included.
     let parsed = Args::try_parse_from(["margins", "enzyme", "scan", "--json", "--help"]).unwrap();
     assert!(matches!(
@@ -608,4 +617,125 @@ fn apply_takes_the_workspace_from_the_plan_and_hints_drop_the_default_selector()
         "workspace_revision_conflict",
         "{stderr}"
     );
+}
+
+/// The readable plan without its random plan-file name.
+fn without_plan_file(readable: &str) -> String {
+    let saved = saved_plan(readable);
+    readable.replace(saved.to_str().unwrap(), "<plan>")
+}
+
+#[test]
+fn plan_colours_the_diff_only_when_asked_or_on_a_terminal() {
+    let fixture = Fixture::new();
+    let desired = fixture.desired();
+    let plan = |extra: &[&str]| {
+        let mut args = vec![
+            "--workspace",
+            "practice",
+            "workspace",
+            "plan",
+            "--desired",
+            desired.to_str().unwrap(),
+        ];
+        args.extend_from_slice(extra);
+        fixture.ok(&args).0
+    };
+    // Tests write to a pipe: auto is plain and identical to never.
+    let auto = plan(&[]);
+    let never = plan(&["--color", "never"]);
+    assert_eq!(without_plan_file(&auto), without_plan_file(&never));
+    assert!(!auto.contains('\x1b'), "{auto}");
+
+    let always = plan(&["--color", "always"]);
+    assert!(
+        always.contains(
+            "\x1b[32m+  learn questions from folder \"people\" about relationships\x1b[0m\n"
+        ),
+        "{always}"
+    );
+    assert!(
+        always.contains("\n--- a/practice.enzyme\n+++ b/practice.enzyme\n"),
+        "{always}"
+    );
+    // Only the diff is coloured: stripping the codes gives the plain output.
+    let stripped = always
+        .replace("\x1b[32m", "")
+        .replace("\x1b[31m", "")
+        .replace("\x1b[0m", "");
+    assert_eq!(without_plan_file(&stripped), without_plan_file(&auto));
+
+    // JSON is never coloured.
+    let (json, _) = fixture.ok(&[
+        "--workspace",
+        "practice",
+        "workspace",
+        "plan",
+        "--desired",
+        desired.to_str().unwrap(),
+        "--json",
+        "--color",
+        "always",
+    ]);
+    assert!(!json.contains('\x1b'));
+    serde_json::from_str::<serde_json::Value>(&json).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn saving_a_plan_prunes_old_and_excess_plans_but_never_follows_symlinks() {
+    use margins_cli::commands::workspace_text::{MAX_KEPT_PLANS, PLAN_MAX_AGE};
+    let fixture = Fixture::new();
+    let desired = fixture.desired();
+    let args = [
+        "--workspace",
+        "practice",
+        "workspace",
+        "plan",
+        "--desired",
+        desired.to_str().unwrap(),
+    ];
+    let (first, _) = fixture.ok(&args);
+    let plans = saved_plan(&first).parent().unwrap().to_path_buf();
+
+    let stale = plans.join("practice-stale.plan.json");
+    std::fs::write(&stale, "{}").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&stale)
+        .unwrap()
+        .set_modified(
+            std::time::SystemTime::now() - PLAN_MAX_AGE - std::time::Duration::from_secs(60),
+        )
+        .unwrap();
+    for index in 0..MAX_KEPT_PLANS + 5 {
+        std::fs::write(
+            plans.join(format!("practice-filler{index:02}.plan.json")),
+            "{}",
+        )
+        .unwrap();
+    }
+    let canary = fixture.root().join("canary.json");
+    std::fs::write(&canary, "keep me").unwrap();
+    let link = plans.join("practice-link.plan.json");
+    std::os::unix::fs::symlink(&canary, &link).unwrap();
+    let unrelated = plans.join("notes.txt");
+    std::fs::write(&unrelated, "not a plan").unwrap();
+
+    let (second, _) = fixture.ok(&args);
+    let newest = saved_plan(&second);
+    assert!(newest.is_file());
+    assert!(!stale.exists(), "a plan past the age limit is removed");
+    let kept = std::fs::read_dir(&plans)
+        .unwrap()
+        .flatten()
+        .filter(|entry| {
+            entry.file_name().to_string_lossy().ends_with(".plan.json")
+                && entry.file_type().unwrap().is_file()
+        })
+        .count();
+    assert!(kept <= MAX_KEPT_PLANS, "{kept} plans kept");
+    assert!(link.symlink_metadata().is_ok(), "symlinks are left alone");
+    assert_eq!(std::fs::read_to_string(&canary).unwrap(), "keep me");
+    assert!(unrelated.exists());
 }

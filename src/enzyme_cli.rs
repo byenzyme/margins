@@ -981,6 +981,7 @@ const LONG_VALUE_OPTIONS: &[&str] = &[
     "--limit",
     "--phrase",
     "--target",
+    "--prompts",
 ];
 /// Short options of the engine (at any level) that take a value.
 const SHORT_VALUE_OPTIONS: &[char] = &['p', 'n'];
@@ -1001,6 +1002,7 @@ fn refusal(command: &str) -> String {
         }
         "install" => "Margins installs its own agent skills with `margins setup --only skills`",
         "catalyze --target" => "search the Workspace itself; a target directory would be prepared outside Margins",
+        "spec plan --prompts" => "`spec plan` previews without it; `--prompts` writes prompt files into a directory outside Margins",
         _ => "it is not one of the read-only commands Margins runs (status, search, catalyze, scan, spec, model list)",
     };
     format!("`enzyme {command}` is not available through `margins enzyme`: {how}.")
@@ -1009,10 +1011,11 @@ fn refusal(command: &str) -> String {
 /// The positional arguments before `--`, and whether a vault or Workspace was
 /// named, with every value-taking option's value skipped. Short options may be
 /// clustered (`-vp /x`, `-vp/x`, `-p=/x`) and long ones may use `=`.
-fn positionals(args: &[String]) -> (Vec<String>, bool, bool) {
+fn positionals(args: &[String]) -> (Vec<String>, bool, bool, bool) {
     let mut found = Vec::new();
     let mut located = false;
     let mut target = false;
+    let mut prompts = false;
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
@@ -1024,6 +1027,7 @@ fn positionals(args: &[String]) -> (Vec<String>, bool, bool) {
             let name = format!("--{}", long.split('=').next().unwrap_or_default());
             located |= LOCATION_OPTIONS.contains(&name.as_str());
             target |= name == "--target";
+            prompts |= name == "--prompts";
             if LONG_VALUE_OPTIONS.contains(&name.as_str()) && !long.contains('=') {
                 index += 1;
             }
@@ -1042,7 +1046,7 @@ fn positionals(args: &[String]) -> (Vec<String>, bool, bool) {
             found.push(arg.clone());
         }
     }
-    (found, located, target)
+    (found, located, target, prompts)
 }
 
 /// Arguments for `margins enzyme`: only the engine's read-only commands, on
@@ -1056,7 +1060,7 @@ pub fn passthrough_args(
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect::<Vec<_>>();
-    let (positional, located, target) = positionals(&text);
+    let (positional, located, target, prompts) = positionals(&text);
     let subcommand = positional.first().map(String::as_str);
     match subcommand {
         // `--help`, `--version`, or nothing: the engine's own help.
@@ -1074,6 +1078,10 @@ pub fn passthrough_args(
                 Some(nested) => return Err(refusal(&format!("{command} {nested}"))),
                 None if text.iter().any(|arg| arg == "--help" || arg == "-h") => {}
                 None => return Err(refusal(command)),
+            }
+            // Only `spec plan` takes `--prompts`, which writes prompt files.
+            if command == "spec" && prompts {
+                return Err(refusal("spec plan --prompts"));
             }
         }
         Some("catalyze") if target => return Err(refusal("catalyze --target")),
@@ -1355,6 +1363,9 @@ mod tests {
             &["ingest"],
             &["catalyze", "q", "--target", "/elsewhere"],
             &["catalyze", "q", "--target=/elsewhere"],
+            &["spec", "plan", "--prompts", "/elsewhere"],
+            &["spec", "plan", "x.enzyme", "--prompts=/elsewhere"],
+            &["-v", "spec", "--prompts", "/elsewhere", "plan"],
         ] {
             let error = passthrough(Some("notes"), refused).unwrap_err();
             assert!(error.contains("is not available through `margins enzyme`"), "{refused:?}: {error}");
