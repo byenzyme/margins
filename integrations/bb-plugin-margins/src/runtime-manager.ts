@@ -259,4 +259,4 @@ export function createRuntimeManager(options: RuntimeManagerOptions = {}) {
   };
 }
 
-export const runtimeManagerInternals = { selectAsset, sha256, targetName };
+export const runtimeManagerInternals = { selectAsset, sha256, targetName, RUNTIME_RELEASE_VERSION };

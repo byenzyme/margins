@@ -158,7 +158,10 @@ Release in this order:
 2. The full local Linux gate passes on `main` (`scripts/local-gate linux`).
 3. The macOS gate and the Mac smoke checklist pass on the attached Mac bb host.
 4. Merge the PR that bumps `RUNTIME_RELEASE_VERSION` and its rebuilt `dist/`
-   **immediately** before tagging. Between that merge and the published release,
+   **immediately** before tagging. The same PR sets `version` in
+   `integrations/bb-plugin-margins/package.json` (and its lockfile) to `X.Y.Z`;
+   bb lists the plugin by that version and `dist/*.meta.json` records it, so
+   rebuild `dist/` after the bump. A plugin test fails when the two differ. Between that merge and the published release,
    fresh plugin installs point at a runtime that does not exist yet.
 5. Bump and tag:
    1. Run the **Version Bump** workflow (`version-bump.yml`) from `main` with

@@ -71,6 +71,7 @@ afterEach(() => {
   cleanup();
   vi.clearAllMocks();
   mocks.refreshNative.mockReset();
+  mocks.navigate.mockReset();
   mocks.call.mockImplementation(defaultCall);
   mocks.native.paired = false;
   mocks.native.status = null;
@@ -367,6 +368,90 @@ describe("Meetings Mac recorder choice", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Edit program" }));
     expect(await screen.findByLabelText("Workspace program", { selector: "textarea" })).toHaveProperty("value", 'workspace "notes" {}\n');
   });
+  const programCalls = (async (method: string, input?: { sessionId?: string; text?: string }) => {
+    if (method === "availableWorkspaces") return { workspaces: [{ id: "obsidian", name: "Obsidian" }], resolvedWorkspaceId: "obsidian", autoSelected: false };
+    if (method === "workspaceProgram") return { workspaceId: "obsidian", workspaceName: "Obsidian", programPath: "/m/configs/obsidian.enzyme", revision: "r1", program: 'workspace "obsidian" {}\n' };
+    if (method === "planWorkspaceProgram") return { ok: true, previewId: "p", workspaceId: "obsidian", baseRevision: "r1", noop: true, actions: [], diff: "" };
+    return defaultCall(method, input);
+  }) as unknown as typeof defaultCall;
+  /** Mirrors bb: navigation re-renders the panel with each segment percent-encoded. */
+  function renderLikeBb(initial: string) {
+    const encode = (subPath: string) => subPath.split("/").map(encodeURIComponent).join("/");
+    const view = render(<MeetingsPage subPath={encode(initial)} />);
+    mocks.navigate.mockImplementation((_panel: string, options: { subPath: string }) =>
+      view.rerender(<MeetingsPage subPath={encode(options.subPath)} />));
+    return view;
+  }
+  const saved = (sessionId: string, title: string) => ({ sessionId, title, startedAt: "2026-10-06T10:00:00Z",
+    inputFinalized: true, notePath: null, threadIds: [], distilledMemoRevision: null });
+
+  it("keeps the program editor open under bb's encoded panel route", async () => {
+    mocks.meetings = [saved("saved-1", "Review")];
+    mocks.call.mockImplementation(programCalls);
+    const view = renderLikeBb("proj-mac/saved-1");
+    await screen.findByRole("heading", { name: "Review" });
+    fireEvent.click(screen.getByRole("button", { name: "Workspace program" }));
+    expect(await screen.findByTitle("/m/configs/obsidian.enzyme")).toBeTruthy();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.getByTitle("/m/configs/obsidian.enzyme")).toBeTruthy();
+    expect(mocks.call).not.toHaveBeenCalledWith("saveWorkspaceMemo", expect.anything());
+    view.unmount();
+
+    mocks.call.mockClear();
+    render(<MeetingsPage subPath="proj-mac/%40program" />);
+    expect(await screen.findByTitle("/m/configs/obsidian.enzyme")).toBeTruthy();
+    expect(mocks.call.mock.calls.some(([method, input]) => method === "readWorkspaceMeeting"
+      && /program/.test((input as { sessionId?: string })?.sessionId || ""))).toBe(false);
+  });
+
+  it("opens the program editor when a dirty memo's meeting was discarded, keeping the text", async () => {
+    mocks.meetings = [saved("gone", "Discarded call")];
+    let discarded = false;
+    mocks.call.mockImplementation((async (method: string, input?: { sessionId?: string; text?: string }) => {
+      if (method === "saveWorkspaceMemo" && discarded) return { ok: false, error: { code: "not_found", message: "session not found", retryable: false } };
+      return programCalls(method, input);
+    }) as unknown as typeof defaultCall);
+    renderLikeBb("proj-mac/gone");
+    const pad = await screen.findByLabelText("Meeting memo pad");
+    discarded = true;
+    fireEvent.change(pad, { target: { value: "Follow up with Ana" } });
+    fireEvent.click(screen.getByRole("button", { name: "Workspace program" }));
+    expect(await screen.findByTitle("/m/configs/obsidian.enzyme")).toBeTruthy();
+    expect(screen.getByText(/could not be saved \(session not found\)/)).toBeTruthy();
+    expect(JSON.parse(sessionStorage.getItem("margins.bb.unsaved-memo.proj-mac/gone")!))
+      .toEqual({ text: "Follow up with Ana", revision: "rev" });
+  });
+
+  it("switches meetings and projects past a failed memo save, then restores the text on return", async () => {
+    mocks.meetings = [saved("first", "First"), saved("second", "Second")];
+    let failing = true;
+    mocks.call.mockImplementation((async (method: string, input?: { sessionId?: string; text?: string; expectedRevision?: string }) => {
+      if (method === "availableProjects") return { projects: [{ id: "proj-mac", name: "Mac" }, { id: "proj-other", name: "Other" }] };
+      if (method === "saveWorkspaceMemo" && failing) return { ok: false, error: { code: "unavailable", message: "Margins server restarted", retryable: true } };
+      return defaultCall(method, input);
+    }) as unknown as typeof defaultCall);
+    renderLikeBb("proj-mac/first");
+    fireEvent.change(await screen.findByLabelText("Meeting memo pad"), { target: { value: "Unsaved idea" } });
+    fireEvent.click(screen.getByRole("button", { name: "Second" }));
+    await screen.findByRole("heading", { name: "Second" });
+    expect(screen.getByText(/could not be saved \(Margins server restarted\)/)).toBeTruthy();
+    expect(screen.getByLabelText("Meeting memo pad")).toHaveProperty("value", "");
+
+    failing = false;
+    fireEvent.click(screen.getByRole("button", { name: "First" }));
+    await waitFor(() => expect(screen.getByLabelText("Meeting memo pad")).toHaveProperty("value", "Unsaved idea"));
+    await waitFor(() => expect(mocks.call).toHaveBeenCalledWith("saveWorkspaceMemo",
+      { projectId: "proj-mac", sessionId: "first", expectedRevision: "rev", text: "Unsaved idea" }));
+    await waitFor(() => expect(sessionStorage.getItem("margins.bb.unsaved-memo.proj-mac/first")).toBeNull());
+    expect(screen.queryByText(/could not be saved/)).toBeNull();
+
+    failing = true;
+    fireEvent.change(screen.getByLabelText("Meeting memo pad"), { target: { value: "Another idea" } });
+    fireEvent.change(screen.getByLabelText("bb project for Meetings"), { target: { value: "proj-other" } });
+    await waitFor(() => expect(mocks.navigate).toHaveBeenLastCalledWith("meetings", { subPath: "proj-other" }));
+    expect(sessionStorage.getItem("margins.bb.unsaved-memo.proj-mac/first")).toContain("Another idea");
+  });
+
   it("keeps a live meeting one click away while the program editor is open", async () => {
     mocks.meetings = [{ sessionId: "live-1", title: "Standup", startedAt: "2026-10-06T10:00:00Z", inputFinalized: false,
       notePath: null, threadIds: [], distilledMemoRevision: null }];

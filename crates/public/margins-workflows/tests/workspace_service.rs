@@ -440,6 +440,24 @@ fn discard_finished_session_removes_source_material_and_preserves_home_note() {
         .reserve_session(&owner, create(session.as_ref()))
         .unwrap();
     assert!(service.discard_session(&owner, &session).is_err());
+    service
+        .publish_live_checkpoint(
+            &owner,
+            &reservation.producer_token,
+            &session,
+            &serde_json::json!({
+                "version": 2, "terminal": false, "decoded_until_ms": 0, "committed_until_ms": 0,
+                "transcripts": [{"words": []}]
+            }),
+        )
+        .unwrap();
+    let live_files = [
+        service.margins_dir().join("to-discard_remote_live.lock"),
+        service
+            .margins_dir()
+            .join("to-discard_remote.live-transcript.json"),
+    ];
+    assert!(live_files.iter().all(|path| path.exists()));
     for lane in ["mic", "system"] {
         for sequence in 0..2 {
             service
@@ -484,6 +502,7 @@ fn discard_finished_session_removes_source_material_and_preserves_home_note() {
         .sessions
         .is_empty());
     assert!(!artifact.exists());
+    assert!(live_files.iter().all(|path| !path.exists()));
     assert!(service
         .margins_dir()
         .join("meeting-blobs")

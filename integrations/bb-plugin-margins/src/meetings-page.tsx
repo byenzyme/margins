@@ -11,6 +11,7 @@ import { ProgramEditor } from "./program-editor.js";
 const LAST_PROJECT_KEY = "margins.bb.meetings-project";
 const STOP_ACK_KEY = "margins.bb.stop-ack";
 const STOP_ACK_EVENT = "margins:stop-saved";
+const UNSAVED_MEMO_KEY = "margins.bb.unsaved-memo";
 const openedMeetings = new Map<string, WorkspaceMeeting>();
 const openedSummaries = new Map<string, WorkspaceMeetingSummary>();
 function rememberMeeting(key: string, value: WorkspaceMeeting) {
@@ -24,6 +25,28 @@ function rememberSummary(key: string, value: WorkspaceMeetingSummary) {
   if (openedSummaries.size > 50) openedSummaries.delete(openedSummaries.keys().next().value!);
 }
 type StopAck = { sessionId: string; elapsed: string; at: number };
+type UnsavedMemo = { text: string; revision: string };
+/** Memo text whose save failed, kept so leaving the meeting does not lose it.
+ * Reopening the meeting restores it and retries against its base revision. */
+function stashMemo(key: string, memo: UnsavedMemo) {
+  try { sessionStorage.setItem(`${UNSAVED_MEMO_KEY}.${key}`, JSON.stringify(memo)); } catch { /* private browser */ }
+}
+function readUnsavedMemo(key: string): UnsavedMemo | null {
+  try {
+    const memo = JSON.parse(sessionStorage.getItem(`${UNSAVED_MEMO_KEY}.${key}`) || "null") as UnsavedMemo | null;
+    return typeof memo?.text === "string" && typeof memo.revision === "string" ? memo : null;
+  } catch { return null; }
+}
+function forgetUnsavedMemo(key: string) {
+  try { sessionStorage.removeItem(`${UNSAVED_MEMO_KEY}.${key}`); } catch { /* private browser */ }
+}
+/** bb passes the panel route remainder still percent-encoded per segment
+ * (`proj/%40program`), so decode each segment before comparing it. */
+function subPathSegments(subPath: string) {
+  return subPath.split("/").map((segment) => {
+    try { return decodeURIComponent(segment); } catch { return segment; }
+  });
+}
 
 function meetingTime(value: string) {
   return new Date(value).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
@@ -88,6 +111,11 @@ export function MeetingsAccessory() {
   return <MeetingLevelDot level={native?.state === "recording" ? native.micPeak ?? null : browser.active ? browser.level : null} accessory />;
 }
 
+function MemoNotice({ text, onDismiss }: { text: string; onDismiss: () => void }) {
+  return <div className="margins-workspace-notice margins-program-entry" role="status">
+    <span>{text}</span><button className="margins-quiet" onClick={onDismiss}>Dismiss</button></div>;
+}
+
 /** Meetings sub-path segment that opens the Workspace program editor. Session
  * ids never start with `@`. */
 export const PROGRAM_SEGMENT = "@program";
@@ -99,7 +127,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   navigateRef.current = navigate;
   const context = useBbContext();
   const [projects, setProjects] = useState<Array<{ id: string; name: string }>>([]);
-  const [projectId, setProjectId] = useState(() => subPath.split("/")[0] || context.projectId || rememberedProject());
+  const [projectId, setProjectId] = useState(() => subPathSegments(subPath)[0] || context.projectId || rememberedProject());
   const [workspaceChoice, setWorkspaceChoice] = useState("");
   const [workspaceOptions, setWorkspaceOptions] = useState<Array<{ id: string; name: string | null }>>([]);
   const [workspaceNotice, setWorkspaceNotice] = useState("");
@@ -123,15 +151,16 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
   }, []);
   const [meetings, setMeetings] = useState<WorkspaceMeetingSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(() => {
-    const segment = subPath.split("/")[1];
+    const segment = subPathSegments(subPath)[1];
     return segment && segment !== PROGRAM_SEGMENT ? segment : null;
   });
-  const [programOpen, setProgramOpen] = useState(() => subPath.split("/")[1] === PROGRAM_SEGMENT);
+  const [programOpen, setProgramOpen] = useState(() => subPathSegments(subPath)[1] === PROGRAM_SEGMENT);
   const [setupDone, setSetupDone] = useState(false);
-  useEffect(() => { setProgramOpen(subPath.split("/")[1] === PROGRAM_SEGMENT); }, [subPath]);
+  useEffect(() => { setProgramOpen(subPathSegments(subPath)[1] === PROGRAM_SEGMENT); }, [subPath]);
   const [meeting, setMeeting] = useState<WorkspaceMeeting | null>(() => openedMeetings.get(`${projectId}/${selectedId}`) || null);
   const [draft, setDraft] = useState(() => openedMeetings.get(`${projectId}/${selectedId}`)?.notepad.text || "");
   const [message, setMessage] = useState("");
+  const [memoNotice, setMemoNotice] = useState<{ sessionId: string; text: string } | null>(null);
   const [transcriptStatus, setTranscriptStatus] = useState<{ sessionId: string; state: "checking" | "ready" | "pending" | "not_ready" | "failed" } | null>(null);
   const [speechSetup, setSpeechSetup] = useState<{ state: "preparing" | "ready" | "failed" | "unavailable"; message: string; progress: number | null } | null>(null);
   const [stopAck, setStopAck] = useState<StopAck | null>(null);
@@ -202,8 +231,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     const liveSession = listed.meetings.find((item) => !item.inputFinalized)?.sessionId || null;
     const newlyObservedLiveSession = liveSession && liveSession !== observedLiveSession.current ? liveSession : null;
     if (newlyObservedLiveSession && !pendingNativeStart.current && newlyObservedLiveSession !== selectedId) {
-      try { await saveMemo(); }
-      catch (error) { setMessage(String(error)); return; }
+      await settleMemo();
       const cached = openedMeetings.get(`${projectId}/${newlyObservedLiveSession}`) || null;
       dirty.current = false;
       revision.current = cached?.notepad.revision || "";
@@ -295,7 +323,14 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
         rememberMeeting(`${projectId}/${selectedId}`, result.meeting);
         setMeeting(result.meeting);
         revision.current = result.meeting.notepad.revision;
-        if (!dirty.current) {
+        const unsaved = dirty.current ? null : readUnsavedMemo(`${projectId}/${selectedId}`);
+        if (unsaved && unsaved.text !== result.meeting.notepad.text) {
+          // Retry against the revision the text was written on, so a memo
+          // changed elsewhere is reported as a conflict, not overwritten.
+          dirty.current = true; revision.current = unsaved.revision;
+          latestDraft.current = unsaved.text; setDraft(unsaved.text);
+        } else if (!dirty.current) {
+          if (unsaved) forgetUnsavedMemo(`${projectId}/${selectedId}`);
           setDraft(result.meeting.notepad.text);
           latestDraft.current = result.meeting.notepad.text;
         }
@@ -365,6 +400,8 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
         setMeeting(result.meeting);
         dirty.current = latestDraft.current !== text;
       }
+      forgetUnsavedMemo(`${projectId}/${sessionId}`);
+      setMemoNotice((current) => current?.sessionId === sessionId ? null : current);
       setMessage("Saved");
     })().finally(() => { saveLoop.current = null; });
     saveLoop.current = loop;
@@ -376,8 +413,19 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     return () => clearTimeout(timer);
   }, [draft, meeting?.sessionId]);
 
+  /** Save a dirty memo before leaving it. A failed save never traps the user:
+   * the text is stashed for its meeting and a notice says so. */
+  async function settleMemo() {
+    try { await saveMemo(); }
+    catch (error) {
+      if (!meeting || !dirty.current) return;
+      stashMemo(`${projectId}/${meeting.sessionId}`, { text: latestDraft.current, revision: revision.current });
+      const reason = error instanceof Error ? error.message : String(error);
+      setMemoNotice({ sessionId: meeting.sessionId, text: `Memo edits for “${meeting.title || `Meeting · ${meetingTime(meeting.startedAt)}`}” could not be saved (${reason}). They are kept in this browser; reopen that meeting to retry.` });
+    }
+  }
   async function choose(sessionId: string) {
-    try { await saveMemo(); } catch (error) { setMessage(String(error)); return; }
+    await settleMemo();
     const cached = openedMeetings.get(`${projectId}/${sessionId}`) || null;
     dirty.current = false;
     revision.current = cached?.notepad.revision || "";
@@ -389,7 +437,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     navigate.toPluginPanel("meetings", { subPath: `${projectId}/${sessionId}` });
   }
   async function openProgram() {
-    try { await saveMemo(); } catch (error) { setMessage(String(error)); return; }
+    await settleMemo();
     setProgramOpen(true); setSetupDone(false);
     navigate.toPluginPanel("meetings", { subPath: `${projectId}/${PROGRAM_SEGMENT}` });
   }
@@ -398,7 +446,7 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
     navigate.toPluginPanel("meetings", { subPath: selectedId ? `${projectId}/${selectedId}` : projectId });
   }
   async function chooseProject(nextProjectId: string) {
-    try { await saveMemo(); } catch (error) { setMessage(String(error)); return; }
+    await settleMemo();
     dirty.current = false; latestDraft.current = ""; revision.current = "";
     setProjectId(nextProjectId); setSelectedId(null); setMeeting(null); setDraft(""); setMessage("");
     setSetupPreview(null); setSetupDone(false); setProgramOpen(false);
@@ -713,11 +761,13 @@ export function MeetingsPage({ subPath }: { subPath: string }) {
         onClick={() => void (programOpen ? closeProgram() : openProgram())}>Workspace program</button>}
     </aside>
     {programOpen && resolvedWorkspaceName ? <div className="margins-program-pane">
+      {memoNotice && <MemoNotice text={memoNotice.text} onDismiss={() => setMemoNotice(null)} />}
       {live.length > 0 && <div className="margins-workspace-notice margins-program-entry" role="status">
         <span>Recording in progress. Pause and Stop stay in the recording bar.</span>
         <button onClick={() => void choose(live[0].sessionId)}>Back to the meeting</button></div>}
       <ProgramEditor key={projectId} projectId={projectId} onClose={closeProgram} /></div>
       : <section className={`margins-meeting-pad${selected?.inputFinalized ? " finished" : ""}`}>
+      {memoNotice && <MemoNotice text={memoNotice.text} onDismiss={() => setMemoNotice(null)} />}
       {setupDone && panel?.state !== "unavailable" && <div className="margins-workspace-notice margins-program-entry" role="status">
         <span>Workspace ready. Its settings live in one program you can read and change.</span>
         <button onClick={() => void openProgram()}>Edit program</button>
