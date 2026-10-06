@@ -34,7 +34,8 @@ The setup conversation should leave the user with:
 - the folder Margins may write approved notes into;
 - the folders it learns from, and any other folders it may search but not change;
 - where the Workspace program lives (`margins --workspace <id> workspace show`)
-  and that `margins --workspace <id> workspace edit` changes it; and
+  and that `margins --workspace <id> workspace edit`, or **Workspace program**
+  in the bb Meetings panel, changes it; and
 - one real example showing that Margins can find an existing note.
 
 Important boundaries:

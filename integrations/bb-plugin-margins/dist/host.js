@@ -79,15 +79,15 @@ var require_windows = __commonJS({
       }
       return false;
     }
-    function checkStat(stat, path2, options) {
-      if (!stat.isSymbolicLink() && !stat.isFile()) {
+    function checkStat(stat2, path2, options) {
+      if (!stat2.isSymbolicLink() && !stat2.isFile()) {
         return false;
       }
       return checkPathExt(path2, options);
     }
     function isexe(path2, options, cb) {
-      fs2.stat(path2, function(er, stat) {
-        cb(er, er ? false : checkStat(stat, path2, options));
+      fs2.stat(path2, function(er, stat2) {
+        cb(er, er ? false : checkStat(stat2, path2, options));
       });
     }
     function sync(path2, options) {
@@ -101,20 +101,20 @@ var require_mode = __commonJS({
     isexe.sync = sync;
     var fs2 = __require2("fs");
     function isexe(path2, options, cb) {
-      fs2.stat(path2, function(er, stat) {
-        cb(er, er ? false : checkStat(stat, options));
+      fs2.stat(path2, function(er, stat2) {
+        cb(er, er ? false : checkStat(stat2, options));
       });
     }
     function sync(path2, options) {
       return checkStat(fs2.statSync(path2), options);
     }
-    function checkStat(stat, options) {
-      return stat.isFile() && checkMode(stat, options);
+    function checkStat(stat2, options) {
+      return stat2.isFile() && checkMode(stat2, options);
     }
-    function checkMode(stat, options) {
-      var mod = stat.mode;
-      var uid = stat.uid;
-      var gid = stat.gid;
+    function checkMode(stat2, options) {
+      var mod = stat2.mode;
+      var uid = stat2.uid;
+      var gid = stat2.gid;
       var myUid = options.uid !== void 0 ? options.uid : process.getuid && process.getuid();
       var myGid = options.gid !== void 0 ? options.gid : process.getgid && process.getgid();
       var u = parseInt("100", 8);
@@ -33384,6 +33384,41 @@ var speechSetupResultSchema = external_exports2.discriminatedUnion("ok", [
   external_exports2.object({ ok: external_exports2.literal(true), state: external_exports2.enum(["preparing", "ready", "failed", "unavailable"]), message: external_exports2.string(), progress: external_exports2.number().min(0).max(1).nullable() }).strict(),
   external_exports2.object({ ok: external_exports2.literal(false), error: hostErrorSchema }).strict()
 ]);
+var programSchema = external_exports2.object({
+  workspaceId: external_exports2.string().min(1),
+  workspaceName: external_exports2.string().nullable(),
+  programPath: external_exports2.string().min(1),
+  revision: external_exports2.string().min(1),
+  program: external_exports2.string()
+}).strict();
+var programErrorSchema = external_exports2.object({
+  code: external_exports2.string(),
+  message: external_exports2.string(),
+  line: external_exports2.number().int().positive().nullable(),
+  column: external_exports2.number().int().positive().nullable(),
+  actualRevision: external_exports2.string().optional()
+}).strict();
+var programPlanResultSchema = external_exports2.discriminatedUnion("ok", [
+  external_exports2.object({
+    ok: external_exports2.literal(true),
+    previewId: external_exports2.string().min(1),
+    workspaceId: external_exports2.string().min(1),
+    baseRevision: external_exports2.string().min(1),
+    noop: external_exports2.boolean(),
+    actions: external_exports2.array(external_exports2.object({ action: external_exports2.string(), summary: external_exports2.string() }).strict()),
+    diff: external_exports2.string()
+  }).strict(),
+  external_exports2.object({ ok: external_exports2.literal(false), error: programErrorSchema }).strict()
+]);
+var programApplyResultSchema = external_exports2.discriminatedUnion("ok", [
+  external_exports2.object({ ok: external_exports2.literal(true), revision: external_exports2.string().min(1) }).strict(),
+  external_exports2.object({ ok: external_exports2.literal(false), error: programErrorSchema }).strict()
+]);
+var MAX_PROGRAM_BYTES = 256 * 1024;
+var programTextSchema = external_exports2.string().refine(
+  (text) => new TextEncoder().encode(text).length <= MAX_PROGRAM_BYTES,
+  { message: `The program must be at most ${MAX_PROGRAM_BYTES / 1024} KiB.` }
+);
 var ownedCaptureInputSchema = external_exports2.object({ target: projectTargetSchema }).extend({
   recordingId: external_exports2.string().min(1),
   ownerId: external_exports2.string().min(1)
@@ -33417,6 +33452,18 @@ var marginsHostContract = defineRpcContract2({
   applyWorkspaceSetup: {
     input: external_exports2.object({ previewId: external_exports2.string() }).strict(),
     output: external_exports2.object({ workspaceId: external_exports2.string(), destination: external_exports2.string() }).strict()
+  },
+  readWorkspaceProgram: {
+    input: external_exports2.object({ workspaceId: external_exports2.string().min(1) }).strict(),
+    output: programSchema
+  },
+  planWorkspaceProgram: {
+    input: external_exports2.object({ workspaceId: external_exports2.string().min(1), program: programTextSchema }).strict(),
+    output: programPlanResultSchema
+  },
+  applyWorkspaceProgram: {
+    input: external_exports2.object({ workspaceId: external_exports2.string().min(1), previewId: external_exports2.string().min(1) }).strict(),
+    output: programApplyResultSchema
   },
   listWorkspaceMeetings: {
     input: external_exports2.object({ target: projectTargetSchema }).strict(),
@@ -33609,6 +33656,18 @@ var marginsRpcContract = defineRpcContract2({
     input: external_exports2.object({ projectId: external_exports2.string().min(1), previewId: external_exports2.string() }).strict(),
     output: external_exports2.object({ workspaceId: external_exports2.string(), destination: external_exports2.string() }).strict()
   },
+  workspaceProgram: {
+    input: external_exports2.object({ projectId: external_exports2.string().min(1) }).strict(),
+    output: programSchema
+  },
+  planWorkspaceProgram: {
+    input: external_exports2.object({ projectId: external_exports2.string().min(1), workspaceId: external_exports2.string().min(1), program: programTextSchema }).strict(),
+    output: programPlanResultSchema
+  },
+  applyWorkspaceProgram: {
+    input: external_exports2.object({ projectId: external_exports2.string().min(1), workspaceId: external_exports2.string().min(1), previewId: external_exports2.string().min(1) }).strict(),
+    output: programApplyResultSchema
+  },
   availableProjects: {
     input: external_exports2.object({}).strict(),
     output: external_exports2.object({ projects: external_exports2.array(external_exports2.object({ id: external_exports2.string(), name: external_exports2.string() }).strict()) }).strict()
@@ -33765,8 +33824,8 @@ function targetName(hostPlatform, arch) {
 }
 async function isRegularExecutable(path2) {
   try {
-    const stat = await lstat(path2);
-    return stat.isFile() && !stat.isSymbolicLink() && (stat.mode & 73) !== 0;
+    const stat2 = await lstat(path2);
+    return stat2.isFile() && !stat2.isSymbolicLink() && (stat2.mode & 73) !== 0;
   } catch {
     return false;
   }
@@ -33861,8 +33920,8 @@ async function installRuntime(input2) {
     });
     for (const name of input2.executables) {
       const source = join(unpacked, name);
-      const stat = await lstat(source).catch(() => null);
-      if (!stat?.isFile() || stat.isSymbolicLink()) {
+      const stat2 = await lstat(source).catch(() => null);
+      if (!stat2?.isFile() || stat2.isSymbolicLink()) {
         throw new Error(`the Margins release did not contain a regular ${name} executable`);
       }
       await copyRuntimeBinary(source, join(input2.runtimeBinDir, name));
@@ -34209,16 +34268,16 @@ var ProjectServerManager = class {
   handles = /* @__PURE__ */ new Map();
   runtime = createRuntimeManager();
   async ensureCli(dataDir) {
-    const cli2 = marginsCli();
-    const stat = await lstat2(cli2).catch(() => null);
-    if (stat?.isFile() && (stat.mode & 73) !== 0) return cli2;
+    const cli3 = marginsCli();
+    const stat2 = await lstat2(cli3).catch(() => null);
+    if (stat2?.isFile() && (stat2.mode & 73) !== 0) return cli3;
     if (process.env.MARGINS_CLI_BIN) throw new Error("The configured Margins CLI is not executable");
     await this.runtime.ensureProjectServer({ dataDir });
-    const installed = await lstat2(cli2).catch(() => null);
+    const installed = await lstat2(cli3).catch(() => null);
     if (!installed?.isFile() || (installed.mode & 73) === 0) {
       throw new Error("Margins CLI installation did not complete");
     }
-    return cli2;
+    return cli3;
   }
   async ensure(target, dataDir, signal) {
     const workspaceId = await resolveWorkspaceId(target);
@@ -34763,23 +34822,23 @@ async function previewWorkspaceSetup(target, dataDir, homeInput) {
     "--json"
   ], 6e4, 2e6);
   const plan = JSON.parse(planJson);
-  const readings = strings(plan.preset?.readings);
+  const readings2 = strings(plan.preset?.readings);
   const skippedReadings = strings(plan.preset?.skipped_readings);
   const noteFolder = plan.preset?.note_folder;
-  if (plan.schema_version !== "margins.workspace.plan.v2" || plan.workspace_id !== workspaceId || !Array.isArray(plan.actions) || typeof plan.desired_program !== "string" || typeof plan.program_path !== "string" || !isAbsolute2(plan.program_path) || !readings || !skippedReadings || typeof noteFolder !== "string") {
+  if (plan.schema_version !== "margins.workspace.plan.v2" || plan.workspace_id !== workspaceId || !Array.isArray(plan.actions) || typeof plan.desired_program !== "string" || typeof plan.program_path !== "string" || !isAbsolute2(plan.program_path) || !readings2 || !skippedReadings || typeof noteFolder !== "string") {
     throw new Error("Margins returned an invalid Workspace plan.");
   }
   const previewId = randomUUID2();
-  const plansDir = join3(dataDir, "setup-plans");
-  await mkdir3(plansDir, { recursive: true, mode: 448 });
-  await writeFile2(join3(plansDir, `${previewId}.plan.json`), planJson, { mode: 384, flag: "wx" });
+  const plansDir2 = join3(dataDir, "setup-plans");
+  await mkdir3(plansDir2, { recursive: true, mode: 448 });
+  await writeFile2(join3(plansDir2, `${previewId}.plan.json`), planJson, { mode: 384, flag: "wx" });
   return {
     previewId,
     workspaceId,
     homeRoot,
     destination: resolve2(homeRoot, noteFolder),
     programPath: plan.program_path,
-    readings,
+    readings: readings2,
     skippedReadings,
     actions: plan.actions
   };
@@ -34799,6 +34858,216 @@ async function applyWorkspaceSetup(dataDir, previewId) {
   const destination = JSON.parse(await cli(["--workspace", plan.workspace_id, "workspace", "destination", "--json"]));
   if (!destination.destination || !isAbsolute2(destination.destination)) throw new Error("Workspace destination is unavailable after setup.");
   return { workspaceId: plan.workspace_id, destination: destination.destination };
+}
+
+// src/workspace-program.ts
+import { randomUUID as randomUUID3 } from "node:crypto";
+import { execFile as execFileCallback4 } from "node:child_process";
+import { mkdir as mkdir4, readFile as readFile4, readdir, stat, unlink as unlink2, writeFile as writeFile3 } from "node:fs/promises";
+import { isAbsolute as isAbsolute3, join as join4 } from "node:path";
+import { promisify as promisify4 } from "node:util";
+
+// src/enzyme-highlight.ts
+function programErrorLocation(message) {
+  const match = /(?:^|[\s:])(\d+):(\d+): /.exec(message);
+  if (!match) return null;
+  const line = Number(match[1]);
+  const column = Number(match[2]);
+  return line > 0 && column > 0 ? { line, column } : null;
+}
+
+// src/workspace-program.ts
+var execFile4 = promisify4(execFileCallback4);
+var workspaceIdPattern = /^[a-z0-9][a-z0-9-]*$/;
+var previewIdPattern2 = /^[0-9a-f]{8}-[0-9a-f-]{27}$/;
+var PLAN_TTL_MS = 60 * 60 * 1e3;
+var MAX_KEPT_PLANS = 40;
+var CliFailure = class extends Error {
+  constructor(code, message, details) {
+    super(message);
+    this.code = code;
+    this.details = details;
+  }
+  code;
+  details;
+};
+async function cli2(args, timeout = 3e4) {
+  try {
+    const { stdout } = await execFile4(marginsCli(), args, {
+      env: { ...process.env, MARGINS_HOME: marginsHome() },
+      timeout,
+      maxBuffer: 4e6
+    });
+    return stdout;
+  } catch (cause) {
+    const stderr = String(cause.stderr || "");
+    for (const line of stderr.split("\n").reverse()) {
+      try {
+        const parsed = JSON.parse(line);
+        if (parsed.ok === false && typeof parsed.error?.code === "string" && typeof parsed.error.message === "string") {
+          const details = parsed.error.details && typeof parsed.error.details === "object" ? parsed.error.details : null;
+          throw new CliFailure(parsed.error.code, parsed.error.message, details);
+        }
+      } catch (error108) {
+        if (error108 instanceof CliFailure) throw error108;
+      }
+    }
+    throw cause;
+  }
+}
+function requireWorkspaceId(workspaceId) {
+  if (!workspaceIdPattern.test(workspaceId)) throw new Error("Invalid Margins Workspace id.");
+}
+function plansDir(dataDir) {
+  return join4(dataDir, "program-plans");
+}
+async function prunePlans(dir) {
+  const entries = await readdir(dir).catch(() => []);
+  const plans = (await Promise.all(entries.filter((name) => name.endsWith(".plan.json")).map(async (name) => {
+    const info = await stat(join4(dir, name)).catch(() => null);
+    return info ? { name, mtime: info.mtimeMs } : null;
+  }))).filter((item) => item !== null).sort((a, b) => b.mtime - a.mtime);
+  const now = Date.now();
+  await Promise.all(plans.filter((item, index) => index >= MAX_KEPT_PLANS || now - item.mtime > PLAN_TTL_MS).map((item) => unlink2(join4(dir, item.name)).catch(() => void 0)));
+}
+function describeRef(ref) {
+  if (ref.startsWith("folder:")) return `the ${ref.slice(7)} folder`;
+  if (ref.startsWith("#")) return `notes tagged ${ref}`;
+  if (ref.startsWith("tag:")) return `notes tagged #${ref.slice(4)}`;
+  if (ref.startsWith("source:")) return `the ${ref.slice(7)} source`;
+  return ref;
+}
+function readings(value) {
+  const out = /* @__PURE__ */ new Map();
+  for (const item of Array.isArray(value) ? value : []) {
+    if (typeof item === "string") out.set(item, "");
+    else if (item && typeof item === "object") {
+      for (const [ref, options] of Object.entries(item)) out.set(ref, JSON.stringify(options));
+    }
+  }
+  return out;
+}
+var stringSet = (value) => new Set(Array.isArray(value) ? value.filter((item) => typeof item === "string") : []);
+function plainSummaries(action) {
+  const name = typeof action.name === "string" ? `"${action.name}"` : "a source";
+  if (action.action === "add_binding") return [`Add the source ${name}`];
+  if (action.action === "remove_binding") return [`Remove the source ${name}`];
+  if (action.action === "update_binding") return [`Change the source ${name}`];
+  if (action.action === "update_program") return ["Other changes, such as learning settings, profiles, or layout (see the diff)"];
+  if (action.action !== "set_policy" || !action.before || !action.after) return [String(action.summary)];
+  const lines = [];
+  const before = readings(action.before.entities);
+  const after = readings(action.after.entities);
+  for (const [ref, options] of after) {
+    if (!before.has(ref)) lines.push(`Learn from ${describeRef(ref)} (new)`);
+    else if (before.get(ref) !== options) lines.push(`Change how Margins learns from ${describeRef(ref)}`);
+  }
+  for (const ref of before.keys()) if (!after.has(ref)) lines.push(`Stop learning from ${describeRef(ref)}`);
+  const sets = [
+    ["excluded_folders", (item) => `the ${item} folder`, "Leave out", "Stop leaving out"],
+    ["excluded_tags", (item) => `notes tagged #${item.replace(/^#/, "")}`, "Leave out", "Stop leaving out"],
+    ["excluded_entities", describeRef, "Leave out", "Stop leaving out"]
+  ];
+  for (const [key, describe5, added, removed] of sets) {
+    const was = stringSet(action.before[key]);
+    const now = stringSet(action.after[key]);
+    for (const item of now) if (!was.has(item)) lines.push(`${added} ${describe5(item)}`);
+    for (const item of was) if (!now.has(item)) lines.push(`${removed} ${describe5(item)}`);
+  }
+  return lines.length ? lines : [String(action.summary)];
+}
+function programError(error108) {
+  const location = programErrorLocation(error108.message);
+  return { code: error108.code, message: error108.message, line: location?.line ?? null, column: location?.column ?? null };
+}
+var UPDATE_MARGINS_FOR_PROGRAM = "This Margins version can't edit the Workspace program from bb. Update Margins, then try again.";
+async function readWorkspaceProgram(workspaceId) {
+  requireWorkspaceId(workspaceId);
+  const capabilities = JSON.parse(await cli2(["capabilities"]));
+  if (capabilities.workspace?.program !== true) throw new Error(UPDATE_MARGINS_FOR_PROGRAM);
+  const listing = JSON.parse(await cli2(["workspace", "list", "--json"]));
+  const name = listing.workspaces?.find((item) => item.id === workspaceId)?.name;
+  const shown = JSON.parse(await cli2(["--workspace", workspaceId, "workspace", "show", "--text", "--json"]));
+  if (shown.workspace_id !== workspaceId || typeof shown.program_path !== "string" || !isAbsolute3(shown.program_path) || typeof shown.revision !== "string" || typeof shown.program !== "string") {
+    throw new Error("Margins returned an invalid Workspace program.");
+  }
+  return {
+    workspaceId,
+    workspaceName: typeof name === "string" && name ? name : null,
+    programPath: shown.program_path,
+    revision: shown.revision,
+    program: shown.program
+  };
+}
+async function planWorkspaceProgram(dataDir, workspaceId, program) {
+  requireWorkspaceId(workspaceId);
+  const dir = plansDir(dataDir);
+  await mkdir4(dir, { recursive: true, mode: 448 });
+  await prunePlans(dir);
+  const previewId = randomUUID3();
+  const desired = join4(dir, `${previewId}.desired.enzyme`);
+  await writeFile3(desired, program, { mode: 384, flag: "wx" });
+  let planJson;
+  try {
+    planJson = await cli2(["--workspace", workspaceId, "workspace", "plan", "--desired", desired, "--json"], 6e4);
+  } catch (error108) {
+    if (error108 instanceof CliFailure) return { ok: false, error: programError(error108) };
+    throw error108;
+  } finally {
+    await unlink2(desired).catch(() => void 0);
+  }
+  const plan = JSON.parse(planJson);
+  const actions = Array.isArray(plan.actions) ? plan.actions.flatMap((item) => {
+    const action = item;
+    return typeof action.action === "string" && typeof action.summary === "string" ? plainSummaries(action).map((summary) => ({ action: action.action, summary })) : [null];
+  }) : null;
+  if (plan.schema_version !== "margins.workspace.plan.v2" || plan.workspace_id !== workspaceId || typeof plan.base_revision !== "string" || typeof plan.desired_sha256 !== "string" || typeof plan.diff !== "string" || !actions || actions.some((item) => item === null)) {
+    throw new Error("Margins returned an invalid Workspace plan.");
+  }
+  await writeFile3(join4(dir, `${previewId}.plan.json`), planJson, { mode: 384, flag: "wx" });
+  return {
+    ok: true,
+    previewId,
+    workspaceId,
+    baseRevision: plan.base_revision,
+    noop: plan.base_revision === plan.desired_sha256,
+    actions,
+    diff: plan.diff
+  };
+}
+async function applyWorkspaceProgram(dataDir, workspaceId, previewId) {
+  requireWorkspaceId(workspaceId);
+  if (!previewIdPattern2.test(previewId)) throw new Error("Invalid Workspace program plan.");
+  const planFile = join4(plansDir(dataDir), `${previewId}.plan.json`);
+  const text = await readFile4(planFile, "utf8").catch(() => null);
+  if (text === null) return { ok: false, error: {
+    code: "expired",
+    line: null,
+    column: null,
+    message: "This review expired before it was saved. Your text is unchanged; review the changes again."
+  } };
+  const plan = JSON.parse(text);
+  if (plan.workspace_id !== workspaceId) throw new Error("The reviewed plan is for a different Workspace.");
+  let receipt;
+  try {
+    receipt = JSON.parse(await cli2(["--workspace", workspaceId, "workspace", "apply", "--plan", planFile, "--json"]));
+  } catch (error108) {
+    if (!(error108 instanceof CliFailure)) throw error108;
+    if (error108.code === "workspace_revision_conflict") {
+      const actual = error108.details?.actual_revision;
+      return { ok: false, error: {
+        code: "stale",
+        message: "The program changed outside this editor after you reviewed it.",
+        line: null,
+        column: null,
+        ...typeof actual === "string" ? { actualRevision: actual } : {}
+      } };
+    }
+    return { ok: false, error: programError(error108) };
+  }
+  if (receipt.ok !== true || typeof receipt.after_revision !== "string") throw new Error("Margins returned an invalid apply receipt.");
+  await unlink2(planFile).catch(() => void 0);
+  return { ok: true, revision: receipt.after_revision };
 }
 
 // src/host-entry.ts
@@ -34833,6 +35102,21 @@ function createMarginsHostEntry(transport) {
         retain(context);
         await transport.prepareCli(context.experimental_paths.dataDir);
         return applyWorkspaceSetup(context.experimental_paths.dataDir, input2.previewId);
+      },
+      async readWorkspaceProgram(input2, context) {
+        retain(context);
+        await transport.prepareCli(context.experimental_paths.dataDir);
+        return readWorkspaceProgram(input2.workspaceId);
+      },
+      async planWorkspaceProgram(input2, context) {
+        retain(context);
+        await transport.prepareCli(context.experimental_paths.dataDir);
+        return planWorkspaceProgram(context.experimental_paths.dataDir, input2.workspaceId, input2.program);
+      },
+      async applyWorkspaceProgram(input2, context) {
+        retain(context);
+        await transport.prepareCli(context.experimental_paths.dataDir);
+        return applyWorkspaceProgram(context.experimental_paths.dataDir, input2.workspaceId, input2.previewId);
       },
       listWorkspaceMeetings(input2, context) {
         retain(context);

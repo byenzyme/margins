@@ -99,6 +99,26 @@ const speechSetupResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
 ]);
 
+const programSchema = z.object({ workspaceId: z.string().min(1), workspaceName: z.string().nullable(), programPath: z.string().min(1),
+  revision: z.string().min(1), program: z.string() }).strict();
+const programErrorSchema = z.object({ code: z.string(), message: z.string(),
+  line: z.number().int().positive().nullable(), column: z.number().int().positive().nullable(),
+  actualRevision: z.string().optional() }).strict();
+const programPlanResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), previewId: z.string().min(1), workspaceId: z.string().min(1),
+    baseRevision: z.string().min(1), noop: z.boolean(),
+    actions: z.array(z.object({ action: z.string(), summary: z.string() }).strict()), diff: z.string() }).strict(),
+  z.object({ ok: z.literal(false), error: programErrorSchema }).strict(),
+]);
+const programApplyResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), revision: z.string().min(1) }).strict(),
+  z.object({ ok: z.literal(false), error: programErrorSchema }).strict(),
+]);
+/** Large enough for any hand-written program; bounds what the editor can send. */
+export const MAX_PROGRAM_BYTES = 256 * 1024;
+const programTextSchema = z.string().refine((text) => new TextEncoder().encode(text).length <= MAX_PROGRAM_BYTES,
+  { message: `The program must be at most ${MAX_PROGRAM_BYTES / 1024} KiB.` });
+
 const ownedCaptureInputSchema = z.object({ target: projectTargetSchema }).extend({
   recordingId: z.string().min(1), ownerId: z.string().min(1),
 }).strict();
@@ -121,6 +141,18 @@ export const marginsHostContract = defineRpcContract({
   applyWorkspaceSetup: {
     input: z.object({ previewId: z.string() }).strict(),
     output: z.object({ workspaceId: z.string(), destination: z.string() }).strict(),
+  },
+  readWorkspaceProgram: {
+    input: z.object({ workspaceId: z.string().min(1) }).strict(),
+    output: programSchema,
+  },
+  planWorkspaceProgram: {
+    input: z.object({ workspaceId: z.string().min(1), program: programTextSchema }).strict(),
+    output: programPlanResultSchema,
+  },
+  applyWorkspaceProgram: {
+    input: z.object({ workspaceId: z.string().min(1), previewId: z.string().min(1) }).strict(),
+    output: programApplyResultSchema,
   },
   listWorkspaceMeetings: {
     input: z.object({ target: projectTargetSchema }).strict(),
@@ -262,6 +294,18 @@ export const marginsRpcContract = defineRpcContract({
     input: z.object({ projectId: z.string().min(1), previewId: z.string() }).strict(),
     output: z.object({ workspaceId: z.string(), destination: z.string() }).strict(),
   },
+  workspaceProgram: {
+    input: z.object({ projectId: z.string().min(1) }).strict(),
+    output: programSchema,
+  },
+  planWorkspaceProgram: {
+    input: z.object({ projectId: z.string().min(1), workspaceId: z.string().min(1), program: programTextSchema }).strict(),
+    output: programPlanResultSchema,
+  },
+  applyWorkspaceProgram: {
+    input: z.object({ projectId: z.string().min(1), workspaceId: z.string().min(1), previewId: z.string().min(1) }).strict(),
+    output: programApplyResultSchema,
+  },
   availableProjects: {
     input: z.object({}).strict(),
     output: z.object({ projects: z.array(z.object({ id: z.string(), name: z.string() }).strict()) }).strict(),
@@ -369,4 +413,8 @@ export type TranscriptionRequestResult = z.infer<typeof transcriptionRequestResu
 export type CaptureRecord = z.infer<typeof captureRecordSchema>;
 export type PanelState = z.infer<typeof panelStateSchema>;
 export type WorkspaceMeeting = z.infer<typeof workspaceMeetingSchema>;
+export type WorkspaceProgram = z.infer<typeof programSchema>;
+export type ProgramPlanResult = z.infer<typeof programPlanResultSchema>;
+export type ProgramApplyResult = z.infer<typeof programApplyResultSchema>;
+export type ProgramError = z.infer<typeof programErrorSchema>;
 export type WorkspaceMeetingSummary = z.infer<typeof workspaceMeetingSummarySchema>;
