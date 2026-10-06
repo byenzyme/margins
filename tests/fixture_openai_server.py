@@ -5,6 +5,7 @@ import argparse
 import json
 import re
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -79,6 +80,7 @@ def catalysts_for(request):
 
 class Handler(BaseHTTPRequestHandler):
     count_file = None
+    delay_seconds = 0.0
     request_count = 0
     count_lock = threading.Lock()
 
@@ -98,6 +100,8 @@ class Handler(BaseHTTPRequestHandler):
             type(self).request_count += 1
             if self.count_file is not None:
                 self.count_file.write_text(f"{self.request_count}\n")
+        if self.delay_seconds:
+            time.sleep(self.delay_seconds)
         content = json.dumps(catalysts_for(request), separators=(",", ":"))
         self._send(
             {
@@ -130,8 +134,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port-file", type=Path, required=True)
     parser.add_argument("--count-file", type=Path)
+    parser.add_argument(
+        "--delay-ms", type=int, default=0, help="answer each completion after this delay"
+    )
     args = parser.parse_args()
     Handler.count_file = args.count_file
+    Handler.delay_seconds = args.delay_ms / 1000
     if Handler.count_file is not None:
         Handler.count_file.write_text("0\n")
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)

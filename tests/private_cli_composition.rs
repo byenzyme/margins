@@ -6,6 +6,10 @@ use std::process::Command;
 #[path = "support/fixture_generator.rs"]
 mod fixture_generator;
 
+#[cfg(feature = "recall")]
+#[path = "support/enzyme_bin.rs"]
+mod enzyme_bin;
+
 fn source(path: &str) -> String {
     fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(path)).unwrap()
 }
@@ -618,32 +622,39 @@ fn workspace_status_reports_engine_source_refresh_staleness() {
             None,
         )
         .unwrap();
-    let index = rusqlite::Connection::open(workspace.recall_path()).unwrap();
-    index
-        .execute_batch(
-            "CREATE TABLE source_refreshes (
-                source_name TEXT PRIMARY KEY,
-                row_count INTEGER NOT NULL,
-                bucket_count INTEGER NOT NULL,
-                refreshed_at_ms INTEGER NOT NULL
-             );",
+    let _generator = fixture_generator::FixtureGenerator::start(&margins_home);
+    let init = Command::new(env!("CARGO_BIN_EXE_margins-private"))
+        .args(["--workspace", "freshness", "init"])
+        .env_clear()
+        .env("HOME", temp.path())
+        .env("MARGINS_HOME", &margins_home)
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "{}", String::from_utf8_lossy(&init.stderr));
+    // The ledger changes after the engine last refreshed its SQLite source.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    store
+        .replace_email_thread_snapshot_with_materialization_fingerprint(
+            &ctx,
+            vec![margins_workflows::integrations::ThreadEvidence {
+                thread_id: "late".into(),
+                occurred_from: chrono::Utc::now(),
+                occurred_to: chrono::Utc::now(),
+                body_text: "A thread synced after the last index refresh.".into(),
+                href: None,
+            }],
+            Vec::new(),
+            &selector.materialization_fingerprint().unwrap(),
         )
         .unwrap();
-    // The lowered SQLite source keeps the program's source name.
-    let engine_source = "google-mail";
-    index
-        .execute(
-            "INSERT INTO source_refreshes VALUES (?1, 4, 2, 1)",
-            [engine_source],
-        )
-        .unwrap();
-    drop(index);
 
     let output = Command::new(env!("CARGO_BIN_EXE_margins-private"))
         .args(["--workspace", "freshness", "workspace", "status", "--json"])
         .env_clear()
         .env("HOME", temp.path())
         .env("MARGINS_HOME", &margins_home)
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .output()
         .unwrap();
     assert!(
@@ -652,14 +663,10 @@ fn workspace_status_reports_engine_source_refresh_staleness() {
         String::from_utf8_lossy(&output.stderr)
     );
     let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(
-        status["source_refresh_staleness"]["google-mail"],
-        serde_json::json!({
-            "last_refresh_ms": 1,
-            "stale": true,
-            "stale_reason": "source_modified_after_refresh",
-        })
-    );
+    let mail = &status["source_refresh_staleness"]["google-mail"];
+    assert!(mail["last_refresh_ms"].as_i64().is_some_and(|ms| ms > 0), "{status}");
+    assert_eq!(mail["stale"], true, "{status}");
+    assert_eq!(mail["stale_reason"], "source_modified_after_refresh", "{status}");
 
     margins_workflows::workspace::remove_source(&mut workspace, "google-mail").unwrap();
     margins_workflows::workspace::add_source(
@@ -679,6 +686,7 @@ fn workspace_status_reports_engine_source_refresh_staleness() {
         .env_clear()
         .env("HOME", temp.path())
         .env("MARGINS_HOME", &margins_home)
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .output()
         .unwrap();
     assert!(
@@ -700,6 +708,7 @@ fn workspace_status_reports_engine_source_refresh_staleness() {
         .env_clear()
         .env("HOME", temp.path())
         .env("MARGINS_HOME", &margins_home)
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .output()
         .unwrap();
     let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -716,6 +725,7 @@ fn workspace_status_reports_engine_source_refresh_staleness() {
         .env_clear()
         .env("HOME", temp.path())
         .env("MARGINS_HOME", &margins_home)
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .output()
         .unwrap();
     let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -829,6 +839,7 @@ fn init_fails_closed_without_a_usable_generator() {
         .args(["--workspace", "init-status", "init"])
         .env_clear()
         .env("MARGINS_HOME", &margins_home)
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .output()
         .unwrap();
 
@@ -1059,6 +1070,7 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
     let initial_index = Command::new(env!("CARGO_BIN_EXE_margins-private"))
         .args(["--workspace", "retention-cli", "init"])
         .env_clear()
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .env("MARGINS_HOME", &margins_home)
         .env("MARGINS_COREML_PREPROCESSOR_CACHE_DIR", &preprocessor_cache)
         .output()
@@ -1088,6 +1100,7 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
             "--json",
         ])
         .env_clear()
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .env("MARGINS_HOME", &margins_home)
         .env("MARGINS_COREML_PREPROCESSOR_CACHE_DIR", &preprocessor_cache)
         .output()
@@ -1117,6 +1130,7 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
             "--json",
         ])
         .env_clear()
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .env("MARGINS_HOME", &margins_home)
         .env("MARGINS_COREML_PREPROCESSOR_CACHE_DIR", &preprocessor_cache)
         .output()
@@ -1149,6 +1163,7 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
             "--json",
         ])
         .env_clear()
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .env("MARGINS_HOME", &margins_home)
         .env(
             "MARGINS_COREML_PREPROCESSOR_CACHE_DIR",
@@ -1207,6 +1222,7 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
             "--json",
         ])
         .env_clear()
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .env("MARGINS_HOME", &margins_home)
         .env("MARGINS_COREML_PREPROCESSOR_CACHE_DIR", &preprocessor_cache)
         .output()

@@ -456,13 +456,13 @@ fn search_index(
         debug_strategy("catalyst");
         return Ok(("ok", "catalyst", "catalyze", hits, response.top_catalysts));
     }
-    // An index without catalysts serves direct search only when selection
-    // chose no entities; otherwise catalysts are missing and recall fails
-    // closed.
+    // An index without catalysts serves direct search only when no selected
+    // entity could have catalysts (none selected, or all too thin);
+    // otherwise catalysts are missing and recall fails closed.
     if status
         .selection
         .as_ref()
-        .is_some_and(|selection| selection.selected > 0)
+        .is_some_and(|selection| selection.entities.iter().any(awaits_catalysts))
     {
         anyhow::bail!(RECALL_UNAVAILABLE_MESSAGE);
     }
@@ -720,6 +720,13 @@ impl CatalystReadiness {
     }
 }
 
+/// Whether an entity the engine selected still waits for catalysts it can
+/// generate. A `skipped` entity has too little evidence for a generation job,
+/// so it does not hold recall back.
+fn awaits_catalysts(entity: &crate::enzyme_cli::SelectedEntity) -> bool {
+    matches!(entity.state.as_str(), "pending" | "unchecked")
+}
+
 /// Catalyst readiness from the engine's own selection report: what it would
 /// select now and which of those entities have catalysts.
 fn catalyst_readiness(status: &StatusEnvelope) -> CatalystReadiness {
@@ -731,7 +738,9 @@ fn catalyst_readiness(status: &StatusEnvelope) -> CatalystReadiness {
         .iter()
         .filter(|entity| entity.state != "ready")
     {
-        pending += 1;
+        if awaits_catalysts(entity) {
+            pending += 1;
+        }
         let reason = match entity.state.as_str() {
             "skipped" => entity
                 .skip_reason
@@ -758,8 +767,7 @@ fn catalyst_readiness(status: &StatusEnvelope) -> CatalystReadiness {
 
 fn classify_init_status(status: &StatusEnvelope) -> InitStatus {
     let readiness = catalyst_readiness(status);
-    let selected = readiness.entities_curated;
-    if readiness.items_pending > 0 || (status.catalysts == 0 && selected > 0) {
+    if readiness.items_pending > 0 {
         return InitStatus {
             status: "catalysts_pending",
             reason: "catalysts_pending",
@@ -994,7 +1002,9 @@ fn provision(workspace: &ResolvedWorkspace, mode: Provision) -> Result<InitStatu
             .map_or(0, |summary| summary.entities_generated),
         init_status.status,
     ));
-    if !generator.generates() && init_status.status == "catalysts_pending" {
+    // Without a generator the documents are indexed (`--llm none`), but recall
+    // fails closed until setup chooses one.
+    if !generator.generates() {
         anyhow::bail!(RECALL_UNAVAILABLE_MESSAGE);
     }
     Ok(init_status)
@@ -1592,6 +1602,20 @@ mod tests {
         let none = classify_init_status(&status(0, serde_json::json!([])));
         assert_eq!(none.status, "ok");
         assert_eq!(none.reason, "no_entities");
+        // Entities too thin for a generation job do not hold recall back.
+        let thin = classify_init_status(&status(
+            0,
+            serde_json::json!([
+                {"name": "sqlite:mail", "type": "collection", "state": "skipped", "catalysts": 0,
+                 "skip_reason": {"kind": "thin_context"}},
+            ]),
+        ));
+        assert_eq!(thin.status, "ok");
+        assert_eq!(thin.reason, "no_entities");
+        assert_eq!(
+            thin.readiness.reasons,
+            BTreeMap::from([("thin-context".to_string(), 1)])
+        );
     }
     #[test]
     fn json_uses_typed_margins_result_shape() {

@@ -9,6 +9,12 @@ pub struct FixtureGenerator {
 
 impl FixtureGenerator {
     pub fn start(margins_home: &Path) -> Self {
+        Self::start_with_delay(margins_home, 0)
+    }
+
+    /// A generator that answers each completion after `delay_ms`.
+    #[allow(dead_code)]
+    pub fn start_with_delay(margins_home: &Path, delay_ms: u64) -> Self {
         let runtime = tempfile::tempdir().unwrap();
         let port_file = runtime.path().join("port");
         let count_file = runtime.path().join("count");
@@ -19,6 +25,7 @@ impl FixtureGenerator {
             .arg(&port_file)
             .args(["--count-file"])
             .arg(&count_file)
+            .args(["--delay-ms", &delay_ms.to_string()])
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .spawn()
