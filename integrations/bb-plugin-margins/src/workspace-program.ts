@@ -57,13 +57,82 @@ async function prunePlans(dir: string) {
     .map((item) => unlink(join(dir, item.name)).catch(() => undefined)));
 }
 
+interface PlanAction {
+  action?: unknown; summary?: unknown; name?: unknown;
+  before?: Policy; after?: Policy;
+}
+interface Policy { entities?: unknown; excluded_folders?: unknown; excluded_tags?: unknown; excluded_entities?: unknown }
+
+/** `folder:People` → "the People folder"; `#x` → "notes tagged #x". */
+function describeRef(ref: string) {
+  if (ref.startsWith("folder:")) return `the ${ref.slice(7)} folder`;
+  if (ref.startsWith("#")) return `notes tagged ${ref}`;
+  if (ref.startsWith("tag:")) return `notes tagged #${ref.slice(4)}`;
+  if (ref.startsWith("source:")) return `the ${ref.slice(7)} source`;
+  return ref;
+}
+
+/** Readings as ref → options, from the view's `entities` list. */
+function readings(value: unknown): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const item of Array.isArray(value) ? value : []) {
+    if (typeof item === "string") out.set(item, "");
+    else if (item && typeof item === "object") {
+      for (const [ref, options] of Object.entries(item)) out.set(ref, JSON.stringify(options));
+    }
+  }
+  return out;
+}
+const stringSet = (value: unknown) => new Set(Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []);
+
+/**
+ * Plain-language lines for one plan action. The CLI's summaries are written
+ * for operators ("Attention policy: learn questions from folder:People"); the
+ * typed before/after views say the same thing in the user's terms. Anything
+ * not recognized keeps the CLI's summary, and the diff stays exact.
+ */
+export function plainSummaries(action: PlanAction): string[] {
+  const name = typeof action.name === "string" ? `"${action.name}"` : "a source";
+  if (action.action === "add_binding") return [`Add the source ${name}`];
+  if (action.action === "remove_binding") return [`Remove the source ${name}`];
+  if (action.action === "update_binding") return [`Change the source ${name}`];
+  if (action.action === "update_program") return ["Other changes, such as learning settings, profiles, or layout (see the diff)"];
+  if (action.action !== "set_policy" || !action.before || !action.after) return [String(action.summary)];
+  const lines: string[] = [];
+  const before = readings(action.before.entities);
+  const after = readings(action.after.entities);
+  for (const [ref, options] of after) {
+    if (!before.has(ref)) lines.push(`Learn from ${describeRef(ref)} (new)`);
+    else if (before.get(ref) !== options) lines.push(`Change how Margins learns from ${describeRef(ref)}`);
+  }
+  for (const ref of before.keys()) if (!after.has(ref)) lines.push(`Stop learning from ${describeRef(ref)}`);
+  const sets: Array<[keyof Policy, (item: string) => string, string, string]> = [
+    ["excluded_folders", (item) => `the ${item} folder`, "Leave out", "Stop leaving out"],
+    ["excluded_tags", (item) => `notes tagged #${item.replace(/^#/, "")}`, "Leave out", "Stop leaving out"],
+    ["excluded_entities", describeRef, "Leave out", "Stop leaving out"],
+  ];
+  for (const [key, describe, added, removed] of sets) {
+    const was = stringSet(action.before[key]);
+    const now = stringSet(action.after[key]);
+    for (const item of now) if (!was.has(item)) lines.push(`${added} ${describe(item)}`);
+    for (const item of was) if (!now.has(item)) lines.push(`${removed} ${describe(item)}`);
+  }
+  return lines.length ? lines : [String(action.summary)];
+}
+
 function programError(error: CliFailure): ProgramError {
   const location = programErrorLocation(error.message);
   return { code: error.code, message: error.message, line: location?.line ?? null, column: location?.column ?? null };
 }
 
+export const UPDATE_MARGINS_FOR_PROGRAM = "This Margins version can't edit the Workspace program from bb. Update Margins, then try again.";
+
 export async function readWorkspaceProgram(workspaceId: string): Promise<WorkspaceProgram> {
   requireWorkspaceId(workspaceId);
+  const capabilities = JSON.parse(await cli(["capabilities"])) as { workspace?: { program?: unknown } };
+  if (capabilities.workspace?.program !== true) throw new Error(UPDATE_MARGINS_FOR_PROGRAM);
+  const listing = JSON.parse(await cli(["workspace", "list", "--json"])) as { workspaces?: Array<{ id?: unknown; name?: unknown }> };
+  const name = listing.workspaces?.find((item) => item.id === workspaceId)?.name;
   const shown = JSON.parse(await cli(["--workspace", workspaceId, "workspace", "show", "--text", "--json"])) as {
     workspace_id?: unknown; program_path?: unknown; revision?: unknown; program?: unknown;
   };
@@ -71,7 +140,8 @@ export async function readWorkspaceProgram(workspaceId: string): Promise<Workspa
     || typeof shown.revision !== "string" || typeof shown.program !== "string") {
     throw new Error("Margins returned an invalid Workspace program.");
   }
-  return { workspaceId, programPath: shown.program_path, revision: shown.revision, program: shown.program };
+  return { workspaceId, workspaceName: typeof name === "string" && name ? name : null,
+    programPath: shown.program_path, revision: shown.revision, program: shown.program };
 }
 
 /** Plan the editor text as the complete desired program. Nothing in the
@@ -95,10 +165,10 @@ export async function planWorkspaceProgram(dataDir: string, workspaceId: string,
     schema_version?: unknown; workspace_id?: unknown; base_revision?: unknown; desired_sha256?: unknown;
     actions?: unknown; diff?: unknown;
   };
-  const actions = Array.isArray(plan.actions) ? plan.actions.map((item) => {
-    const action = item as { action?: unknown; summary?: unknown };
+  const actions = Array.isArray(plan.actions) ? plan.actions.flatMap((item) => {
+    const action = item as PlanAction;
     return typeof action.action === "string" && typeof action.summary === "string"
-      ? { action: action.action, summary: action.summary } : null;
+      ? plainSummaries(action).map((summary) => ({ action: action.action as string, summary })) : [null];
   }) : null;
   if (plan.schema_version !== "margins.workspace.plan.v2" || plan.workspace_id !== workspaceId
     || typeof plan.base_revision !== "string" || typeof plan.desired_sha256 !== "string"
@@ -120,9 +190,12 @@ export async function applyWorkspaceProgram(dataDir: string, workspaceId: string
   requireWorkspaceId(workspaceId);
   if (!previewIdPattern.test(previewId)) throw new Error("Invalid Workspace program plan.");
   const planFile = join(plansDir(dataDir), `${previewId}.plan.json`);
-  const plan = JSON.parse(await readFile(planFile, "utf8").catch(() => {
-    throw new Error("This review expired. Review the changes again.");
-  })) as { workspace_id?: unknown };
+  const text = await readFile(planFile, "utf8").catch(() => null);
+  // Plans are pruned after an hour or when many newer ones exist (another
+  // open editor plans too); the user's text is untouched, only the review.
+  if (text === null) return { ok: false, error: { code: "expired", line: null, column: null,
+    message: "This review expired before it was saved. Your text is unchanged; review the changes again." } };
+  const plan = JSON.parse(text) as { workspace_id?: unknown };
   if (plan.workspace_id !== workspaceId) throw new Error("The reviewed plan is for a different Workspace.");
   let receipt: { ok?: unknown; after_revision?: unknown };
   try {

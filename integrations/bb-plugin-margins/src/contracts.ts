@@ -99,7 +99,7 @@ const speechSetupResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(false), error: hostErrorSchema }).strict(),
 ]);
 
-const programSchema = z.object({ workspaceId: z.string().min(1), programPath: z.string().min(1),
+const programSchema = z.object({ workspaceId: z.string().min(1), workspaceName: z.string().nullable(), programPath: z.string().min(1),
   revision: z.string().min(1), program: z.string() }).strict();
 const programErrorSchema = z.object({ code: z.string(), message: z.string(),
   line: z.number().int().positive().nullable(), column: z.number().int().positive().nullable(),
@@ -116,7 +116,8 @@ const programApplyResultSchema = z.discriminatedUnion("ok", [
 ]);
 /** Large enough for any hand-written program; bounds what the editor can send. */
 export const MAX_PROGRAM_BYTES = 256 * 1024;
-const programTextSchema = z.string().max(MAX_PROGRAM_BYTES);
+const programTextSchema = z.string().refine((text) => new TextEncoder().encode(text).length <= MAX_PROGRAM_BYTES,
+  { message: `The program must be at most ${MAX_PROGRAM_BYTES / 1024} KiB.` });
 
 const ownedCaptureInputSchema = z.object({ target: projectTargetSchema }).extend({
   recordingId: z.string().min(1), ownerId: z.string().min(1),

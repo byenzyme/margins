@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { chmod, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyWorkspaceProgram, planWorkspaceProgram, readWorkspaceProgram } from "./workspace-program.js";
+import { applyWorkspaceProgram, plainSummaries, planWorkspaceProgram, readWorkspaceProgram } from "./workspace-program.js";
 
 const prior = { cli: process.env.MARGINS_CLI_BIN, home: process.env.MARGINS_HOME };
 afterEach(() => {
@@ -20,14 +20,16 @@ async function fakeCli(root: string) {
 const fs = require('node:fs');
 const a = process.argv.slice(2); fs.appendFileSync(${JSON.stringify(join(root, "calls"))}, a.join(' ') + '\\n');
 const fail = (code, message, details = null) => { process.stderr.write(JSON.stringify({schema_version:'margins.error.v1', ok:false, error:{code, message, retryable:false, details}}) + '\\n'); process.exit(1); };
-if (a.includes('show')) console.log(JSON.stringify({workspace_id:'notes', program_path:'/m/configs/notes.enzyme', revision:'rev-1', program:'workspace "notes" {}\\n'}, null, 2));
+if (a[0] === 'capabilities') console.log(JSON.stringify({schema:1, workspace:{setup:true, program: !fs.existsSync(${JSON.stringify(join(root, "old-cli"))})}}));
+else if (a.includes('list')) console.log(JSON.stringify({default_workspace:null, workspaces:[{id:'notes', name:'My Notes'}]}));
+else if (a.includes('show')) console.log(JSON.stringify({workspace_id:'notes', program_path:'/m/configs/notes.enzyme', revision:'rev-1', program:'workspace "notes" {}\\n'}, null, 2));
 else if (a.includes('plan')) {
   const desired = fs.readFileSync(a[a.indexOf('--desired') + 1], 'utf8');
   fs.writeFileSync(${JSON.stringify(join(root, "seen-desired"))}, desired);
   if (desired.includes('lern')) fail('workspace_desired_invalid', 'invalid desired program: 3:3: expected "}"; found "lern"');
   if (desired.includes('Nope')) fail('workspace_desired_invalid', 'folder reading "Nope" does not exist under Home');
   console.log(JSON.stringify({schema_version:'margins.workspace.plan.v2', workspace_id:'notes', base_revision:'rev-1', plan_id:'p',
-    actions:[{action:'set_policy', summary:'Attention policy: learn questions from folder:People', before:{}, after:{}}],
+    actions:[{action:'set_policy', summary:'Attention policy: learn questions from folder:People', before:{entities:[]}, after:{entities:[{'folder:People':{profile:'auto'}}]}}],
     desired_program:desired, desired_sha256: desired === 'same' ? 'rev-1' : 'rev-2', diff:'--- a/notes.enzyme\\n+++ b/notes.enzyme\\n'}));
 } else if (a.includes('apply')) {
   if (fs.existsSync(${JSON.stringify(join(root, "moved"))})) fail('workspace_revision_conflict', 'workspace revision conflict: expected rev-1, found rev-9', {expected_revision:'rev-1', actual_revision:'rev-9'});
@@ -39,17 +41,33 @@ else if (a.includes('plan')) {
   process.env.MARGINS_HOME = join(root, "machine");
 }
 
+describe("Plain-language review summaries", () => {
+  it("describes readings, exclusions, and sources in the user's terms", () => {
+    expect(plainSummaries({ action: "set_policy", summary: "Attention policy: …",
+      before: { entities: ["#old", { "folder:Meetings": { profile: "operational" } }], excluded_folders: ["Archive"], excluded_tags: [] },
+      after: { entities: [{ "folder:Meetings": { profile: "decisions" } }, { "folder:Projects": { profile: "decisions" } }],
+        excluded_folders: ["Templates"], excluded_tags: ["private"] } })).toEqual([
+      "Change how Margins learns from the Meetings folder", "Learn from the Projects folder (new)", "Stop learning from notes tagged #old",
+      "Leave out the Templates folder", "Stop leaving out the Archive folder", "Leave out notes tagged #private",
+    ]);
+    expect(plainSummaries({ action: "add_binding", summary: "x", name: "chat" })).toEqual(['Add the source "chat"']);
+    expect(plainSummaries({ action: "update_program", summary: "x" })[0]).toContain("see the diff");
+    expect(plainSummaries({ action: "set_policy", summary: "Attention policy: reorder", before: { entities: ["#a"] }, after: { entities: ["#a"] } }))
+      .toEqual(["Attention policy: reorder"]);
+  });
+});
+
 describe("Workspace program editing on the project machine", () => {
   it("reads the program, plans editor text without writing, and applies exactly the reviewed plan", async () => {
     const root = await mkdtemp(join(tmpdir(), "margins-program-"));
     try {
       await fakeCli(root);
       await expect(readWorkspaceProgram("notes")).resolves.toEqual({
-        workspaceId: "notes", programPath: "/m/configs/notes.enzyme", revision: "rev-1", program: 'workspace "notes" {}\n' });
+        workspaceId: "notes", workspaceName: "My Notes", programPath: "/m/configs/notes.enzyme", revision: "rev-1", program: 'workspace "notes" {}\n' });
       const text = 'workspace "notes" {\n  learn questions from folder "People"\n}\n';
       const plan = await planWorkspaceProgram(root, "notes", text);
       expect(plan).toMatchObject({ ok: true, workspaceId: "notes", baseRevision: "rev-1", noop: false,
-        actions: [{ action: "set_policy", summary: "Attention policy: learn questions from folder:People" }] });
+        actions: [{ action: "set_policy", summary: "Learn from the People folder (new)" }] });
       expect(await readFile(join(root, "seen-desired"), "utf8")).toBe(text);
       // Only the plan is kept; the desired text file is removed.
       expect(await readdir(join(root, "program-plans"))).toEqual([`${(plan as { previewId: string }).previewId}.plan.json`]);
@@ -59,7 +77,12 @@ describe("Workspace program editing on the project machine", () => {
       expect(calls).toContain("--workspace notes workspace show --text --json");
       expect(calls).toMatch(/--workspace notes workspace plan --desired \S+\.desired\.enzyme --json/);
       expect(calls).toMatch(new RegExp(`--workspace notes workspace apply --plan \\S+${(plan as { previewId: string }).previewId}\\.plan\\.json --json`));
-      await expect(applyWorkspaceProgram(root, "notes", (plan as { previewId: string }).previewId)).rejects.toThrow("expired");
+      // A review whose plan was pruned (or already used) comes back typed, not thrown.
+      await expect(applyWorkspaceProgram(root, "notes", (plan as { previewId: string }).previewId)).resolves.toMatchObject({
+        ok: false, error: { code: "expired", message: expect.stringContaining("review the changes again") } });
+      // An older CLI cannot show or plan programs: ask for an update instead of a raw argument error.
+      await writeFile(join(root, "old-cli"), "");
+      await expect(readWorkspaceProgram("notes")).rejects.toThrow("Update Margins");
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
@@ -109,7 +132,7 @@ describe.skipIf(!process.env.MARGINS_PROGRAM_E2E_CLI)("Workspace program editing
         const edited = saved.program.replace(/\n}\s*$/, '\n  learn questions from folder "People" about relationships\n}\n');
         const plan = await planWorkspaceProgram(root, "notes", edited);
         expect(plan).toMatchObject({ ok: true, baseRevision: saved.revision, noop: false,
-          actions: [{ action: "set_policy", summary: "Attention policy: learn questions from folder:People" }] });
+          actions: [{ action: "set_policy", summary: "Learn from the People folder (new)" }] });
         const unchanged = await planWorkspaceProgram(root, "notes", saved.program);
         expect(unchanged).toMatchObject({ ok: true, noop: true });
         // Another editor saves first.

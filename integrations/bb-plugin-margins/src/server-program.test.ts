@@ -18,7 +18,7 @@ function harness(options: { defaultWorkspaceId?: string | null; hostOffline?: bo
       if (options.hostOffline && method !== "workspaceOptions") throw new Error("Host worker offline");
       if (method === "workspaceOptions") return { defaultWorkspaceId: options.defaultWorkspaceId === undefined ? "notes" : options.defaultWorkspaceId,
         autoSelected: false, workspaces: [{ id: "notes", name: "Notes" }] };
-      if (method === "readWorkspaceProgram") return { workspaceId: "notes", programPath: "/m/configs/notes.enzyme", revision: "rev-1", program: "workspace \"notes\" {}\n" };
+      if (method === "readWorkspaceProgram") return { workspaceId: "notes", workspaceName: "Notes", programPath: "/m/configs/notes.enzyme", revision: "rev-1", program: "workspace \"notes\" {}\n" };
       if (method === "planWorkspaceProgram") return (input as { program: string }).program.includes("lern")
         ? { ok: false, error: { code: "workspace_desired_invalid", message: "3:3: expected \"}\"", line: 3, column: 3 } }
         : { ok: true, previewId: "11111111-2222-3333-4444-555555555555", workspaceId: "notes", baseRevision: "rev-1", noop: false,
@@ -35,7 +35,7 @@ describe("Workspace program RPC", () => {
   it("reads, plans, and applies the project's Workspace program on the project's machine", async () => {
     const host = harness();
     await expect(host.harness.behavior.callRpc("workspaceProgram", { projectId: "proj-1" })).resolves.toEqual({
-      workspaceId: "notes", programPath: "/m/configs/notes.enzyme", revision: "rev-1", program: "workspace \"notes\" {}\n" });
+      workspaceId: "notes", workspaceName: "Notes", programPath: "/m/configs/notes.enzyme", revision: "rev-1", program: "workspace \"notes\" {}\n" });
     await expect(host.harness.behavior.callRpc("planWorkspaceProgram", { projectId: "proj-1", workspaceId: "notes", program: "x" }))
       .resolves.toMatchObject({ ok: true, baseRevision: "rev-1", actions: [{ summary: "Update program statements" }] });
     await expect(host.harness.behavior.callRpc("planWorkspaceProgram", { projectId: "proj-1", workspaceId: "notes", program: "lern" }))
@@ -63,8 +63,14 @@ describe("Workspace program RPC", () => {
       .rejects.toThrow("offline");
   });
 
-  it("bounds the program text the editor may send", async () => {
-    await expect(harness().harness.behavior.callRpc("planWorkspaceProgram", { projectId: "proj-1", workspaceId: "notes", program: "x".repeat(300 * 1024) }))
+  it("bounds the program text the editor may send in bytes, not characters", async () => {
+    const host = harness();
+    await expect(host.harness.behavior.callRpc("planWorkspaceProgram", { projectId: "proj-1", workspaceId: "notes", program: "x".repeat(300 * 1024) }))
       .rejects.toThrow();
+    // 100 Ki three-byte characters: under the cap in characters, over it in bytes.
+    await expect(host.harness.behavior.callRpc("planWorkspaceProgram", { projectId: "proj-1", workspaceId: "notes", program: "€".repeat(100 * 1024) }))
+      .rejects.toThrow();
+    await expect(host.harness.behavior.callRpc("planWorkspaceProgram", { projectId: "proj-1", workspaceId: "notes", program: "€".repeat(80 * 1024) }))
+      .resolves.toMatchObject({ ok: true });
   });
 });
