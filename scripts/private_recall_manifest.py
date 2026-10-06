@@ -2,7 +2,6 @@
 """Compose the official Cargo manifest with the pinned private recall source."""
 
 from pathlib import Path
-import subprocess
 import sys
 import tomllib
 
@@ -53,10 +52,7 @@ def compose() -> str:
     ]
     assert manifest["dependencies"]["recall-engine"]["optional"] is True
     # The linked engine and the enzyme CLI that Margins runs are one revision.
-    pinned_cli = subprocess.run(
-        [str(ROOT / "scripts/enzyme-pin"), "get", "rev"],
-        check=True, stdout=subprocess.PIPE, text=True,
-    ).stdout.strip()
+    pinned_cli = tomllib.loads((ROOT / "scripts/enzyme-cli.pin").read_text())["rev"]
     assert manifest["dependencies"]["recall-engine"]["rev"] == pinned_cli
     return source
 

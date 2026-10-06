@@ -26,7 +26,7 @@ die() {
 
 get() {
   local key="$1" value
-  value="$(sed -n "s/^${key//./\\.}=//p" "$pin_file" | tr -d '[:space:]')"
+  value="$(sed -n "s/^${key//./\\.} = \"\\([^\"]*\\)\"\$/\\1/p" "$pin_file")"
   [[ -n "$value" ]] || return 1
   printf '%s\n' "$value"
 }

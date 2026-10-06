@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Print the path of the `enzyme` binary that Margins tests and gates run.
 #
-# MARGINS_ENZYME_BIN wins when set. Otherwise the enzyme-rust revision `rev`
-# in scripts/enzyme-cli.pin is built once per host (debug, no local model) into
+# MARGINS_ENZYME_BIN wins when set. Otherwise the enzyme-rust revision in
+# scripts/enzyme-cli.pin is built once per host (debug, no local model) into
 # MARGINS_ENZYME_CACHE (default ~/.cache/margins-enzyme/<rev>) and reused. Run
 # it inside scripts/cargo-lane so the build uses a managed target.
 set -euo pipefail
@@ -17,7 +17,8 @@ if [[ -n "${MARGINS_ENZYME_BIN:-}" ]]; then
   exit 0
 fi
 
-rev="$("$repo_root/scripts/enzyme-pin" get rev)"
+rev="$(sed -n 's/^rev = "\([0-9a-f]*\)"$/\1/p' "$repo_root/scripts/enzyme-cli.pin")"
+[[ -n "$rev" ]] || { echo "enzyme-bin: no rev in scripts/enzyme-cli.pin" >&2; exit 1; }
 cache="${MARGINS_ENZYME_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/margins-enzyme}/$rev"
 if [[ ! -x "$cache/bin/enzyme" ]]; then
   echo "enzyme-bin: building enzyme $rev into $cache" >&2
