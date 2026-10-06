@@ -8,6 +8,11 @@ import { createRuntimeManager, runtimeManagerInternals } from "./runtime-manager
 
 const execFile = promisify(execFileCallback);
 
+it("publishes the plugin at the runtime release it pins", async () => {
+  const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
+  expect(manifest.version).toBe(runtimeManagerInternals.RUNTIME_RELEASE_VERSION);
+});
+
 async function archiveFixture(root: string, executables: string[]) {
   const unpacked = join(root, "unpacked");
   await mkdir(unpacked);
