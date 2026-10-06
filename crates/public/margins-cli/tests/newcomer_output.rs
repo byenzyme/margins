@@ -13,7 +13,10 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 struct Fixture {
     _guard: std::sync::MutexGuard<'static, ()>,
-    temp: tempfile::TempDir,
+    _temp: tempfile::TempDir,
+    /// The temp directory with symlinks resolved (macOS `/var` is
+    /// `/private/var`), so it matches the paths Margins stores and prints.
+    root: std::path::PathBuf,
     old_home: Option<std::ffi::OsString>,
 }
 
@@ -25,27 +28,29 @@ impl Fixture {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
         let old_home = std::env::var_os("MARGINS_HOME");
-        std::env::set_var("MARGINS_HOME", temp.path().join("machine"));
+        std::env::set_var("MARGINS_HOME", root.join("machine"));
         std::env::remove_var("MARGINS_WORKSPACE");
-        std::fs::create_dir_all(temp.path().join("vault/people")).unwrap();
-        std::fs::write(temp.path().join("vault/people/ada.md"), "# Ada\n").unwrap();
+        std::fs::create_dir_all(root.join("vault/people")).unwrap();
+        std::fs::write(root.join("vault/people/ada.md"), "# Ada\n").unwrap();
         workspace::create_workspace(
-            &temp.path().join("machine"),
+            &root.join("machine"),
             "practice",
             None,
-            &temp.path().join("vault"),
+            &root.join("vault"),
         )
         .unwrap();
         Self {
             _guard: guard,
-            temp,
+            _temp: temp,
+            root,
             old_home,
         }
     }
 
     fn root(&self) -> &Path {
-        self.temp.path()
+        &self.root
     }
 
     fn program_path(&self) -> std::path::PathBuf {

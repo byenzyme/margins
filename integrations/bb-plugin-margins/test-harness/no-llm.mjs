@@ -375,7 +375,7 @@ try {
   }
   if (freshRelease) await until("fresh release runtime install", () =>
     existsSync(path.join(freshCliBinDir, "margins"))
-      && existsSync(path.join(hostData, "runtime", "v0.4.17", "margins-server")), 120_000);
+      && existsSync(path.join(hostData, "runtime", "v0.4.18", "margins-server")), 120_000);
   shot("01-workspace.png");
 
   // The fake microphone is this harness's deliberate browser-only choice.
@@ -608,7 +608,7 @@ try {
     const installed = { modelInitiallyAbsent: true, modelDir: coldCoremlModel,
       modelInstalled: coremlInstalled(coldCoremlModel), asrBackend: "coreml",
       releaseRuntimeInstalled: freshRelease
-        ? existsSync(path.join(bbData, "plugins/margins/host-data/runtime/v0.4.17/margins-server")) : null };
+        ? existsSync(path.join(bbData, "plugins/margins/host-data/runtime/v0.4.18/margins-server")) : null };
     writeFileSync(path.join(artifacts, "cold-asr-install.json"), `${JSON.stringify(installed, null, 2)}\n`);
     if (existsSync(path.join(bbData, "logs")) && !existsSync(path.join(artifacts, "bb-diagnostic-logs"))) {
       cpSync(path.join(bbData, "logs"), path.join(artifacts, "bb-diagnostic-logs"), { recursive: true });
