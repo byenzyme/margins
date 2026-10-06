@@ -10,6 +10,7 @@
 
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 use crate::workspace::{
@@ -53,8 +54,11 @@ pub struct PresetProposal {
     pub desired: WorkspaceConfig,
     /// Preset readings in the desired program, as written there.
     pub readings: Vec<String>,
-    /// Preset folder readings dropped because the notes folder has no such folder.
+    /// Preset folder readings dropped because the notes folder has no such
+    /// folder, or several that differ only in case.
     pub skipped_readings: Vec<String>,
+    /// Why each skipped reading was dropped.
+    pub skip_reasons: BTreeMap<String, String>,
     /// The Home folder Margins writes notes into (`"."` is the Home root).
     pub note_folder: String,
 }
@@ -66,25 +70,42 @@ pub struct PresetProposal {
 ///   folder reading is added only when the folder exists under Home (matched
 ///   case-insensitively and written with its on-disk name), else skipped;
 /// - preset `leave out folders` entries are added;
-/// - the preset note folder replaces only a Home-root (`"."`) note folder.
+/// - the preset note folder is used only by a program that has not been set
+///   up yet: Home-root (`"."`) note folder, no readings, nothing left out (what
+///   `workspace new` writes). Any other `"."` is a choice and is kept.
 pub fn propose(current: &WorkspaceConfig, filled: &str) -> Result<PresetProposal> {
     let preset = WorkspaceProgram::parse(filled).context("the filled preset does not parse")?;
     let preset = derive_view(&preset, None, Default::default())?;
+    let never_set_up =
+        current.policy.entities.is_empty() && current.policy.excluded_folders.is_empty();
     let mut desired = current.clone();
     let home = home_path(&desired)?.to_path_buf();
     let mut readings = Vec::new();
     let mut skipped_readings = Vec::new();
+    let mut skip_reasons = BTreeMap::new();
 
     for entity in &preset.policy.entities {
         for (entity_ref, options) in entity.entries() {
             let entity_ref = match folder_of(entity_ref) {
-                Some(folder) => match resolve_home_folder(&home, folder)? {
-                    Some(actual) => home_folder_entity(
+                Some(folder) => match find_home_folder(&home, folder)? {
+                    HomeFolder::Found(actual) => home_folder_entity(
                         &desired,
                         &enzyme_spec::entity_selector("folder", &slash_path(&actual)),
                     ),
-                    None => {
+                    HomeFolder::Missing => {
                         skipped_readings.push(entity_ref.to_string());
+                        skip_reasons.insert(entity_ref.to_string(), "no such folder".to_string());
+                        continue;
+                    }
+                    HomeFolder::Ambiguous(paths) => {
+                        skipped_readings.push(entity_ref.to_string());
+                        skip_reasons.insert(
+                            entity_ref.to_string(),
+                            format!(
+                                "several folders differ only in case: {}",
+                                paths.iter().map(|path| slash_path(path)).collect::<Vec<_>>().join(", ")
+                            ),
+                        );
                         continue;
                     }
                 },
@@ -107,9 +128,9 @@ pub fn propose(current: &WorkspaceConfig, filled: &str) -> Result<PresetProposal
     }
 
     for folder in &preset.policy.excluded_folders {
-        let folder = match resolve_home_folder(&home, folder)? {
-            Some(actual) => slash_path(&actual),
-            None => folder.clone(),
+        let folder = match find_home_folder(&home, folder)? {
+            HomeFolder::Found(actual) => slash_path(&actual),
+            HomeFolder::Missing | HomeFolder::Ambiguous(_) => folder.clone(),
         };
         if !desired
             .policy
@@ -133,9 +154,12 @@ pub fn propose(current: &WorkspaceConfig, filled: &str) -> Result<PresetProposal
             _ => None,
         });
     let note_folder = home_note_folder(&mut desired)?;
-    if note_folder.is_none() {
+    if note_folder.is_none() && never_set_up {
         if let Some(folder) = preset_note_folder {
-            let folder = resolve_home_folder(&home, &slash_path(&folder))?.unwrap_or(folder);
+            let folder = match find_home_folder(&home, &slash_path(&folder))? {
+                HomeFolder::Found(actual) => actual,
+                HomeFolder::Missing | HomeFolder::Ambiguous(_) => folder,
+            };
             *note_folder = Some(folder);
         }
     }
@@ -148,6 +172,7 @@ pub fn propose(current: &WorkspaceConfig, filled: &str) -> Result<PresetProposal
         desired,
         readings,
         skipped_readings,
+        skip_reasons,
         note_folder,
     })
 }
@@ -192,14 +217,27 @@ fn slash_path(path: &Path) -> String {
         .join("/")
 }
 
+/// Where a Home-relative folder path points.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HomeFolder {
+    /// The folder, relative to Home, with its on-disk names.
+    Found(PathBuf),
+    Missing,
+    /// Several folders differ from the request only in case: their paths.
+    Ambiguous(Vec<PathBuf>),
+}
+
 /// Find the folder `relative` (`/`-separated, `"."` for the root) under
-/// `home`, matching each component case-insensitively. Returns its on-disk
-/// path relative to `home`, or `None` when it does not exist. Two folders
-/// that differ only in case are an error.
-pub fn resolve_home_folder(home: &Path, relative: &str) -> Result<Option<PathBuf>> {
+/// `home`. Each component matches case-insensitively (Unicode lowercase); an
+/// exact match wins over other spellings.
+pub fn find_home_folder(home: &Path, relative: &str) -> Result<HomeFolder> {
     let relative = relative.trim();
     if relative == "." {
-        return Ok(home.is_dir().then(PathBuf::new));
+        return Ok(if home.is_dir() {
+            HomeFolder::Found(PathBuf::new())
+        } else {
+            HomeFolder::Missing
+        });
     }
     let components = Path::new(relative).components().collect::<Vec<_>>();
     if components.is_empty()
@@ -212,24 +250,43 @@ pub fn resolve_home_folder(home: &Path, relative: &str) -> Result<Option<PathBuf
     let mut found = PathBuf::new();
     for component in components {
         let wanted = component.as_os_str().to_string_lossy();
+        let wanted_folded = wanted.to_lowercase();
         let current = home.join(&found);
         let entries = std::fs::read_dir(&current).with_context(|| {
             format!("could not inspect Workspace home folder {}", current.display())
         })?;
-        let mut matches = entries
+        let matches = entries
             .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().eq_ignore_ascii_case(&wanted))
+            .filter(|entry| entry.file_name().to_string_lossy().to_lowercase() == wanted_folded)
             .filter(|entry| entry.path().is_dir())
-            .map(|entry| entry.file_name());
-        let Some(next) = matches.next() else {
-            return Ok(None);
+            .map(|entry| entry.file_name())
+            .collect::<Vec<_>>();
+        let next = match matches.as_slice() {
+            [] => return Ok(HomeFolder::Missing),
+            [only] => only.clone(),
+            several => match several.iter().find(|name| name.to_string_lossy() == wanted) {
+                Some(exact) => exact.clone(),
+                None => {
+                    let mut paths = several.iter().map(|name| found.join(name)).collect::<Vec<_>>();
+                    paths.sort();
+                    return Ok(HomeFolder::Ambiguous(paths));
+                }
+            },
         };
-        if matches.next().is_some() {
-            bail!("folder path {relative:?} is ambiguous under the Workspace home");
-        }
         found.push(next);
     }
-    Ok(Some(found))
+    Ok(HomeFolder::Found(found))
+}
+
+/// [`find_home_folder`], with several matching spellings as an error.
+pub fn resolve_home_folder(home: &Path, relative: &str) -> Result<Option<PathBuf>> {
+    match find_home_folder(home, relative)? {
+        HomeFolder::Found(path) => Ok(Some(path)),
+        HomeFolder::Missing => Ok(None),
+        HomeFolder::Ambiguous(_) => {
+            bail!("folder path {relative:?} is ambiguous under the Workspace home")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -311,6 +368,32 @@ mod tests {
         let again = propose(&edited, &filled(temp.path())).unwrap();
         assert_eq!(again.desired, edited);
         assert_eq!(again.note_folder, "Inbox");
+
+        // Notes deliberately written to the Home root stay there.
+        if let Some(WorkspaceBinding::NativeMarkdown { note_folder, .. }) =
+            edited.bindings.get_mut("home")
+        {
+            *note_folder = None;
+        }
+        let root = propose(&edited, &filled(temp.path())).unwrap();
+        assert_eq!(root.desired, edited);
+        assert_eq!(root.note_folder, ".");
+    }
+
+    #[test]
+    fn a_reading_whose_folder_has_several_spellings_is_skipped_with_a_reason() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("people")).unwrap();
+        std::fs::create_dir_all(temp.path().join("PEOPLE")).unwrap();
+        if !temp.path().join("pEOPLE").exists() {
+            let proposal = propose(&current(temp.path()), &filled(temp.path())).unwrap();
+            assert!(proposal.skipped_readings.contains(&"folder:People".to_string()));
+            assert_eq!(
+                proposal.skip_reasons["folder:People"],
+                "several folders differ only in case: PEOPLE, people"
+            );
+            assert_eq!(proposal.skip_reasons["folder:Projects"], "no such folder");
+        }
     }
 
     #[test]
@@ -332,12 +415,25 @@ mod tests {
         );
         assert_eq!(resolve_home_folder(temp.path(), "missing").unwrap(), None);
         assert!(resolve_home_folder(temp.path(), "../x").is_err());
+        std::fs::create_dir_all(temp.path().join("Ärzte")).unwrap();
+        assert_eq!(
+            resolve_home_folder(temp.path(), "ärzte").unwrap(),
+            Some(PathBuf::from("Ärzte"))
+        );
         std::fs::create_dir_all(temp.path().join("work")).unwrap();
         // Case-insensitive file systems cannot hold both spellings.
         if temp.path().join("WORK").exists() {
             return;
         }
-        assert!(resolve_home_folder(temp.path(), "work/people").is_err());
+        assert_eq!(
+            find_home_folder(temp.path(), "Work").unwrap(),
+            HomeFolder::Found("Work".into())
+        );
+        assert_eq!(
+            find_home_folder(temp.path(), "WORK").unwrap(),
+            HomeFolder::Ambiguous(vec!["Work".into(), "work".into()])
+        );
+        assert!(resolve_home_folder(temp.path(), "WORK/people").is_err());
     }
 
     #[test]

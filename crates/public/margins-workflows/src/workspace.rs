@@ -2385,6 +2385,25 @@ pub fn plan_workspace_program(
         .into());
     }
     let desired_view = validate_program(margins_home, &desired)?;
+    // Refuse at plan time a note folder that apply could not write into, such
+    // as a symbolic link out of Home.
+    for binding in desired_view.bindings.values() {
+        if let WorkspaceBinding::NativeMarkdown {
+            path,
+            role: SourceRole::Home,
+            note_folder: Some(folder),
+        } = binding
+        {
+            if path.is_dir() {
+                safe_note_destination(path, folder).map_err(|error| {
+                    WorkspaceMutationError::InvalidPlan(format!(
+                        "new notes cannot go to {:?}: {error:#}",
+                        folder.display().to_string()
+                    ))
+                })?;
+            }
+        }
+    }
     let mut actions = view_actions(&workspace.config, &desired_view);
     if workspace.program.text() != desired_program {
         // The view actions explain the change when applying them to the
@@ -4277,6 +4296,24 @@ account = "owner@example.com"
 
         assert_eq!(std::fs::read_to_string(&workspace.config_path).unwrap(), before);
         apply_workspace_plan(&mut workspace, &plan).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_plan_refuses_a_note_folder_linked_out_of_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let margins_home = temp.path().join("state");
+        let notes = temp.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::create_dir_all(temp.path().join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(temp.path().join("elsewhere"), notes.join("Meetings")).unwrap();
+        let workspace = create_workspace(&margins_home, "practice", None, &notes).unwrap();
+        let program = workspace.program.text().replace(
+            "remember in folder \".\"",
+            "remember in folder \"Meetings\"",
+        );
+        let error = plan_workspace_program(&workspace, &program).unwrap_err();
+        assert!(format!("{error:#}").contains("outside the Home root"), "{error:#}");
     }
 
     #[test]

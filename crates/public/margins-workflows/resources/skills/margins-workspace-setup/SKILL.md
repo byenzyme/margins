@@ -139,7 +139,8 @@ The plan's `preset` object lists the `readings` it kept, the
 `note_folder` new notes go to; `program_path` is the program file. `actions`
 has one plain-language `summary` per change and `diff` is the exact program
 change. The preset only adds to the program, so running setup again on a set-up
-Workspace changes nothing.
+Workspace changes nothing; its note folder, including a chosen Home root, is
+kept.
 
 Tell the user, in their terms, which folders Margins will learn from, which preset
 folders were skipped because they do not exist, what it leaves out, and where new
@@ -286,4 +287,6 @@ the posture clear:
 | `tension_trace` | unresolved assumptions, competing forces, and tradeoffs. |
 | `preference_evidence` | stable preferences demonstrated by actions. |
 
-Leave an ambiguous entity without a profile.
+The program may also name a profile by its alias: `relationships` is `relational`
+and `decisions` is `decision_trace` (the preset uses the aliases). Leave an
+ambiguous entity without a profile.

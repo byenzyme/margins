@@ -328,6 +328,7 @@ fn workspace_plan_preset(
         "template": template,
         "readings": proposal.readings,
         "skipped_readings": proposal.skipped_readings,
+        "skip_reasons": proposal.skip_reasons,
         "note_folder": proposal.note_folder,
     });
     Ok(value)
