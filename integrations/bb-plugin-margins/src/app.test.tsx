@@ -60,6 +60,8 @@ describe("Margins recording panel", () => {
     expect(projectWorkspace).toHaveBeenCalledWith({ projectId: "project-1" });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(projectWorkspace).toHaveBeenCalledWith({ projectId: "project-1", workspaceId: "" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit program" }));
+    expect(slot.inspection.navigateCalls).toContainEqual({ method: "toPluginPanel", path: "meetings", options: { subPath: "project-1/@program" } });
     slot.lifecycle.unmount();
   });
 

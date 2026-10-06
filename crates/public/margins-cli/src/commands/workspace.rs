@@ -4,12 +4,13 @@ use anyhow::Context;
 use margins_workflows::catalyst::{selected_status, CatalystStatus};
 use margins_workflows::workspace::{
     self, CalendarCollectionSelector, GmailCollectionSelector, IndexPolicy, ResolvedWorkspace,
-    SourceKind, SourceRole, WorkspaceBinding, WorkspaceConfig, WorkspacePlan,
+    SourceKind, SourceRole, WorkspaceBinding, WorkspaceConfig, WorkspacePlan, WorkspaceProgram,
 };
+use margins_workflows::workspace_program::derive_view;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 #[derive(Serialize)]
 struct PublicWorkspaceView<'a> {
@@ -71,15 +72,18 @@ pub fn new(
 
 pub fn list(json: bool, stdout: &mut dyn Write) -> Result<(), CliError> {
     let home = workspace::margins_home().map_err(CliError::from_anyhow)?;
-    let workspaces = workspace::list_workspaces(&home).map_err(CliError::from_anyhow)?;
+    let workspaces = workspace::list_workspace_entries(&home).map_err(CliError::from_anyhow)?;
     let default = workspace::default_workspace(&home).map_err(CliError::from_anyhow)?;
     if json {
         let entries = workspaces
             .iter()
-            .map(|item| {
-                serde_json::json!({
+            .map(|(id, resolved)| match resolved {
+                Ok(item) => serde_json::json!({
                     "id": item.config.id, "name": item.config.name,
-                })
+                }),
+                Err(error) => serde_json::json!({
+                    "id": id, "error": format!("{error:#}"),
+                }),
             })
             .collect::<Vec<_>>();
         serde_json::to_writer(
@@ -91,13 +95,16 @@ pub fn list(json: bool, stdout: &mut dyn Write) -> Result<(), CliError> {
         .map_err(|error| CliError::from_anyhow(error.into()))?;
         writeln!(stdout).map_err(|error| CliError::from_anyhow(error.into()))
     } else {
-        for item in workspaces {
-            writeln!(
-                stdout,
-                "{}\t{}",
-                item.config.id,
-                item.config.name.as_deref().unwrap_or("")
-            )
+        for (id, resolved) in workspaces {
+            match resolved {
+                Ok(item) => writeln!(
+                    stdout,
+                    "{}\t{}",
+                    item.config.id,
+                    item.config.name.as_deref().unwrap_or("")
+                ),
+                Err(error) => writeln!(stdout, "{id}\t(invalid: {error:#})"),
+            }
             .map_err(|error| CliError::from_anyhow(error.into()))?;
         }
         Ok(())
@@ -212,33 +219,295 @@ pub fn plan(
             format!("could not read {}: {error}", desired_path.display()),
         )
     })?;
-    let desired: WorkspaceConfig = toml::from_str(&body).map_err(|error| {
-        CliError::new(
-            "workspace_desired_invalid",
-            format!("invalid desired workspace config: {error}"),
-        )
-    })?;
-    validate_desired_home_folder_entities(&desired)?;
-    let plan = workspace::plan_workspace_config(&workspace.config, desired)
-        .map_err(CliError::from_anyhow)?;
+    let legacy_toml = desired_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("toml"));
+    let plan = plan_desired(&workspace, &body, legacy_toml)?;
     serde_json::to_writer_pretty(&mut *stdout, &plan)
         .map_err(|error| CliError::new("output_failed", error.to_string()))?;
     writeln!(stdout).map_err(|error| CliError::new("output_failed", error.to_string()))
 }
 
-/// Scan emits unscoped `folder:<path>` specs for the Workspace home. Refuse a
-/// plan that cannot resolve one of those specs before the user reviews and
-/// consents to a policy that would fail later during init.
+/// Plan a complete desired program (or legacy TOML config) against the
+/// Workspace, refusing folder readings that do not resolve under Home.
+fn plan_desired(
+    workspace: &ResolvedWorkspace,
+    body: &str,
+    legacy_toml: bool,
+) -> Result<WorkspacePlan, CliError> {
+    let plan = if legacy_toml {
+        // Older setup callers still write the retired config.toml shape.
+        let desired: WorkspaceConfig = toml::from_str(body).map_err(|error| {
+            CliError::new(
+                "workspace_desired_invalid",
+                format!("invalid desired workspace config: {error}"),
+            )
+        })?;
+        workspace::plan_legacy_workspace_config(workspace, desired)
+    } else {
+        workspace::plan_workspace_program(workspace, body)
+    }
+    .map_err(|error| desired_error(error))?;
+    let desired_view = WorkspaceProgram::parse(&plan.desired_program)
+        .and_then(|program| {
+            derive_view(
+                &program,
+                workspace.config.name.clone(),
+                workspace.config.retention.clone(),
+            )
+        })
+        .map_err(|error| desired_error(error))?;
+    validate_desired_home_folder_entities(&desired_view)?;
+    Ok(plan)
+}
+
+/// Rename a Workspace whose id became reserved; see
+/// [`workspace::rename_reserved_workspace`].
+pub fn rename(old: &str, new: &str, json: bool, stdout: &mut dyn Write) -> Result<(), CliError> {
+    let home = workspace::margins_home().map_err(CliError::from_anyhow)?;
+    let renamed = workspace::rename_reserved_workspace(&home, old, new)
+        .map_err(|error| CliError::new("workspace_rename_failed", format!("{error:#}")))?;
+    let output = |error: std::io::Error| CliError::new("output_failed", error.to_string());
+    if json {
+        serde_json::to_writer_pretty(&mut *stdout, &renamed)
+            .map_err(|error| CliError::new("output_failed", error.to_string()))?;
+        writeln!(stdout).map_err(output)
+    } else {
+        writeln!(
+            stdout,
+            "Renamed Workspace {old} to {new}: {}. The previous declaration is kept at {}.",
+            renamed.program_path.display(),
+            renamed.retired.display()
+        )
+        .map_err(output)?;
+        writeln!(
+            stdout,
+            "Use --workspace {new} from now on; update any saved selection of '{old}' (for example in the bb plugin)."
+        )
+        .map_err(output)
+    }
+}
+
+/// Test/harness-only: treat the process as an interactive terminal for
+/// `workspace edit`, so a scripted `$EDITOR` and piped answers can drive it.
+pub const EDIT_ASSUME_TERMINAL_ENV: &str = "MARGINS_WORKSPACE_EDIT_ASSUME_TERMINAL";
+
+#[derive(Serialize)]
+struct ProgramView<'a> {
+    workspace_id: &'a str,
+    program_path: String,
+    revision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    program: Option<&'a str>,
+}
+
+/// Print where the selected Workspace's program lives (or its text).
+pub fn show(
+    selector: Option<&str>,
+    cwd: &Path,
+    text: bool,
+    json: bool,
+    stdout: &mut dyn Write,
+) -> Result<(), CliError> {
+    let workspace = resolve_existing(selector, cwd)?;
+    let output = |error: std::io::Error| CliError::new("output_failed", error.to_string());
+    if json {
+        let view = ProgramView {
+            workspace_id: &workspace.config.id,
+            program_path: workspace.config_path.to_string_lossy().into_owned(),
+            revision: workspace.program.sha256(),
+            program: text.then(|| workspace.program.text()),
+        };
+        serde_json::to_writer_pretty(&mut *stdout, &view)
+            .map_err(|error| CliError::new("output_failed", error.to_string()))?;
+        writeln!(stdout).map_err(output)
+    } else if text {
+        write!(stdout, "{}", workspace.program.text()).map_err(output)
+    } else {
+        writeln!(stdout, "{}", workspace.config_path.display()).map_err(output)
+    }
+}
+
+/// Open the Workspace program in `$VISUAL`/`$EDITOR` on a copy, then show the
+/// change and apply it through the same plan/apply path as `workspace plan`
+/// and `workspace apply`. An edit that does not validate is never applied;
+/// the user's text stays in a kept file they can reopen or plan from.
+pub fn edit(
+    selector: Option<&str>,
+    cwd: &Path,
+    stdin: &mut dyn std::io::BufRead,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<(), CliError> {
+    use std::io::IsTerminal;
+
+    let assume_terminal = std::env::var_os(EDIT_ASSUME_TERMINAL_ENV).is_some_and(|value| value == "1");
+    if !assume_terminal && !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
+        return Err(CliError::new(
+            "workspace_edit_requires_terminal",
+            "workspace edit opens an editor and asks before applying, so it needs an interactive terminal. \
+             Without one, read the program with `margins workspace show --text`, then use \
+             `margins workspace plan --workspace <id> --desired <file> --json` and `margins workspace apply`.",
+        ));
+    }
+    let editor = editor_command().ok_or_else(|| {
+        CliError::new(
+            "workspace_edit_no_editor",
+            "set $VISUAL or $EDITOR to the editor to open the Workspace program with",
+        )
+    })?;
+    let mut workspace = resolve_existing(selector, cwd)?;
+    let id = workspace.config.id.clone();
+    let output = |error: std::io::Error| CliError::new("output_failed", error.to_string());
+    let original = workspace.program.text().to_string();
+    let (_, edit_path) = tempfile::Builder::new()
+        .prefix(&format!("margins-{id}-"))
+        .suffix(".enzyme")
+        .tempfile()
+        .and_then(|file| file.keep().map_err(|error| error.error))
+        .map_err(|error| CliError::new("workspace_edit_failed", format!("creating an edit file: {error}")))?;
+    std::fs::write(&edit_path, &original).map_err(|error| {
+        CliError::new("workspace_edit_failed", format!("writing {}: {error}", edit_path.display()))
+    })?;
+    let kept = |message: String| {
+        CliError::new(
+            "workspace_edit_not_applied",
+            format!(
+                "{message}\nYour edit is kept at {path}. Reopen it with your editor, then run\n  \
+                 margins workspace plan --workspace {id} --desired {path} --json\n\
+                 and `margins workspace apply`, or start over with `margins workspace edit`.",
+                path = edit_path.display()
+            ),
+        )
+    };
+    writeln!(stderr, "Editing Workspace {id} ({})", workspace.config_path.display()).map_err(output)?;
+    loop {
+        run_editor(&editor, &edit_path)
+            .map_err(|error| kept(format!("the editor did not finish: {error:#}")))?;
+        let edited = std::fs::read_to_string(&edit_path)
+            .map_err(|error| kept(format!("could not read the edit: {error}")))?;
+        if edited == original {
+            let _ = std::fs::remove_file(&edit_path);
+            writeln!(stdout, "No changes to Workspace {id}.").map_err(output)?;
+            return Ok(());
+        }
+        let plan = match plan_desired(&workspace, &edited, false) {
+            Ok(plan) => plan,
+            Err(error) => {
+                writeln!(stderr, "The edited program is not valid: {}", error.message()).map_err(output)?;
+                if ask(stdin, stderr, "Reopen the editor to fix it? [Y/n] ", true).map_err(output)? {
+                    continue;
+                }
+                return Err(kept(format!("The edited program is not valid: {}", error.message())));
+            }
+        };
+        write!(stdout, "{}", plan.diff).map_err(output)?;
+        if !plan.diff.ends_with('\n') {
+            writeln!(stdout).map_err(output)?;
+        }
+        if !ask(stdin, stderr, &format!("Apply this change to Workspace {id}? [y/N] "), false)
+            .map_err(output)?
+        {
+            return Err(kept("Not applied.".to_string()));
+        }
+        let receipt = workspace::apply_workspace_plan(&mut workspace, &plan).map_err(|error| {
+            kept(format!("The change could not be applied: {error:#}"))
+        })?;
+        let _ = std::fs::remove_file(&edit_path);
+        writeln!(
+            stdout,
+            "Applied. Workspace {id} is at revision {}.",
+            receipt.after_revision
+        )
+        .map_err(output)?;
+        return Ok(());
+    }
+}
+
+fn editor_command() -> Option<String> {
+    ["VISUAL", "EDITOR"].into_iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+/// Run the editor command with the file as its last argument. The command is
+/// interpreted by the shell, so values such as `code --wait` work.
+fn run_editor(editor: &str, path: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$@\""))
+        .arg("sh")
+        .arg(path)
+        .status();
+    #[cfg(not(unix))]
+    let status = {
+        let mut parts = editor.split_whitespace();
+        std::process::Command::new(parts.next().unwrap_or(editor))
+            .args(parts)
+            .arg(path)
+            .status()
+    };
+    let status = status.with_context(|| format!("starting editor `{editor}`"))?;
+    if !status.success() {
+        anyhow::bail!("editor `{editor}` exited with {status}");
+    }
+    Ok(())
+}
+
+/// Ask a yes/no question on `stderr`; an empty answer takes the default and
+/// end of input is always "no", so piped input can never loop.
+fn ask(
+    stdin: &mut dyn std::io::BufRead,
+    stderr: &mut dyn Write,
+    question: &str,
+    default: bool,
+) -> std::io::Result<bool> {
+    write!(stderr, "{question}")?;
+    stderr.flush()?;
+    let mut answer = String::new();
+    if stdin.read_line(&mut answer)? == 0 {
+        writeln!(stderr)?;
+        return Ok(false);
+    }
+    Ok(match answer.trim().to_ascii_lowercase().as_str() {
+        "" => default,
+        "y" | "yes" => true,
+        _ => false,
+    })
+}
+
+/// Typed mutation errors keep their codes; anything else in a desired program
+/// is the caller's input to fix.
+fn desired_error(error: anyhow::Error) -> CliError {
+    if error
+        .downcast_ref::<workspace::WorkspaceMutationError>()
+        .is_some()
+    {
+        return CliError::from_anyhow(error);
+    }
+    CliError::new("workspace_desired_invalid", format!("{error:#}"))
+}
+
+/// Folder readings name folders under the Workspace home. Refuse a plan that
+/// cannot resolve one of them before the user reviews and
+/// consents to a policy that would fail later during init. With several
+/// Markdown sources, folder readings are root-qualified; only those of the
+/// Home source are checked here.
 fn validate_desired_home_folder_entities(desired: &WorkspaceConfig) -> Result<(), CliError> {
-    let home = desired
+    let (home_name, home) = desired
         .bindings
-        .values()
-        .find_map(|binding| match binding {
+        .iter()
+        .find_map(|(name, binding)| match binding {
             WorkspaceBinding::NativeMarkdown {
                 path,
                 role: SourceRole::Home,
                 ..
-            } => Some(path.as_path()),
+            } => Some((name.as_str(), path.as_path())),
             _ => None,
         })
         .ok_or_else(|| {
@@ -247,13 +516,31 @@ fn validate_desired_home_folder_entities(desired: &WorkspaceConfig) -> Result<()
                 "desired workspace must declare one home notes source",
             )
         })?;
+    let markdown_sources = desired
+        .bindings
+        .values()
+        .filter(|binding| matches!(binding, WorkspaceBinding::NativeMarkdown { .. }))
+        .count();
 
     for configured in &desired.policy.entities {
         for (entity_ref, _) in configured.entries() {
             let Some(folder) = strip_ascii_case_prefix(entity_ref.trim(), "folder:") else {
                 continue;
             };
-            if resolve_scan_folder(home, folder)?.is_none() {
+            let folder = if markdown_sources > 1 {
+                let (root, rest) = folder.split_once('/').unwrap_or((folder, "."));
+                if !root.eq_ignore_ascii_case(home_name) {
+                    continue;
+                }
+                rest
+            } else {
+                folder
+            };
+            let resolved = margins_workflows::workspace_preset::resolve_home_folder(home, folder)
+                .map_err(|error| {
+                    CliError::new("workspace_desired_invalid", format!("{error:#}"))
+                })?;
+            if resolved.is_none() {
                 return Err(CliError::new(
                     "workspace_desired_invalid",
                     format!(
@@ -271,59 +558,6 @@ fn strip_ascii_case_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> 
         .get(..prefix.len())
         .filter(|candidate| candidate.eq_ignore_ascii_case(prefix))
         .map(|_| &value[prefix.len()..])
-}
-
-fn resolve_scan_folder(home: &Path, relative: &str) -> Result<Option<PathBuf>, CliError> {
-    let relative = relative.trim();
-    if relative == "." {
-        return Ok(home.is_dir().then(|| home.to_path_buf()));
-    }
-    let components = Path::new(relative).components().collect::<Vec<_>>();
-    if components.is_empty()
-        || components
-            .iter()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err(CliError::new(
-            "workspace_desired_invalid",
-            format!("folder entity path must be relative to the Workspace home: {relative:?}"),
-        ));
-    }
-
-    let mut current = home.to_path_buf();
-    for component in components {
-        let wanted = component.as_os_str().to_string_lossy();
-        let entries = std::fs::read_dir(&current).map_err(|error| {
-            CliError::new(
-                "workspace_desired_invalid",
-                format!(
-                    "could not inspect Workspace home folder {}: {error}",
-                    current.display()
-                ),
-            )
-        })?;
-        let mut matches = entries
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case(&wanted)
-            })
-            .filter(|entry| entry.path().is_dir())
-            .map(|entry| entry.path());
-        let Some(next) = matches.next() else {
-            return Ok(None);
-        };
-        if matches.next().is_some() {
-            return Err(CliError::new(
-                "workspace_desired_invalid",
-                format!("folder entity path {relative:?} is ambiguous under the Workspace home"),
-            ));
-        }
-        current = next;
-    }
-    Ok(Some(current))
 }
 
 pub fn apply(
@@ -360,6 +594,82 @@ pub fn apply(
     serde_json::to_writer_pretty(&mut *stdout, &receipt)
         .map_err(|error| CliError::new("output_failed", error.to_string()))?;
     writeln!(stdout).map_err(|error| CliError::new("output_failed", error.to_string()))
+}
+
+/// Convert retired `workspaces/<id>/config.toml` files to programs. With
+/// `--workspace`, only that Workspace; otherwise every one still to migrate.
+pub fn migrate(
+    selector: Option<&str>,
+    dry_run: bool,
+    json: bool,
+    stdout: &mut dyn Write,
+) -> Result<(), CliError> {
+    let home = workspace::margins_home().map_err(CliError::from_anyhow)?;
+    let ids = match selector {
+        Some(id) => vec![id.to_string()],
+        None => workspace::legacy_workspace_ids(&home).map_err(CliError::from_anyhow)?,
+    };
+    let output = |error: std::io::Error| CliError::from_anyhow(error.into());
+    let mut failed = Vec::new();
+    for id in ids {
+        let migration = match if dry_run {
+            workspace::preview_workspace_migration(&home, &id)
+        } else {
+            workspace::migrate_workspace(&home, &id)
+        } {
+            Ok(migration) => migration,
+            Err(error) => {
+                // One Workspace that cannot migrate must not block the others;
+                // its legacy file stays in place.
+                if json {
+                    serde_json::to_writer(
+                        &mut *stdout,
+                        &serde_json::json!({
+                            "schema_version": workspace::WORKSPACE_MIGRATE_SCHEMA,
+                            "workspace_id": id, "status": "failed", "error": format!("{error:#}"),
+                        }),
+                    )
+                    .map_err(|error| CliError::from_anyhow(error.into()))?;
+                    writeln!(stdout).map_err(output)?;
+                } else {
+                    writeln!(stdout, "{id}: failed: {error:#}").map_err(output)?;
+                }
+                failed.push((id, error));
+                continue;
+            }
+        };
+        if json {
+            serde_json::to_writer(&mut *stdout, &migration)
+                .map_err(|error| CliError::from_anyhow(error.into()))?;
+            writeln!(stdout).map_err(output)?;
+        } else {
+            writeln!(
+                stdout,
+                "{}: {} -> {}",
+                migration.workspace_id,
+                migration.status,
+                migration.program_path.display()
+            )
+            .map_err(output)?;
+            for warning in &migration.warnings {
+                writeln!(stdout, "  warning: {warning}").map_err(output)?;
+            }
+            if dry_run {
+                write!(stdout, "{}", migration.program).map_err(output)?;
+            }
+        }
+    }
+    match failed.len() {
+        0 => Ok(()),
+        1 => Err(CliError::from_anyhow(failed.remove(0).1)),
+        n => Err(CliError::new(
+            "workspace_migration_failed",
+            format!(
+                "{n} Workspaces could not migrate: {}",
+                failed.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>().join(", ")
+            ),
+        )),
+    }
 }
 
 pub fn require_explicit_workspace(selector: Option<&str>) -> Result<&str, CliError> {
@@ -600,7 +910,7 @@ fn render_workspace(
 ) -> Result<(), CliError> {
     let view = PublicWorkspaceView {
         id: &workspace.config.id,
-        revision: workspace::workspace_revision(&workspace.config)
+        revision: workspace::workspace_revision(&workspace)
             .map_err(CliError::from_anyhow)?,
         name: &workspace.config.name,
         state_dir: workspace.state_dir.to_string_lossy().into_owned(),
@@ -640,7 +950,7 @@ fn render_runtime_workspace(
     let margins_home = workspace::margins_home().map_err(CliError::from_anyhow)?;
     let view = RuntimeWorkspaceView {
         id: &workspace.config.id,
-        revision: workspace::workspace_revision(&workspace.config)
+        revision: workspace::workspace_revision(&workspace)
             .map_err(CliError::from_anyhow)?,
         name: &workspace.config.name,
         state_dir: workspace.state_dir.to_string_lossy().into_owned(),
@@ -784,10 +1094,16 @@ mod tests {
             },
         );
 
+        // Several Markdown roots: folder readings are root-qualified, and a
+        // folder that exists only under the reference root is not Home's.
+        desired.policy.entities = vec![WorkspaceEntity::simple("folder:home/people")];
         let error = validate_desired_home_folder_entities(&desired).unwrap_err();
 
         assert_eq!(error.code(), "workspace_desired_invalid");
         assert!(error.to_string().contains("does not resolve to a folder"));
+
+        desired.policy.entities = vec![WorkspaceEntity::simple("folder:reference/people")];
+        validate_desired_home_folder_entities(&desired).unwrap();
     }
 
     #[test]

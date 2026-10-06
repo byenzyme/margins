@@ -9,6 +9,9 @@ export CARGO_TARGET_DIR
 
 BIN_DIR="${MARGINS_BIN_DIR:-${HOME:?HOME is required}/.local/bin}"
 DEST="$BIN_DIR/margins"
+# margins finds its pinned engine at <prefix>/libexec/margins/enzyme, off PATH,
+# so it never replaces or shadows an `enzyme` the user installed.
+ENGINE_DIR="$(dirname "$BIN_DIR")/libexec/margins"
 
 # Build profile selects the compiled feature set:
 #   recall (default) — portable lookup only (`--features recall`), no native
@@ -30,13 +33,35 @@ case "$PROFILE" in
 esac
 BUILD_ARGS+=(--bin margins-private)
 
-echo "Building official Margins CLI (profile: $PROFILE)..."
-(
-  cd "$REPO_ROOT"
-  scripts/with-private-recall scripts/cargo-lane shared -- cargo "${BUILD_ARGS[@]}"
-)
+# The engine margins runs: the official enzyme release asset in
+# scripts/enzyme-cli.pin, or an explicit MARGINS_ENZYME_BIN (for example
+# "$(scripts/enzyme-bin)" before that release exists). Either must report the
+# pinned version.
+engine_stage="$(mktemp -d "${TMPDIR:-/tmp}/margins-engine.XXXXXX")"
+trap 'rm -rf "$engine_stage"' EXIT
+if [ -n "${MARGINS_ENZYME_BIN:-}" ]; then
+  "$REPO_ROOT/scripts/enzyme-pin" check "$MARGINS_ENZYME_BIN"
+  install -m 0755 "$MARGINS_ENZYME_BIN" "$engine_stage/enzyme"
+else
+  "$REPO_ROOT/scripts/enzyme-pin" fetch "$("$REPO_ROOT/scripts/enzyme-pin" host-target)" "$engine_stage" || {
+    echo "Could not install the pinned enzyme engine. To use a local build, rerun with" >&2
+    echo "  MARGINS_ENZYME_BIN=\"\$(scripts/cargo-lane shared -- scripts/enzyme-bin)\"" >&2
+    exit 1
+  }
+fi
 
-SOURCE="$CARGO_TARGET_DIR/release/margins-private"
+# MARGINS_CLI_SOURCE installs an already-built margins-private instead of
+# building one (the bundled-engine e2e uses the gate's build).
+if [ -n "${MARGINS_CLI_SOURCE:-}" ]; then
+  SOURCE="$MARGINS_CLI_SOURCE"
+else
+  echo "Building official Margins CLI (profile: $PROFILE)..."
+  (
+    cd "$REPO_ROOT"
+    scripts/cargo-lane shared -- cargo "${BUILD_ARGS[@]}"
+  )
+  SOURCE="$CARGO_TARGET_DIR/release/margins-private"
+fi
 if [ ! -x "$SOURCE" ]; then
   echo "Built CLI was not found at $SOURCE" >&2
   exit 1
@@ -96,6 +121,7 @@ tmp="$BIN_DIR/.margins-install-$$"
 cp "$SOURCE" "$tmp"
 chmod 0755 "$tmp"
 
+preserved=""
 if [ -e "$DEST" ] || [ -L "$DEST" ]; then
   existing_kind="$(capability_kind "$DEST")"
   case "$existing_kind" in
@@ -108,8 +134,6 @@ if [ -e "$DEST" ] || [ -L "$DEST" ]; then
         echo "Preserved public CLI path already exists unexpectedly: $preserved" >&2
         exit 1
       fi
-      mv "$DEST" "$preserved"
-      echo "Preserved public portable Margins CLI at $preserved"
       ;;
     *)
       rm -f "$tmp"
@@ -119,6 +143,14 @@ if [ -e "$DEST" ] || [ -L "$DEST" ]; then
   esac
 fi
 
+# The engine lands first so the new margins never runs without it.
+mkdir -p "$ENGINE_DIR"
+install -m 0755 "$engine_stage/enzyme" "$ENGINE_DIR/.enzyme-install-$$"
+mv "$ENGINE_DIR/.enzyme-install-$$" "$ENGINE_DIR/enzyme"
+if [ -n "$preserved" ]; then
+  mv "$DEST" "$preserved"
+  echo "Preserved public portable Margins CLI at $preserved"
+fi
 mv "$tmp" "$DEST"
 
 capabilities="$("$DEST" capabilities)"
@@ -132,9 +164,10 @@ if report.get("schema") != 1 or report.get("product") != "margins":
 if report.get("official") is not True:
     raise SystemExit("installed binary is not the official composition")
 recall = report.get("recall") or {}
-if recall.get("scan") is not True or recall.get("indexing") is not True or recall.get("lookup") is not True:
-    raise SystemExit("installed binary does not include recall scan, indexing, and lookup")
+if recall.get("indexing") is not True or recall.get("lookup") is not True:
+    raise SystemExit("installed binary does not include recall indexing and lookup")
 PY
 
 echo "Installed official margins command at $DEST"
+echo "Installed its enzyme engine at $ENGINE_DIR/enzyme"
 echo "Add $BIN_DIR to PATH if your shell cannot find margins."

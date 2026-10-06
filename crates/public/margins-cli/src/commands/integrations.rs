@@ -353,7 +353,7 @@ fn sync_declared_inner(
 ) -> Result<Vec<SyncConnectorRow>, CliError> {
     validate_mutation_request_id(request_id).map_err(CliError::from_anyhow)?;
     let workspace = resolve_state_dir(workspace_state_dir).map_err(CliError::from_anyhow)?;
-    let actual_revision = workspace_revision(&workspace.config).map_err(CliError::from_anyhow)?;
+    let actual_revision = workspace_revision(&workspace).map_err(CliError::from_anyhow)?;
     if actual_revision != expected_revision {
         return Err(CliError::from_anyhow(
             WorkspaceMutationError::RevisionConflict {
@@ -466,7 +466,7 @@ fn reconcile_inner(
     // returns its original receipt even if later workspace mutations changed or
     // removed the binding; a new request must still match the current revision.
     let workspace = resolve_state_dir(workspace_state_dir).map_err(CliError::from_anyhow)?;
-    let actual_revision = workspace_revision(&workspace.config).map_err(CliError::from_anyhow)?;
+    let actual_revision = workspace_revision(&workspace).map_err(CliError::from_anyhow)?;
     if actual_revision != expected_revision {
         return Err(CliError::from_anyhow(
             WorkspaceMutationError::RevisionConflict {
@@ -595,7 +595,7 @@ pub fn status(
     let envelope = StatusEnvelope {
         schema_version: STATUS_SCHEMA,
         workspace_id: workspace.config.id.clone(),
-        revision: workspace_revision(&workspace.config).map_err(CliError::from_anyhow)?,
+        revision: workspace_revision(&workspace).map_err(CliError::from_anyhow)?,
         results,
     };
     if json_output {

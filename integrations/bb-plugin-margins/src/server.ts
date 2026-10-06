@@ -179,7 +179,9 @@ export default function marginsPlugin(bb: BbPluginApi) {
       // envelope here violates their RPC output schemas and hides the host
       // failure behind an unrelated validation error.
       if (method === "workspaceOptions" || method === "workspacePaths"
-        || method === "previewWorkspaceSetup" || method === "applyWorkspaceSetup") throw cause;
+        || method === "previewWorkspaceSetup" || method === "applyWorkspaceSetup"
+        || method === "readWorkspaceProgram" || method === "planWorkspaceProgram"
+        || method === "applyWorkspaceProgram") throw cause;
       return { ok: false, error: { code: "project_machine_offline", message: "Margins could not reach this bb project's machine. Audio already received there is safe; reconnect the project machine and try again.", retryable: true } };
     }
   }
@@ -454,6 +456,17 @@ export default function marginsPlugin(bb: BbPluginApi) {
     } finally { noteThreadLocks.delete(lockKey); }
   }
 
+  /** The Workspace whose program this project edits: its saved choice, else
+   * the machine default. An editor opened on another Workspace must reload. */
+  async function programWorkspace(target: ProjectTarget, expected?: string): Promise<string> {
+    const workspaceId = target.workspaceId || (await callHost(target, "workspaceOptions", {})).defaultWorkspaceId;
+    if (!workspaceId) throw new Error("Set up a Margins Workspace for this project first.");
+    if (expected !== undefined && expected !== workspaceId) {
+      throw new Error("This project now uses a different Margins Workspace. Reload the program.");
+    }
+    return workspaceId;
+  }
+
   bb.rpc.register(marginsRpcContract, {
     async availableWorkspaces({ projectId }) {
       const target = await targetForProject(projectId);
@@ -469,14 +482,30 @@ export default function marginsPlugin(bb: BbPluginApi) {
       const paths = await callHost(target, "workspacePaths", { workspaceId });
       return { workspaceId, ...paths };
     },
-    async previewWorkspaceSetup({ projectId, homeRoot, noteFolder }) {
+    async previewWorkspaceSetup({ projectId, homeRoot }) {
       const target = await targetForProject(projectId);
-      return callHost(target, "previewWorkspaceSetup", { target, homeRoot, noteFolder });
+      return callHost(target, "previewWorkspaceSetup", { target, homeRoot });
     },
     async applyWorkspaceSetup({ projectId, previewId }) {
       const target = await targetForProject(projectId);
       const result = await callHost(target, "applyWorkspaceSetup", { previewId });
       bb.realtime.publish(REALTIME_CHANNEL, { projectId, reason: "workspace-setup" });
+      return result;
+    },
+    async workspaceProgram({ projectId }) {
+      const target = await targetForProject(projectId);
+      return callHost(target, "readWorkspaceProgram", { workspaceId: await programWorkspace(target) });
+    },
+    async planWorkspaceProgram({ projectId, workspaceId, program }) {
+      const target = await targetForProject(projectId);
+      await programWorkspace(target, workspaceId);
+      return callHost(target, "planWorkspaceProgram", { workspaceId, program });
+    },
+    async applyWorkspaceProgram({ projectId, workspaceId, previewId }) {
+      const target = await targetForProject(projectId);
+      await programWorkspace(target, workspaceId);
+      const result = await callHost(target, "applyWorkspaceProgram", { workspaceId, previewId });
+      if (result.ok) bb.realtime.publish(REALTIME_CHANNEL, { projectId, reason: "workspace-program" });
       return result;
     },
     async availableProjects() {

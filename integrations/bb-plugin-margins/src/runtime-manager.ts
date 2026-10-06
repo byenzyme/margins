@@ -12,7 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { homedir, platform } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 const execFile = promisify(execFileCallback);
@@ -45,6 +45,9 @@ function targetName(hostPlatform: NodeJS.Platform, arch: string) {
 }
 
 const RELEASE_EXECUTABLES = ["margins", "margins-server"] as const;
+// The pinned enzyme engine that margins runs. Archives carry it next to
+// margins; the shared CLI copy finds it at <prefix>/libexec/margins/enzyme.
+const RELEASE_ENGINE = "enzyme";
 
 async function isRegularExecutable(path: string) {
   try {
@@ -185,6 +188,10 @@ async function installRuntime(input: {
       }
       await copyRuntimeBinary(source, join(input.runtimeBinDir, name));
     }
+    const engine = join(unpacked, RELEASE_ENGINE);
+    const engineStat = await lstat(engine).catch(() => null);
+    const hasEngine = Boolean(engineStat?.isFile() && !engineStat.isSymbolicLink());
+    if (hasEngine) await copyRuntimeBinary(engine, join(input.runtimeBinDir, RELEASE_ENGINE));
 
     // Make the normal command available to agents and shells when that path is
     // free or already belongs to this plugin. An existing Margins command is
@@ -196,6 +203,12 @@ async function installRuntime(input: {
       .then((value) => value.startsWith("managed-by=bb-plugin-margins\n"))
       .catch(() => false);
     if (!cliExists || pluginManaged) {
+      // The engine lands first so the new margins never runs without it.
+      if (hasEngine) {
+        const engineDir = join(dirname(input.cliBinDir), "libexec", "margins");
+        await mkdir(engineDir, { recursive: true });
+        await copyRuntimeBinary(engine, join(engineDir, RELEASE_ENGINE));
+      }
       await replaceManagedBinary(join(unpacked, "margins"), cliDestination);
     }
   } finally {

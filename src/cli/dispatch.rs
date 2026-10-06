@@ -43,7 +43,6 @@ fn official_capabilities_json() -> serde_json::Value {
         "build": margins_cli::build_info::get(),
         "recall": {
             "available": cfg!(feature = "recall"),
-            "scan": cfg!(feature = "recall"),
             "indexing": cfg!(feature = "recall"),
             "lookup": cfg!(feature = "recall"),
             "local_model": cfg!(feature = "recall-local-model"),
@@ -59,6 +58,10 @@ fn official_capabilities_json() -> serde_json::Value {
         },
         "workspace": {
             "setup": true,
+            "preset": cfg!(feature = "recall"),
+            // `workspace show --text --json`, `plan --desired`, and `apply`
+            // edit the program; the bb plugin's editor requires them.
+            "program": true,
         },
         "audio_import": {
             "available": cfg!(any(feature = "coreml-asr", feature = "parakeet-asr")),
@@ -93,7 +96,7 @@ fn official_version_line() -> String {
     margins_cli::build_info::version_line(env!("CARGO_PKG_VERSION"), "official")
 }
 
-/// Side-effect-free packaged-binary probe used by the private release pipeline.
+/// Side-effect-free packaged-binary probe used by the release pipeline.
 ///
 /// Keeping this command in the private composition (rather than the public CLI
 /// parser) makes a public-only binary with its no-capture service unable to
@@ -115,9 +118,6 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    if let Err(error) = crate::initialize_sqlite_runtime() {
-        return report_error(&format!("SQLite runtime initialization failed: {error:#}"));
-    }
     let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
     if let Some(code) = release_smoke(&args) {
         return code;
@@ -359,7 +359,7 @@ where
             .map_or_else(|error| error.exit_code(), |_| 0);
         #[cfg(feature = "recall")]
         if code == 0 && workspace.ledger_path().is_file() {
-            if let Err(error) = crate::recall::provision_workspace_for_init(&workspace) {
+            if let Err(error) = crate::recall::refresh_workspace(&workspace) {
                 return report_json_cli_error(
                     margins_cli::CliError::new(
                         "integration_index_refresh_failed",
@@ -423,19 +423,18 @@ where
         return run_sync(workspace_selector.as_deref(), source.as_deref(), *json);
     }
 
-    // Scan is filesystem-only discovery. It shares Margins' explicit config
-    // path but never opens or creates the recall database.
-    #[cfg(feature = "recall")]
-    if matches!(&parsed.command, Some(Command::Scan)) {
-        return run_scan(workspace_selector.as_deref());
-    }
-
+    // The engine fills the setup preset; the plan itself is the ordinary one.
     #[cfg(feature = "recall")]
     if let Some(Command::Workspace {
-        command: margins_cli::args::WorkspaceCommand::Compile { note_folder, .. },
+        command:
+            margins_cli::args::WorkspaceCommand::Plan {
+                desired: None,
+                preset: Some(preset),
+                ..
+            },
     }) = &parsed.command
     {
-        return run_workspace_compile(workspace_selector.as_deref(), note_folder.as_deref());
+        return run_workspace_plan_preset(workspace_selector.as_deref(), preset);
     }
 
     let interactive_command = match &parsed.command {
@@ -484,7 +483,7 @@ where
                 Ok(workspace) => workspace,
                 Err(error) => return report_error(&error.to_string()),
             };
-            if let Err(error) = crate::recall::provision_workspace_for_init(&workspace) {
+            if let Err(error) = crate::recall::refresh_workspace(&workspace) {
                 return report_json_cli_error(
                     margins_cli::CliError::new(
                         "granola_index_refresh_failed",
@@ -520,7 +519,7 @@ where
                 }
             };
             if retention_requires_refresh && workspace.ledger_path().is_file() {
-                if let Err(error) = crate::recall::provision_workspace_for_init(&workspace) {
+                if let Err(error) = crate::recall::refresh_workspace(&workspace) {
                     return report_json_cli_error(
                         margins_cli::CliError::new(
                             "retention_index_refresh_failed",

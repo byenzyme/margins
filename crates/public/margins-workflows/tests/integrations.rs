@@ -230,7 +230,7 @@ mod retention_store {
         let store = IntegrationsStore::open(&workspace.state_dir)?;
         let ctx = email_ctx(&workspace.state_dir);
         seed_email_fixture(&store, &ctx)?;
-        let revision = workspace_revision(&workspace.config)?;
+        let revision = workspace_revision(&workspace)?;
         let plan = preview_retention(&workspace, &target(), RetentionScope::RawCache)?;
         assert_eq!(plan.schema_version, "margins.retention.preview.v1");
         assert_eq!(plan.revision, revision);
@@ -263,7 +263,7 @@ mod retention_store {
         let store = IntegrationsStore::open(&workspace.state_dir)?;
         let ctx = email_ctx(&workspace.state_dir);
         seed_email_fixture(&store, &ctx)?;
-        let revision = workspace_revision(&workspace.config)?;
+        let revision = workspace_revision(&workspace)?;
         let plan = preview_retention(&workspace, &target(), RetentionScope::Tombstones)?;
         assert_eq!(plan.counts.tombstoned_evidence, 1);
         let receipt = apply_retention(&workspace, &plan, &revision, "tombstones-1")?;
@@ -290,7 +290,7 @@ mod retention_store {
         let ctx = email_ctx(&workspace.state_dir);
         seed_email_fixture(&store, &ctx)?;
         let runs_before = ledger_count(store.db_path(), "SELECT COUNT(*) FROM runs");
-        let revision = workspace_revision(&workspace.config)?;
+        let revision = workspace_revision(&workspace)?;
         let plan = preview_retention(&workspace, &target(), RetentionScope::Materialization)?;
         assert!(plan.index_refresh_required);
         apply_retention(&workspace, &plan, &revision, "materialization-1")?;
@@ -319,7 +319,7 @@ mod retention_store {
         let store = IntegrationsStore::open(&workspace.state_dir)?;
         let ctx = email_ctx(&workspace.state_dir);
         seed_email_fixture(&store, &ctx)?;
-        let revision = workspace_revision(&workspace.config)?;
+        let revision = workspace_revision(&workspace)?;
         let plan = preview_retention(&workspace, &target(), RetentionScope::All)?;
         apply_retention(&workspace, &plan, &revision, "all-scope-1")?;
         assert!(store.thread_evidence(&ctx)?.is_empty());
@@ -332,18 +332,20 @@ mod retention_store {
     ) -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let mut workspace = open_workspace(&temp)?;
-        workspace.config.retention = RetentionPolicy {
-            raw_cache_max_age_days: Some(30),
-            tombstone_max_age_days: Some(30),
-        };
-        std::fs::write(
-            &workspace.config_path,
-            toml::to_string(&workspace.config).unwrap(),
+        let margins_home = workspace.state_dir.parent().unwrap().parent().unwrap().to_path_buf();
+        margins_workflows::workspace::set_workspace_retention(
+            &margins_home,
+            &workspace.config.id,
+            &RetentionPolicy {
+                raw_cache_max_age_days: Some(30),
+                tombstone_max_age_days: Some(30),
+            },
         )?;
+        workspace = margins_workflows::workspace::resolve_state_dir(&workspace.state_dir)?;
         let store = IntegrationsStore::open(&workspace.state_dir)?;
         let ctx = email_ctx(&workspace.state_dir);
         seed_email_fixture(&store, &ctx)?;
-        let revision = workspace_revision(&workspace.config)?;
+        let revision = workspace_revision(&workspace)?;
         let plan = preview_retention(&workspace, &target(), RetentionScope::Expired)?;
         assert!(plan.cutoffs.raw_cache_before.is_some() || plan.cutoffs.tombstone_before.is_some());
         apply_retention(&workspace, &plan, &revision, "expired-1")?;
@@ -358,7 +360,7 @@ mod retention_store {
         let workspace = open_workspace(&temp)?;
         let store = IntegrationsStore::open(&workspace.state_dir)?;
         seed_email_fixture(&store, &email_ctx(&workspace.state_dir))?;
-        let revision = workspace_revision(&workspace.config)?;
+        let revision = workspace_revision(&workspace)?;
         let first = preview_retention(&workspace, &target(), RetentionScope::RawCache)?;
         let second = preview_retention(&workspace, &target(), RetentionScope::RawCache)?;
         assert_eq!(first.plan_id, second.plan_id);
@@ -377,7 +379,7 @@ mod retention_store {
         let workspace = open_workspace(&temp)?;
         let store = IntegrationsStore::open(&workspace.state_dir)?;
         seed_email_fixture(&store, &email_ctx(&workspace.state_dir))?;
-        let revision = workspace_revision(&workspace.config)?;
+        let revision = workspace_revision(&workspace)?;
         let plan = preview_retention(&workspace, &target(), RetentionScope::RawCache)?;
         apply_retention(&workspace, &plan, &revision, "conflict-id")?;
         let hash_conflict = apply_retention(
@@ -422,12 +424,10 @@ mod retention_store {
                 margins_workflows::integrations::RetentionMutationError::PlanStale { .. }
             )));
         let current_plan = preview_retention(&workspace, &target(), RetentionScope::RawCache)?;
-        let mut changed_config = workspace.config.clone();
-        changed_config.name = Some("revision changed after preview".to_string());
-        std::fs::write(
-            &workspace.config_path,
-            toml::to_string(&changed_config).unwrap(),
-        )?;
+        let mut changed = workspace.clone();
+        let mut policy = changed.config.policy.clone();
+        policy.excluded_folders.push("revision-changed-after-preview".to_string());
+        margins_workflows::workspace::update_policy(&mut changed, policy)?;
         let revision_conflict = apply_retention(
             &workspace,
             &current_plan,
@@ -493,7 +493,7 @@ mod retention_store {
             connector_id: GOOGLE_MEET_CONNECTOR_ID.to_string(),
             source_account: "owner@margins.test".to_string(),
         };
-        let revision = workspace_revision(&workspace.config)?;
+        let revision = workspace_revision(&workspace)?;
         let plan = preview_retention(&workspace, &target, RetentionScope::Materialization)?;
         assert_eq!(plan.counts.active_evidence, 1);
         apply_retention(&workspace, &plan, &revision, "removed-binding")?;

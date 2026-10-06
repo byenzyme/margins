@@ -53,7 +53,11 @@ On first Workspace discovery, the plugin’s project-host worker installs one ve
 digest-verified Margins release when needed. That release contains:
 
 - `margins`, the normal CLI;
-- `margins-server`, the project-side recording service.
+- `margins-server`, the project-side recording service;
+- `enzyme`, the pinned recall engine that `margins` runs, in archives from the
+  first release that ships it. The plugin copies it next to the runtime and,
+  when it manages the CLI in `~/.local/bin`, to `~/.local/libexec/margins/enzyme`,
+  off `PATH`, so it never replaces a user's own `enzyme`.
 
 The plugin pins `v0.4.16`, whose Linux and Apple Silicon macOS archives include
 both executables. That release must be published before a clean installation
@@ -146,13 +150,40 @@ transcript.
 ## First-run Workspace setup
 
 In Meetings, select the bb project containing your notes and choose its Home
-folder. An Obsidian project can use its own root without typing a path. The
-note destination defaults to `inbox`. Continue scans notes and uses hosted Jev
-selection when available, then shows the exact Workspace plan before **Use this
-Workspace** applies it and sets the machine default. A vault with no notes can
+folder. An Obsidian project can use its own root without typing a path.
+Continue starts from the Margins meetings preset: notes go to `Meetings`, and
+Margins learns from the `Meetings`, `People`, and `Projects` folders that exist.
+The panel shows the folders it learns from, the preset folders it skipped, the
+program path, and the exact Workspace plan before **Use this Workspace** applies
+it and sets the machine default. The program can be changed later in the panel
+(below) or with `margins workspace edit`. A vault with no notes can
 still be connected for recording. Existing People notes can inform recall; the
 first confirmed participant can create a People folder during distillation.
 SQLite sources require an explicit mapping later.
+
+## Workspace program editor
+
+The program at `$MARGINS_HOME/configs/<id>.enzyme` is the Workspace's whole
+configuration. **Edit program** in the setup result, **Workspace program** in
+the Meetings sidebar, and **Edit program** in Settings open it in Meetings
+(sub-path `<projectId>/@program`). It needs a Margins CLI that reports
+`workspace.program` in `margins capabilities`; an older CLI gets an "Update
+Margins" message. The editor colours strings, source kinds, and profile names
+from the live bb code theme, keeps keywords a muted foreground, and shows line
+numbers. Tab indents; Escape, then Tab, leaves the editor. Each pause in typing plans the text
+with `margins workspace plan --desired <file> --json` on the project's machine.
+Planning writes nothing to the Workspace. Syntax errors appear at their line
+and column. Errors without a location, such as a folder that does not exist,
+appear under the editor. **Review changes** shows the plan's summaries and
+diff in plain language, and **Save program** commits exactly that plan through
+`margins workspace apply`. A review whose plan expired is checked again. When the saved program changed elsewhere since editing began, the
+editor refuses to apply and keeps the text. It then offers to review the edits
+against the saved version or to load the saved version. A replaced or reverted
+text can be restored, and an unsaved draft survives closing the panel.
+
+The highlighter mirrors enzyme-spec's lexer and keeps no keyword list. Every
+user-chosen name in the language is quoted, so a bare word is vocabulary.
+Position decides source-kind and profile names.
 
 ## Development
 
@@ -164,5 +195,9 @@ npm run typecheck
 npm test
 npm run build
 ```
+
+`src/workspace-program.test.ts` also runs the editor's read, plan, apply, and
+stale path against a real CLI when `MARGINS_PROGRAM_E2E_CLI` names a built
+`margins` binary.
 
 Do not install or reload this package into a live bb instance during repo tests.

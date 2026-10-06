@@ -264,27 +264,28 @@ Resolution order for a bb project:
 3. Neither set: the panel asks the user to choose or set up a Workspace;
    it does not silently fall back to `<project>/.margins`.
 
-### First-run Workspace compile
+### First-run Workspace setup
 
 The Meetings panel provides a direct setup form for a notes folder in the
 selected bb project. A blank folder field uses that project root only when it
-contains an Obsidian vault marker. The note folder defaults to `inbox`; the
-user sees the resolved destination before accepting it. No agent thread,
-handwritten TOML, SSH alias, or Workspace ID is required.
+contains an Obsidian vault marker. The user sees the resolved note destination
+before accepting it. No agent thread, handwritten TOML, SSH alias, or Workspace
+ID is required.
 
 The host reuses a Workspace for the same Home or creates one with product-owned
-capture storage. It scans Home and compiles a bounded recall policy, using Jev
-for entity/profile choices when hosted selection is available. An empty vault
-needs no model call and remains ready for recording. If hosted selection fails,
-the preview labels its automatic coverage fallback. The compiler emits a
-complete desired config; the ordinary `workspace plan --desired` generates the
-exact actions shown in the panel, and `workspace apply` reads that unchanged
-plan after the user clicks **Use this Workspace**. Only then is it set as the
+capture storage. It starts the program from the Margins meetings preset with
+`workspace plan --preset margins-meetings` (2026-10-06; this replaced the
+scan-and-Jev compiler): notes go to `Meetings`, `Templates` and `Attachments`
+are left out, and Margins learns from the `Meetings`, `People`, and `Projects`
+folders that exist. An empty vault needs no model call and remains ready for
+recording. The plan generates the exact actions shown in the panel with the
+program path, and `workspace apply` reads that unchanged plan after the user
+clicks **Use this Workspace**. Only then is it set as the
 machine default. This is a UI over the existing plan/apply contract, not a
 second setup protocol.
 
-Home is the only automatically declared notes Source. The compiler discovers
-an existing People folder and may select it as a recall anchor. It does not
+Home is the only automatically declared notes Source. The preset reads an
+existing People folder as a relationships anchor. It does not
 create an empty folder to satisfy a default. During the first distillation
 with a confirmed participant, the note writer saves the participant in the
 meeting note and creates `people/` under Home with a minimal person note when

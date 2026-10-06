@@ -34,13 +34,13 @@ with `source add`. Users do not need to write a desired TOML document.
 `workspace plan` and `workspace apply` remain an optional deterministic
 automation path over the same public Workspace protocol.
 
-Some Margins builds may report `recall.scan: true`. The setup agent consumes the
-complete read-only `scan.v2` result as grounded evidence about the Workspace home,
-then explains what Margins understands the practice to be and asks in plain
-language what is wrong or missing. Your Source declarations still define the full
-recall boundary. If settings follow from the confirmed understanding, the agent
-compiles a fresh plan with `workspace plan --desired`; the plan finally applied is
-always the exact one last reviewed, unchanged, before `init` and `sync`.
+Official builds report `workspace.preset: true`. Setup then starts the Workspace
+program from the Margins meetings preset with `workspace plan --preset
+margins-meetings`: notes go to `Meetings`, `Templates` and `Attachments` are left
+out, and Margins learns from the `Meetings`, `People`, and `Projects` folders that
+exist. Your Source declarations still define the full recall boundary. The plan
+finally applied is always the exact one last reviewed, unchanged, before `init`
+and `sync`; `margins workspace edit` changes the program later.
 
 ## Distillation
 

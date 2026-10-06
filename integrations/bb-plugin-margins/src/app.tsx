@@ -4,11 +4,12 @@ import { AlertCircle, Pause, Play, Square } from "lucide-react";
 import type { marginsRpcContract } from "../server.js";
 import { browserCaptureOwner } from "./browser-capture.js";
 import { nativeBridgeOwner, nativeMicrophoneDurationMs, type CaptureAuthority, type NativeStatus } from "./native-bridge-client.js";
-import { MeetingLevelDot, MeetingsAccessory, MeetingsPage, rememberStopAck } from "./meetings-page.js";
+import { MeetingLevelDot, MeetingsAccessory, MeetingsPage, PROGRAM_SEGMENT, rememberStopAck } from "./meetings-page.js";
 import { MarginsThreadTab } from "./thread-tab.js";
 
 function ProjectWorkspaceSetting({ projectId, onSaved }: { projectId: string; onSaved: () => void }) {
   const rpc = useRpc<typeof marginsRpcContract>();
+  const navigate = useBbNavigate();
   const [value, setValue] = useState("");
   const [workspaces, setWorkspaces] = useState<Array<{ id: string; name: string | null }>>([]);
   const [defaultWorkspaceId, setDefaultWorkspaceId] = useState<string | null>(null);
@@ -43,6 +44,7 @@ function ProjectWorkspaceSetting({ projectId, onSaved }: { projectId: string; on
       {paths.recordings && <div>Meeting recordings <code>{paths.recordings}</code></div>}
       {paths.notes && <div>Connected notes <code>{paths.notes}</code></div>}
       <small>These locations come from the selected Margins Workspace.</small>
+      <span><button onClick={() => navigate.toPluginPanel("meetings", { subPath: `${projectId}/${PROGRAM_SEGMENT}` })}>Edit program</button></span>
     </div>}
     {pathsError && <span role="status">Workspace locations unavailable</span>}
   </div>;

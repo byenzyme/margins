@@ -6,6 +6,10 @@ use std::process::Command;
 #[path = "support/fixture_generator.rs"]
 mod fixture_generator;
 
+#[cfg(feature = "recall")]
+#[path = "support/enzyme_bin.rs"]
+mod enzyme_bin;
+
 fn source(path: &str) -> String {
     fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(path)).unwrap()
 }
@@ -82,6 +86,43 @@ fn production_source_add_help_exposes_granola_workspace_source() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("granola"), "{stdout}");
     assert!(stdout.contains("last_30_days"), "{stdout}");
+}
+
+#[test]
+fn production_binary_logs_migration_warnings_to_stderr() {
+    let temp = tempfile::tempdir().unwrap();
+    let margins_home = temp.path().join("margins-home");
+    let notes = temp.path().join("notes");
+    fs::create_dir_all(&notes).unwrap();
+    let legacy_dir = margins_home.join("workspaces/odd");
+    fs::create_dir_all(&legacy_dir).unwrap();
+    fs::write(
+        legacy_dir.join("config.toml"),
+        format!(
+            "id = \"odd\"\n\n[policy]\nentities = [\"person:ada\"]\n\n[bindings.home]\nkind = \"notes\"\npath = {:?}\nrole = \"home\"\n",
+            notes.canonicalize().unwrap()
+        ),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_margins-private"))
+        .args(["workspace", "migrate", "--json"])
+        .env_clear()
+        .env("HOME", temp.path())
+        .env("MARGINS_HOME", &margins_home)
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    let migration: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(migration["warnings"].as_array().unwrap().len(), 1);
+    assert!(
+        stderr.lines().any(
+            |line| line.starts_with("margins: warning: migrated Workspace 'odd': ")
+                && line.contains("person:ada")
+        ),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -501,10 +542,12 @@ fn workspace_status_implicitly_creates_fresh_notes_once() {
         first_json["source_refresh_staleness"],
         serde_json::json!({})
     );
-    let config_path = margins_home.join("workspaces/fresh-notes/config.toml");
+    let config_path = margins_home.join("configs/fresh-notes.enzyme");
     assert!(config_path.is_file());
-    let config: margins_workflows::workspace::WorkspaceConfig =
-        toml::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert!(!margins_home.join("workspaces/fresh-notes/config.toml").exists());
+    let config = margins_workflows::workspace::resolve_at(&margins_home, "fresh-notes")
+        .unwrap()
+        .config;
     assert!(matches!(
         &config.bindings["home"],
         margins_workflows::workspace::WorkspaceBinding::NativeMarkdown { path, .. }
@@ -579,32 +622,39 @@ fn workspace_status_reports_engine_source_refresh_staleness() {
             None,
         )
         .unwrap();
-    let index = rusqlite::Connection::open(workspace.recall_path()).unwrap();
-    index
-        .execute_batch(
-            "CREATE TABLE source_refreshes (
-                source_name TEXT PRIMARY KEY,
-                row_count INTEGER NOT NULL,
-                bucket_count INTEGER NOT NULL,
-                refreshed_at_ms INTEGER NOT NULL
-             );",
+    let _generator = fixture_generator::FixtureGenerator::start(&margins_home);
+    let init = Command::new(env!("CARGO_BIN_EXE_margins-private"))
+        .args(["--workspace", "freshness", "init"])
+        .env_clear()
+        .env("HOME", temp.path())
+        .env("MARGINS_HOME", &margins_home)
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "{}", String::from_utf8_lossy(&init.stderr));
+    // The ledger changes after the engine last refreshed its SQLite source.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    store
+        .replace_email_thread_snapshot_with_materialization_fingerprint(
+            &ctx,
+            vec![margins_workflows::integrations::ThreadEvidence {
+                thread_id: "late".into(),
+                occurred_from: chrono::Utc::now(),
+                occurred_to: chrono::Utc::now(),
+                body_text: "A thread synced after the last index refresh.".into(),
+                href: None,
+            }],
+            Vec::new(),
+            &selector.materialization_fingerprint().unwrap(),
         )
         .unwrap();
-    let engine_source =
-        margins_workflows::workspace::gmail_collection_namespace("owner@example.com").unwrap();
-    index
-        .execute(
-            "INSERT INTO source_refreshes VALUES (?1, 4, 2, 1)",
-            [engine_source],
-        )
-        .unwrap();
-    drop(index);
 
     let output = Command::new(env!("CARGO_BIN_EXE_margins-private"))
         .args(["--workspace", "freshness", "workspace", "status", "--json"])
         .env_clear()
         .env("HOME", temp.path())
         .env("MARGINS_HOME", &margins_home)
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .output()
         .unwrap();
     assert!(
@@ -613,14 +663,10 @@ fn workspace_status_reports_engine_source_refresh_staleness() {
         String::from_utf8_lossy(&output.stderr)
     );
     let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(
-        status["source_refresh_staleness"]["google-mail"],
-        serde_json::json!({
-            "last_refresh_ms": 1,
-            "stale": true,
-            "stale_reason": "source_modified_after_refresh",
-        })
-    );
+    let mail = &status["source_refresh_staleness"]["google-mail"];
+    assert!(mail["last_refresh_ms"].as_i64().is_some_and(|ms| ms > 0), "{status}");
+    assert_eq!(mail["stale"], true, "{status}");
+    assert_eq!(mail["stale_reason"], "source_modified_after_refresh", "{status}");
 
     margins_workflows::workspace::remove_source(&mut workspace, "google-mail").unwrap();
     margins_workflows::workspace::add_source(
@@ -640,6 +686,7 @@ fn workspace_status_reports_engine_source_refresh_staleness() {
         .env_clear()
         .env("HOME", temp.path())
         .env("MARGINS_HOME", &margins_home)
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .output()
         .unwrap();
     assert!(
@@ -661,6 +708,7 @@ fn workspace_status_reports_engine_source_refresh_staleness() {
         .env_clear()
         .env("HOME", temp.path())
         .env("MARGINS_HOME", &margins_home)
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .output()
         .unwrap();
     let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -677,6 +725,7 @@ fn workspace_status_reports_engine_source_refresh_staleness() {
         .env_clear()
         .env("HOME", temp.path())
         .env("MARGINS_HOME", &margins_home)
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .output()
         .unwrap();
     let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -790,6 +839,7 @@ fn init_fails_closed_without_a_usable_generator() {
         .args(["--workspace", "init-status", "init"])
         .env_clear()
         .env("MARGINS_HOME", &margins_home)
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .output()
         .unwrap();
 
@@ -803,157 +853,33 @@ fn init_fails_closed_without_a_usable_generator() {
 
 #[test]
 #[cfg(feature = "recall")]
-fn official_workspace_scan_is_full_evidence_for_agent_compiled_apply() {
-    let temp = tempfile::tempdir().unwrap();
-    let margins_home = temp.path().join("margins-home");
-    let notes = temp.path().join("notes");
-    fs::create_dir_all(notes.join("projects")).unwrap();
-    fs::create_dir_all(notes.join("templates")).unwrap();
-    fs::write(
-        notes.join("projects/atlas.md"),
-        "---\ntags: [launch]\n---\n# Atlas\nA handoffable workspace plan for [[Rui Tan]].\n",
-    )
-    .unwrap();
-    fs::write(
-        notes.join("templates/meeting.md"),
-        "# Meeting Template\nReusable scaffolding, not workspace memory.\n",
-    )
-    .unwrap();
-    let workspace =
-        margins_workflows::workspace::create_workspace(&margins_home, "practice", None, &notes)
-            .unwrap();
-
-    let scan = Command::new(env!("CARGO_BIN_EXE_margins-private"))
-        .args(["--workspace", "practice", "scan"])
-        .env_clear()
-        .env("HOME", temp.path())
-        .env("MARGINS_HOME", &margins_home)
-        .output()
-        .unwrap();
-    assert!(
-        scan.status.success(),
-        "scan failed: {}",
-        String::from_utf8_lossy(&scan.stderr)
-    );
-    assert!(scan.stderr.is_empty());
-    let evidence: serde_json::Value = serde_json::from_slice(&scan.stdout).unwrap();
-    assert_eq!(evidence["schema_version"], "scan.v2");
-    assert!(evidence["coverage_entities"].is_array());
-    assert!(evidence["entity_curation_candidates"].is_array());
-    assert!(evidence["entity_samples"].is_array());
-    assert!(evidence["folder_stats"].is_array());
-    assert!(evidence["folder_page_entities"].is_array());
-    assert!(evidence["frontmatter_samples"].is_array());
-    assert!(evidence["sample_files"].is_array());
-    assert!(evidence["available_profiles"].is_array());
-    assert!(evidence["excluded_folders"]
-        .as_array()
-        .unwrap()
-        .contains(&serde_json::json!("templates")));
-    let unchanged = margins_workflows::workspace::resolve_at(&margins_home, "practice").unwrap();
-    assert_eq!(unchanged.config, workspace.config, "scan must be read-only");
-
-    let mut desired = workspace.config.clone();
-    desired.policy.excluded_folders = evidence["excluded_folders"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|value| value.as_str().unwrap().to_string())
-        .collect();
-    let desired_path = temp.path().join("desired.toml");
-    fs::write(&desired_path, toml::to_string_pretty(&desired).unwrap()).unwrap();
-    let planned = Command::new(env!("CARGO_BIN_EXE_margins-private"))
-        .args([
-            "--workspace",
-            "practice",
-            "workspace",
-            "plan",
-            "--desired",
-            desired_path.to_str().unwrap(),
-            "--json",
-        ])
-        .env_clear()
-        .env("HOME", temp.path())
-        .env("MARGINS_HOME", &margins_home)
-        .output()
-        .unwrap();
-    assert!(
-        planned.status.success(),
-        "{}",
-        String::from_utf8_lossy(&planned.stderr)
-    );
-    let plan: margins_workflows::workspace::WorkspacePlan =
-        serde_json::from_slice(&planned.stdout).unwrap();
-    assert_eq!(plan.workspace_id, workspace.config.id);
-    assert!(matches!(
-        &plan.actions[..],
-        [margins_workflows::workspace::WorkspacePlanAction::SetPolicy { .. }]
-    ));
-    let plan_path = temp.path().join("plan.json");
-    fs::write(&plan_path, &planned.stdout).unwrap();
-    let apply = Command::new(env!("CARGO_BIN_EXE_margins-private"))
-        .args([
-            "--workspace",
-            "practice",
-            "workspace",
-            "apply",
-            "--plan",
-            plan_path.to_str().unwrap(),
-            "--json",
-        ])
-        .env_clear()
-        .env("HOME", temp.path())
-        .env("MARGINS_HOME", &margins_home)
-        .output()
-        .unwrap();
-    assert!(
-        apply.status.success(),
-        "apply failed: {}",
-        String::from_utf8_lossy(&apply.stderr)
-    );
-    let receipt: margins_workflows::workspace::WorkspaceApplyReceipt =
-        serde_json::from_slice(&apply.stdout).unwrap();
-    assert!(receipt.ok);
-    assert_eq!(receipt.plan_id, plan.plan_id);
-    assert_eq!(receipt.workspace_id, plan.workspace_id);
-    assert_eq!(
-        receipt.request_id,
-        format!("workspace-apply-{}", receipt.request_hash)
-    );
-
-    let applied =
-        margins_workflows::workspace::resolve_workspace(&margins_home, Some("practice"), &notes)
-            .unwrap();
-    assert_eq!(applied.config, plan.desired);
-}
-
-#[test]
-#[cfg(feature = "recall")]
-fn official_workspace_scan_does_not_create_an_implicit_workspace() {
+fn preset_plan_needs_an_existing_workspace_and_creates_none() {
     let temp = tempfile::tempdir().unwrap();
     let margins_home = temp.path().join("margins-home");
     let notes = temp.path().join("notes");
     fs::create_dir_all(&notes).unwrap();
-    fs::write(notes.join("note.md"), "# Notes\nRead-only scan evidence.\n").unwrap();
 
-    let scan = Command::new(env!("CARGO_BIN_EXE_margins-private"))
-        .arg("scan")
-        .current_dir(&notes)
-        .env_clear()
-        .env("HOME", temp.path())
-        .env("MARGINS_HOME", &margins_home)
-        .output()
-        .unwrap();
-    assert!(
-        !scan.status.success(),
-        "scan unexpectedly created a Workspace: {}",
-        String::from_utf8_lossy(&scan.stdout)
-    );
-    assert!(scan.stdout.is_empty());
-    assert!(String::from_utf8(scan.stderr)
-        .unwrap()
-        .contains("no workspace selected"));
+    for args in [
+        &["workspace", "plan", "--preset", "margins-meetings", "--json"][..],
+        &["--workspace", "practice", "workspace", "plan", "--preset", "margins-meetings", "--json"][..],
+    ] {
+        let plan = Command::new(env!("CARGO_BIN_EXE_margins-private"))
+            .args(args)
+            .current_dir(&notes)
+            .env_clear()
+            .env("HOME", temp.path())
+            .env("MARGINS_HOME", &margins_home)
+            .output()
+            .unwrap();
+        assert!(
+            !plan.status.success(),
+            "preset plan unexpectedly succeeded: {}",
+            String::from_utf8_lossy(&plan.stdout)
+        );
+        assert!(plan.stdout.is_empty());
+    }
     assert!(!margins_home.join("workspaces").exists());
+    assert!(!margins_home.join("configs").exists());
 }
 
 #[test]
@@ -1015,6 +941,7 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
     let initial_index = Command::new(env!("CARGO_BIN_EXE_margins-private"))
         .args(["--workspace", "retention-cli", "init"])
         .env_clear()
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .env("MARGINS_HOME", &margins_home)
         .env("MARGINS_COREML_PREPROCESSOR_CACHE_DIR", &preprocessor_cache)
         .output()
@@ -1024,8 +951,7 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
         "{}",
         String::from_utf8_lossy(&initial_index.stderr)
     );
-    let namespace =
-        margins_workflows::workspace::gmail_collection_namespace("owner@example.com").unwrap();
+    let namespace = "mail";
     let before: i64 = rusqlite::Connection::open(workspace.recall_path())
         .unwrap()
         .query_row(
@@ -1045,6 +971,7 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
             "--json",
         ])
         .env_clear()
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .env("MARGINS_HOME", &margins_home)
         .env("MARGINS_COREML_PREPROCESSOR_CACHE_DIR", &preprocessor_cache)
         .output()
@@ -1074,6 +1001,7 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
             "--json",
         ])
         .env_clear()
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .env("MARGINS_HOME", &margins_home)
         .env("MARGINS_COREML_PREPROCESSOR_CACHE_DIR", &preprocessor_cache)
         .output()
@@ -1106,6 +1034,7 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
             "--json",
         ])
         .env_clear()
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .env("MARGINS_HOME", &margins_home)
         .env(
             "MARGINS_COREML_PREPROCESSOR_CACHE_DIR",
@@ -1164,6 +1093,7 @@ fn retention_apply_materialization_refreshes_official_recall_index() {
             "--json",
         ])
         .env_clear()
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
         .env("MARGINS_HOME", &margins_home)
         .env("MARGINS_COREML_PREPROCESSOR_CACHE_DIR", &preprocessor_cache)
         .output()
@@ -1213,7 +1143,7 @@ fn packaged_binary_reports_private_native_composition() {
     assert_eq!(contract["capture_available"], true);
     assert_eq!(contract["capture_provider"], "native-recorder");
     assert_eq!(contract["tui_available"], true);
-    for capability in ["available", "scan", "indexing", "lookup"] {
+    for capability in ["available", "indexing", "lookup"] {
         assert_eq!(
             contract["recall"][capability],
             cfg!(feature = "recall"),

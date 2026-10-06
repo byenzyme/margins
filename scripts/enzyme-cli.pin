@@ -1,0 +1,22 @@
+# The enzyme CLI that Margins runs and ships (TOML). Every consumer reads this
+# file: scripts/enzyme-bin (tests and gates), scripts/enzyme-pin (release
+# archives, source installs), and the margins binary's run-time version check
+# (src/enzyme_cli.rs).
+#
+# rev      enzyme-rust commit whose CLI tests and gates build.
+# version  what `enzyme --version` prints for that commit. Margins runs no
+#          other enzyme. It must be a NEW enzyme release, tagged v<version> at
+#          `rev`; never reuse an already-published version for another commit.
+#          Change rev and version together.
+# sha256.<target>
+#          sha256 of the official byenzyme/enzyme release asset
+#          enzyme-<platform>.tar.gz of that release, for each Margins release
+#          target. Empty until the release exists: scripts/enzyme-bin and the
+#          gates then build `rev`, and release packaging fails. Take the values
+#          from that release's .sha256 assets; `scripts/enzyme-pin fetch`
+#          refuses a digest GitHub did not record for v<version> or that any
+#          other release published.
+rev = "101d9839f5d82a48f1b89b46fe3c2c79dc6064c6"
+version = "0.12.0"
+sha256.aarch64-apple-darwin = ""
+sha256.x86_64-unknown-linux-gnu = ""

@@ -15,7 +15,7 @@ for target in aarch64-apple-darwin x86_64-unknown-linux-gnu; do
     echo "checksum mismatch: $archive" >&2
     exit 1
   }
-  expected=$'margins\nmargins-server'
+  expected=$'enzyme\nmargins\nmargins-server'
   actual_entries=$(tar -tzf "$archive" | sed -e '/^\.$/d' -e '/^\.\/$/d' -e 's#^\./##' | LC_ALL=C sort)
   expected_entries=$(printf '%s\n' "$expected" | LC_ALL=C sort)
   test "$actual_entries" = "$expected_entries" || {

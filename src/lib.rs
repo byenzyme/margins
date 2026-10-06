@@ -20,32 +20,11 @@ pub mod project;
 #[cfg(feature = "recall")]
 pub mod recall;
 #[cfg(feature = "recall")]
-pub mod scan;
-#[cfg(feature = "recall")]
-mod setup_compile;
+pub mod enzyme_cli;
 #[cfg(feature = "recall")]
 mod workspace_recall;
 /// Portable public contracts re-exported by the root crate.
 pub use margins_core as core;
-
-/// Initialize the process-wide SQLite runtime before recall and Margins storage
-/// can open their independently wrapped connections.
-pub fn initialize_sqlite_runtime() -> anyhow::Result<()> {
-    #[cfg(feature = "recall")]
-    recall_engine::initialize_sqlite_runtime()?;
-    Ok(())
-}
-
-// libsql configures SQLite's process-wide serialized mode on its first open.
-// The unit-test harness can run store tests before a recall test, unlike the
-// private CLI, which initializes SQLite before dispatch. Start the same runtime
-// before any test thread can open a libsql-rusqlite connection: SQLite rejects
-// sqlite3_config with SQLITE_MISUSE once another wrapper has initialized it.
-#[cfg(all(test, feature = "recall"))]
-#[ctor::ctor]
-fn initialize_sqlite_before_unit_tests() {
-    initialize_sqlite_runtime().expect("initialize SQLite before unit tests");
-}
 
 #[cfg(test)]
 pub(crate) fn test_process_env_lock() -> &'static std::sync::Mutex<()> {

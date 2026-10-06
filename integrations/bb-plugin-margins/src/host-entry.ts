@@ -2,6 +2,7 @@ import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
 import { hostSignals, marginsHostContract, type HostResult } from "./contracts.js";
 import { ProjectMarginsTransport, workspaceOptions, workspacePaths } from "./project-server.js";
 import { applyWorkspaceSetup, previewWorkspaceSetup } from "./workspace-setup.js";
+import { applyWorkspaceProgram, planWorkspaceProgram, readWorkspaceProgram } from "./workspace-program.js";
 
 type Transport = ProjectMarginsTransport;
 
@@ -36,12 +37,27 @@ export function createMarginsHostEntry(transport: Transport) {
       async previewWorkspaceSetup(input, context) {
         retain(context);
         await transport.prepareCli(context.experimental_paths.dataDir);
-        return previewWorkspaceSetup(input.target, context.experimental_paths.dataDir, input.homeRoot, input.noteFolder);
+        return previewWorkspaceSetup(input.target, context.experimental_paths.dataDir, input.homeRoot);
       },
       async applyWorkspaceSetup(input, context) {
         retain(context);
         await transport.prepareCli(context.experimental_paths.dataDir);
         return applyWorkspaceSetup(context.experimental_paths.dataDir, input.previewId);
+      },
+      async readWorkspaceProgram(input, context) {
+        retain(context);
+        await transport.prepareCli(context.experimental_paths.dataDir);
+        return readWorkspaceProgram(input.workspaceId);
+      },
+      async planWorkspaceProgram(input, context) {
+        retain(context);
+        await transport.prepareCli(context.experimental_paths.dataDir);
+        return planWorkspaceProgram(context.experimental_paths.dataDir, input.workspaceId, input.program);
+      },
+      async applyWorkspaceProgram(input, context) {
+        retain(context);
+        await transport.prepareCli(context.experimental_paths.dataDir);
+        return applyWorkspaceProgram(context.experimental_paths.dataDir, input.workspaceId, input.previewId);
       },
       listWorkspaceMeetings(input, context) {
         retain(context);

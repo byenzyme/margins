@@ -56,7 +56,7 @@ fn workspace_default_and_destination_are_explicit_json_reads() {
         panic!()
     };
     *note_folder = Some(PathBuf::from("inbox"));
-    let plan = workspace::plan_workspace_config(&workspace.config, desired).unwrap();
+    let plan = workspace::plan_workspace_config(&workspace, desired).unwrap();
     let mut workspace = workspace;
     workspace::apply_workspace_plan(&mut workspace, &plan).unwrap();
     let (set, output, _) = invoke(
@@ -90,6 +90,246 @@ fn workspace_default_and_destination_are_explicit_json_reads() {
 }
 
 #[test]
+fn workspace_plan_apply_and_migrate_use_enzyme_programs() {
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let machine = temp.path().join("machine");
+    let vault = temp.path().join("vault");
+    std::fs::create_dir_all(vault.join("people")).unwrap();
+    let old = std::env::var_os("MARGINS_HOME");
+    std::env::set_var("MARGINS_HOME", &machine);
+    let service = services(&vault);
+    let workspace = workspace::create_workspace(&machine, "practice", None, &vault).unwrap();
+    let program_path = machine.join("configs/practice.enzyme");
+    assert_eq!(workspace.config_path, program_path);
+
+    let (status, output, _) = invoke(
+        &service,
+        &vault,
+        &["margins", "--workspace", "practice", "workspace", "status", "--json"],
+    );
+    assert!(status.is_ok(), "{output}");
+    let status: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(status["config"], program_path.to_string_lossy().as_ref());
+    assert_eq!(status["revision"], workspace.program.sha256());
+
+    let desired = workspace.program.text().replace(
+        "  remember in folder",
+        "  learn questions from folder \"people\" about relationships {\n    sample by time\n  }\n\n  remember in folder",
+    );
+    let desired_path = temp.path().join("desired.enzyme");
+    std::fs::write(&desired_path, &desired).unwrap();
+    let (planned, output, stderr) = invoke(
+        &service,
+        &vault,
+        &[
+            "margins",
+            "--workspace",
+            "practice",
+            "workspace",
+            "plan",
+            "--desired",
+            desired_path.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(planned.is_ok(), "{stderr}");
+    let plan: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(plan["schema_version"], "margins.workspace.plan.v2");
+    assert_eq!(plan["workspace_id"], "practice");
+    assert_eq!(plan["base_revision"], workspace.program.sha256());
+    assert_eq!(plan["desired_program"], desired.as_str());
+    assert_eq!(
+        plan["desired_sha256"],
+        margins_workflows::workspace::program_sha256(&desired)
+    );
+    assert!(plan["plan_id"].as_str().unwrap().len() == 64);
+    assert!(plan["diff"]
+        .as_str()
+        .unwrap()
+        .contains("+  learn questions from folder \"people\" about relationships {"));
+    let actions = plan["actions"].as_array().unwrap();
+    assert!(actions.iter().any(|action| action["action"] == "set_policy"));
+    assert!(actions.iter().any(|action| action["action"] == "update_program"));
+    assert!(actions
+        .iter()
+        .all(|action| action["summary"].as_str().is_some_and(|summary| !summary.is_empty())));
+    let plan_path = temp.path().join("plan.json");
+    std::fs::write(&plan_path, &output).unwrap();
+
+    for replayed in [false, true] {
+        let (applied, output, stderr) = invoke(
+            &service,
+            &vault,
+            &[
+                "margins",
+                "--workspace",
+                "practice",
+                "workspace",
+                "apply",
+                "--plan",
+                plan_path.to_str().unwrap(),
+                "--json",
+            ],
+        );
+        assert!(applied.is_ok(), "{stderr}");
+        let receipt: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(receipt["schema_version"], "margins.workspace.apply.v2");
+        assert_eq!(receipt["after_revision"], plan["desired_sha256"]);
+        assert_eq!(receipt["replayed"], replayed);
+    }
+    assert_eq!(std::fs::read_to_string(&program_path).unwrap(), desired);
+
+    // A desired file in the retired TOML shape is still accepted and keeps
+    // the program's learning settings.
+    let mut legacy = workspace::resolve_at(&machine, "practice").unwrap().config;
+    legacy.policy.excluded_folders = vec!["archive".to_string()];
+    let legacy_path = temp.path().join("desired.toml");
+    std::fs::write(&legacy_path, toml::to_string_pretty(&legacy).unwrap()).unwrap();
+    let (planned, output, stderr) = invoke(
+        &service,
+        &vault,
+        &[
+            "margins",
+            "--workspace",
+            "practice",
+            "workspace",
+            "plan",
+            "--desired",
+            legacy_path.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(planned.is_ok(), "{stderr}");
+    let plan: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let program = plan["desired_program"].as_str().unwrap();
+    assert!(program.contains("leave out folders [\"archive\"]"), "{program}");
+    assert!(program.contains("sample by time"), "{program}");
+
+    // An invalid desired program is refused with a stable code.
+    std::fs::write(&desired_path, desired.replace("remember in folder", "remember in folders")).unwrap();
+    let (refused, _, _) = invoke(
+        &service,
+        &vault,
+        &[
+            "margins",
+            "--workspace",
+            "practice",
+            "workspace",
+            "plan",
+            "--desired",
+            desired_path.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(refused.unwrap_err().code(), "workspace_desired_invalid");
+
+    // Migration of a retired config.toml: dry run, then write, then nothing left.
+    let legacy_dir = machine.join("workspaces/old");
+    std::fs::create_dir_all(&legacy_dir).unwrap();
+    std::fs::write(
+        legacy_dir.join("config.toml"),
+        format!(
+            "id = \"old\"\n\n[bindings.home]\nkind = \"notes\"\npath = {:?}\nrole = \"home\"\n",
+            vault.canonicalize().unwrap()
+        ),
+    )
+    .unwrap();
+    let (dry, output, stderr) = invoke(
+        &service,
+        &vault,
+        &["margins", "workspace", "migrate", "--dry-run", "--json"],
+    );
+    assert!(dry.is_ok(), "{stderr}");
+    let preview: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+    assert_eq!(preview["schema_version"], "margins.workspace.migrate.v1");
+    assert_eq!(preview["status"], "would_migrate");
+    assert!(!machine.join("configs/old.enzyme").exists());
+    let (migrated, output, stderr) = invoke(
+        &service,
+        &vault,
+        &["margins", "workspace", "migrate", "--json"],
+    );
+    assert!(migrated.is_ok(), "{stderr}");
+    let migration: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+    assert_eq!(migration["status"], "migrated");
+    assert_eq!(migration["program"], preview["program"]);
+    assert_eq!(
+        std::fs::read_to_string(machine.join("configs/old.enzyme")).unwrap(),
+        preview["program"].as_str().unwrap()
+    );
+    assert!(legacy_dir.join("config.toml.migrated").is_file());
+    let (again, output, _) = invoke(
+        &service,
+        &vault,
+        &["margins", "workspace", "migrate", "--json"],
+    );
+    assert!(again.is_ok());
+    assert!(output.is_empty());
+
+    // Forms the previous engine ignored are reported, not fatal; a Workspace
+    // that cannot migrate is listed with its error and keeps its legacy file.
+    // Programs in one configs directory resolve together, and two Workspaces
+    // may not declare the same Markdown folder: give these their own.
+    let odd_notes = temp.path().join("odd-notes");
+    std::fs::create_dir_all(&odd_notes).unwrap();
+    let home_binding = format!(
+        "\n[bindings.home]\nkind = \"notes\"\npath = {:?}\nrole = \"home\"\n",
+        odd_notes.canonicalize().unwrap()
+    );
+    let odd_dir = machine.join("workspaces/odd");
+    std::fs::create_dir_all(&odd_dir).unwrap();
+    std::fs::write(
+        odd_dir.join("config.toml"),
+        format!("id = \"odd\"\n\n[policy]\nentities = [\"person:ada\", \"#craft\"]\n{home_binding}"),
+    )
+    .unwrap();
+    let broken_dir = machine.join("workspaces/broken");
+    std::fs::create_dir_all(&broken_dir).unwrap();
+    let broken = format!(
+        "id = \"broken\"\n{}",
+        home_binding.replace("role = \"home\"", "role = \"home\"\nnote_folder = \"../out\"")
+    );
+    std::fs::write(broken_dir.join("config.toml"), &broken).unwrap();
+    let (migrated, output, _) = invoke(
+        &service,
+        &vault,
+        &["margins", "workspace", "migrate", "--json"],
+    );
+    assert!(migrated.is_err());
+    let lines: Vec<serde_json::Value> = output
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2, "{output}");
+    assert_eq!(lines[0]["workspace_id"], "broken");
+    assert_eq!(lines[0]["status"], "failed");
+    assert_eq!(lines[1]["workspace_id"], "odd");
+    assert_eq!(lines[1]["status"], "migrated", "{output}");
+    let warnings = lines[1]["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].as_str().unwrap().contains("person:ada"));
+    assert!(lines[1]["program"].as_str().unwrap().contains("learn questions from tag \"craft\""));
+    assert_eq!(std::fs::read_to_string(broken_dir.join("config.toml")).unwrap(), broken);
+
+    let (listed, output, stderr) = invoke(
+        &service,
+        &vault,
+        &["margins", "workspace", "list", "--json"],
+    );
+    assert!(listed.is_ok(), "{stderr}");
+    let listed: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+    let entries = listed["workspaces"].as_array().unwrap();
+    let ids: Vec<&str> = entries.iter().map(|entry| entry["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["broken", "odd", "old", "practice"], "{listed}");
+    assert!(entries[0]["error"].as_str().is_some_and(|error| !error.is_empty()));
+    assert!(entries[1].get("error").is_none());
+    restore_env("MARGINS_HOME", old.as_ref());
+}
+
+#[test]
 fn workspace_remove_only_accepts_a_non_default_config_only_workspace() {
     let _guard = ENV_LOCK
         .lock()
@@ -115,7 +355,7 @@ fn workspace_remove_only_accepts_a_non_default_config_only_workspace() {
         &["margins", "workspace", "remove", "default", "--json"],
     );
     assert!(default_result.is_err());
-    assert!(machine.join("workspaces/default/config.toml").exists());
+    assert!(machine.join("configs/default.enzyme").exists());
 
     let (data_result, _, _) = invoke(
         &service,
@@ -587,10 +827,11 @@ fn parser_accepts_workspace_plan_apply_and_integrations_reconcile() {
         "workspace",
         "plan",
         "--desired",
-        "desired.toml",
+        "desired.enzyme",
         "--json",
     ])
     .unwrap();
+    Args::try_parse_from(["margins", "workspace", "migrate", "--dry-run", "--json"]).unwrap();
     Args::try_parse_from([
         "margins",
         "workspace",
@@ -1803,7 +2044,7 @@ fn sync_declared_sources_default_and_narrow_error() {
         },
     )
     .unwrap();
-    let revision = workspace::workspace_revision(&workspace.config).unwrap();
+    let revision = workspace::workspace_revision(&workspace).unwrap();
 
     let all = margins_cli::commands::integrations::sync_declared_with_google_credential(
         &workspace.state_dir,
@@ -2235,15 +2476,27 @@ fn integrations_cli_reconciles_native_google_bindings_and_replays_idempotently()
 }
 
 #[test]
-fn parser_accepts_only_read_only_scan() {
-    let parsed = Args::try_parse_from(["margins", "scan"]).unwrap();
+fn setup_has_no_scan_or_compile_and_plans_from_a_preset() {
+    assert!(Args::try_parse_from(["margins", "scan"]).is_err());
+    assert!(Args::try_parse_from(["margins", "workspace", "compile", "--json"]).is_err());
+    let parsed =
+        Args::try_parse_from(["margins", "workspace", "plan", "--preset", "margins-meetings", "--json"])
+            .unwrap();
     assert!(matches!(
         parsed.command,
-        Some(margins_cli::args::Command::Scan)
+        Some(margins_cli::args::Command::Workspace {
+            command: margins_cli::args::WorkspaceCommand::Plan {
+                desired: None,
+                preset: Some(ref preset),
+                ..
+            }
+        }) if preset == "margins-meetings"
     ));
-
-    assert!(Args::try_parse_from(["margins", "scan", "--write-config"]).is_err());
-    assert!(Args::try_parse_from(["margins", "scan", "--update"]).is_err());
+    assert!(Args::try_parse_from(["margins", "workspace", "plan", "--json"]).is_err());
+    assert!(Args::try_parse_from([
+        "margins", "workspace", "plan", "--desired", "d.enzyme", "--preset", "margins-meetings", "--json",
+    ])
+    .is_err());
 }
 
 #[test]
@@ -2317,7 +2570,7 @@ fn parser_accepts_repeatable_setup_only_and_speech_skip() {
 }
 
 #[test]
-fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only() {
+fn workspace_setup_guide_is_the_preset_flow_and_is_read_only() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("note.md"), "real note").unwrap();
     let services = services(temp.path());
@@ -2341,60 +2594,40 @@ fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only()
     assert!(stdout.contains("source add notes"));
     assert!(stdout.contains("Run these commands from the notes folder"));
     assert!(stdout.contains("cd \"/absolute/path/to/notes\""));
-    assert!(stdout.contains("`recall.scan: true`"));
-    assert!(stdout.contains("scan as soon as the explicit named Workspace"));
-    assert!(stdout.contains("There is no `margins workspace scan` subcommand"));
-    assert!(stdout.contains("Read the complete saved `scan.v2` result"));
-    assert!(stdout.contains("Show the user an understanding, not scan output"));
-    assert!(stdout.contains("The field names below are for your analysis"));
-    assert!(stdout.contains("match how you work, and what did it miss?"));
+    assert!(stdout.contains("`workspace.preset: true`"));
+    assert!(stdout.contains("workspace plan --preset margins-meetings --json"));
+    assert!(stdout.contains("`skipped_readings`"));
+    assert!(stdout.contains("`program_path`"));
+    assert!(stdout.contains("workspace show"));
+    assert!(stdout.contains("workspace edit"));
+    assert!(stdout.contains("enzyme scan --workspace <id> --json"));
     assert!(stdout.contains("Never open, cat, print, or summarize credential bundles"));
     assert!(stdout.contains("Use only redacted Margins product status"));
     assert!(stdout.contains("Do not run recall before `margins init`"));
     assert!(stdout.contains("margins setup --only catalyst"));
     assert!(stdout.contains("If `actions` is empty"));
     assert!(stdout.contains("apply the saved plan unchanged"));
-    assert!(stdout.contains("workspace plan"));
     assert!(stdout.contains("Never hand-edit plan JSON"));
-    assert!(stdout.contains("Do not ask for a second “apply this plan” confirmation"));
+    assert!(stdout.contains("do not ask for a second “apply this plan”"));
     assert!(stdout.contains("machine-level catalyst mode"));
     assert!(stdout.contains("not an exact-phrase boundary proof"));
     assert!(stdout.contains("contiguous, verbatim phrase"));
-    assert!(stdout.contains("one universal discovery question"));
-    assert!(stdout.contains("universal pause."));
-    assert!(stdout.contains("Do not ask the user to design `[policy].entities`"));
-    assert!(stdout.contains("Never declare setup complete while"));
-    assert!(stdout.contains("Use exactly the spellings surfaced by scan"));
-    assert!(stdout.contains("folder:<path>"));
-    assert!(stdout.contains("`[policy].entities`"));
-    assert!(stdout.contains("profile = \"relational\""));
-    assert!(stdout.contains("expandable = true"));
-    for field in [
-        "summary",
-        "instructions",
-        "coverage_entities",
-        "entity_curation_candidates",
-        "top_entities",
-        "top_folders",
-        "top_tags",
-        "top_links",
-        "entity_samples",
-        "representative_samples",
-        "sample_files",
-        "folder_stats",
-        "folder_page_entities",
-        "folder_children",
-        "tag_children",
-        "frontmatter_samples",
+    assert!(stdout.contains("`learn questions from …` reading"));
+    assert!(stdout.contains("    about relationships"));
+    assert!(stdout.contains("    including linked pages"));
+    assert!(stdout.contains("remember in folder \"Meetings\" create note"));
+    assert!(stdout.contains("/tmp/margins-workspace-desired.enzyme"));
+    for removed in [
+        "scan.v2",
+        "margins --workspace practice scan",
+        "workspace compile",
+        "recall.scan",
         "current_config",
-        "available_profiles",
+        "entity_curation_candidates",
+        "desired-state TOML",
     ] {
-        assert!(
-            stdout.contains(&format!("`{field}`")),
-            "missing scan field {field}"
-        );
+        assert!(!stdout.contains(removed), "guide still mentions {removed}");
     }
-    assert!(stdout.contains("`current_config.config_path`"));
     for profile in [
         "relational",
         "operational",
@@ -2410,58 +2643,33 @@ fn workspace_setup_guide_exposes_coverage_and_entity_curation_and_is_read_only()
         );
     }
     let normalized_guide = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(normalized_guide.contains("A fallback policy change after failure is not part"));
     assert!(normalized_guide.contains("Do not run unsupported discovery commands"));
-    assert!(normalized_guide.contains("Do not provision a hosted lease at the start"));
-    assert!(normalized_guide.contains("short-lived lease should begin as late as possible"));
     assert!(normalized_guide.contains("do not run `init` repeatedly"));
     assert!(normalized_guide.contains("earlier setup attempts as hypotheses"));
-    assert!(normalized_guide.contains("preserve that policy"));
+    assert!(normalized_guide.contains("preserve that program"));
     assert!(normalized_guide.contains("`live_lexical` status only confirms that an index exists"));
     assert!(normalized_guide.contains("portable live Markdown coverage"));
     assert!(normalized_guide.contains("Never relabel that number as “indexed documents.”"));
     assert!(normalized_guide.contains("`mode = \"indexed\"` reports the persisted engine index"));
-    assert!(normalized_guide.contains("`entity_curation_candidates[].spec`"));
-    assert!(normalized_guide.contains("`entity_curation_candidates[].expansion`"));
-    assert!(normalized_guide
-        .contains("`expands_automatically = true` means `expandable = true` is redundant"));
-    assert!(
-        normalized_guide.contains("`mode = \"explicit_available\"` means real child pages exist")
-    );
-    assert!(normalized_guide.contains("frequency alone does not establish importance"));
+    assert!(normalized_guide.contains("folder names match case-insensitively"));
+    assert!(normalized_guide.contains("running setup again on a set-up Workspace changes nothing"));
     assert!(normalized_guide.contains("not a weight or an importance score"));
     assert!(normalized_guide.contains("Leave an ambiguous entity without a profile"));
-    assert!(normalized_guide.contains("one note per person is an optional practice"));
-    assert!(normalized_guide.contains("Do not create, reorganize, or configure those notes"));
-    assert!(normalized_guide.contains("at most two future capture habits"));
-    assert!(normalized_guide.contains("name the question that habit would make answerable"));
-    assert!(normalized_guide.contains("Do not prescribe a generic folder taxonomy"));
-    assert!(normalized_guide.contains("Lead the final handoff with what the proof revealed"));
-    assert!(normalized_guide.contains("Do not mistake a successful command"));
+    assert!(normalized_guide.contains("Refinement is optional and never a setup step"));
     assert!(normalized_guide.contains("operational receipt"));
     assert!(normalized_guide.contains("revision hashes, similarity scores"));
     assert!(stdout.contains("Do not begin connected-note distillation as part of setup"));
     let declaration = stdout.find("margins workspace new practice").unwrap();
-    let scan = stdout.find("margins --workspace practice scan").unwrap();
-    let understanding = stdout
-        .find("## 4. Show the user an understanding, not scan output")
-        .unwrap();
-    let plan = stdout
-        .find("margins --workspace practice workspace plan")
+    let preset = stdout
+        .find("margins --workspace practice workspace plan --preset")
         .unwrap();
     let apply = stdout
         .find("margins --workspace practice workspace apply")
         .unwrap();
     let initialize = stdout.find("margins --workspace practice init").unwrap();
-    assert!(
-        declaration < scan
-            && scan < understanding
-            && understanding < plan
-            && plan < apply
-            && apply < initialize
-    );
+    let recall = stdout.find("margins --workspace practice recall").unwrap();
+    assert!(declaration < preset && preset < apply && apply < initialize && initialize < recall);
     assert!(!stdout.contains("margins transcribe"));
-    assert!(!stdout.contains("scan --write-config"));
     assert!(!stdout.contains("workspace propose"));
     assert!(!stdout.contains("--if-revision"));
     assert!(!stdout.contains("--request-id"));
@@ -2482,6 +2690,7 @@ fn public_capabilities_report_only_supported_workflows() {
     assert_eq!(value["schema"], 1);
     assert_eq!(value["product"], "margins");
     assert_eq!(value["composition"], "public");
+    assert_eq!(value["workspace"]["program"], true);
     assert_eq!(
         value["build"]["commit"],
         margins_cli::build_info::get().commit
@@ -2572,7 +2781,6 @@ fn guided_onboarding_routes_without_duplicating_setup_protocol() {
     assert!(normalized.contains("setup result brief and secondary"));
     assert!(stdout.split_whitespace().count() < 300);
     for duplicated_detail in [
-        "scan.v2",
         "workspace plan",
         "workspace apply",
         "current_config",
@@ -2589,16 +2797,20 @@ fn guided_onboarding_routes_without_duplicating_setup_protocol() {
 }
 
 #[test]
-fn public_scan_is_not_the_product_workspace_discovery() {
+fn public_preset_plan_needs_the_engine() {
     let temp = tempfile::tempdir().unwrap();
     let services = services(temp.path());
 
-    let (result, stdout, stderr) = invoke(&services, temp.path(), &["margins", "scan"]);
+    let (result, stdout, stderr) = invoke(
+        &services,
+        temp.path(),
+        &["margins", "--workspace", "practice", "workspace", "plan", "--preset", "margins-meetings", "--json"],
+    );
 
     assert!(result.is_err());
     assert!(stdout.is_empty());
-    assert!(stderr.contains("composition_unavailable"));
-    assert!(stderr.contains("official Margins CLI"));
+    assert!(stderr.contains("composition_unavailable"), "{stderr}");
+    assert!(stderr.contains("official Margins CLI"), "{stderr}");
     assert!(!temp.path().join(".margins").exists());
 }
 
@@ -2678,6 +2890,7 @@ fn public_init_recall_and_sync_form_an_autonomous_local_loop() {
     assert!(status.get("catalyst").is_none());
     assert!(status.get("source_refresh_staleness").is_none());
     assert!(!notes.join(".margins").exists());
+    assert!(!margins_home.join("workspaces/practice/enzyme.db").exists());
     assert!(!margins_home.join("workspaces/practice/index.db").exists());
 
     restore_env("MARGINS_HOME", old_margins_home.as_ref());

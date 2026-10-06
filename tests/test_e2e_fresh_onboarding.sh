@@ -299,7 +299,9 @@ path.write_text(json.dumps({
 PY
 fi
 
-test -f "$MARGINS_WORKSPACE_STATE/config.toml"
+# The Workspace is one Enzyme program; workspaces/<id>/ holds state only.
+test -f "$MARGINS_HOME/configs/$MARGINS_WORKSPACE.enzyme"
+test ! -e "$MARGINS_WORKSPACE_STATE/config.toml"
 "$MARGINS_E2E_BIN" --workspace "$MARGINS_WORKSPACE" source list --json \
   > "$RUN_ROOT/sources-after-init.json"
 python3 - "$RUN_ROOT/sources-after-init.json" <<'PY'
@@ -417,13 +419,20 @@ for pair in google-mail:mail google-calendar:calendar google-meet:meet; do
   "$MARGINS_E2E_BIN" --workspace second-practice source add "$kind" \
     --name "$name" --account owner@example.com >/dev/null
 done
-python3 - "$MARGINS_HOME/workspaces/second-practice/config.toml" <<'PY'
-import sys, tomllib
-config = tomllib.load(open(sys.argv[1], "rb"))
-assert config["bindings"]["mail"]["gmail"] == {
+test ! -e "$MARGINS_HOME/workspaces/second-practice/config.toml"
+"$MARGINS_E2E_BIN" --workspace second-practice source list --json \
+  > "$RUN_ROOT/second-practice-sources.json"
+python3 - "$MARGINS_HOME/configs/second-practice.enzyme" "$RUN_ROOT/second-practice-sources.json" <<'PY'
+import json, re, sys
+program = open(sys.argv[1]).read()
+assert re.search(
+    r'source\s+google-mail\s+"mail"\s*\{[^}]*\baccount\s+"owner@example\.com"', program
+), program
+mail = next(row for row in json.load(open(sys.argv[2])) if row["name"] == "mail")
+assert mail["gmail"] == {
     "query": "-in:spam -in:trash",
     "backfill_days": 365,
-}, config["bindings"]["mail"]
+}, mail
 PY
 "$MARGINS_E2E_BIN" connect status --json > "$RUN_ROOT/machine-connect-status.json"
 python3 - "$RUN_ROOT/machine-connect-status.json" <<'PY'

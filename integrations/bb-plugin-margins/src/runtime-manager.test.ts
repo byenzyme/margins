@@ -127,6 +127,49 @@ describe("Margins runtime manager", () => {
     }
   });
 
+  it("installs the bundled enzyme engine beside the runtime and under the CLI prefix", async () => {
+    const root = await mkdtemp(join(tmpdir(), "margins-bb-engine-"));
+    try {
+      const archive = await archiveFixture(root, ["margins", "margins-server", "enzyme"]);
+      const dataDir = join(root, "plugin-data");
+      const cliBinDir = join(root, "prefix", "bin");
+      const manager = createRuntimeManager({
+        env: { MARGINS_CLI_BIN_DIR: cliBinDir },
+        fetchImpl: releaseFetch(archive) as unknown as typeof fetch,
+        homeDir: root, platform: "linux", arch: "x64",
+      });
+      await manager.ensureProjectServer({ dataDir });
+      const runtimeEngine = join(dataDir, "runtime", "v0.4.16", "enzyme");
+      expect((await execFile(runtimeEngine)).stdout.trim()).toBe("enzyme");
+      const cliEngine = join(root, "prefix", "libexec", "margins", "enzyme");
+      expect((await execFile(cliEngine)).stdout.trim()).toBe("enzyme");
+      // Never on PATH next to margins, where a user's own enzyme may live.
+      await expect(readFile(join(cliBinDir, "enzyme"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves the engine alone when the CLI path belongs to someone else", async () => {
+    const root = await mkdtemp(join(tmpdir(), "margins-bb-engine-"));
+    try {
+      const archive = await archiveFixture(root, ["margins", "margins-server", "enzyme"]);
+      const cliBinDir = join(root, "prefix", "bin");
+      await mkdir(cliBinDir, { recursive: true });
+      await writeFile(join(cliBinDir, "margins"), "#!/bin/sh\necho user\n", { mode: 0o755 });
+      const manager = createRuntimeManager({
+        env: { MARGINS_CLI_BIN_DIR: cliBinDir },
+        fetchImpl: releaseFetch(archive) as unknown as typeof fetch,
+        homeDir: root, platform: "linux", arch: "x64",
+      });
+      await manager.ensureProjectServer({ dataDir: join(root, "plugin-data") });
+      await expect(readFile(join(root, "prefix", "libexec", "margins", "enzyme"))).rejects.toMatchObject({ code: "ENOENT" });
+      expect((await execFile(join(cliBinDir, "margins"))).stdout.trim()).toBe("user");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects a release missing the server before placing a CLI in the home", async () => {
     const root = await mkdtemp(join(tmpdir(), "margins-bb-install-"));
     try {

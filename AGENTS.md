@@ -84,25 +84,25 @@ The Codex plugin is parked outside core; see
 
 ## Workspace Setup and Distillation
 
-- Setup exists to make one knowledge practice legible to Margins and to persist
-  only the minimum settings that keep that understanding true. A Workspace is the
-  durable read/write/attention boundary for a single practice; `init`/`sync`
-  materialize it. Exact-phrase recall proves a declared Source is reachable. When
-  a grounded review is available, setup must also test one question that review
-  promised. The setup skill and `margins guide workspace-setup` are the single
-  source of truth for declaration, review, `init`, `sync`, proof, and optional
-  plan/apply.
-- Some builds report `recall.scan: true`: setup must consume the complete
-  read-only `scan.v2` result as its evidence substrate, including coverage and
-  curation candidates, representative samples, hierarchy, frontmatter, structural
-  exclusions, current config, and available profiles. The skill—not a deterministic
-  renderer—forms the grounded interpretation, leads with that understanding, and
-  invites plain-language corrections before deriving settings. Source declarations,
-  not scan, define the full recall boundary.
-- A desired config is compiled with `workspace plan --desired`. The **final
-  reviewed** plan is applied unchanged—`workspace apply` reads the plan's base
-  revision, derives its retry identity, commits only the exact plan the user last
-  saw, and refuses stale or altered plans. Never hand-edit plan JSON.
+- Setup exists to point Margins at one practice's notes and persist the minimum
+  settings that keep recall true. A Workspace is the durable read/write/attention
+  boundary for a single practice; `init`/`sync` materialize it. Setup is one
+  preset-only flow: choose the notes folder → `workspace new` → `workspace plan
+  --preset margins-meetings` (the engine fills Margins' managed
+  `$MARGINS_HOME/presets/margins-meetings.enzyme.in` through `enzyme compile
+  --preset`; Margins drops folder readings whose folders do not exist) → reviewed
+  `workspace apply` → `init` → exact-phrase recall proves a declared Source is
+  reachable → tell the user the program path and `margins workspace edit`. The
+  setup skill and `margins guide workspace-setup` are the single source of truth
+  for that flow.
+- There is no scan or grounded review in setup, and no promised-question recall
+  test. Refinement is optional and later: `margins workspace edit`, or an agent
+  that wants evidence reads the engine's own `enzyme scan --workspace <id> --json`.
+  Margins keeps no copy of engine scan or selection logic.
+- A desired program is compiled with `workspace plan --desired` (or `--preset`).
+  The **final reviewed** plan is applied unchanged—`workspace apply` reads the
+  plan's base revision, derives its retry identity, commits only the exact plan
+  the user last saw, and refuses stale or altered plans. Never hand-edit plan JSON.
 - Setup and distillation are separate. Setup makes recall ready and must not begin
   connected-note distillation. Distillation is latest-session-first: the skill
   resolves `transcript latest` (and, when needed, `artifacts latest`) inside the
@@ -111,11 +111,11 @@ The Codex plugin is parked outside core; see
   default. Removing capture from a build must not remove read-only access to
   sessions that already exist.
 - These are seams over existing contracts, not new surfaces. Do not introduce a
-  second setup protocol, a new anchor schema, or a write/update mode for `scan`,
-  and do not conflate setup with distillation.
-- Preserve both verification lanes in `docs/setup-e2e-lanes.md`: the
-  credential-free public source lane and the separate hosted grounded-review
-  lane.
+  second setup protocol or a new anchor schema, and do not conflate setup with
+  distillation.
+- Preserve the verification lanes in `docs/setup-e2e-lanes.md`: the
+  credential-free public source lane and the preset setup E2E through the real
+  binaries. The hosted grounded-review lane was retired with the scan.
 
 ## Portable and macOS Platform Test Lanes
 
@@ -126,17 +126,18 @@ mode is required.
 ```bash
 scripts/local-gate quick src/cli.rs crates/public/margins-workflows
 scripts/local-gate quick integrations/bb-plugin-margins/src
-scripts/local-gate quick scripts/cargo-lane scripts/with-private-recall
+scripts/local-gate quick scripts/cargo-lane
 scripts/local-gate public
-scripts/with-private-recall scripts/local-gate linux
+scripts/local-gate linux
 # On the attached Mac host:
-scripts/with-private-recall scripts/local-gate macos
+scripts/local-gate macos
 ```
 
-`scripts/with-private-recall` defaults `CARGO_NET_GIT_FETCH_WITH_CLI=true`, so
-private enzyme-rust fetches use credentials already available to the git CLI.
-An explicitly supplied value is preserved. Release CI sets the variable
-directly before invoking the wrapper.
+Margins builds entirely from public source. Lanes with `recall` run the pinned
+`enzyme` CLI from `scripts/enzyme-bin`: the official release asset named in
+`scripts/enzyme-cli.pin` when it has a sha256 for the host, otherwise a build of
+the pinned `rev`, which needs read access to `byenzyme/enzyme-rust` until that
+enzyme release exists.
 
 `quick` accepts changed paths or Cargo package names. It tests affected root
 workspace crates and their reverse dependents, then checks shipped binaries.
@@ -146,19 +147,14 @@ run their hermetic script tests (`SCRIPT_TESTS` in `scripts/local-gate`, for
 example `scripts/cargo-lane` runs `tests/test_cargo_lane.py`); changing
 `scripts/local-gate` runs all of them. `tests/test_*.py` and `tests/test_*.sh`
 edits alone do not trigger Rust tests. Script tests must stay fast and use only
-temp directories and temp git repos. Independently of its path arguments,
-`quick` inspects `git diff origin/main...HEAD` (override the base with
-`MARGINS_LOCAL_GATE_BASE`) plus uncommitted changes. When any `Cargo.toml`,
-`Cargo.lock`, or `Cargo.private-recall.lock` changed, it fails fast if the
-private lock no longer reproduces the public lock, then runs the `--locked`
-private-composition metadata check, which is reported as SKIP when
-`enzyme-rust` is unreachable. `public` builds and tests the
-root workspace with default features disabled and no private git source in its
-manifest or lockfile. `public` and `linux` both run every script test
+temp directories and temp git repos. `public` builds and tests the
+root workspace with default features disabled and needs no `enzyme` binary.
+`public` and `linux` both run every script test
 (`tests/test_*.py` plus the listed shell fixtures).
 `linux` runs the full portable recall suite, the isolated
-Google onboarding fixture, setup rollout contracts, BB plugin checks, and shipped
-Linux binary checks. `macos` runs the native private and public composition suites and checks
+Google onboarding fixture, the Enzyme home isolation and bundled-engine proofs,
+setup rollout contracts, BB plugin checks, and shipped
+Linux binary checks. `macos` runs the native official and public composition suites and checks
 the extracted `margins-server` when present. Every mode uses one disposable
 `scripts/cargo-lane` invocation and prints a pass/fail summary.
 
@@ -171,7 +167,7 @@ desktop app. For the shipped project server, check `margins-server` with
 `scripts/cargo-lane shared`.
 
 ```bash
-scripts/with-private-recall scripts/cargo-lane disposable -- cargo test --workspace --no-default-features --features recall
+MARGINS_ENZYME_BIN="$(scripts/enzyme-bin)" scripts/cargo-lane disposable -- cargo test --workspace --no-default-features --features recall
 # Historical desktop-only test (cannot run after desktop/src-tauri retirement):
 cargo test -p margins-desktop \
   --manifest-path desktop/src-tauri/Cargo.toml \
@@ -332,8 +328,11 @@ user's Obsidian notes. The hosted/MCP route may be unavailable in this workspace
 
 **Do not confuse the two stores, and know exactly where they still overlap.**
 The standalone `enzyme` CLI below is for the *agent research* pass and reads
-`~/.enzyme/enzyme.db`. Product retrieval is a different path: Margins indexes
-and reads `$MARGINS_HOME/workspaces/<id>/index.db` in-process. When testing
+`~/.enzyme/enzyme.db`. Product retrieval is a different path: the Margins home
+is its own Enzyme home (`ENZYME_HOME=$MARGINS_HOME`), and Margins indexes and
+reads `$MARGINS_HOME/workspaces/<id>/enzyme.db` by running the shipped `enzyme`
+CLI (inspect it with `ENZYME_HOME=~/.margins enzyme --workspace <id> status`;
+tests need `MARGINS_ENZYME_BIN`, see `scripts/enzyme-bin`). When testing
 product retrieval, declare Sources and pass `--workspace <id>` to `margins init`;
 initializing an Enzyme fixture leaves the product path unindexed.
 
@@ -342,10 +341,10 @@ The boundary as it actually stands:
 | Concern | State |
 | --- | --- |
 | Auth/credentials | Uncrossed. Margins uses an injected desktop credential or explicit env; it never discovers Enzyme auth. |
-| Recall database | Uncrossed. `$MARGINS_HOME/workspaces/<id>/index.db`. |
-| Local model *files* | Intentionally shared at `~/.enzyme/models/`. |
-| Model selection | Machine-level Margins config. |
-| Excluded folders | Workspace policy in `$MARGINS_HOME/workspaces/<id>/config.toml`. |
+| Recall database | Uncrossed. `$MARGINS_HOME/workspaces/<id>/enzyme.db` (renamed from `index.db` on first use, no reindex). |
+| Local model *files* | Uncrossed. `$MARGINS_HOME/models/`; never `~/.enzyme/models/`. |
+| Model selection | `$MARGINS_HOME/configs/settings.enzyme` (`settings { generation …; model …; updates disabled }`); host preferences in `$MARGINS_HOME/margins.toml`. |
+| Excluded folders | Workspace program `leave out folders` in `$MARGINS_HOME/configs/<id>.enzyme`. |
 
 Margins builds an ephemeral engine configuration from those declarations; it
 does not discover Enzyme policy or Sources from cwd.
@@ -519,9 +518,11 @@ and does not fix it. The coordinator routes it to the owning worker (or a new
 one) with the worker's diagnosis attached.
 
 **One repo (2026-10-02).** This repository becomes the public repository, with
-fresh history at cutover; there is no separate public export. Only the Enzyme
-recall engine stays closed, consumed as a private git dependency behind the
-`recall` / `recall-local-model` features. Workers must keep every crate building
+fresh history at cutover; there is no separate public export. Margins links no
+closed code: it runs the shipped `enzyme` CLI (pinned in
+`scripts/enzyme-cli.pin`) behind the public `recall` feature. Release archives
+carry that binary next to `margins`; installs (Homebrew, `install.sh`, the BB
+plugin) put it at `<prefix>/libexec/margins/enzyme`. Workers must keep every crate building
 and testing with `recall` off, keep credentials out of source, and stop editing
 the export allowlist; the cutover retires that machinery.
 
@@ -571,7 +572,7 @@ The CI regression verifies only the harness's capture and hard-gate mechanics;
 it does not replace the real agent rollout against the release-candidate binary.
 
 For native CLI core-product verification, use
-`scripts/with-private-recall scripts/core-product-smoke.sh`; the full and
+`scripts/core-product-smoke.sh`; the full and
 zero-compile iteration commands are documented in
 `docs/official-cli-release.md`.
 

@@ -6,6 +6,7 @@ pub mod args;
 pub mod build_info;
 pub mod commands;
 pub mod error;
+pub mod logging;
 pub mod output;
 pub mod services;
 pub mod vault_guard;
@@ -239,20 +240,61 @@ fn run_inner(
             );
         }
         Some(Command::Workspace {
-            command: WorkspaceCommand::Compile { .. },
+            command: WorkspaceCommand::Rename { old, new, json },
         }) => {
-            return Err(CliError::new(
-                "workspace_compile_unavailable",
-                "this build does not include the Workspace compiler",
-            ));
+            return commands::workspace::rename(&old, &new, json, stdout);
         }
         Some(Command::Workspace {
-            command: WorkspaceCommand::Plan { desired, .. },
+            command: WorkspaceCommand::Show { text, json },
+        }) => {
+            return commands::workspace::show(
+                workspace_selector.as_deref(),
+                invocation_dir,
+                text,
+                json,
+                stdout,
+            );
+        }
+        Some(Command::Workspace {
+            command: WorkspaceCommand::Edit,
+        }) => {
+            return commands::workspace::edit(
+                workspace_selector.as_deref(),
+                invocation_dir,
+                &mut std::io::stdin().lock(),
+                stdout,
+                stderr,
+            );
+        }
+        Some(Command::Workspace {
+            command:
+                WorkspaceCommand::Plan {
+                    desired: Some(desired),
+                    ..
+                },
         }) => {
             return commands::workspace::plan(
                 workspace_selector.as_deref(),
                 invocation_dir,
                 &absolute_from(invocation_dir, &desired),
+                stdout,
+            );
+        }
+        Some(Command::Workspace {
+            command: WorkspaceCommand::Plan { desired: None, .. },
+        }) => {
+            return Err(CliError::new(
+                "composition_unavailable",
+                "this build cannot fill presets; install the official Margins CLI, which runs the enzyme engine",
+            ));
+        }
+        Some(Command::Workspace {
+            command: WorkspaceCommand::Migrate { dry_run, json },
+        }) => {
+            return commands::workspace::migrate(
+                workspace_selector.as_deref(),
+                dry_run,
+                json,
                 stdout,
             );
         }
@@ -542,12 +584,6 @@ fn run_inner(
                 stdout,
             );
         }
-        Some(Command::Scan) => {
-            return Err(CliError::new(
-                "composition_unavailable",
-                "This public development CLI cannot scan a Margins recall workspace. Install the official Margins CLI (`./install.sh` or a release artifact).",
-            ));
-        }
         Some(Command::Note { print }) => {
             let workspace = workspace_selector.as_deref().or(env_workspace.as_deref());
             return commands::guide::note_handoff(workspace, print, stdout);
@@ -744,7 +780,6 @@ fn run_inner(
         },
         Some(Command::Recall { .. }) => unreachable!("handled before project resolution"),
         Some(Command::Sync { .. }) => unreachable!("handled before project resolution"),
-        Some(Command::Scan) => unreachable!("handled before project resolution"),
         Some(Command::Capabilities) => unreachable!("handled before project resolution"),
         Some(Command::Init) => unreachable!("handled before project resolution"),
         Some(Command::Note { .. }) => unreachable!("handled before project resolution"),

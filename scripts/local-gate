@@ -6,15 +6,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import platform
-import re
 import subprocess
 import sys
-import tomllib
 
 
 ROOT = Path(__file__).resolve().parent.parent
 LANE = ROOT / "scripts" / "cargo-lane"
-PRIVATE_RECALL_WRAPPER = ROOT / "scripts" / "with-private-recall"
 BB_PLUGIN = ROOT / "integrations/bb-plugin-margins"
 BB_PLUGIN_DIST = "integrations/bb-plugin-margins/dist"
 ROOT_PACKAGES = {
@@ -36,7 +33,6 @@ if SERVER_MANIFEST.exists():
 # follows them transitively so a library edit also runs its consumers' tests.
 # Keep this map in sync when a root workspace crate adds a local dependency.
 REVERSE_DEPENDENTS = {
-    "enzyme-core": {"margins"},
     "margins-capture": {"margins"},
     "margins-cli": {"margins", "margins-capture"},
     "margins-core": {
@@ -57,17 +53,9 @@ REVERSE_DEPENDENTS = {
 # all. A new tests/test_*.py is picked up automatically by linux and public.
 SCRIPT_TESTS = {
     "tests/test_cargo_lane.py": ("scripts/cargo-lane",),
-    "tests/test_with_private_recall.py": (
-        "scripts/with-private-recall",
-        "scripts/private_recall_manifest.py",
-        "scripts/private_recall_dependency.toml",
-        "crates/public/margins-cli/build.rs",
-    ),
     "tests/test_design_docs.py": ("desktop/INTEGRATIONS_",),
-    "tests/test_local_gate.py": ("Cargo.lock", "Cargo.private-recall.lock"),
     "tests/test_setup_e2e_lanes.sh": (
         "scripts/e2e-fresh-workspace-setup.sh",
-        "scripts/e2e-official-hosted-workspace-setup.sh",
     ),
 }
 USAGE = "usage: scripts/local-gate quick <paths-or-crates>... | public | linux | macos | scan [git-range]"
@@ -136,157 +124,6 @@ def normalize_input(raw: str) -> str:
     if ".." in path.parts:
         raise ValueError(f"path must stay inside this checkout: {raw}")
     return path.as_posix().removeprefix("./").rstrip("/")
-
-
-def cargo_graph_changed(inputs: list[str]) -> bool:
-    return any(
-        Path(normalize_input(raw)).name in {"Cargo.toml", "Cargo.lock", "Cargo.private-recall.lock"}
-        for raw in inputs
-    )
-
-
-CARGO_GRAPH_FILES = {"Cargo.toml", "Cargo.lock", "Cargo.private-recall.lock"}
-# Root files that scripts/with-private-recall temporarily substitutes.
-WRAPPER_SUBSTITUTED = ("Cargo.toml", "Cargo.lock")
-BASE_REF_ENV = "MARGINS_LOCAL_GATE_BASE"
-PRIVATE_DEPENDENCY = ROOT / "scripts" / "private_recall_dependency.toml"
-
-
-def git_output(root: Path, *args: str) -> bytes | None:
-    result = subprocess.run(
-        ["git", "-C", str(root), *args], check=False, capture_output=True,
-    )
-    return result.stdout if result.returncode == 0 else None
-
-
-def public_file(root: Path, name: str) -> bytes | None:
-    """The checkout's own copy of a root file, even under with-private-recall."""
-    backup = os.environ.get("MARGINS_PRIVATE_RECALL_PUBLIC_DIR")
-    if (
-        name in WRAPPER_SUBSTITUTED
-        and backup
-        and os.environ.get("MARGINS_PRIVATE_RECALL_ACTIVE") == "1"
-    ):
-        path = Path(backup) / name
-    else:
-        path = root / name
-    return path.read_bytes() if path.is_file() else None
-
-
-def changed_cargo_files(root: Path, base: str) -> tuple[set[str], str | None]:
-    """Cargo manifests/locks changed on this branch or left uncommitted.
-
-    Workers pass source paths to quick, so the path arguments alone miss a
-    lockfile change; this looks at the branch itself.
-    """
-    changed: set[str] = set()
-    note = None
-    committed = git_output(root, "diff", "--name-only", f"{base}...HEAD")
-    if committed is None:
-        note = f"could not diff against {base}; checked uncommitted changes only"
-    else:
-        changed.update(committed.decode().splitlines())
-    uncommitted = git_output(root, "diff", "--name-only", "HEAD") or b""
-    untracked = git_output(root, "ls-files", "--others", "--exclude-standard") or b""
-    changed.update(
-        path
-        for path in (uncommitted + b"\n" + untracked).decode().splitlines()
-        if path not in WRAPPER_SUBSTITUTED
-    )
-    for name in WRAPPER_SUBSTITUTED:
-        if public_file(root, name) != git_output(root, "show", f"HEAD:{name}"):
-            changed.add(name)
-    return {path for path in changed if Path(path).name in CARGO_GRAPH_FILES}, note
-
-
-def lock_drift(public_lock: str, private_lock: str) -> list[str]:
-    """Public lock entries the private composition lock does not reproduce.
-
-    The private lock is the public graph plus the private engine, so every
-    public package must appear with the same source and checksum, and each
-    workspace member must keep at least its public dependencies. Third-party
-    dependency lists may legitimately differ through feature unification.
-    """
-    private = {
-        (package["name"], package["version"]): package
-        for package in tomllib.loads(private_lock).get("package", [])
-    }
-    problems = []
-    for package in tomllib.loads(public_lock).get("package", []):
-        key = (package["name"], package["version"])
-        label = f"{key[0]} {key[1]}"
-        twin = private.get(key)
-        if twin is None:
-            problems.append(f"{label} is missing from Cargo.private-recall.lock")
-            continue
-        for field in ("source", "checksum"):
-            if package.get(field) != twin.get(field):
-                problems.append(f"{label} has a different {field} in Cargo.private-recall.lock")
-        if "source" not in package:
-            names = lambda entry: {dependency.split()[0] for dependency in entry.get("dependencies", [])}
-            for dependency in sorted(names(package) - names(twin)):
-                problems.append(
-                    f"{label} depends on {dependency} only in Cargo.lock, not in Cargo.private-recall.lock"
-                )
-    return problems
-
-
-def check_private_lock_drift(gate: Gate) -> None:
-    label = "private recall lock matches Cargo.lock"
-    print(f"\n==> {label}", flush=True)
-    public_lock = public_file(ROOT, "Cargo.lock")
-    private_lock = ROOT / "Cargo.private-recall.lock"
-    if public_lock is None or not private_lock.is_file():
-        gate.skipped.append(f"{label} (lockfile missing)")
-        return
-    problems = lock_drift(public_lock.decode(), private_lock.read_text())
-    for problem in problems[:20]:
-        print(f"local-gate: {problem}", file=sys.stderr)
-    if len(problems) > 20:
-        print(f"local-gate: ... and {len(problems) - 20} more", file=sys.stderr)
-    if problems:
-        print(
-            "local-gate: refresh it with scripts/with-private-recall bash -c"
-            " 'cargo update --workspace && cp Cargo.lock Cargo.private-recall.lock'",
-            file=sys.stderr,
-        )
-        raise GateFailure(label, 1)
-    gate.passed.append(label)
-
-
-def private_recall_reachable() -> str | None:
-    """Return why the private engine source is unreachable, or None."""
-    match = re.search(r'git\s*=\s*"([^"]+)"', PRIVATE_DEPENDENCY.read_text())
-    if not match:
-        return "no git source in scripts/private_recall_dependency.toml"
-    try:
-        result = subprocess.run(
-            ["git", "ls-remote", "--exit-code", match.group(1), "HEAD"],
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_SSH_COMMAND": os.environ.get(
-                "GIT_SSH_COMMAND", "ssh -o BatchMode=yes"
-            )},
-            check=False,
-            capture_output=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return f"cannot reach {match.group(1)}: {exc}"
-    if result.returncode:
-        return f"no access to {match.group(1)}"
-    return None
-
-
-def check_private_composition_lock(gate: Gate, *, optional: bool = False) -> None:
-    label = "verify private recall manifest and lock"
-    if optional:
-        unreachable = private_recall_reachable()
-        if unreachable:
-            gate.skipped.append(f"{label} ({unreachable})")
-            return
-    command = ["cargo", "metadata", "--locked", "--format-version", "1"]
-    if os.environ.get("MARGINS_PRIVATE_RECALL_ACTIVE") != "1":
-        command.insert(0, str(PRIVATE_RECALL_WRAPPER))
-    gate.run(label, command, quiet_stdout=True)
 
 
 def quick_selection(inputs: list[str]) -> tuple[list[str], bool, bool]:
@@ -370,11 +207,10 @@ def check_bb_plugin(gate: Gate) -> None:
 
 def check_shipped_linux(gate: Gate, *, cli_already_built: bool = False) -> None:
     if not cli_already_built:
-        private_recall = os.environ.get("MARGINS_PRIVATE_RECALL_ACTIVE") == "1"
         gate.cargo(
             "check portable CLI",
             "check", "-p", "margins", "--bin", "margins-private",
-            "--no-default-features", *(["--features", "recall"] if private_recall else []), "--locked",
+            "--no-default-features", "--features", "recall", "--locked",
         )
     if SERVER_MANIFEST.exists():
         gate.cargo(
@@ -385,23 +221,15 @@ def check_shipped_linux(gate: Gate, *, cli_already_built: bool = False) -> None:
 
 
 def quick(gate: Gate, inputs: list[str]) -> None:
-    base = os.environ.get(BASE_REF_ENV, "origin/main")
-    branch_changes, note = changed_cargo_files(ROOT, base)
-    if note:
-        print(f"local-gate: {note}", file=sys.stderr)
-    if cargo_graph_changed(inputs) or branch_changes:
-        if branch_changes:
-            print(f"local-gate: Cargo graph changed: {', '.join(sorted(branch_changes))}")
-        check_private_lock_drift(gate)
-        check_private_composition_lock(gate, optional=True)
     run_script_tests(gate, quick_script_tests(inputs))
     packages, parked_desktop, bb_plugin = quick_selection(inputs)
     if packages:
         args = ["test", "--locked", "--no-default-features"]
         for package in packages:
             args.extend(["-p", package])
-        if "margins" in packages and os.environ.get("MARGINS_PRIVATE_RECALL_ACTIVE") == "1":
+        if "margins" in packages:
             args.extend(["--features", "recall"])
+            use_enzyme_binary(gate)
         gate.cargo("affected root workspace tests", *args)
     if parked_desktop:
         gate.skipped.append("parked desktop path")
@@ -410,19 +238,31 @@ def quick(gate: Gate, inputs: list[str]) -> None:
     check_shipped_linux(gate)
 
 
+def use_enzyme_binary(gate: Gate) -> None:
+    """Export MARGINS_ENZYME_BIN: the given binary, or the pinned enzyme build."""
+    label = "locate or build the pinned enzyme CLI"
+    print(f"\n==> {label}", flush=True)
+    result = subprocess.run(
+        [str(ROOT / "scripts/enzyme-bin")], cwd=ROOT, check=False,
+        stdout=subprocess.PIPE, text=True,
+    )
+    if result.returncode:
+        raise GateFailure(label, result.returncode)
+    os.environ["MARGINS_ENZYME_BIN"] = result.stdout.strip()
+    print(f"MARGINS_ENZYME_BIN={os.environ['MARGINS_ENZYME_BIN']}", flush=True)
+    gate.passed.append(label)
+
+
 def linux(gate: Gate) -> None:
-    if os.environ.get("MARGINS_PRIVATE_RECALL_ACTIVE") != "1":
-        raise ValueError("linux recall gate requires scripts/with-private-recall")
-    check_private_lock_drift(gate)
-    check_private_composition_lock(gate)
     run_script_tests(gate, all_script_tests())
     check_bb_plugin(gate)
+    use_enzyme_binary(gate)
     gate.cargo(
-        "portable workspace and private composition tests",
+        "portable workspace and recall composition tests",
         "test", "--workspace", "--no-default-features", "--features", "recall", "--locked",
     )
     gate.cargo(
-        "build portable private CLI for onboarding",
+        "build portable recall CLI for onboarding",
         "build", "-p", "margins", "--bin", "margins-private",
         "--no-default-features", "--features", "recall", "--locked",
     )
@@ -430,6 +270,16 @@ def linux(gate: Gate) -> None:
     gate.run(
         "isolated Google onboarding harness",
         ["bash", "tests/test_e2e_fresh_onboarding.sh"],
+        env={**os.environ, "MARGINS_E2E_BIN": str(binary)},
+    )
+    gate.run(
+        "Enzyme home isolation through the margins and enzyme binaries",
+        ["bash", "scripts/e2e-enzyme-home-isolation.sh"],
+        env={**os.environ, "MARGINS_E2E_BIN": str(binary)},
+    )
+    gate.run(
+        "installed margins finds and version-checks its bundled enzyme",
+        ["bash", "scripts/e2e-bundled-engine.sh"],
         env={**os.environ, "MARGINS_E2E_BIN": str(binary)},
     )
     gate.run(
@@ -451,16 +301,15 @@ def public(gate: Gate) -> None:
     )
     run_script_tests(gate, all_script_tests())
     gate.cargo(
-        "build and test workspace without private recall engine",
+        "build and test workspace without recall",
         "test", "--workspace", "--all-targets", "--no-default-features", "--locked",
     )
 
 
 def macos(gate: Gate) -> None:
-    if os.environ.get("MARGINS_PRIVATE_RECALL_ACTIVE") != "1":
-        raise ValueError("macos recall gate requires scripts/with-private-recall")
+    use_enzyme_binary(gate)
     gate.cargo(
-        "build private release CLI",
+        "build official release CLI",
         "build", "--release", "-p", "margins", "--bin", "margins-private", "--locked",
         "--no-default-features", "--features",
         OFFICIAL_MACOS_FEATURES,
@@ -470,7 +319,7 @@ def macos(gate: Gate) -> None:
         "build", "--workspace", "--exclude", "margins", "--all-targets", "--locked",
     )
     gate.cargo(
-        "private composition, audio capture, CoreML, and recall integration",
+        "official composition, audio capture, CoreML, and recall integration",
         "test", "-p", "margins", "--locked", "--no-default-features", "--features",
         OFFICIAL_MACOS_FEATURES,
     )

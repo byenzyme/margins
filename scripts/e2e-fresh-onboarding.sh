@@ -27,8 +27,9 @@ Usage:
 
 Run init first, then source the env file it prints before invoking another phase.
 Set MARGINS_E2E_BIN before init to test a specific margins executable.
-Before phase2, verify-isolation/report require only config.toml; phase2 writes a
-sandbox marker after completing and later checks also require ledger.db/index.db.
+Before phase2, verify-isolation/report require only the Workspace program
+($MARGINS_HOME/configs/<id>.enzyme); phase2 writes a
+sandbox marker after completing and later checks also require ledger.db/enzyme.db.
 EOF
 }
 
@@ -122,15 +123,24 @@ require_sandbox_env() {
   done
 }
 
+workspace_program_path() {
+  printf '%s\n' "$MARGINS_HOME/configs/$MARGINS_WORKSPACE.enzyme"
+}
+
 require_workspace_declaration() {
-  [ -f "$MARGINS_WORKSPACE_STATE/config.toml" ] || \
-    die "workspace declaration is missing: $MARGINS_WORKSPACE_STATE/config.toml"
+  local program
+  program="$(workspace_program_path)"
+  [ -f "$program" ] || die "workspace program is missing: $program"
+  # workspaces/<id>/ holds state only; a live legacy config.toml means the
+  # declaration was not migrated into the Workspace language.
+  [ ! -e "$MARGINS_WORKSPACE_STATE/config.toml" ] || \
+    die "legacy workspace config.toml still present in state dir: $MARGINS_WORKSPACE_STATE/config.toml"
 }
 
 assert_workspace_layout() {
   require_workspace_declaration
   if [ -f "$MARGINS_E2E_SANDBOX/.phase2-complete" ]; then
-    for filename in ledger.db index.db; do
+    for filename in ledger.db enzyme.db; do
       [ -f "$MARGINS_WORKSPACE_STATE/$filename" ] || \
         die "workspace state is missing $filename after phase2: $MARGINS_WORKSPACE_STATE/$filename"
     done
@@ -163,7 +173,7 @@ PY
 }
 
 write_desired_fixture() {
-  cp "$MARGINS_WORKSPACE_STATE/config.toml" "$1"
+  cp "$(workspace_program_path)" "$1"
 }
 
 ledger_run_count() {
@@ -218,17 +228,17 @@ PY
 
 run_workspace_plan_apply() {
   local label_prefix="$1"
-  local desired="$MARGINS_E2E_ARTIFACTS/${label_prefix}-desired.toml"
+  local desired="$MARGINS_E2E_ARTIFACTS/${label_prefix}-desired.enzyme"
   local plan="$MARGINS_E2E_ARTIFACTS/${label_prefix}-plan.json"
   local apply="$MARGINS_E2E_ARTIFACTS/${label_prefix}-apply.json"
   local status="$MARGINS_E2E_ARTIFACTS/${label_prefix}-workspace-status.json"
   timed_run "${label_prefix}.workspace-status" "$status" run_margins workspace status --json
   write_desired_fixture "$desired"
   timed_run "${label_prefix}.workspace-plan" "$plan" run_margins workspace plan --desired "$desired" --json
-  assert_json_schema "$plan" "margins.workspace.plan.v1"
+  assert_json_schema "$plan" "margins.workspace.plan.v2"
   timed_run "${label_prefix}.workspace-apply" "$apply" \
     run_margins workspace apply --plan "$plan" --json
-  assert_json_schema "$apply" "margins.workspace.apply.v1"
+  assert_json_schema "$apply" "margins.workspace.apply.v2"
 }
 
 run_integrations_reconcile() {
@@ -276,16 +286,20 @@ PY
 assert_phase6_external_document_contract() {
   local ledger="$MARGINS_WORKSPACE_STATE/ledger.db"
   [ -f "$ledger" ] || die "ledger.db is required for Phase 6 external-document checks: $ledger"
-  python3 - "$ledger" "$MARGINS_WORKSPACE_STATE/config.toml" "$NOTES_HOME" "${MARGINS_E2E_GOOGLE_ONLY:-0}" <<'PY' || die "Phase 6 external-document contract failed"
+  local phase6_sources="$MARGINS_E2E_ARTIFACTS/phase6-source-list.json"
+  run_margins source list --json > "$phase6_sources" || die "Phase 6 source list failed"
+  python3 - "$ledger" "$(workspace_program_path)" "$NOTES_HOME" "${MARGINS_E2E_GOOGLE_ONLY:-0}" "$phase6_sources" <<'PY' || die "Phase 6 external-document contract failed"
+import json
+import re
 import sqlite3
 import sys
-import tomllib
 from pathlib import Path
 
 ledger = sys.argv[1]
-config_path = sys.argv[2]
+program_path = Path(sys.argv[2])
 notes_home = Path(sys.argv[3])
 google_only = sys.argv[4] == "1"
+sources = json.load(open(sys.argv[5]))
 db = sqlite3.connect(f"file:{ledger}?mode=ro", uri=True)
 tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')")}
 for table in ("external_document_evidence", "external_document_participants"):
@@ -324,21 +338,23 @@ for connector in ("google_meet", "granola"):
 for forbidden in ("episodes", "recall_items"):
     if forbidden in tables:
         raise SystemExit(f"generic Episode framework object must be absent: {forbidden}")
-config = tomllib.load(open(config_path, "rb"))
-meet = next(
-    (binding for binding in config.get("bindings", {}).values() if binding.get("kind") == "google-meet"),
-    None,
-)
-granola = next(
-    (binding for binding in config.get("bindings", {}).values() if binding.get("kind") == "granola"),
-    None,
-)
-if meet is None or not meet.get("account"):
-    raise SystemExit("google-meet binding must declare account identity")
+program = program_path.read_text()
+
+def program_source_block(kind):
+    match = re.search(r'source\s+' + re.escape(kind) + r'\s+"[^"]*"\s*\{([^}]*)\}', program)
+    return match.group(1) if match else None
+
+meet = next((row for row in sources if row.get("kind") == "google-meet"), None)
+granola = next((row for row in sources if row.get("kind") == "granola"), None)
+meet_block = program_source_block("google-meet")
+granola_block = program_source_block("granola")
+if meet is None or not meet.get("account") or meet_block is None or not re.search(r'\baccount\s+"[^"]+"', meet_block):
+    raise SystemExit("google-meet source must declare account identity in the Workspace program")
 if not google_only:
-    if granola is None or not granola.get("account"):
-        raise SystemExit("granola binding must declare account identity")
-    if "path" in granola:
+    if granola is None or not granola.get("account") or granola_block is None \
+            or not re.search(r'\baccount\s+"[^"]+"', granola_block):
+        raise SystemExit("granola source must declare account identity in the Workspace program")
+    if "path" in granola or re.search(r'\bpath\b', granola_block):
         raise SystemExit("granola binding must not declare export path")
     if "projection" in granola:
         raise SystemExit("granola binding must not declare retired projection settings")
@@ -798,17 +814,19 @@ EOF
 }
 
 create_fake_recall_index() {
-  python3 - "$REFERENCE_NOTES" "$MARGINS_WORKSPACE_STATE" <<'PY'
+  local sources="$MARGINS_E2E_ARTIFACTS/fake-index-source-list.json"
+  run_margins source list --json > "$sources"
+  python3 - "$REFERENCE_NOTES" "$MARGINS_WORKSPACE_STATE" "$sources" <<'PY'
 from pathlib import Path
-import hashlib
-import os
+import json
 import sqlite3
 import sys
 import time
 
 notes = Path(sys.argv[1])
 workspace = Path(sys.argv[2])
-db = workspace / "index.db"
+markdown = [row for row in json.load(open(sys.argv[3])) if row.get("kind") == "notes"]
+db = workspace / "enzyme.db"
 db.parent.mkdir(parents=True, exist_ok=True)
 if db.exists():
     db.unlink()
@@ -827,12 +845,13 @@ CREATE TABLE docs (
 CREATE TABLE doc_links (doc_id INTEGER NOT NULL, link TEXT NOT NULL);
 """)
 now = time.time_ns() // 1_000_000
-namespace = "markdown_" + hashlib.sha256(
-    b"margins:workspace:native-markdown:v1\0" + os.fsencode(notes)
-).hexdigest()
+# Workspace-language identity: one Markdown source -> root-relative refs;
+# several -> "<source name>/<relative>".
+source_name = next(row["name"] for row in markdown if Path(row["path"]) == notes)
+prefix = "" if len(markdown) == 1 else f"{source_name}/"
 for index, path in enumerate(sorted(notes.glob("*.md")), 1):
     relative = str(path.relative_to(notes))
-    source_ref = f"{namespace}/{relative}"
+    source_ref = f"{prefix}{relative}"
     content = path.read_text()
     mtime = path.stat().st_mtime_ns // 1_000_000
     title = next((line.removeprefix("title:").strip() for line in content.splitlines() if line.startswith("title:")), path.stem)
@@ -1017,8 +1036,6 @@ PY
 
   local init_output="$MARGINS_E2E_ARTIFACTS/phase2-index-init.txt"
   if recall_composition_available; then
-    local scan_output="$MARGINS_E2E_ARTIFACTS/phase2-scan.json"
-    timed_run "phase2.scan" "$scan_output" run_margins scan
     timed_run "phase2.index-refresh" "$init_output" run_margins init
   else
     local started ended
@@ -1114,20 +1131,23 @@ contract_phase8() {
   timed_run "contract-phase8.workspace-status" "$status" run_margins workspace status --json
   local revision plan apply stale_err
   revision="$(read_workspace_revision "$status")"
-  write_desired_fixture "$MARGINS_E2E_ARTIFACTS/contract-phase8-desired.toml"
+  write_desired_fixture "$MARGINS_E2E_ARTIFACTS/contract-phase8-desired.enzyme"
   # Use a new plan identity. Replaying phase2's already-applied no-op plan is
   # valid even after another mutation and cannot test stale-plan rejection.
-  python3 - "$MARGINS_E2E_ARTIFACTS/contract-phase8-desired.toml" <<'PY'
+  python3 - "$MARGINS_E2E_ARTIFACTS/contract-phase8-desired.enzyme" <<'PY'
 from pathlib import Path
 import sys
 path = Path(sys.argv[1])
 text = path.read_text()
-assert "raw_cache_max_age_days" not in text
-path.write_text(text.replace("[retention]", "[retention]\nraw_cache_max_age_days = 45", 1))
+# Retention moved to machine config; mutate a program statement instead.
+assert "contract-phase8-" not in text
+end = text.rstrip().rfind("}")
+assert end > 0, "desired program has no closing workspace brace"
+path.write_text(text[:end] + '  leave out folders ["contract-phase8-a"]\n' + text[end:])
 PY
   plan="$MARGINS_E2E_ARTIFACTS/contract-phase8-plan.json"
   timed_run "contract-phase8.workspace-plan" "$plan" \
-    run_margins workspace plan --desired "$MARGINS_E2E_ARTIFACTS/contract-phase8-desired.toml" --json
+    run_margins workspace plan --desired "$MARGINS_E2E_ARTIFACTS/contract-phase8-desired.enzyme" --json
   local revision_marker="$MARGINS_E2E_SANDBOX/contract-phase8-revision-marker"
   mkdir -p "$revision_marker"
   printf '# Phase 8 revision marker\n' > "$revision_marker/marker.md"
@@ -1146,17 +1166,17 @@ PY
   apply="$MARGINS_E2E_ARTIFACTS/contract-phase8-apply.json"
   timed_run "contract-phase8.workspace-apply" "$apply" \
     run_margins workspace apply --plan "$plan" --json
-  python3 - "$MARGINS_E2E_ARTIFACTS/contract-phase8-desired.toml" <<'PY'
+  python3 - "$MARGINS_E2E_ARTIFACTS/contract-phase8-desired.enzyme" <<'PY'
 from pathlib import Path
 import sys
 path = Path(sys.argv[1])
 text = path.read_text()
-assert "raw_cache_max_age_days = 45" in text
-path.write_text(text.replace("raw_cache_max_age_days = 45", "raw_cache_max_age_days = 30", 1))
+assert '"contract-phase8-a"' in text
+path.write_text(text.replace('"contract-phase8-a"', '"contract-phase8-b"', 1))
 PY
   local followup_plan="$MARGINS_E2E_ARTIFACTS/contract-phase8-followup-plan.json"
   timed_run "contract-phase8.workspace-plan-followup" "$followup_plan" \
-    run_margins workspace plan --desired "$MARGINS_E2E_ARTIFACTS/contract-phase8-desired.toml" --json
+    run_margins workspace plan --desired "$MARGINS_E2E_ARTIFACTS/contract-phase8-desired.enzyme" --json
   local followup_apply="$MARGINS_E2E_ARTIFACTS/contract-phase8-followup-apply.json"
   timed_run "contract-phase8.workspace-apply-followup" "$followup_apply" \
     run_margins workspace apply --plan "$followup_plan" --json
@@ -1180,9 +1200,9 @@ contract_greps() {
   for file in "$contract" "$recall" "$setup_skill" "$onboarding_skill"; do
     [ -f "$file" ] || die "contract file missing: $file"
   done
-  grep -Fq 'margins.workspace.plan.v1' "$contract" "$setup_skill" "$onboarding_skill" \
+  grep -Fq 'margins.workspace.plan.v2' "$contract" "$setup_skill" "$onboarding_skill" \
     || die "contract grep missing workspace plan schema"
-  grep -Fq 'margins.workspace.apply.v1' "$contract" "$setup_skill" "$onboarding_skill" \
+  grep -Fq 'margins.workspace.apply.v2' "$contract" "$setup_skill" "$onboarding_skill" \
     || die "contract grep missing workspace apply schema"
   grep -Fq 'margins.integrations.reconcile.v1' "$contract" "$setup_skill" "$onboarding_skill" \
     || die "contract grep missing integrations reconcile schema"
@@ -1562,10 +1582,13 @@ from pathlib import Path
 
 home, output = map(Path, sys.argv[1:])
 snapshot = {"workspaces": {}}
-for config in sorted((home / "workspaces").glob("*/config.toml")):
-    state = config.parent
+programs = sorted(path for path in (home / "configs").glob("*.enzyme") if path.name != "profiles.enzyme")
+if not programs:
+    raise SystemExit("no Workspace programs under configs/")
+for config in programs:
+    state = home / "workspaces" / config.stem
     row = {"config_sha256": hashlib.sha256(config.read_bytes()).hexdigest()}
-    index = state / "index.db"
+    index = state / "enzyme.db"
     row["index_sha256"] = hashlib.sha256(index.read_bytes()).hexdigest() if index.exists() else None
     ledger = state / "ledger.db"
     if ledger.exists():
@@ -1591,7 +1614,7 @@ for config in sorted((home / "workspaces").glob("*/config.toml")):
             if forbidden in schema_objects:
                 raise SystemExit(f"generic Episode framework object must be absent: {forbidden}")
         db.close()
-    snapshot["workspaces"][config.parent.name] = row
+    snapshot["workspaces"][config.stem] = row
 output.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
 PY
   if [ "$granola_only" -eq 0 ]; then
@@ -1605,10 +1628,13 @@ from pathlib import Path
 home, before_path, after_path, result_path, status_path = map(Path, sys.argv[1:])
 before = json.load(open(before_path))
 after = {"workspaces": {}}
-for config in sorted((home / "workspaces").glob("*/config.toml")):
-    state = config.parent
+programs = sorted(path for path in (home / "configs").glob("*.enzyme") if path.name != "profiles.enzyme")
+if not programs:
+    raise SystemExit("no Workspace programs under configs/")
+for config in programs:
+    state = home / "workspaces" / config.stem
     row = {"config_sha256": hashlib.sha256(config.read_bytes()).hexdigest()}
-    index = state / "index.db"
+    index = state / "enzyme.db"
     row["index_sha256"] = hashlib.sha256(index.read_bytes()).hexdigest() if index.exists() else None
     ledger = state / "ledger.db"
     if ledger.exists():
@@ -1639,7 +1665,7 @@ for config in sorted((home / "workspaces").glob("*/config.toml")):
         if google and any(status != "needs-auth" or last_sync is None for status, last_sync in google):
             raise SystemExit(f"Google health did not preserve snapshot as needs-auth: {google}")
         db.close()
-    after["workspaces"][config.parent.name] = row
+    after["workspaces"][config.stem] = row
 after_path.write_text(json.dumps(after, indent=2, sort_keys=True) + "\n")
 if after != before:
     raise SystemExit(f"retained state changed: before={before} after={after}")
@@ -1670,10 +1696,13 @@ from pathlib import Path
 home, before_path, result_path, status_path = map(Path, sys.argv[1:])
 before = json.load(open(before_path))
 after = {"workspaces": {}}
-for config in sorted((home / "workspaces").glob("*/config.toml")):
-    state = config.parent
+programs = sorted(path for path in (home / "configs").glob("*.enzyme") if path.name != "profiles.enzyme")
+if not programs:
+    raise SystemExit("no Workspace programs under configs/")
+for config in programs:
+    state = home / "workspaces" / config.stem
     row = {"config_sha256": hashlib.sha256(config.read_bytes()).hexdigest()}
-    index = state / "index.db"
+    index = state / "enzyme.db"
     row["index_sha256"] = hashlib.sha256(index.read_bytes()).hexdigest() if index.exists() else None
     ledger = state / "ledger.db"
     if ledger.exists():
@@ -1692,7 +1721,7 @@ for config in sorted((home / "workspaces").glob("*/config.toml")):
         if granola and any(status != "needs-auth" or last_sync is None for status, last_sync in granola):
             raise SystemExit(f"Granola health did not preserve snapshot as needs-auth: {granola}")
         db.close()
-    after["workspaces"][config.parent.name] = row
+    after["workspaces"][config.stem] = row
 if after != before:
     raise SystemExit("Granola disconnect changed retained config/index/evidence shapes")
 result = json.load(open(result_path))

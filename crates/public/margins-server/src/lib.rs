@@ -4,6 +4,7 @@ pub mod asr;
 pub mod auth;
 pub mod browser;
 pub mod http;
+pub mod logging;
 pub mod webm;
 
 /// BB capture wire contract; checked against the plugin before remote use.

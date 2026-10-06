@@ -124,7 +124,8 @@ These are not redundant health checks:
 
 - **SSH reachability is an access check.** It proves only that OpenSSH reached
   and authenticated the intended operating-system account.
-- **Grounded recognition is a setup decision.** The complete remote scan lets
+- **Grounded recognition is a setup decision** (superseded 2026-10-06: setup is
+  preset-only; see section 4.5). The complete remote scan lets
   Margins propose what the declared practice appears to be before deriving
   exclusions, attention, profile, or expansion policy. The user recognizes or
   corrects that account. Its value is not peculiar to remote operation, but the
@@ -226,6 +227,13 @@ the stable Workspace ID, one writable home Source, and product-owned capture
 storage needed for the canonical scan/setup path.
 
 ### 4.5 Run canonical Workspace setup on the remote authority
+
+> **Superseded 2026-10-06:** Workspace setup is now preset-only. There is no
+> scan, `scan.v2`, grounded review, or promised-question test; setup runs
+> `workspace plan --preset margins-meetings`, applies the reviewed plan, runs
+> `init`/`sync`, and proves recall with an exact phrase. The steps below that
+> depend on the grounded review are historical; `margins guide workspace-setup`
+> is the current contract.
 
 Once the Source boundary and Workspace ID exist, the onboarding coordinator
 first checks the persisted setup revision and proof status. If they remain valid,
@@ -522,6 +530,9 @@ and fixtures are isolated and removed only after restoration and evidence captur
 The test must not depend on ambient provider credentials.
 
 ### 10.2 Official hosted grounded-review lane
+
+> **Retired 2026-10-06** with the scan-grounded review; see
+> `docs/setup-e2e-lanes.md` for the preset setup lane.
 
 The hosted lane runs the same remote authority through the complete canonical
 grounded review. It proves that:

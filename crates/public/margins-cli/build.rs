@@ -66,8 +66,8 @@ fn main() {
         commit.chars().take(12).collect()
     };
     let git_available = git_commit.is_some();
-    // scripts/with-private-recall measures dirtiness before it rewrites
-    // Cargo.toml/Cargo.lock and passes the result here.
+    // Like MARGINS_BUILD_COMMIT, an explicit "true"/"false" overrides the
+    // checkout's own `git status`.
     let dirty_override =
         env::var("MARGINS_BUILD_DIRTY")
             .ok()

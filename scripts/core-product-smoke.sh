@@ -88,10 +88,6 @@ case "$DURATION_SECS" in
 esac
 
 [ -x "$CARGO_LANE" ] || die "missing executable cargo lane wrapper: $CARGO_LANE"
-if { [ "$RUN_BUILD" = "1" ] || [ "$RUN_TESTS" = "1" ]; } \
-    && [ "${MARGINS_PRIVATE_RECALL_ACTIVE:-}" != "1" ]; then
-  die "release build and private tests require scripts/with-private-recall"
-fi
 
 run_logged() {
   local label="$1"
@@ -189,9 +185,10 @@ run_focused_tests() {
     --no-default-features --features "$OFFICIAL_MACOS_FEATURES" \
     packaged_binary_reports_private_native_composition
 
-  printf '\n== private recall integration ==\n'
-  cargo test -p margins --test recall_index_process \
-    --no-default-features --features "$OFFICIAL_MACOS_FEATURES"
+  printf '\n== recall integration through the pinned enzyme ==\n'
+  MARGINS_ENZYME_BIN="${MARGINS_ENZYME_BIN:-$("$REPO_ROOT/scripts/enzyme-bin")}" \
+    cargo test -p margins --test recall_index_process \
+      --no-default-features --features "$OFFICIAL_MACOS_FEATURES"
 }
 
 run_live_smoke() {
@@ -427,8 +424,13 @@ if status.get("id") != "core-product-smoke":
     raise SystemExit(f"unexpected workspace id: {status.get('id')!r}")
 if pathlib.Path(status.get("home", "")).resolve() != notes.resolve():
     raise SystemExit("workspace home did not resolve to fixture notes")
-if not (state / "config.toml").is_file():
-    raise SystemExit("workspace config.toml was not created")
+program = root / "margins-home" / "configs" / "core-product-smoke.enzyme"
+if not program.is_file():
+    raise SystemExit("workspace program configs/core-product-smoke.enzyme was not created")
+if pathlib.Path(status.get("config", "")).resolve() != program.resolve():
+    raise SystemExit(f"workspace status config is not the program file: {status.get('config')!r}")
+if (state / "config.toml").exists():
+    raise SystemExit("legacy workspace config.toml was written into the state directory")
 if (notes / ".margins").exists():
     raise SystemExit("workspace state leaked into notes home")
 home_sources = [source for source in sources if source.get("role") == "home"]
@@ -438,6 +440,7 @@ summary = {
     "workspace_root": str(root),
     "workspace_id": status.get("id"),
     "workspace_state": str(state),
+    "workspace_program": str(program),
     "home": str(notes),
     "source_count": len(sources),
     "home_source": home_sources[0],

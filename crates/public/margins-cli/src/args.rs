@@ -243,8 +243,6 @@ pub enum Command {
         #[command(subcommand)]
         command: DisconnectCommand,
     },
-    /// Inspect a vault and emit grounded setup evidence without changing it
-    Scan,
     /// Print this installation's machine-readable capabilities as JSON
     Capabilities,
     /// Establish or refresh a Margins vault in this folder
@@ -352,21 +350,42 @@ pub enum WorkspaceCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Compile complete desired Workspace settings into a revisioned plan
-    Plan {
-        /// TOML file containing the complete desired Workspace settings
+    /// Rename a Workspace whose id is now reserved (settings, profiles,
+    /// margins-sources), keeping its notes and state
+    Rename {
+        /// The reserved id the Workspace has today
+        old: String,
+        /// The new Workspace id
+        new: String,
         #[arg(long)]
-        desired: PathBuf,
-        /// Emit margins.workspace.plan.v1 JSON
-        #[arg(long, required = true)]
         json: bool,
     },
-    /// Propose Workspace recall settings from the declared Home Source
-    Compile {
-        /// Optional relative folder for approved notes under Home
+    /// Print the path of the selected Workspace's program
+    Show {
+        /// Print the program text instead of its path
         #[arg(long)]
-        note_folder: Option<String>,
-        /// Emit a machine-readable proposal and complete desired TOML
+        text: bool,
+        /// Emit the id, program path, and revision (and text with --text) as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Edit the selected Workspace's program in $VISUAL or $EDITOR, then review
+    /// the change and apply it through plan/apply (interactive terminals only)
+    Edit,
+    /// Compile a complete desired Workspace program, or the setup preset, into
+    /// a revisioned plan
+    Plan {
+        /// `.enzyme` file with the complete desired `workspace "<id>" { … }`
+        /// program (a legacy `.toml` desired config is still accepted)
+        #[arg(long, required_unless_present = "preset", conflicts_with = "preset")]
+        desired: Option<PathBuf>,
+        /// Fill a preset for the Workspace's notes folder and add it to the
+        /// current program: `margins-meetings` (the setup preset) or the path
+        /// to a `.enzyme.in` template. Folder readings for folders the notes
+        /// folder does not have are dropped.
+        #[arg(long, value_name = "NAME|PATH")]
+        preset: Option<String>,
+        /// Emit margins.workspace.plan.v2 JSON
         #[arg(long, required = true)]
         json: bool,
     },
@@ -375,8 +394,17 @@ pub enum WorkspaceCommand {
         /// JSON plan emitted by `workspace plan`
         #[arg(long)]
         plan: PathBuf,
-        /// Emit margins.workspace.apply.v1 JSON
+        /// Emit margins.workspace.apply.v2 JSON
         #[arg(long, required = true)]
+        json: bool,
+    },
+    /// Convert retired `workspaces/<id>/config.toml` files to `configs/<id>.enzyme`
+    Migrate {
+        /// Print the programs without writing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit margins.workspace.migrate.v1 JSON lines
+        #[arg(long)]
         json: bool,
     },
 }

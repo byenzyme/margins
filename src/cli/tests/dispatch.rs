@@ -62,7 +62,9 @@
         );
         assert_eq!(value["recall"]["indexing"], cfg!(feature = "recall"));
         assert_eq!(value["recall"]["lookup"], cfg!(feature = "recall"));
-        assert_eq!(value["recall"]["scan"], cfg!(feature = "recall"));
+        assert!(value["recall"].get("scan").is_none());
+        assert_eq!(value["workspace"]["preset"], cfg!(feature = "recall"));
+        assert_eq!(value["workspace"]["program"], true);
         assert_eq!(
             value["recall"]["local_model"],
             cfg!(feature = "recall-local-model")

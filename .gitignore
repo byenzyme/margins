@@ -22,6 +22,7 @@ docs/
 !/docs/remote-workspace-operations.md
 !/docs/setup-e2e-lanes.md
 !/docs/workspace-setup-rollout-review.md
+!/docs/workspace-language.md
 .enzyme/
 .enzyme-embeddings/
 node_modules/

@@ -236,19 +236,11 @@ fn local_catalyst_status(_home: &Path) -> (bool, &'static str) {
 }
 
 fn redacted_expiry_status(home: &Path) -> serde_json::Value {
-    let config = match fs::read_to_string(home.join("config.toml")) {
-        Ok(contents) => match contents.parse::<toml::Value>() {
-            Ok(config) => config,
-            Err(_) => return expiry_view("unknown", "unknown"),
-        },
-        Err(_) => return expiry_view("not_applicable", "none"),
+    let settings = match margins_workflows::machine_config::engine_settings(home) {
+        Ok(settings) => settings,
+        Err(_) => return expiry_view("unknown", "unknown"),
     };
-    if config
-        .get("llm")
-        .and_then(|llm| llm.get("mode"))
-        .and_then(toml::Value::as_str)
-        != Some("hosted")
-    {
+    if settings.generation.as_deref() != Some("hosted") {
         return expiry_view("not_applicable", "none");
     }
     let bundle = match fs::read_to_string(home.join(BUNDLE_FILE)) {
@@ -348,20 +340,10 @@ pub fn invalidate_bundle_if_key(home: &Path, rejected_api_key: &str) -> Result<b
     }
 }
 
+/// Select the catalyst generator in the engine settings program
+/// (`configs/settings.enzyme`).
 pub fn set_llm_mode(home: &Path, mode: &str) -> Result<()> {
-    if !matches!(mode, "hosted" | "local" | "auto") {
-        bail!("unsupported catalyst mode '{mode}'");
-    }
-    let path = home.join("config.toml");
-    let mut document = match fs::read_to_string(&path) {
-        Ok(contents) => contents
-            .parse::<toml_edit::DocumentMut>()
-            .with_context(|| format!("parsing {}", path.display()))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => toml_edit::DocumentMut::new(),
-        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
-    };
-    document["llm"]["mode"] = toml_edit::value(mode);
-    atomic_write(&path, document.to_string().as_bytes(), 0o644)
+    margins_workflows::machine_config::set_generation(home, mode)
 }
 
 pub fn cached_bundle_for_generation(home: &Path) -> Result<Option<HostedCredentialBundle>> {
@@ -726,8 +708,10 @@ mod tests {
         assert_eq!(bundle.model, INCLUDED_CATALYST_MODEL);
         assert_eq!(bundle.profile, bootstrap_profile("file-identity"));
         assert!(bundle.cached_at > 0);
-        let config = fs::read_to_string(home.join("config.toml")).unwrap();
-        assert!(config.contains("mode = \"hosted\""));
+        let settings = fs::read_to_string(home.join("configs/settings.enzyme")).unwrap();
+        assert!(settings.contains("generation hosted"), "{settings}");
+        assert!(settings.contains("updates disabled"), "{settings}");
+        assert!(!home.join("config.toml").exists());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -950,9 +934,9 @@ mod tests {
         assert_eq!(bundle.base_url, report.base_url);
         assert_eq!(bundle.model, report.model);
         assert_eq!(bundle.profile, bootstrap_profile(&bootstrap));
-        assert!(fs::read_to_string(temp.path().join("config.toml"))
+        assert!(fs::read_to_string(temp.path().join("configs/settings.enzyme"))
             .unwrap()
-            .contains("mode = \"hosted\""));
+            .contains("generation hosted"));
     }
 
     #[cfg(feature = "recall")]

@@ -1,6 +1,7 @@
 name: Build official Margins CLI
 description: >-
-  Build, sign/notarize (macOS), package and smoke one official CLI archive.
+  Build, sign/notarize (macOS), package and smoke one official CLI archive:
+  margins, margins-server, and the pinned enzyme engine they run.
   Shared by cli-release.yml and the no-publish cli-release-validation.yml so the
   dry run exercises exactly the release build. This action never publishes.
 
@@ -19,13 +20,10 @@ inputs:
     required: true
   cache:
     description: >-
-      "true" to restore and save the Rust cache. The cache contains the private
-      enzyme-rust source and artifacts, so pass "true" only from a tag ref:
-      tag-scoped caches are unreadable from other refs, while a cache saved on
-      main is restorable by any run, including fork pull requests.
-    required: true
-  enzyme-rust-deploy-key:
-    description: ENZYME_RUST_DEPLOY_KEY secret (read-only deploy key on byenzyme/enzyme-rust)
+      "true" to restore and save the Rust cache. Its build artifacts embed the
+      Google OAuth client, so pass "true" only from a tag ref: tag-scoped caches
+      are unreadable from other refs, while a cache saved on main is restorable
+      by any run, including fork pull requests.
     required: true
   google-oauth-client-json:
     description: MARGINS_GOOGLE_OAUTH_CLIENT_JSON secret
@@ -66,8 +64,9 @@ runs:
     - if: inputs.cache == 'true'
       uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       with:
-        # Distinct prefix so public-ci.yml's restore keys can never match.
-        prefix-key: v0-official-private
+        # Distinct prefix so public-ci.yml's restore keys can never match; v1
+        # never restores a pre-public (v0) cache holding private engine source.
+        prefix-key: v1-official
 
     - name: Assert native runner architecture
       shell: bash
@@ -80,16 +79,9 @@ runs:
       shell: bash
       run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
 
-    - name: Authenticate private recall source
-      uses: ./.github/actions/private-recall-ssh
-      with:
-        mode: setup
-        deploy-key: ${{ inputs.enzyme-rust-deploy-key }}
-
-    - name: Build the private root distributable
+    - name: Build the root distributable
       shell: bash
       env:
-        CARGO_NET_GIT_FETCH_WITH_CLI: "true"
         MARGINS_GOOGLE_OAUTH_CLIENT_JSON: ${{ inputs.google-oauth-client-json }}
         FEATURES: ${{ inputs.features }}
         TARGET: ${{ inputs.target }}
@@ -99,16 +91,9 @@ runs:
           echo "::error::Missing required secret: MARGINS_GOOGLE_OAUTH_CLIENT_JSON"
           exit 1
         fi
-        scripts/with-private-recall cargo build --release --locked --package margins --bin margins-private \
+        cargo build --release --locked --package margins --bin margins-private \
           --no-default-features --features "$FEATURES" \
           --target "$TARGET"
-
-    # The private engine is only fetched above; drop the key before signing.
-    - name: Remove private recall credentials
-      if: always()
-      uses: ./.github/actions/private-recall-ssh
-      with:
-        mode: cleanup
 
     - name: Compile the project recording service
       shell: bash
@@ -121,6 +106,19 @@ runs:
         --bin margins-server
         --target "$TARGET"
 
+    # Margins ships the enzyme Enzyme users get: the official byenzyme/enzyme
+    # release asset (built with --features local-llm), checked against the
+    # version and per-target sha256 in scripts/enzyme-cli.pin. The pinned digest
+    # must be the one GitHub recorded for release v<version> and no other
+    # release's (enzyme-pin verify-release). An unpinned target fails.
+    - name: Fetch the pinned enzyme engine
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+        # Read-only token for the releases API (rate limit only).
+        GH_TOKEN: ${{ github.token }}
+      run: scripts/enzyme-pin fetch "$TARGET" "target/$TARGET/release/enzyme-pinned"
+
     - name: Sign and notarize the macOS CLI
       if: runner.os == 'macOS'
       shell: bash
@@ -130,7 +128,7 @@ runs:
         APPLE_ID: ${{ inputs.apple-id }}
         APPLE_PASSWORD: ${{ inputs.apple-password }}
         APPLE_TEAM_ID: ${{ inputs.apple-team-id }}
-        BINARY_PATHS: target/${{ inputs.target }}/release/margins-private target/${{ inputs.target }}/release/margins-server
+        BINARY_PATHS: target/${{ inputs.target }}/release/margins-private target/${{ inputs.target }}/release/margins-server target/${{ inputs.target }}/release/enzyme-pinned/enzyme
       run: |
         set -euo pipefail
 
@@ -206,7 +204,13 @@ runs:
           --timestamp
         )
         for BINARY_PATH in $BINARY_PATHS; do
-          codesign "${SIGNING_ARGS[@]}" "$BINARY_PATH"
+          EXTRA_ARGS=()
+          # Re-signing replaces enzyme's own signature; keep any entitlements
+          # it carries (the v0.11.1 asset is linker-signed ad hoc with none).
+          if [[ "$(basename "$BINARY_PATH")" == enzyme ]]; then
+            EXTRA_ARGS=(--preserve-metadata=entitlements)
+          fi
+          codesign "${SIGNING_ARGS[@]}" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} "$BINARY_PATH"
           codesign --verify --deep --strict --verbose=2 "$BINARY_PATH"
           cp "$BINARY_PATH" "$NOTARIZATION_DIR/"
         done
@@ -263,8 +267,13 @@ runs:
         mkdir packaged-cli
         install -m 0755 "target/${TARGET}/release/margins-private" packaged-cli/margins
         install -m 0755 "target/${TARGET}/release/margins-server" packaged-cli/margins-server
+        # Next to margins, where it looks first; installers that put margins
+        # in a shared bin directory move it to ../libexec/margins/enzyme.
+        install -m 0755 "target/${TARGET}/release/enzyme-pinned/enzyme" packaged-cli/enzyme
         if [[ "$TARGET" == "aarch64-apple-darwin" ]]; then
-          codesign --verify --deep --strict --verbose=2 packaged-cli/margins
+          for BINARY in margins margins-server enzyme; do
+            codesign --verify --deep --strict --verbose=2 "packaged-cli/$BINARY"
+          done
         fi
         tar -czf "$ARCHIVE" -C packaged-cli .
         if command -v shasum >/dev/null; then
@@ -283,3 +292,4 @@ runs:
         mkdir packaged-smoke
         tar -xzf "$ARCHIVE" -C packaged-smoke
         scripts/smoke-official-cli.sh packaged-smoke/margins
+        scripts/enzyme-pin check packaged-smoke/enzyme

@@ -17,7 +17,9 @@ anyhow = "1"
 axum = { version = "0.7", features = ["multipart"] }
 chrono = "0.4"
 dirs = "6"
+env_logger = { version = "0.11", default-features = false }
 hound = "3.5"
+log = "0.4"
 matroska-demuxer = { path = "vendor/matroska-demuxer" }
 margins-core = { path = "../margins-core" }
 margins-media = { path = "../margins-media" }
