@@ -853,162 +853,33 @@ fn init_fails_closed_without_a_usable_generator() {
 
 #[test]
 #[cfg(feature = "recall")]
-fn official_workspace_scan_is_full_evidence_for_agent_compiled_apply() {
-    let temp = tempfile::tempdir().unwrap();
-    let margins_home = temp.path().join("margins-home");
-    let notes = temp.path().join("notes");
-    fs::create_dir_all(notes.join("projects")).unwrap();
-    fs::create_dir_all(notes.join("templates")).unwrap();
-    fs::write(
-        notes.join("projects/atlas.md"),
-        "---\ntags: [launch]\n---\n# Atlas\nA handoffable workspace plan for [[Rui Tan]].\n",
-    )
-    .unwrap();
-    fs::write(
-        notes.join("templates/meeting.md"),
-        "# Meeting Template\nReusable scaffolding, not workspace memory.\n",
-    )
-    .unwrap();
-    let workspace =
-        margins_workflows::workspace::create_workspace(&margins_home, "practice", None, &notes)
-            .unwrap();
-
-    let scan = Command::new(env!("CARGO_BIN_EXE_margins-private"))
-        .args(["--workspace", "practice", "scan"])
-        .env_clear()
-        .env("HOME", temp.path())
-        .env("MARGINS_HOME", &margins_home)
-        .output()
-        .unwrap();
-    assert!(
-        scan.status.success(),
-        "scan failed: {}",
-        String::from_utf8_lossy(&scan.stderr)
-    );
-    assert!(scan.stderr.is_empty());
-    let evidence: serde_json::Value = serde_json::from_slice(&scan.stdout).unwrap();
-    assert_eq!(evidence["schema_version"], "scan.v2");
-    assert!(evidence["coverage_entities"].is_array());
-    assert!(evidence["entity_curation_candidates"].is_array());
-    assert!(evidence["entity_samples"].is_array());
-    assert!(evidence["folder_stats"].is_array());
-    assert!(evidence["folder_page_entities"].is_array());
-    assert!(evidence["frontmatter_samples"].is_array());
-    assert!(evidence["sample_files"].is_array());
-    assert!(evidence["available_profiles"].is_array());
-    assert!(evidence["excluded_folders"]
-        .as_array()
-        .unwrap()
-        .contains(&serde_json::json!("templates")));
-    let unchanged = margins_workflows::workspace::resolve_at(&margins_home, "practice").unwrap();
-    assert_eq!(unchanged.config, workspace.config, "scan must be read-only");
-
-    let mut desired = workspace.config.clone();
-    desired.policy.excluded_folders = evidence["excluded_folders"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|value| value.as_str().unwrap().to_string())
-        .collect();
-    let desired_path = temp.path().join("desired.toml");
-    fs::write(&desired_path, toml::to_string_pretty(&desired).unwrap()).unwrap();
-    let planned = Command::new(env!("CARGO_BIN_EXE_margins-private"))
-        .args([
-            "--workspace",
-            "practice",
-            "workspace",
-            "plan",
-            "--desired",
-            desired_path.to_str().unwrap(),
-            "--json",
-        ])
-        .env_clear()
-        .env("HOME", temp.path())
-        .env("MARGINS_HOME", &margins_home)
-        .output()
-        .unwrap();
-    assert!(
-        planned.status.success(),
-        "{}",
-        String::from_utf8_lossy(&planned.stderr)
-    );
-    let plan: margins_workflows::workspace::WorkspacePlan =
-        serde_json::from_slice(&planned.stdout).unwrap();
-    assert_eq!(plan.workspace_id, workspace.config.id);
-    assert!(matches!(
-        &plan.actions[..],
-        [margins_workflows::workspace::WorkspacePlanAction::SetPolicy { .. }]
-    ));
-    let plan_path = temp.path().join("plan.json");
-    fs::write(&plan_path, &planned.stdout).unwrap();
-    let apply = Command::new(env!("CARGO_BIN_EXE_margins-private"))
-        .args([
-            "--workspace",
-            "practice",
-            "workspace",
-            "apply",
-            "--plan",
-            plan_path.to_str().unwrap(),
-            "--json",
-        ])
-        .env_clear()
-        .env("HOME", temp.path())
-        .env("MARGINS_HOME", &margins_home)
-        .output()
-        .unwrap();
-    assert!(
-        apply.status.success(),
-        "apply failed: {}",
-        String::from_utf8_lossy(&apply.stderr)
-    );
-    let receipt: margins_workflows::workspace::WorkspaceApplyReceipt =
-        serde_json::from_slice(&apply.stdout).unwrap();
-    assert!(receipt.ok);
-    assert_eq!(receipt.plan_id, plan.plan_id);
-    assert_eq!(receipt.workspace_id, plan.workspace_id);
-    assert_eq!(
-        receipt.request_id,
-        format!("workspace-apply-{}", receipt.request_hash)
-    );
-
-    let applied =
-        margins_workflows::workspace::resolve_workspace(&margins_home, Some("practice"), &notes)
-            .unwrap();
-    assert_eq!(applied.program.text(), plan.desired_program);
-    assert!(applied
-        .config
-        .policy
-        .excluded_folders
-        .contains(&"templates".to_string()));
-}
-
-#[test]
-#[cfg(feature = "recall")]
-fn official_workspace_scan_does_not_create_an_implicit_workspace() {
+fn preset_plan_needs_an_existing_workspace_and_creates_none() {
     let temp = tempfile::tempdir().unwrap();
     let margins_home = temp.path().join("margins-home");
     let notes = temp.path().join("notes");
     fs::create_dir_all(&notes).unwrap();
-    fs::write(notes.join("note.md"), "# Notes\nRead-only scan evidence.\n").unwrap();
 
-    let scan = Command::new(env!("CARGO_BIN_EXE_margins-private"))
-        .arg("scan")
-        .current_dir(&notes)
-        .env_clear()
-        .env("HOME", temp.path())
-        .env("MARGINS_HOME", &margins_home)
-        .output()
-        .unwrap();
-    assert!(
-        !scan.status.success(),
-        "scan unexpectedly created a Workspace: {}",
-        String::from_utf8_lossy(&scan.stdout)
-    );
-    assert!(scan.stdout.is_empty());
-    assert!(String::from_utf8(scan.stderr)
-        .unwrap()
-        .contains("no workspace selected"));
+    for args in [
+        &["workspace", "plan", "--preset", "margins-meetings", "--json"][..],
+        &["--workspace", "practice", "workspace", "plan", "--preset", "margins-meetings", "--json"][..],
+    ] {
+        let plan = Command::new(env!("CARGO_BIN_EXE_margins-private"))
+            .args(args)
+            .current_dir(&notes)
+            .env_clear()
+            .env("HOME", temp.path())
+            .env("MARGINS_HOME", &margins_home)
+            .output()
+            .unwrap();
+        assert!(
+            !plan.status.success(),
+            "preset plan unexpectedly succeeded: {}",
+            String::from_utf8_lossy(&plan.stdout)
+        );
+        assert!(plan.stdout.is_empty());
+    }
     assert!(!margins_home.join("workspaces").exists());
+    assert!(!margins_home.join("configs").exists());
 }
 
 #[test]
@@ -1272,7 +1143,7 @@ fn packaged_binary_reports_private_native_composition() {
     assert_eq!(contract["capture_available"], true);
     assert_eq!(contract["capture_provider"], "native-recorder");
     assert_eq!(contract["tui_available"], true);
-    for capability in ["available", "scan", "indexing", "lookup"] {
+    for capability in ["available", "indexing", "lookup"] {
         assert_eq!(
             contract["recall"][capability],
             cfg!(feature = "recall"),

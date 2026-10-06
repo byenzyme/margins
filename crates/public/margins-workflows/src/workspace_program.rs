@@ -606,7 +606,7 @@ pub fn legacy_view(config: &WorkspaceConfig) -> Result<LegacyView> {
     Ok(LegacyView { config, warnings })
 }
 
-/// Qualify a Home-relative `folder:<path>` spec (what `scan` emits) for the
+/// Qualify a Home-relative `folder:<path>` spec (a preset folder reading) for the
 /// program behind `view`: with several Markdown sources it is prefixed with the
 /// Home source name. Other entity refs are returned unchanged.
 pub fn home_folder_entity(view: &WorkspaceConfig, spec: &str) -> String {

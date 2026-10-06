@@ -149,6 +149,73 @@ workspace "practice" {
         assert!(text.contains("'it''s@example.com'"), "{text}");
     }
 
+    /// The mail account itself is never one of a thread's people, so it
+    /// cannot become a link entity; Gmail's dotted and `+tag` spellings of the
+    /// account are the same person.
+    #[test]
+    fn mail_people_leave_out_the_account_owner() {
+        use crate::integrations::{
+            ConnectorCtx, IntegrationsStore, ParticipantThread, ThreadEvidence,
+            EMAIL_CONNECTOR_ID,
+        };
+        let home = tempfile::tempdir().unwrap();
+        let state = home.path().join("workspaces/practice");
+        let account = "Jo.Owner+work@Gmail.com";
+        let store = IntegrationsStore::open(&state).unwrap();
+        let mail = ConnectorCtx {
+            vault_root: state.clone(),
+            connector_id: EMAIL_CONNECTOR_ID.to_string(),
+            account: account.to_string(),
+            command_path: None,
+        };
+        let at = chrono::Utc::now();
+        let participants = ["joowner@gmail.com", "jo.owner+work@gmail.com", "ada@client.test"];
+        store
+            .replace_email_thread_snapshot_with_materialization_fingerprint(
+                &mail,
+                vec![ThreadEvidence {
+                    thread_id: "t1".into(),
+                    occurred_from: at,
+                    occurred_to: at,
+                    body_text: "Vendor shortlist".into(),
+                    href: None,
+                }],
+                participants
+                    .iter()
+                    .map(|participant| ParticipantThread {
+                        participant: participant.to_string(),
+                        thread_id: "t1".into(),
+                        last_interaction: at,
+                        sampling_score: Some(1),
+                    })
+                    .collect(),
+                &crate::workspace::GmailCollectionSelector::default_declaration()
+                    .materialization_fingerprint()
+                    .unwrap(),
+            )
+            .unwrap();
+        drop(store);
+
+        let program = enzyme_spec::parse(&format!(
+            "workspace \"practice\" {{\n  source google-mail \"mail\" {{ account {account:?} }}\n}}\n"
+        ))
+        .unwrap();
+        let resolved =
+            enzyme_spec::resolve_in(vec![program], &environment(home.path()).unwrap()).unwrap();
+        let enzyme_spec::Source::Sqlite(source) = &resolved.workspaces[0].sources[0] else {
+            panic!("google-mail must expand to a SQLite source");
+        };
+        let ledger = rusqlite::Connection::open(&source.db).unwrap();
+        let people: String = ledger
+            .query_row(
+                &format!("SELECT participants FROM ({})", source.query),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(people, r#"["ada@client.test"]"#);
+    }
+
     #[test]
     fn unknown_fields_are_still_errors() {
         let home = tempfile::tempdir().unwrap();

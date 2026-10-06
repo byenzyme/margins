@@ -16,13 +16,12 @@ latest or selected Margins session / supplied evidence
 ```
 
 `workspace plan` and `workspace apply` provide optional deterministic automation
-over the same declarations. A CLI build may report `recall.scan: true`; the setup
-skill then consumes the complete read-only `scan.v2` evidence after declaration.
-The skill—not a second CLI renderer—forms the grounded interpretation, leads with
-that understanding, and invites plain-language corrections. Any desired settings
-are compiled with `workspace plan --desired`; a correction is recompiled into a
-fresh plan, and only the final reviewed plan is applied unchanged before `init` and
-`sync`. Declared Sources still define the full recall boundary.
+over the same declarations. A CLI build that reports `workspace.preset: true`
+starts the program from the Margins meetings preset with `workspace plan --preset
+margins-meetings`, which keeps only readings for folders the notes have. Other
+desired settings are compiled with `workspace plan --desired`; only the final
+reviewed plan is applied unchanged before `init` and `sync`. Declared Sources
+still define the full recall boundary.
 
 Distillation starts only after setup is ready. It resolves `transcript latest`
 by default, while a session id or supplied transcript, memo, text, or supported

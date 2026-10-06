@@ -28,12 +28,11 @@ margins --workspace practice source add notes \
 ```
 
 Choosing folders directly is the standard setup path. `workspace plan` and
-`workspace apply` provide optional deterministic automation. A CLI build may
-also report `recall.scan: true`; when present, the setup skill consumes the full
-structured scan as evidence, explains what Margins understands the practice to
-be, and invites plain-language corrections. Any desired settings are compiled
-with `workspace plan --desired`; only the final plan you reviewed is applied,
-unchanged, before `init`/`sync`.
+`workspace apply` provide optional deterministic automation. Official builds
+report `workspace.preset: true`; setup then starts the program from the meetings
+preset with `workspace plan --preset margins-meetings`. Any other desired
+settings are compiled with `workspace plan --desired`; only the final plan you
+reviewed is applied, unchanged, before `init`/`sync`.
 
 Connected-note distillation is a separate skill workflow. It starts with the
 latest Margins session unless the user selects another session or supplies a

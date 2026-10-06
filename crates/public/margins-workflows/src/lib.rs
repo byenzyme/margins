@@ -20,6 +20,7 @@ pub mod transcript_view;
 /// one copy margins-workflows declares.
 pub use enzyme_spec;
 pub mod workspace;
+pub mod workspace_preset;
 pub mod workspace_program;
 pub mod workspace_service;
 pub mod remote_workspace;

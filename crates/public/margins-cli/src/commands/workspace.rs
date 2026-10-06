@@ -10,7 +10,7 @@ use margins_workflows::workspace_program::derive_view;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 #[derive(Serialize)]
 struct PublicWorkspaceView<'a> {
@@ -493,8 +493,8 @@ fn desired_error(error: anyhow::Error) -> CliError {
     CliError::new("workspace_desired_invalid", format!("{error:#}"))
 }
 
-/// Scan emits unscoped `folder:<path>` specs for the Workspace home. Refuse a
-/// plan that cannot resolve one of those specs before the user reviews and
+/// Folder readings name folders under the Workspace home. Refuse a plan that
+/// cannot resolve one of them before the user reviews and
 /// consents to a policy that would fail later during init. With several
 /// Markdown sources, folder readings are root-qualified; only those of the
 /// Home source are checked here.
@@ -536,7 +536,11 @@ fn validate_desired_home_folder_entities(desired: &WorkspaceConfig) -> Result<()
             } else {
                 folder
             };
-            if resolve_scan_folder(home, folder)?.is_none() {
+            let resolved = margins_workflows::workspace_preset::resolve_home_folder(home, folder)
+                .map_err(|error| {
+                    CliError::new("workspace_desired_invalid", format!("{error:#}"))
+                })?;
+            if resolved.is_none() {
                 return Err(CliError::new(
                     "workspace_desired_invalid",
                     format!(
@@ -554,59 +558,6 @@ fn strip_ascii_case_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> 
         .get(..prefix.len())
         .filter(|candidate| candidate.eq_ignore_ascii_case(prefix))
         .map(|_| &value[prefix.len()..])
-}
-
-fn resolve_scan_folder(home: &Path, relative: &str) -> Result<Option<PathBuf>, CliError> {
-    let relative = relative.trim();
-    if relative == "." {
-        return Ok(home.is_dir().then(|| home.to_path_buf()));
-    }
-    let components = Path::new(relative).components().collect::<Vec<_>>();
-    if components.is_empty()
-        || components
-            .iter()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err(CliError::new(
-            "workspace_desired_invalid",
-            format!("folder entity path must be relative to the Workspace home: {relative:?}"),
-        ));
-    }
-
-    let mut current = home.to_path_buf();
-    for component in components {
-        let wanted = component.as_os_str().to_string_lossy();
-        let entries = std::fs::read_dir(&current).map_err(|error| {
-            CliError::new(
-                "workspace_desired_invalid",
-                format!(
-                    "could not inspect Workspace home folder {}: {error}",
-                    current.display()
-                ),
-            )
-        })?;
-        let mut matches = entries
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case(&wanted)
-            })
-            .filter(|entry| entry.path().is_dir())
-            .map(|entry| entry.path());
-        let Some(next) = matches.next() else {
-            return Ok(None);
-        };
-        if matches.next().is_some() {
-            return Err(CliError::new(
-                "workspace_desired_invalid",
-                format!("folder entity path {relative:?} is ambiguous under the Workspace home"),
-            ));
-        }
-        current = next;
-    }
-    Ok(Some(current))
 }
 
 pub fn apply(

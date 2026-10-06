@@ -30,6 +30,7 @@ pub const SEARCH_SCHEMA: &str = "enzyme.search.v1";
 pub const STATUS_SCHEMA: &str = "enzyme.status.v1";
 pub const PROFILES_SCHEMA: &str = "enzyme.profiles.v1";
 pub const MODELS_SCHEMA: &str = "enzyme.models.v1";
+pub const COMPILE_SCHEMA: &str = "compile.v2";
 
 /// Parent variables the child may inherit. Everything else, notably
 /// `ENZYME_*`, `OPENAI_*`, and `OPENROUTER_*`, is dropped.
@@ -525,6 +526,39 @@ impl Engine {
             PROFILES_SCHEMA,
         )?;
         Ok(envelope)
+    }
+
+    /// `compile --preset <template> --dry-run --json <source>`: the template
+    /// filled for `workspace`, checked against the other programs in
+    /// `configs/`. Nothing is saved.
+    pub fn compile_preset(
+        &self,
+        workspace: &str,
+        template: &Path,
+        source: &Path,
+    ) -> Result<String, EngineError> {
+        let mut command = self.command(Some(workspace));
+        command
+            .arg("compile")
+            .arg("--preset")
+            .arg(template)
+            .args(["--dry-run", "--json"])
+            .arg(source);
+        let output = self.run(command)?;
+        check_status(&output, &[])?;
+        let envelope: serde_json::Value = parse_json(&output.stdout)?;
+        expect_schema(
+            envelope
+                .get("schema_version")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default(),
+            COMPILE_SCHEMA,
+        )?;
+        envelope
+            .get("program")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| EngineError::Protocol("compile printed no program".into()))
     }
 
     /// `model list --json`: the registry and what is installed in

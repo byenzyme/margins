@@ -14,10 +14,9 @@ export interface WorkspaceSetupPreview {
   workspaceId: string;
   homeRoot: string;
   destination: string;
-  mode: "jev" | "automatic_fallback" | "empty";
-  warning: string | null;
-  filesScanned: number;
-  selectedEntities: string[];
+  programPath: string;
+  readings: string[];
+  skippedReadings: string[];
   actions: unknown[];
 }
 
@@ -45,32 +44,26 @@ async function selectedHome(target: ProjectTarget, input: string): Promise<strin
   return root;
 }
 
-function validNoteFolder(value: string) {
-  const folder = value.trim();
-  if (!folder) return "";
-  if (isAbsolute(folder) || folder.split(/[\\/]/).some((part) => !part || part === "." || part === "..")) {
-    throw new Error("Note folder must be a folder name relative to Home.");
-  }
-  return folder;
-}
-
 function workspaceIdFor(root: string, existing: Set<string>) {
   const slug = basename(root).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "notes";
   if (!existing.has(slug)) return slug;
   return `${slug}-${createHash("sha256").update(root).digest("hex").slice(0, 8)}`;
 }
 
-function entityNames(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((entry) => typeof entry === "string" ? [entry]
-    : entry && typeof entry === "object" && !Array.isArray(entry) ? Object.keys(entry) : []);
+function strings(value: unknown): string[] | null {
+  return Array.isArray(value) && value.every((item) => typeof item === "string") ? value : null;
 }
 
+/** Setup starts from the Margins meetings preset: the CLI fills it for the
+ * notes folder, keeps readings whose folders exist, and plans the change. */
 export async function previewWorkspaceSetup(
-  target: ProjectTarget, dataDir: string, homeInput: string, noteFolderInput: string,
+  target: ProjectTarget, dataDir: string, homeInput: string,
 ): Promise<WorkspaceSetupPreview> {
   const homeRoot = await selectedHome(target, homeInput);
-  const noteFolder = validNoteFolder(noteFolderInput);
+  const capabilities = JSON.parse(await cli(["capabilities"])) as { workspace?: { preset?: unknown } };
+  if (capabilities.workspace?.preset !== true) {
+    throw new Error("This Margins version can't set up a Workspace from the meetings preset. Update Margins, then try again.");
+  }
   const listing = JSON.parse(await cli(["workspace", "list", "--json"])) as {
     workspaces?: Array<{ id: string }>;
   };
@@ -96,37 +89,30 @@ export async function previewWorkspaceSetup(
       throw error;
     }
   }
-  const compiled = JSON.parse(await cli([
-    "--workspace", workspaceId, "workspace", "compile",
-    ...(noteFolder ? ["--note-folder", noteFolder] : []), "--json",
-  ], 120_000, 2_000_000)) as {
-    schema_version?: string; desired_program?: string; mode?: WorkspaceSetupPreview["mode"];
-    warning?: string | null; files_scanned?: number; selected_entities?: unknown;
+  const planJson = await cli([
+    "--workspace", workspaceId, "workspace", "plan", "--preset", "margins-meetings", "--json",
+  ], 60_000, 2_000_000);
+  const plan = JSON.parse(planJson) as {
+    schema_version?: string; workspace_id?: string; actions?: unknown[]; desired_program?: string;
+    program_path?: string;
+    preset?: { readings?: unknown; skipped_readings?: unknown; note_folder?: unknown };
   };
-  if (compiled.schema_version !== "margins.workspace.compile.v2" || typeof compiled.desired_program !== "string"
-    || !["jev", "automatic_fallback", "empty"].includes(compiled.mode || "")) {
-    throw new Error("Margins returned an invalid Workspace proposal.");
+  const readings = strings(plan.preset?.readings);
+  const skippedReadings = strings(plan.preset?.skipped_readings);
+  const noteFolder = plan.preset?.note_folder;
+  if (plan.schema_version !== "margins.workspace.plan.v2" || plan.workspace_id !== workspaceId
+    || !Array.isArray(plan.actions) || typeof plan.desired_program !== "string"
+    || typeof plan.program_path !== "string" || !isAbsolute(plan.program_path)
+    || !readings || !skippedReadings || typeof noteFolder !== "string") {
+    throw new Error("Margins returned an invalid Workspace plan.");
   }
   const previewId = randomUUID();
   const plansDir = join(dataDir, "setup-plans");
   await mkdir(plansDir, { recursive: true, mode: 0o700 });
-  // The complete desired Workspace program (`workspace "<id>" { … }`).
-  const desiredFile = join(plansDir, `${previewId}.desired.enzyme`);
-  await writeFile(desiredFile, compiled.desired_program, { mode: 0o600, flag: "wx" });
-  const planJson = await cli(["--workspace", workspaceId, "workspace", "plan", "--desired", desiredFile, "--json"]);
-  const plan = JSON.parse(planJson) as {
-    schema_version?: string; workspace_id?: string; actions?: unknown[]; desired_program?: string;
-  };
-  if (plan.schema_version !== "margins.workspace.plan.v2" || plan.workspace_id !== workspaceId
-    || !Array.isArray(plan.actions) || plan.desired_program !== compiled.desired_program) {
-    throw new Error("Margins returned an invalid Workspace plan.");
-  }
   await writeFile(join(plansDir, `${previewId}.plan.json`), planJson, { mode: 0o600, flag: "wx" });
   return {
-    previewId, workspaceId, homeRoot, destination: noteFolder ? resolve(homeRoot, noteFolder) : homeRoot,
-    mode: compiled.mode!, warning: compiled.warning || null,
-    filesScanned: Number(compiled.files_scanned || 0), selectedEntities: entityNames(compiled.selected_entities),
-    actions: plan.actions,
+    previewId, workspaceId, homeRoot, destination: resolve(homeRoot, noteFolder),
+    programPath: plan.program_path, readings, skippedReadings, actions: plan.actions,
   };
 }
 
