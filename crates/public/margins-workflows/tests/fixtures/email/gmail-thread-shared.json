@@ -9,13 +9,13 @@
         "internalDate": 1787306400000,
         "headers": {
           "from": "DK Kim <dk@matching.test>",
-          "to": "Owner <owner@example.com>, Bob Zhao <bob@matching.test>",
-          "cc": "Josh Lee <josh@matching.test>, Steven Zhang <steven@matching.test>",
+          "to": "Owner <owner@example.com>, Bob Reyes <bob@matching.test>",
+          "cc": "Josh Lee <josh@matching.test>, Owen Hart <owen@matching.test>",
           "subject": "Complete Matching Survey",
           "date": "Fri, 21 Aug 2026 10:00:00 +0000",
           "message_id": "<shared-dk@matching.test>"
         },
-        "body": "DK shared the complete matching survey evidence with Bob and Steven. The team compared concrete customer constraints, delivery milestones, ownership boundaries, review criteria, unresolved risks, and the next validation checkpoint before committing to the Tuesday pilot plan. Discovery preparation negotiation implementation measurement review followup ownership coordination decisions constraints risks milestones outcomes lessons priorities tradeoffs commitments dependencies timelines experiments feedback documentation validation maintenance communication delivery reflection architecture reliability accessibility performance security privacy onboarding adoption retention support research synthesis planning estimation sequencing delegation escalation mitigation monitoring observability testing rollout recovery quality scope budget staffing alignment partnership accountability learning iteration evidence rationale provenance confidence assumptions alternatives consequences checkpoints acceptance readiness durability consistency accuracy specificity relevance substance context history trajectory strategy operations governance stewardship facilitation collaboration resolution."
+        "body": "DK shared the complete matching survey evidence with Bob and Owen. The team compared concrete customer constraints, delivery milestones, ownership boundaries, review criteria, unresolved risks, and the next validation checkpoint before committing to the Tuesday pilot plan. Discovery preparation negotiation implementation measurement review followup ownership coordination decisions constraints risks milestones outcomes lessons priorities tradeoffs commitments dependencies timelines experiments feedback documentation validation maintenance communication delivery reflection architecture reliability accessibility performance security privacy onboarding adoption retention support research synthesis planning estimation sequencing delegation escalation mitigation monitoring observability testing rollout recovery quality scope budget staffing alignment partnership accountability learning iteration evidence rationale provenance confidence assumptions alternatives consequences checkpoints acceptance readiness durability consistency accuracy specificity relevance substance context history trajectory strategy operations governance stewardship facilitation collaboration resolution."
       },
       {
         "id": "m-shared-owner",
@@ -23,15 +23,15 @@
         "internalDate": 1787307300000,
         "headers": {
           "from": "Owner <owner@example.com>",
-          "to": "DK Kim <dk@matching.test>, Bob Zhao <bob@matching.test>",
-          "cc": "Josh Lee <josh@matching.test>, Steven Zhang <steven@matching.test>",
+          "to": "DK Kim <dk@matching.test>, Bob Reyes <bob@matching.test>",
+          "cc": "Josh Lee <josh@matching.test>, Owen Hart <owen@matching.test>",
           "subject": "Re: Complete Matching Survey",
           "date": "Fri, 21 Aug 2026 10:15:00 +0000",
           "in-reply-to": "<shared-dk@matching.test>",
           "references": "<shared-dk@matching.test>",
           "message_id": "<shared-owner@example.com>"
         },
-        "body": "Thanks DK, I will review this with Bob and Steven. We will verify the supporting observations, compare the proposed tradeoffs, assign each follow-up, document the open questions, and return with a grounded decision after the Tuesday pilot checkpoint."
+        "body": "Thanks DK, I will review this with Bob and Owen. We will verify the supporting observations, compare the proposed tradeoffs, assign each follow-up, document the open questions, and return with a grounded decision after the Tuesday pilot checkpoint."
       },
       {
         "id": "m-shared-josh",

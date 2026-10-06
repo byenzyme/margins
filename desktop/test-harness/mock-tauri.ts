@@ -462,7 +462,7 @@ export async function getCalendarEventSuggestion(): Promise<CalendarSuggestionRe
       end: new Date(Date.now() + 45 * 60_000).toISOString(),
       calendar_id: "primary",
       event_id: "mock-event",
-      people: ["Kevin Smith", "Annie Zhang"],
+      people: ["Marcus Webb", "Elena Ruiz"],
       filename: "2026-06-01-13-00-00-customer-call-pilot-scope",
     },
     freshness: {
@@ -688,7 +688,7 @@ export async function surveyGranolaImport(_paths: string[], _projectId?: string 
   return {
     file_count: 1,
     meeting_count: 3,
-    people: ["Annie Zhang", "Kevin Smith", "Maya Lin", "Priya Nair"],
+    people: ["Elena Ruiz", "Marcus Webb", "Maya Lin", "Priya Nair"],
     organizations: ["Acme", "Rho"],
     ambiguous_people: [],
     suggested_notes_folder: "meetings",
@@ -1862,8 +1862,8 @@ function createState(scenario: MockScenario): MockState {
         "/Users/me/Obsidian/second-brain/inbox/customer-call.md",
       ),
       frontmatter_title: "Customer call: Pilot scope review",
-      frontmatter_people: ["Kevin Smith", "Annie Zhang"],
-      people: ["Kevin Smith", "Annie Zhang"],
+      frontmatter_people: ["Marcus Webb", "Elena Ruiz"],
+      people: ["Marcus Webb", "Elena Ruiz"],
     });
     aligned["customer-call"] = mockAligned("customer-call");
     notes["customer-call"] = mockGroundedNote("customer-call");
@@ -1986,13 +1986,13 @@ function mockManySessions(): SessionInfo[] {
     note?: boolean;
   };
   const specs: Spec[] = [
-    { name: "customer-call-pilot-scope", title: "Customer call: Pilot scope review with Acme leadership team", offsetMin: 8, duration: 0, memo: 0, status: "recording", people: ["Kevin Smith", "Annie Zhang"] },
+    { name: "customer-call-pilot-scope", title: "Customer call: Pilot scope review with Acme leadership team", offsetMin: 8, duration: 0, memo: 0, status: "recording", people: ["Marcus Webb", "Elena Ruiz"] },
     { name: "design-review-export-pipeline", title: "Design review: export pipeline", offsetMin: 95, duration: 1842, memo: 7, status: "processing", people: ["Priya Nair"] },
     { name: "standup", title: "Standup", offsetMin: 240, duration: 720, memo: 2, status: "synthesized", people: ["team"] },
-    { name: "1-1-annie", title: "1:1 with Annie", offsetMin: 360, duration: 1820, memo: 5, status: "synthesized", people: ["Annie Zhang"] },
+    { name: "1-1-elena", title: "1:1 with Elena", offsetMin: 360, duration: 1820, memo: 5, status: "synthesized", people: ["Elena Ruiz"] },
     { name: "user-interview-rho", title: "User interview — Rho ops lead", offsetMin: 540, duration: 2640, memo: 9, status: "synthesized", people: ["Maya Lin"] },
     { name: "yesterday-standup", title: "Standup", offsetMin: 60 * 24 + 15, duration: 695, memo: 1, status: "synthesized" },
-    { name: "yesterday-pricing-strategy", title: "Pricing strategy sync — finance + GTM joint", offsetMin: 60 * 24 + 180, duration: 3120, memo: 11, status: "synthesized", people: ["David Park", "Sara Holm"], tags: ["pricing", "gtm"], note: true },
+    { name: "yesterday-pricing-strategy", title: "Pricing strategy sync — finance + GTM joint", offsetMin: 60 * 24 + 180, duration: 3120, memo: 11, status: "synthesized", people: ["Marek Novak", "Sara Holm"], tags: ["pricing", "gtm"], note: true },
     { name: "yesterday-eng-roadmap", title: "Eng roadmap Q3 planning", offsetMin: 60 * 24 + 300, duration: 2900, memo: 6, status: "synthesized", people: ["Priya Nair", "Tom Becker"] },
     { name: "two-day-coffee-mike", title: "Coffee with Mike", offsetMin: 60 * 48 + 240, duration: 1450, memo: 3, status: "unprocessed", people: ["Mike Chen"] },
     { name: "two-day-board-prep", title: "Board prep dry run", offsetMin: 60 * 48 + 480, duration: 2750, memo: 8, status: "synthesized", tags: ["board"] },
@@ -2064,13 +2064,13 @@ function mockSession(
     memo_line_count: memoCount,
     status,
     vault_note_path: vaultNotePath,
-    people: ["Kevin Smith", "Annie Zhang"],
+    people: ["Marcus Webb", "Elena Ruiz"],
     calendar_event_title: "Customer Call: Pilot Scope",
     source: "session",
     frontmatter_created: vaultNotePath ? startTime.slice(0, 10) : null,
     frontmatter_created_sort: vaultNotePath ? startTime.slice(0, 10) : null,
     frontmatter_tags: vaultNotePath ? ["enzyme/gtm", "ai-ux", "capture"] : [],
-    frontmatter_people: vaultNotePath ? ["Kevin Smith", "Annie Zhang"] : [],
+    frontmatter_people: vaultNotePath ? ["Marcus Webb", "Elena Ruiz"] : [],
     frontmatter_reflection_type: vaultNotePath ? "strategy" : null,
   };
 }
@@ -2224,7 +2224,7 @@ installWindowHook();
 
 // The reprocess suggestion compares current people against the people the note
 // was written with, persisted in localStorage (read lazily by the app). For
-// the reprocess scenario, pretend the note was distilled before Kevin/Annie
+// the reprocess scenario, pretend the note was distilled before Marcus/Elena
 // were added so the suggestion appears; keep every other scenario hermetic.
 if (typeof window !== "undefined") {
   if (scenarioName() === "reprocess-with-people") {

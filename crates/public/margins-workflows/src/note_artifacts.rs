@@ -568,7 +568,7 @@ reflectionType: retro
     fn parses_people_frontmatter_shapes_without_mangling_identity() {
         let cases = [
             ("people: Kevin", "Kevin"),
-            ("people:\n  - 'Kevin Smith'", "Kevin Smith"),
+            ("people:\n  - 'Marcus Webb'", "Marcus Webb"),
             ("people:\n  - [[Ada Lovelace]]", "Ada Lovelace"),
             (
                 "attendees:\n  - '[[Alice Morgan]] <alice@example.com>'",

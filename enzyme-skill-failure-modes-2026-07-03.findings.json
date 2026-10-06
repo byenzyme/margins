@@ -623,7 +623,7 @@
    {
     "name": "Duplicated/stale enzyme state in Obsidian inbox",
     "description": "The Obsidian vault probe found old tool state under inbox/.enzyme and inbox/.margins \u2014 these are orphaned/nested Enzyme/Margins state directories inside the inbox/ subfolder rather than the vault root. This indicates historical setup confusion or migration artifacts.",
-    "vaultContext": "obsidian-vault (~Users/joshuapham/obsidian)",
+    "vaultContext": "obsidian-vault (~Users/example/obsidian)",
     "discovery": "Probe of ~/obsidian found .enzyme/ and .margins/ at both vault root and inside inbox/.",
     "fixAttempted": "Probe recommended leaving it alone unless the user explicitly requests cleanup. No active fix.",
     "fixStatus": "open"
