@@ -16,7 +16,7 @@
 #          from that release's .sha256 assets; `scripts/enzyme-pin fetch`
 #          refuses a digest GitHub did not record for v<version> or that any
 #          other release published.
-rev = "101d9839f5d82a48f1b89b46fe3c2c79dc6064c6"
+rev = "05251c1ba2b094c90a15015be47a117ed5a210e4"
 version = "0.12.0"
-sha256.aarch64-apple-darwin = ""
-sha256.x86_64-unknown-linux-gnu = ""
+sha256.aarch64-apple-darwin = "4cd256c11294721f58acb6a4e38431e9a33aa07ceb9a04caa8ebf2cb65a46131"
+sha256.x86_64-unknown-linux-gnu = "300b94599e868c6781dc649173f2a78e78d678f2fe51fefaa20d5c58c2e1b909"

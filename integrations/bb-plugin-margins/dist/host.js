@@ -33813,7 +33813,7 @@ import { homedir, platform } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 var execFile = promisify(execFileCallback);
-var RUNTIME_RELEASE_VERSION = "0.4.16";
+var RUNTIME_RELEASE_VERSION = "0.4.17";
 var RELEASE_API = `https://api.github.com/repos/byenzyme/margins/releases/tags/v${RUNTIME_RELEASE_VERSION}`;
 var MAX_ARCHIVE_BYTES = 128 * 1024 * 1024;
 function targetName(hostPlatform, arch) {
@@ -33823,6 +33823,7 @@ function targetName(hostPlatform, arch) {
   return null;
 }
 var RELEASE_ENGINE = "enzyme";
+var RELEASE_EXECUTABLES = ["margins", "margins-server", RELEASE_ENGINE];
 async function isRegularExecutable(path2) {
   try {
     const stat2 = await lstat(path2);
@@ -33920,27 +33921,23 @@ async function installRuntime(input2) {
       signal: input2.signal
     });
     for (const name of input2.executables) {
-      const source = join(unpacked, name);
-      const stat2 = await lstat(source).catch(() => null);
+      const stat2 = await lstat(join(unpacked, name)).catch(() => null);
       if (!stat2?.isFile() || stat2.isSymbolicLink()) {
         throw new Error(`the Margins release did not contain a regular ${name} executable`);
       }
-      await copyRuntimeBinary(source, join(input2.runtimeBinDir, name));
+    }
+    for (const name of input2.executables) {
+      await copyRuntimeBinary(join(unpacked, name), join(input2.runtimeBinDir, name));
     }
     const engine = join(unpacked, RELEASE_ENGINE);
-    const engineStat = await lstat(engine).catch(() => null);
-    const hasEngine = Boolean(engineStat?.isFile() && !engineStat.isSymbolicLink());
-    if (hasEngine) await copyRuntimeBinary(engine, join(input2.runtimeBinDir, RELEASE_ENGINE));
     await mkdir(input2.cliBinDir, { recursive: true });
     const cliDestination = join(input2.cliBinDir, "margins");
     const cliExists = await lstat(cliDestination).catch(() => null);
     const pluginManaged = await readFile(`${cliDestination}.bb-margins-managed`, "utf8").then((value) => value.startsWith("managed-by=bb-plugin-margins\n")).catch(() => false);
     if (!cliExists || pluginManaged) {
-      if (hasEngine) {
-        const engineDir = join(dirname(input2.cliBinDir), "libexec", "margins");
-        await mkdir(engineDir, { recursive: true });
-        await copyRuntimeBinary(engine, join(engineDir, RELEASE_ENGINE));
-      }
+      const engineDir = join(dirname(input2.cliBinDir), "libexec", "margins");
+      await mkdir(engineDir, { recursive: true });
+      await copyRuntimeBinary(engine, join(engineDir, RELEASE_ENGINE));
       await replaceManagedBinary(join(unpacked, "margins"), cliDestination);
     }
   } finally {
@@ -33965,7 +33962,7 @@ function createRuntimeManager(options = {}) {
       }
       const runtimeBinDir = join(input2.dataDir, "runtime", `v${RUNTIME_RELEASE_VERSION}`);
       const serverPath = join(runtimeBinDir, "margins-server");
-      if (await isRegularExecutable(serverPath)) return serverPath;
+      if (await isRegularExecutable(serverPath) && await isRegularExecutable(join(runtimeBinDir, RELEASE_ENGINE))) return serverPath;
       const target = targetName(hostPlatform, hostArch);
       if (!target) throw new Error("Recording is not available on this project machine");
       const expectedName = `margins-${RUNTIME_RELEASE_VERSION}-${target}.tar.gz`;
@@ -33978,7 +33975,7 @@ function createRuntimeManager(options = {}) {
         cliBinDir: env.MARGINS_CLI_BIN_DIR?.trim() || join(home, ".local", "bin"),
         execFileImpl,
         signal: input2.signal,
-        executables: ["margins", "margins-server"]
+        executables: RELEASE_EXECUTABLES
       });
       if (!await isRegularExecutable(serverPath)) {
         throw new Error("The Margins recorder was not installed correctly");

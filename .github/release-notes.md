@@ -1,24 +1,31 @@
-Margins 0.4.16 makes recording start and stop faster and more reliable.
-The release archives contain `margins` and `margins-server`.
+Margins 0.4.17 makes each Workspace one editable program and ships its own
+recall engine. The release archives contain `margins`, `margins-server`, and
+`enzyme`.
 
-- Margins Menu (BB mode) opens your microphone before the meeting session is
-  ready and keeps what you say while it starts, so the first words are no
-  longer lost. The menu says **Starting…** until capture is live. Pause and
-  Finish work during that window; Finish turns the microphone off right away.
-  If bb cannot be reached, the audio already captured is kept in
-  `~/.margins/unsent` and is not discarded.
-- Finishing a Menu recording no longer waits for live transcription to wind
-  down, so Stop reaches *saved* in about a second. The server then starts the
-  final transcript automatically. Before this fix, a Menu recording could stay
-  untranscribed until the next job came in.
-- The bb recording timer for Menu recordings now keeps real time. It used
-  to run about three times too fast with 48 kHz microphones. The *Saved*
-  label shows the length of the saved recording.
-- When live transcription finishes warming up, it catches up on the audio
-  recorded so far. It no longer starts partway into the meeting.
-- BB browser recordings keep audio the server has not yet acknowledged in the
-  browser's storage. A page reload no longer loses those chunks.
-- `margins --version` reports the version, commit, and build kind.
-  `margins setup --only` no longer fails when no catalyst is configured.
+- Each Workspace is now one `.enzyme` program that says which notes Margins
+  reads, where it writes, and what it pays attention to. `margins workspace
+  show` prints it and `margins workspace edit` opens it in your editor and
+  reviews the change before applying it. In bb, the Meetings panel has a
+  highlighted editor for the same program.
+- Setup starts from the `margins-meetings` preset. It fills in readings for
+  your notes folders and turns on automatic selection, so a new Workspace can
+  recall from its notes without a scan or a review step.
+- Margins runs the bundled `enzyme` 0.12.0 that ships beside it. It keeps its
+  index, models, and settings in the Margins home and never reads or changes
+  `~/.enzyme` or an `enzyme` you installed yourself.
+- Existing setups migrate on first run. Each Workspace's `config.toml` becomes
+  its program, and machine settings move from `~/.margins/config.toml` to
+  `~/.margins/margins.toml`; each original is kept as `config.toml.migrated`.
+  Each Workspace's `index.db` is renamed to `enzyme.db` without reindexing.
+- Margins now builds entirely from public source.
+- The `margins scan` and `margins workspace compile` commands are removed. Use
+  `margins workspace edit`, or `margins workspace plan --preset` followed by
+  `margins workspace apply`.
+
+Upgrade the CLI and the bb plugin (with its `margins-server`) together. The
+plugin installs `margins`, `margins-server`, and `enzyme` from the 0.4.17
+archive as one runtime and refuses an archive without `enzyme`. Stop any older
+`margins` or `margins-server` before the first run: one that still has the
+index open keeps writing to it after the rename.
 
 Known limits: Linux live transcription is not available.
