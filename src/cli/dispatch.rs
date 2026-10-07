@@ -686,21 +686,25 @@ fn transcribe_preflight(
     workspace_selector: Option<&str>,
     project_selector: Option<&str>,
     cwd: &Path,
-    offer_download: impl FnOnce() -> Result<()>,
+    offer_download: impl FnOnce(&[u8]) -> Result<()>,
 ) -> Result<(), margins_cli::CliError> {
     // Remote transcription runs on the remote host's model, never this one.
     if remote_selected {
         return Ok(());
     }
+    // The routing announcement ("Using Workspace … (default)", an earlier
+    // store's hint) is handed to the offer, which shows it before asking about
+    // the download, so the user knows where the transcription goes first.
+    let mut announcement = Vec::new();
     margins_cli::commands::capture_target::resolve(
         &margins_cli::standalone_services(),
         workspace_selector,
         project_selector,
         cwd,
         margins_cli::commands::capture_target::CaptureIntent::Record,
-        &mut Vec::new(),
+        &mut announcement,
     )?;
-    offer_download().map_err(|error| margins_cli::CliError::new("command_failed", format!("{error:#}")))
+    offer_download(&announcement).map_err(|error| margins_cli::CliError::new("command_failed", format!("{error:#}")))
 }
 
 fn bare_capture_creates(current: Option<&str>, current_exists: bool) -> bool {

@@ -97,7 +97,7 @@
         std::env::set_var("MARGINS_HOME", &margins_home);
         std::env::remove_var("MARGINS_WORKSPACE");
         let offers = AtomicUsize::new(0);
-        let offer = || {
+        let offer = |_announcement: &[u8]| {
             offers.fetch_add(1, Ordering::SeqCst);
             Ok(())
         };

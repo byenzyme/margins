@@ -3858,10 +3858,12 @@ fn recording_without_a_workspace_points_at_init_and_creates_nothing() {
 #[test]
 fn recording_uses_the_covering_workspace_then_the_default() {
     let temp = tempfile::tempdir().unwrap();
-    let home = HermeticHome::new(temp.path());
-    let notes = temp.path().join("notes");
-    let other = temp.path().join("other");
-    let elsewhere = temp.path().join("elsewhere");
+    // Resolved (macOS `/var` is `/private/var`), as the cwd Margins sees.
+    let root = temp.path().canonicalize().unwrap();
+    let home = HermeticHome::new(&root);
+    let notes = root.join("notes");
+    let other = root.join("other");
+    let elsewhere = root.join("elsewhere");
     for path in [&notes, &other, &elsewhere] {
         std::fs::create_dir_all(path).unwrap();
     }
@@ -3872,7 +3874,7 @@ fn recording_uses_the_covering_workspace_then_the_default() {
     workspace::set_default_workspace(&home.home, "team").unwrap();
     let mut services = services(&notes);
     services.asr = Arc::new(EmptyAsr);
-    let audio = temp.path().join("input.wav");
+    let audio = root.join("input.wav");
     margins_media::audio::write_interleaved_wav(&audio, &[0.0; 320], 16_000, 1).unwrap();
     let audio = audio.to_str().unwrap();
 
