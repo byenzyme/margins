@@ -32,7 +32,8 @@ if [[ -n "${MARGINS_SIGN_KEYCHAIN:-}" ]]; then
 fi
 codesign "${signing_args[@]}" \
   --entitlements "$repo_dir/src/cli/MarginsNativeBridge.entitlements" "$capture"
-codesign "${signing_args[@]}" "$app"
+codesign "${signing_args[@]}" \
+  --entitlements "$repo_dir/src/cli/MarginsNativeBridge.entitlements" "$app"
 
 entitlements="$(codesign --display --entitlements :- "$capture" 2>/dev/null | tr -d '[:space:]')"
 if [[ "$entitlements" != *'<key>com.apple.security.device.audio-input</key><true/>'* ]]; then

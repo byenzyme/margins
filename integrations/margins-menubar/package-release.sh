@@ -48,6 +48,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>Margins records your microphone for the meeting you start in bb and saves it to your selected Margins Workspace.</string>
+  <key>NSAudioCaptureUsageDescription</key><string>Margins records conversation audio playing on this Mac for the meeting you start in bb and saves it to your selected Margins Workspace.</string>
 </dict></plist>
 PLIST
 
