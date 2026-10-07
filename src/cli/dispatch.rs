@@ -403,8 +403,17 @@ where
     // never downloads it); the public dispatcher then finds it installed.
     #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
     if matches!(parsed.command, Some(Command::Transcribe { .. })) {
-        if let Err(error) = ensure_speech_model_for_transcribe() {
-            return report_error(&format!("{error:#}"));
+        let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+        if let Err(error) = transcribe_preflight(
+            remote_selected,
+            workspace_selector.as_deref(),
+            project_selector.as_deref(),
+            &cwd,
+            ensure_speech_model_for_transcribe,
+        ) {
+            let exit_code = error.exit_code();
+            let _ = margins_cli::output::write_error(&mut io::stderr(), &error);
+            return exit_code;
         }
     }
 
@@ -617,6 +626,32 @@ where
         Ok(()) => 0,
         Err(error) => report_error(&format!("{error:#}")),
     }
+}
+
+/// Resolve where `transcribe` will keep the session (after `--remote` is
+/// ruled out) before offering the speech model download, so nobody downloads it only to learn there is no Workspace.
+/// The public dispatcher resolves again (and announces a default) afterwards.
+#[cfg_attr(not(all(feature = "coreml-asr", target_os = "macos")), allow(dead_code))]
+fn transcribe_preflight(
+    remote_selected: bool,
+    workspace_selector: Option<&str>,
+    project_selector: Option<&str>,
+    cwd: &Path,
+    offer_download: impl FnOnce() -> Result<()>,
+) -> Result<(), margins_cli::CliError> {
+    // Remote transcription runs on the remote host's model, never this one.
+    if remote_selected {
+        return Ok(());
+    }
+    margins_cli::commands::capture_target::resolve(
+        &margins_cli::standalone_services(),
+        workspace_selector,
+        project_selector,
+        cwd,
+        margins_cli::commands::capture_target::CaptureIntent::Record,
+        &mut Vec::new(),
+    )?;
+    offer_download().map_err(|error| margins_cli::CliError::new("command_failed", format!("{error:#}")))
 }
 
 fn bare_capture_creates(current: Option<&str>, current_exists: bool) -> bool {

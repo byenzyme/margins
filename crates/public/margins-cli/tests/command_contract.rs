@@ -3980,16 +3980,17 @@ fn per_folder_stores_from_earlier_releases_stay_readable_and_continuable() {
     assert!(result.is_ok(), "{stderr}");
     assert!(stdout.contains("old-meeting"), "{stdout}");
 
-    // `attach` continues a session started before the upgrade in its own store:
-    // by name, or the unfinished current one.
-    for args in [
-        vec!["margins", "attach", "old-meeting"],
-        vec!["margins", "attach"],
-    ] {
-        let (result, _, stderr) = invoke(&services, &vault, &args);
-        assert_eq!(result.unwrap_err().code(), "capture_unavailable", "{args:?}");
-        assert!(!stderr.contains("Using Workspace"), "{args:?}: {stderr}");
-    }
+    // `attach <id>` continues a session started before the upgrade in its own
+    // store.
+    let (result, _, stderr) = invoke(&services, &vault, &["margins", "attach", "old-meeting"]);
+    assert_eq!(result.unwrap_err().code(), "capture_unavailable");
+    assert!(!stderr.contains("Using Workspace"), "{stderr}");
+    // A bare attach stays with the Workspace (older builds never marked
+    // sessions ended) and points at `attach <id>`.
+    let (result, _, stderr) = invoke(&services, &vault, &["margins", "attach"]);
+    assert_eq!(result.unwrap_err().code(), "capture_unavailable");
+    assert!(stderr.contains("Using Workspace practice (default)"), "{stderr}");
+    assert!(stderr.contains("`margins attach old-meeting`"), "{stderr}");
     // An unknown name is not the old store's; it goes to the Workspace.
     let (result, _, stderr) = invoke(&services, &vault, &["margins", "attach", "other"]);
     assert_eq!(result.unwrap_err().code(), "capture_unavailable");
@@ -4004,6 +4005,8 @@ fn per_folder_stores_from_earlier_releases_stay_readable_and_continuable() {
         &["margins", "--project", "test", "attach", "old-meeting"],
     );
     assert_eq!(result.unwrap_err().code(), "capture_unavailable");
+    let (result, _, _) = invoke(&services, &notes, &["margins", "--project", "test", "attach"]);
+    assert_eq!(result.unwrap_err().code(), "legacy_store_read_only");
     let (result, stdout, stderr) =
         invoke(&services, &notes, &["margins", "--project", "test", "current"]);
     assert!(result.is_ok(), "{stderr}");
@@ -4413,6 +4416,30 @@ fn public_note_handoff_defaults_to_latest_session_in_selected_workspace() {
     assert!(stdout.contains("my latest Margins session"));
     assert!(stdout.contains("workspace practice"));
     assert!(!stdout.contains("I provide"));
+}
+
+#[test]
+fn ambiguous_workspaces_keep_their_error_code_when_an_old_store_is_named() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = HermeticHome::new(temp.path());
+    let notes = temp.path().join("notes");
+    let plain = temp.path().join("plain");
+    for folder in [&notes, &plain] {
+        std::fs::create_dir_all(folder).unwrap();
+        workspace::create_workspace(&home.home, &format!("a-{}", folder.file_name().unwrap().to_str().unwrap()), None, folder).unwrap();
+    }
+    // A second Workspace covering each folder makes resolution ambiguous.
+    workspace::create_workspace(&home.home, "outer", None, temp.path()).unwrap();
+    std::fs::create_dir_all(notes.join(".margins")).unwrap();
+
+    let (without, _, _) = invoke(&services(&plain), &plain, &["margins", "ls"]);
+    let without = without.unwrap_err();
+    let (with, _, _) = invoke(&services(&notes), &notes, &["margins", "ls"]);
+    let with = with.unwrap_err();
+    assert_eq!(with.code(), without.code());
+    assert!(with.message().contains("multiple workspaces"), "{}", with.message());
+    assert!(with.message().contains("--project"), "{}", with.message());
+    assert!(!without.message().contains("--project"));
 }
 
 #[test]

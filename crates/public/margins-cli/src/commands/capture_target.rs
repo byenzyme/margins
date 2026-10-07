@@ -10,9 +10,9 @@
 //! - every command resolves the same way, so reads and recordings in one folder
 //!   always meet the same store; an old store is used only when no Workspace
 //!   covers the folder and no default is set, or when `--project` names it;
-//! - `attach` continues a session that already lives in the old store (a named
-//!   one, or the unfinished current one), so a recording started before an
-//!   upgrade can be finished;
+//! - `attach <id>` continues a session that already lives in the old store, so
+//!   a recording started before an upgrade can be finished (a bare `attach`
+//!   only points at it);
 //! - a concrete meeting id missing from the Workspace is looked up in the old
 //!   store (see [`CaptureTarget::Workspace::legacy`]).
 //!
@@ -78,7 +78,7 @@ pub fn resolve(
     if let Some(selector) = project_selector {
         let project = explicit_legacy_store(services, selector, cwd)?;
         let allowed = match intent {
-            CaptureIntent::Record => false,
+            CaptureIntent::Record | CaptureIntent::Attach(None) => false,
             CaptureIntent::Attach(session) => continues_legacy_session(services, &project, session),
             CaptureIntent::Existing => true,
         };
@@ -102,21 +102,39 @@ pub fn resolve(
 
     let legacy = legacy_store(services, cwd);
     let selected = workspace::resolve_workspace_or_default(&margins_home, None, cwd).map_err(
-        |error| match &legacy {
-            Some(project) => CliError::new(
-                "command_failed",
-                format!(
-                    "{error:#}. Earlier recordings in this folder stay readable with `margins --project {} ls`",
-                    project.root_dir.display()
+        |error| {
+            let typed = CliError::from_anyhow(error);
+            match &legacy {
+                // Keep the original code; only the message gains the hint.
+                Some(project) => CliError::new(
+                    typed.code(),
+                    format!(
+                        "{}. Earlier recordings in this folder stay readable with `margins --project {} ls`",
+                        typed.message(),
+                        project.root_dir.display()
+                    ),
                 ),
-            ),
-            None => CliError::from_anyhow(error),
+                None => typed,
+            }
         },
     )?;
-    // A session already recorded into the old store is continued there.
-    if let (CaptureIntent::Attach(session), Some(project)) = (intent, &legacy) {
-        if continues_legacy_session(services, project, session) {
+    // A named session already recorded into the old store is continued there.
+    // A bare attach never resumes the old store: older builds never marked
+    // sessions ended, so "active" there does not mean in progress.
+    if let (CaptureIntent::Attach(Some(name)), Some(project)) = (intent, &legacy) {
+        if continues_legacy_session(services, project, Some(name)) {
             return Ok(CaptureTarget::Legacy(project.clone()));
+        }
+    }
+    if let (CaptureIntent::Attach(None), Some(project)) = (intent, &legacy) {
+        if let Some(name) = unfinished_legacy_current(services, project) {
+            writeln!(
+                stderr,
+                "The earlier store in {} has an unfinished session {name}; continue it with `margins attach {name}` (or read it with `margins --project {} ls`).",
+                project.work_dir.join(".margins").display(),
+                project.root_dir.display()
+            )
+            .map_err(|error| CliError::from_anyhow(error.into()))?;
         }
     }
     let Some(selected) = selected else {
@@ -187,33 +205,37 @@ fn explicit_legacy_store(
     }
 }
 
-/// Whether `attach` continues a session that lives in the old store: the named
-/// session exists there, or (with no name) its current session is unfinished.
+/// Whether `attach <name>` continues a session that lives in the old store.
 fn continues_legacy_session(
     services: &CliServices,
     project: &ResolvedProject,
     session: Option<&str>,
 ) -> bool {
     let margins_dir = project.work_dir.join(".margins");
-    if !margins_dir.is_dir() {
-        return false;
-    }
-    if let Some(name) = session {
-        return services
-            .sessions
-            .exists(&margins_dir, name)
-            .unwrap_or(false);
-    }
-    let Ok(Some(current)) = services.sessions.current(&margins_dir) else {
+    let Some(name) = session else {
         return false;
     };
-    let current = current.trim();
-    !current.is_empty()
-        && services.sessions.list(&margins_dir).is_ok_and(|sessions| {
-            sessions
-                .iter()
-                .any(|info| info.name == current && info.lifecycle_state == "active")
-        })
+    margins_dir.is_dir()
+        && services
+            .sessions
+            .exists(&margins_dir, name)
+            .unwrap_or(false)
+}
+
+/// The old store's current session when it still reads as unfinished; only
+/// used to point a bare `attach` at `attach <name>`.
+fn unfinished_legacy_current(services: &CliServices, project: &ResolvedProject) -> Option<String> {
+    let margins_dir = project.work_dir.join(".margins");
+    if !margins_dir.is_dir() {
+        return None;
+    }
+    let current = services.sessions.current(&margins_dir).ok()??;
+    let current = current.trim().to_string();
+    let sessions = services.sessions.list(&margins_dir).ok()?;
+    sessions
+        .iter()
+        .any(|info| info.name == current && info.lifecycle_state == "active")
+        .then_some(current)
 }
 
 /// The per-folder store at or above `cwd`, if one already exists. Margins'
