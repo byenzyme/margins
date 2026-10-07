@@ -442,7 +442,7 @@ fn source_kind_label(binding: &WorkspaceBinding) -> &'static str {
             ..
         } => "notes (home)",
         WorkspaceBinding::NativeMarkdown { .. } => "notes (reference)",
-        WorkspaceBinding::Captures { .. } => "captures",
+        WorkspaceBinding::Captures { .. } => "recordings",
         WorkspaceBinding::Gmail { .. } => "google mail",
         WorkspaceBinding::GoogleCalendar { .. } => "google calendar",
         WorkspaceBinding::GoogleMeet { .. } => "google meet",
@@ -661,13 +661,26 @@ fn write_text(report: &StatusReport, all: bool, out: &mut dyn Write) -> std::io:
         }
         let skipped: usize = attention.skipped_by_reason.values().sum();
         if skipped > 0 {
-            let reasons = attention
-                .skipped_by_reason
-                .iter()
-                .map(|(kind, count)| format!("{count} {}", why(kind, None)))
-                .collect::<Vec<_>>()
-                .join("; ");
-            writeln!(out, "  Skipped: {skipped} ({reasons}) — see why with `{margins} status --explain`")?;
+            let reasons = if attention.skipped_by_reason.len() == 1 {
+                attention
+                    .skipped_by_reason
+                    .keys()
+                    .map(|kind| why(kind, None))
+                    .collect::<Vec<_>>()
+            } else {
+                attention
+                    .skipped_by_reason
+                    .iter()
+                    .map(|(kind, count)| format!("{} ({count})", why(kind, None)))
+                    .collect::<Vec<_>>()
+            }
+            .join("; ");
+            let see = if report.explain.is_some() {
+                String::new()
+            } else {
+                format!(" · see why with `{margins} status --explain`")
+            };
+            writeln!(out, "  Skipped {skipped}: {reasons}{see}")?;
         }
     }
     writeln!(

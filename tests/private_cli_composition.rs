@@ -417,8 +417,7 @@ fn workspace_commands_refuse_unsafe_home_and_state_cwds_with_exact_reasons() {
             } else if establishes {
                 let _ = id;
                 format!(
-                    "Margins won't make a Workspace here: {reason}; if this really is your notes folder, name it: margins init {}",
-                    cwd.canonicalize().unwrap().display()
+                    "Margins won't make a Workspace here: {reason}; name your notes folder instead: margins init /path/to/notes"
                 )
             } else {
                 margins_cli::commands::workspace::NO_WORKSPACE_MESSAGE.to_string()

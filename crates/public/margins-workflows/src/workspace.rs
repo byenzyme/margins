@@ -1703,16 +1703,18 @@ fn refuse_unsafe_home(
     explicit: bool,
 ) -> Result<Vec<String>> {
     let mut notes = Vec::new();
+    // Never allowed, named or not.
     let refuse = |reason: &str| -> Result<Vec<String>> {
-        let hint = if explicit {
-            "choose your notes folder instead".to_string()
-        } else {
-            format!(
-                "if this really is your notes folder, name it: margins init {}",
-                cwd.display()
-            )
-        };
-        bail!("Margins won't make a Workspace here: {reason}; {hint}")
+        bail!(
+            "Margins won't make a Workspace here: {reason}; name your notes folder instead: margins init /path/to/notes"
+        )
+    };
+    // Allowed when the person names the folder.
+    let refuse_unless_named = |reason: &str| -> Result<Vec<String>> {
+        bail!(
+            "Margins won't make a Workspace here: {reason}; if this really is your notes folder, name it: margins init {}",
+            cwd.display()
+        )
     };
 
     if cwd.parent().is_none() {
@@ -1771,7 +1773,7 @@ fn refuse_unsafe_home(
         .any(|root| cwd.starts_with(root))
     {
         if !explicit {
-            return refuse("this is a temporary folder");
+            return refuse_unless_named("this is a temporary folder");
         }
         notes.push("This is a temporary folder; the Workspace stops working if it is deleted.".to_string());
     }
@@ -1800,7 +1802,7 @@ fn refuse_unsafe_home(
         });
     if !has_markdown {
         if !explicit {
-            return refuse("there are no Markdown notes here");
+            return refuse_unless_named("there are no Markdown notes here");
         }
         notes.push("There are no Markdown notes here yet; Margins learns from them as you add them and run `margins sync`.".to_string());
     }
@@ -3983,9 +3985,8 @@ mod tests {
         assert_eq!(
             error.to_string(),
             format!(
-                "Margins won't make a Workspace here: it contains the notes folder of Workspace practice ({}); if this really is your notes folder, name it: margins init {}",
-                notes.canonicalize().unwrap().display(),
-                ancestor.canonicalize().unwrap().display()
+                "Margins won't make a Workspace here: it contains the notes folder of Workspace practice ({}); name your notes folder instead: margins init /path/to/notes",
+                notes.canonicalize().unwrap().display()
             )
         );
         // Naming the folder does not lift this refusal.
