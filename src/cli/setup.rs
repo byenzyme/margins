@@ -625,8 +625,118 @@ fn human_bytes(bytes: u64) -> String {
 
 // ── Speech model setup ────────────────────────────────────────────────────────
 
+/// The command that downloads only the speech model.
+const SPEECH_SETUP_COMMAND: &str = "margins setup --only speech";
+
+/// Approximate size of the CoreML Parakeet speech model: the exact size is
+/// only known once the download starts.
+const SPEECH_MODEL_APPROX_BYTES: u64 = 464 * 1_048_576;
+
+/// Why the speech model is about to be downloaded. Onboarding never downloads
+/// it; the first recording or transcription does, after asking.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpeechPurpose {
+    Setup,
+    Record,
+    #[cfg_attr(not(all(feature = "coreml-asr", target_os = "macos")), allow(dead_code))]
+    Transcribe,
+}
+
+impl SpeechPurpose {
+    fn sentence(self) -> &'static str {
+        match self {
+            SpeechPurpose::Setup => "Local speech",
+            SpeechPurpose::Record => "Recording",
+            SpeechPurpose::Transcribe => "Transcribing",
+        }
+    }
+}
+
+/// Bytes the first speech download fetches: the speech model plus any speaker
+/// recognition models this build bundles.
+#[cfg_attr(not(all(feature = "coreml-asr", target_os = "macos")), allow(dead_code))]
+fn speech_download_bytes() -> u64 {
+    #[cfg(feature = "polyvoice-diarization")]
+    let speaker = margins_media::providers::polyvoice::balanced_model_downloads()
+        .map(|files| files.iter().map(|(_, size)| *size).sum::<u64>())
+        .unwrap_or(0);
+    #[cfg(not(feature = "polyvoice-diarization"))]
+    let speaker = 0;
+    SPEECH_MODEL_APPROX_BYTES.saturating_add(speaker)
+}
+
+/// State the download size and ask before fetching the speech model. Without a
+/// terminal, refuse with the exact command and size instead of downloading.
+#[cfg_attr(not(all(feature = "coreml-asr", target_os = "macos")), allow(dead_code))]
+fn confirm_speech_download(
+    purpose: SpeechPurpose,
+    bytes: u64,
+    interactive: bool,
+    input: &mut dyn BufRead,
+    output: &mut dyn Write,
+) -> Result<()> {
+    let size = human_bytes(bytes);
+    let need = format!(
+        "{} needs the local speech model, a one-time download of about {size}.",
+        purpose.sentence()
+    );
+    if !interactive {
+        anyhow::bail!("{need} Run `{SPEECH_SETUP_COMMAND}` in a terminal to download it.");
+    }
+    write!(output, "{need} Download now? [Y/n] ")?;
+    output.flush()?;
+    let mut answer = String::new();
+    input.read_line(&mut answer)?;
+    if matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "" | "y" | "yes"
+    ) {
+        return Ok(());
+    }
+    if purpose == SpeechPurpose::Setup {
+        anyhow::bail!("setup canceled");
+    }
+    anyhow::bail!("Nothing was downloaded. Run `{SPEECH_SETUP_COMMAND}` when ready (about {size}).")
+}
+
+/// Download the speech model only after [`confirm_speech_download`] agrees;
+/// returns whether `download` ran.
+#[cfg_attr(not(all(feature = "coreml-asr", target_os = "macos")), allow(dead_code))]
+fn offer_speech_download(
+    installed: bool,
+    purpose: SpeechPurpose,
+    bytes: u64,
+    interactive: bool,
+    input: &mut dyn BufRead,
+    output: &mut dyn Write,
+    download: impl FnOnce() -> Result<()>,
+) -> Result<bool> {
+    if installed {
+        return Ok(false);
+    }
+    confirm_speech_download(purpose, bytes, interactive, input, output)?;
+    download()?;
+    Ok(true)
+}
+
+/// Before the first `margins transcribe`, offer the speech model download.
+#[cfg(all(feature = "coreml-asr", target_os = "macos"))]
+fn ensure_speech_model_for_transcribe() -> Result<()> {
+    ensure_speech_model_with(SpeechPurpose::Transcribe)
+}
+
 #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
 fn ensure_speech_model(explicit_setup: bool) -> Result<()> {
+    ensure_speech_model_with(if explicit_setup {
+        SpeechPurpose::Setup
+    } else {
+        SpeechPurpose::Record
+    })
+}
+
+#[cfg(all(feature = "coreml-asr", target_os = "macos"))]
+fn ensure_speech_model_with(purpose: SpeechPurpose) -> Result<()> {
+    let explicit_setup = purpose == SpeechPurpose::Setup;
     if margins_media::model_registry::resolve_coreml_dir().is_some() {
         if explicit_setup {
             let speaker_setup = start_speaker_recognition()?;
@@ -636,32 +746,21 @@ fn ensure_speech_model(explicit_setup: bool) -> Result<()> {
         return Ok(());
     }
 
-    let mut stderr = io::stderr().lock();
-    if !io::stdin().is_terminal() {
-        anyhow::bail!(
-            "local transcription is not installed; run `margins setup` in a terminal before `margins new`"
-        );
-    }
-    write!(
-        stderr,
-        "Local speech needs a one-time download. Download now? [Y/n] "
+    offer_speech_download(
+        false,
+        purpose,
+        speech_download_bytes(),
+        io::stdin().is_terminal(),
+        &mut io::stdin().lock(),
+        &mut io::stderr(),
+        download_speech_model_with_progress,
     )?;
-    stderr.flush()?;
-    let mut answer = String::new();
-    io::stdin().read_line(&mut answer)?;
-    let accepted = matches!(
-        answer.trim().to_ascii_lowercase().as_str(),
-        "" | "y" | "yes"
-    );
-    if !accepted {
-        if explicit_setup {
-            anyhow::bail!("setup canceled");
-        }
-        anyhow::bail!(
-            "local transcription is required before `margins new`; run `margins setup` when ready"
-        );
-    }
+    Ok(())
+}
 
+#[cfg(all(feature = "coreml-asr", target_os = "macos"))]
+fn download_speech_model_with_progress() -> Result<()> {
+    let mut stderr = io::stderr().lock();
     let speaker_setup = start_speaker_recognition()?;
     let terminal = stderr.is_terminal();
     let mut last_percent = u8::MAX;

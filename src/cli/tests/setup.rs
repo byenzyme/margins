@@ -1090,3 +1090,109 @@
         );
         assert!(stderr.contains("catalyst mode: local"), "{stderr}");
     }
+
+    #[test]
+    fn first_record_states_the_speech_download_size_and_asks() {
+        let mut input = "y\n".as_bytes();
+        let mut output = Vec::new();
+        confirm_speech_download(
+            SpeechPurpose::Record,
+            SPEECH_MODEL_APPROX_BYTES,
+            true,
+            &mut input,
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "Recording needs the local speech model, a one-time download of about 464.0 MB. Download now? [Y/n] "
+        );
+    }
+
+    #[test]
+    fn declining_the_speech_download_downloads_nothing_and_names_the_command() {
+        let mut input = "n\n".as_bytes();
+        let mut output = Vec::new();
+        let error = confirm_speech_download(
+            SpeechPurpose::Transcribe,
+            SPEECH_MODEL_APPROX_BYTES,
+            true,
+            &mut input,
+            &mut output,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(String::from_utf8(output).unwrap().starts_with("Transcribing needs"));
+        assert_eq!(
+            error,
+            "Nothing was downloaded. Run `margins setup --only speech` when ready (about 464.0 MB)."
+        );
+    }
+
+    #[test]
+    fn non_interactive_speech_download_refuses_with_command_and_size() {
+        let mut input = "y\n".as_bytes();
+        let mut output = Vec::new();
+        let error = confirm_speech_download(
+            SpeechPurpose::Record,
+            SPEECH_MODEL_APPROX_BYTES + 30 * 1_048_576,
+            false,
+            &mut input,
+            &mut output,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(output.is_empty(), "no prompt without a terminal");
+        assert_eq!(
+            error,
+            "Recording needs the local speech model, a one-time download of about 494.0 MB. Run `margins setup --only speech` in a terminal to download it."
+        );
+    }
+
+    #[test]
+    fn speech_download_runs_only_after_consent() {
+        let downloads = AtomicUsize::new(0);
+        let stub = || {
+            downloads.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        };
+        // Installed: no prompt, no download.
+        let mut output = Vec::new();
+        assert!(!offer_speech_download(
+            true,
+            SpeechPurpose::Record,
+            SPEECH_MODEL_APPROX_BYTES,
+            true,
+            &mut "".as_bytes(),
+            &mut output,
+            stub,
+        )
+        .unwrap());
+        assert!(output.is_empty());
+        // Non-interactive and declined: refused before the download.
+        for (interactive, answer) in [(false, "y\n"), (true, "n\n")] {
+            let result = offer_speech_download(
+                false,
+                SpeechPurpose::Record,
+                SPEECH_MODEL_APPROX_BYTES,
+                interactive,
+                &mut answer.as_bytes(),
+                &mut Vec::new(),
+                stub,
+            );
+            assert!(result.unwrap_err().to_string().contains("margins setup --only speech"));
+        }
+        assert_eq!(downloads.load(Ordering::SeqCst), 0);
+        // Accepted: the stubbed download runs once.
+        assert!(offer_speech_download(
+            false,
+            SpeechPurpose::Record,
+            SPEECH_MODEL_APPROX_BYTES,
+            true,
+            &mut "\n".as_bytes(),
+            &mut Vec::new(),
+            stub,
+        )
+        .unwrap());
+        assert_eq!(downloads.load(Ordering::SeqCst), 1);
+    }

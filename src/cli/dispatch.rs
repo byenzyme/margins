@@ -399,6 +399,15 @@ where
         };
     }
 
+    // The first transcription is where the speech model is offered (onboarding
+    // never downloads it); the public dispatcher then finds it installed.
+    #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
+    if matches!(parsed.command, Some(Command::Transcribe { .. })) {
+        if let Err(error) = ensure_speech_model_for_transcribe() {
+            return report_error(&format!("{error:#}"));
+        }
+    }
+
     if let Some(Command::Note { print }) = &parsed.command {
         return match crate::note::run(*print) {
             Ok(()) => 0,
