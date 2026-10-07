@@ -646,7 +646,7 @@ fn write_text(report: &StatusReport, all: bool, out: &mut dyn Write) -> std::io:
         if !attention.from_readings.is_empty() {
             writeln!(
                 out,
-                "  From your readings: {}",
+                "  Now: {}",
                 entity_groups(&attention.from_readings, all, waiting)
             )?;
         }
@@ -654,7 +654,7 @@ fn write_text(report: &StatusReport, all: bool, out: &mut dyn Write) -> std::io:
             let more = attention.automatic_total - attention.automatic.len();
             writeln!(
                 out,
-                "  Picked automatically ({}): {}{}",
+                "  Also picked by Margins ({}): {}{}",
                 attention.automatic_total,
                 entity_groups(&attention.automatic, true, waiting),
                 if more > 0 {
@@ -733,12 +733,7 @@ fn write_text(report: &StatusReport, all: bool, out: &mut dyn Write) -> std::io:
         }
         writeln!(out, "Why (the next catalyst build: {}):", totals.join(", "))?;
         for reading in &explain.readings {
-            let learns = if reading.learns.is_empty() {
-                "nothing yet".to_string()
-            } else {
-                reading.learns.join(", ")
-            };
-            writeln!(out, "  {}: {learns}", plain_reading(&reading.reading))?;
+            writeln!(out, "  {}", explain_line(reading))?;
             for skip in &reading.skipped {
                 writeln!(out, "    {} — {}", skip.what, skip.why)?;
             }
@@ -880,6 +875,25 @@ pub fn plain_reading(source: &str) -> String {
         }
     }
     plain
+}
+
+/// One `--explain` (and edit preview) line for a reading: what it learns
+/// about, without repeating the reading itself ("the Meetings folder: learned
+/// about" rather than "the Meetings folder: the Meetings folder").
+pub fn explain_line(reading: &ExplainReading) -> String {
+    let plain = plain_reading(&reading.reading);
+    let (itself, others): (Vec<&String>, Vec<&String>) = reading
+        .learns
+        .iter()
+        .partition(|learned| plain.starts_with(learned.as_str()));
+    let others = others.iter().map(|other| other.as_str()).collect::<Vec<_>>().join(", ");
+    let learns = match (itself.is_empty(), others.is_empty()) {
+        (false, true) => "learned about".to_string(),
+        (false, false) => format!("learned about, with {others}"),
+        (true, false) => others,
+        (true, true) => "nothing yet".to_string(),
+    };
+    format!("{plain}: {learns}")
 }
 
 /// An entity's state in the words status uses everywhere.

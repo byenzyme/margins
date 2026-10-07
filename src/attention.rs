@@ -59,7 +59,10 @@ impl Entity {
             .get(&self.name.to_lowercase())
             .cloned()
             .unwrap_or_else(|| self.name.clone());
-        margins_cli::commands::status::plain_entity(&self.entity_type, &name)
+        match self.entity_type.as_str() {
+            "link" => format!("{name} (linked page)"),
+            kind => margins_cli::commands::status::plain_entity(kind, &name),
+        }
     }
 
     fn state_label(&self, generating: bool) -> String {
@@ -318,14 +321,20 @@ fn summarize(diff: &Diff, next: &Snapshot, casing: &BTreeMap<String, String>) ->
         ));
     } else {
         if !diff.added.is_empty() {
-            parts.push(format!("+ {}", listed(&diff.added, |entity| entity.label(casing))));
+            parts.push(format!(
+                "now learning about {}",
+                listed(&diff.added, |entity| entity.label(casing))
+            ));
         }
         if !diff.removed.is_empty() {
-            parts.push(format!("− {}", listed(&diff.removed, |entity| entity.label(casing))));
+            parts.push(format!(
+                "no longer learning about {}",
+                listed(&diff.removed, |entity| entity.label(casing))
+            ));
         }
         if !diff.changed.is_empty() {
             parts.push(format!(
-                "~ {}",
+                "changed: {}",
                 listed(&diff.changed, |change| describe_change(change, diff.generating, casing))
             ));
         }
@@ -404,7 +413,7 @@ mod tests {
         assert_eq!(diff.changed.len(), 1);
         assert_eq!(
             diff.summary,
-            "+ bob · − projects · ~ Alice Chen (building → has catalysts)"
+            "now learning about bob (linked page) · no longer learning about projects (linked page) · changed: Alice Chen (linked page) (building → has catalysts)"
         );
 
         let program_changed = super::diff(Some(&before), &snap("b", before.entities.clone()), true, &BTreeMap::new());
@@ -416,7 +425,7 @@ mod tests {
         let moved = super::diff(Some(&before), &snap("b", moved), true, &BTreeMap::new());
         assert_eq!(
             moved.summary,
-            "~ projects (from a reading → picked automatically) · (program changed) · 1 still building"
+            "changed: projects (linked page) (from a reading → picked automatically) · (program changed) · 1 still building"
         );
         let same = super::diff(Some(&before), &before, false, &BTreeMap::new());
         assert_eq!(same.summary, "no change in what Margins learns about · 1 waiting for catalysts");

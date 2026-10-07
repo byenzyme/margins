@@ -30,6 +30,20 @@ use std::path::{Path, PathBuf};
 pub const NO_CAPTURE_WORKSPACE_MESSAGE: &str = "No Margins Workspace covers this folder and no default Workspace is set, so there is nowhere to keep this recording. \
 Run `margins init` in your notes folder first, or pass `--workspace <id>`.";
 
+/// Shown when `ls`, `current`, or another read finds no Workspace.
+pub const NO_SESSIONS_WORKSPACE_MESSAGE: &str = "No Margins Workspace covers this folder and no default Workspace is set, so there are no recordings to show. \
+Run `margins init` in your notes folder first, or pass `--workspace <id>`.";
+
+fn no_workspace(intent: CaptureIntent<'_>) -> CliError {
+    CliError::new(
+        "workspace_required",
+        match intent {
+            CaptureIntent::Existing => NO_SESSIONS_WORKSPACE_MESSAGE,
+            _ => NO_CAPTURE_WORKSPACE_MESSAGE,
+        },
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaptureIntent<'a> {
     /// Starts a new session (`new`, bare `margins`, `transcribe`).
@@ -96,7 +110,7 @@ pub fn resolve(
         let selected =
             workspace::resolve_workspace_or_default(&margins_home, workspace_selector, cwd)
                 .map_err(CliError::from_anyhow)?
-                .ok_or_else(|| CliError::new("workspace_required", NO_CAPTURE_WORKSPACE_MESSAGE))?;
+                .ok_or_else(|| no_workspace(intent))?;
         return workspace_target(selected.workspace, None);
     }
 
@@ -140,7 +154,7 @@ pub fn resolve(
     let Some(selected) = selected else {
         return match (intent, legacy) {
             (CaptureIntent::Existing, Some(project)) => Ok(CaptureTarget::Legacy(project)),
-            _ => Err(CliError::new("workspace_required", NO_CAPTURE_WORKSPACE_MESSAGE)),
+            _ => Err(no_workspace(intent)),
         };
     };
     if selected.via_default {
