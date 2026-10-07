@@ -34,7 +34,7 @@
                 "counts": {"selected": 4, "planned": 3, "skipped": 1, "candidates_skipped": 5}
             }]
         });
-        let view = explain_view(&plan);
+        let view = explain_view(&plan, &std::collections::BTreeMap::from([("alice".to_string(), "Alice".to_string())]));
         assert_eq!((view.planned, view.skipped, view.candidates_skipped), (3, 1, 5));
         assert!(!view.truncated);
         let groups = view
@@ -45,16 +45,16 @@
         assert_eq!(
             groups,
             [
-                ("folder \"Meetings\"", vec!["meetings".to_string()]),
+                ("folder \"Meetings\"", vec!["the meetings folder".to_string()]),
                 (
                     "folder \"People\" including linked pages",
-                    vec!["alice (linked page)".to_string()]
+                    vec!["Alice (linked page)".to_string()]
                 ),
-                ("picked automatically", vec!["focus".to_string()]),
+                ("picked automatically", vec!["#focus".to_string()]),
             ]
         );
         let people = &view.readings[1].skipped;
-        assert_eq!(people[0].what, "people");
+        assert_eq!(people[0].what, "the people folder");
         assert_eq!(people[0].why, "too little written about it yet");
         assert_eq!(people[1].what, "4 more pages");
         assert_eq!(people[1].why, "linked fewer than 3 times");
@@ -66,23 +66,20 @@
             .flat_map(|reading| &reading.skipped)
             .all(|skip| !skip.why.contains("token")));
 
-        // enzyme 0.12.1: per-reading jobs and skips (TODO(E6): drop).
-        let legacy = serde_json::json!({
-            "schema": "enzyme.spec-plan.v1",
-            "vaults": [{
-                "readings": [{
-                    "source": "folder \"Meetings\"",
-                    "jobs": [{"entity_name": "meetings", "entity_type": "folder"}],
-                    "skipped": [{"entity_name": "standup", "entity_type": "link",
-                                 "reason": {"kind": "thin_context"}}]
-                }],
-                "other_jobs": [], "other_skipped": [],
-                "totals": {"jobs": 1, "skipped": 1}
-            }]
-        });
-        let view = explain_view(&legacy);
-        assert_eq!((view.planned, view.skipped), (1, 1));
-        assert_eq!(view.readings.len(), 1, "an empty automatic group is dropped");
-        assert_eq!(view.readings[0].learns, ["meetings"]);
-        assert_eq!(view.readings[0].skipped[0].why, "too little written about it yet");
+        assert_eq!(
+            margins_cli::commands::status::plain_reading("folder \"People\" including linked pages"),
+            "the People folder and the pages it links"
+        );
+
+        // An entity the engine cannot tie to one reading gets its own group.
+        let unattributed = serde_json::json!({"vaults": [{
+            "readings": [],
+            "entities": [{"kind": "link", "name": "bob", "origin": "unattributed",
+                          "reading": null, "status": "planned", "questions": 3}],
+            "skipped": [], "counts": {"planned": 1, "skipped": 0, "candidates_skipped": 0}
+        }]});
+        let view = explain_view(&unattributed, &std::collections::BTreeMap::new());
+        assert_eq!(view.readings.len(), 1);
+        assert_eq!(view.readings[0].reading, "not tied to one reading");
+        assert_eq!(view.readings[0].learns, ["bob"]);
     }

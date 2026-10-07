@@ -1334,7 +1334,9 @@ fn cli_only_newcomer_learns_the_program_and_sees_it_through_status() {
         "{init_stdout}"
     );
     assert!(!init_stdout.contains("<margins_init"), "{init_stdout}");
-    assert!(init_stdout.contains("Margins learns about:\n  Meetings — operational\n"), "{init_stdout}");
+    assert!(init_stdout.contains("\nReads: the Meetings folder — operational · "), "{init_stdout}");
+    assert!(init_stdout.contains("\nLearns about now: "), "{init_stdout}");
+    assert!(init_stdout.contains("\nLeaves out: templates · Attachments\n"), "{init_stdout}");
     assert!(init_stdout.contains(" notes indexed · "), "{init_stdout}");
     assert!(
         init_stdout.ends_with(
@@ -1398,9 +1400,9 @@ fn cli_only_newcomer_learns_the_program_and_sees_it_through_status() {
     let readable = text(&env.ok(&["--workspace", "practice", "status", "--explain"]).stdout);
     for expected in [
         " notes indexed",
-        "\nLearns about:\n  Meetings — operational\n",
+        "\nLearns about:\n  the Meetings folder — operational\n",
         "\nWhy (the next catalyst build: ",
-        "  folder \"Meetings\"",
+        "\n  the Meetings folder: ",
     ] {
         assert!(readable.contains(expected), "missing {expected:?} in:\n{readable}");
     }

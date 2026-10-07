@@ -187,6 +187,8 @@ pub struct ExplainView {
     pub candidates_skipped: usize,
     /// The engine listed only part of a long plan.
     pub truncated: bool,
+    /// Why there is no explanation right now, when there is none.
+    pub unavailable: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -608,7 +610,10 @@ fn write_text(report: &StatusReport, all: bool, out: &mut dyn Write) -> std::io:
         }
         parts.join(" · ")
     };
-    writeln!(out, "Catalysts: {state}")?;
+    writeln!(
+        out,
+        "Catalysts (questions Margins prepares from your notes to find related ones): {state}"
+    )?;
     if let Some(step) = &catalysts.next_step {
         writeln!(out, "  Next: {step}")?;
     }
@@ -624,9 +629,9 @@ fn write_text(report: &StatusReport, all: bool, out: &mut dyn Write) -> std::io:
         }
     }
     for reading in &attention.readings {
-        let mut line = format!("  {}", reading.label);
+        let mut line = format!("  {}", workspace_text::describe_ref(&reading.reading));
         if reading.including_linked_pages {
-            line.push_str(", including linked pages");
+            line.push_str(" and the pages it links");
         }
         if let Some(about) = &reading.about {
             line.push_str(&format!(" — {about}"));
@@ -659,28 +664,42 @@ fn write_text(report: &StatusReport, all: bool, out: &mut dyn Write) -> std::io:
                 }
             )?;
         }
-        let skipped: usize = attention.skipped_by_reason.values().sum();
-        if skipped > 0 {
-            let reasons = if attention.skipped_by_reason.len() == 1 {
-                attention
-                    .skipped_by_reason
-                    .keys()
-                    .map(|kind| why(kind, None))
-                    .collect::<Vec<_>>()
-            } else {
-                attention
-                    .skipped_by_reason
-                    .iter()
-                    .map(|(kind, count)| format!("{} ({count})", why(kind, None)))
-                    .collect::<Vec<_>>()
+        // Skipped entities appear once, here, grouped by reason.
+        let skipped = attention
+            .from_readings
+            .iter()
+            .chain(attention.automatic.iter())
+            .filter(|entity| entity.state == "skipped")
+            .collect::<Vec<_>>();
+        let total: usize = attention.skipped_by_reason.values().sum();
+        if total > 0 {
+            let mut by_reason: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            for entity in &skipped {
+                by_reason
+                    .entry(why(entity.skip_kind.as_deref().unwrap_or("skipped"), None))
+                    .or_default()
+                    .push(entity_label(entity));
             }
-            .join("; ");
+            let mut groups = by_reason
+                .into_iter()
+                .map(|(reason, mut names)| {
+                    if !all && names.len() > AUTOMATIC_SHOWN {
+                        let more = names.len() - AUTOMATIC_SHOWN;
+                        names.truncate(AUTOMATIC_SHOWN);
+                        names.push(format!("+{more} more"));
+                    }
+                    format!("{} ({reason})", names.join(", "))
+                })
+                .collect::<Vec<_>>();
+            if skipped.len() < total {
+                groups.push(format!("{} more (--all)", total - skipped.len()));
+            }
             let see = if report.explain.is_some() {
                 String::new()
             } else {
                 format!(" · see why with `{margins} status --explain`")
             };
-            writeln!(out, "  Skipped {skipped}: {reasons}{see}")?;
+            writeln!(out, "  Skipped: {}{see}", groups.join("; "))?;
         }
     }
     writeln!(
@@ -696,7 +715,10 @@ fn write_text(report: &StatusReport, all: bool, out: &mut dyn Write) -> std::io:
         writeln!(out, "New notes go to: {destination}")?;
     }
 
-    if let Some(explain) = &report.explain {
+    if let Some(reason) = report.explain.as_ref().and_then(|explain| explain.unavailable.as_ref()) {
+        writeln!(out)?;
+        writeln!(out, "Why: not available yet — {reason}")?;
+    } else if let Some(explain) = &report.explain {
         writeln!(out)?;
         let mut totals = vec![format!(
             "{} {} learned about",
@@ -716,7 +738,7 @@ fn write_text(report: &StatusReport, all: bool, out: &mut dyn Write) -> std::io:
             } else {
                 reading.learns.join(", ")
             };
-            writeln!(out, "  {}: {learns}", reading.reading)?;
+            writeln!(out, "  {}: {learns}", plain_reading(&reading.reading))?;
             for skip in &reading.skipped {
                 writeln!(out, "    {} — {}", skip.what, skip.why)?;
             }
@@ -789,35 +811,83 @@ fn write_text(report: &StatusReport, all: bool, out: &mut dyn Write) -> std::io:
     }
 }
 
-/// Entities grouped by state: "ready: a, b · building: c · skipped: d (thin
-/// context)".
+/// Entities grouped by state: "ready: a, b · building: c". Skipped ones are
+/// listed once, on the Skipped line.
 fn entity_groups(entities: &[EntityView], all: bool, waiting: &str) -> String {
     let limit = if all { usize::MAX } else { AUTOMATIC_SHOWN };
-    let names = |state: &dyn Fn(&EntityView) -> bool, skip: bool| {
+    let names = |state: &dyn Fn(&EntityView) -> bool| {
         let matching = entities.iter().filter(|entity| state(entity)).collect::<Vec<_>>();
-        let mut shown = matching
-            .iter()
-            .take(limit)
-            .map(|entity| match (skip, entity.skip_kind.as_deref()) {
-                (true, Some(kind)) => format!("{} ({})", entity.name, why(kind, None)),
-                _ => entity.name.clone(),
-            })
-            .collect::<Vec<_>>();
+        let mut shown = matching.iter().take(limit).map(|entity| entity_label(entity)).collect::<Vec<_>>();
         if matching.len() > limit {
             shown.push(format!("+{} more (--all)", matching.len() - limit));
         }
         shown.join(", ")
     };
     let mut groups = Vec::new();
-    for (label, state, skip) in [
-        ("ready", &(|entity: &EntityView| entity.state == "ready") as &dyn Fn(&EntityView) -> bool, false),
-        (waiting, &|entity: &EntityView| !matches!(entity.state.as_str(), "ready" | "skipped"), false),
-        ("skipped", &|entity: &EntityView| entity.state == "skipped", true),
+    for (label, state) in [
+        ("ready", &(|entity: &EntityView| entity.state == "ready") as &dyn Fn(&EntityView) -> bool),
+        (waiting, &|entity: &EntityView| !matches!(entity.state.as_str(), "ready" | "skipped")),
     ] {
-        let listed = names(state, skip);
+        let listed = names(state);
         if !listed.is_empty() {
             groups.push(format!("{label}: {listed}"));
         }
     }
-    groups.join(" · ")
+    if groups.is_empty() {
+        "nothing yet".to_string()
+    } else {
+        groups.join(" · ")
+    }
+}
+
+/// An engine entity in plain words: "the Meetings folder", "#focus", "Alice".
+pub fn entity_label(entity: &EntityView) -> String {
+    plain_entity(&entity.entity_type, &entity.name)
+}
+
+pub fn plain_entity(kind: &str, name: &str) -> String {
+    match kind {
+        "folder" => format!("the {name} folder"),
+        "tag" => format!("#{}", name.trim_start_matches('#')),
+        "log" => format!("the {name} log"),
+        _ => name.to_string(),
+    }
+}
+
+/// A reading as the engine prints it (`folder "People" including linked
+/// pages`) in plain words ("the People folder and the pages it links").
+pub fn plain_reading(source: &str) -> String {
+    let source = source.trim();
+    let (kind, rest) = source.split_once(' ').unwrap_or((source, ""));
+    let (name, tail) = match rest.strip_prefix('"').and_then(|rest| rest.split_once('"')) {
+        Some((name, tail)) => (name.to_string(), tail.trim()),
+        None => (rest.to_string(), ""),
+    };
+    let mut plain = match kind {
+        "folder" => format!("the {name} folder"),
+        "tag" => format!("notes tagged #{}", name.trim_start_matches('#')),
+        "link" => name,
+        "log" => format!("the {name} log"),
+        _ => source.replace('"', ""),
+    };
+    match tail {
+        "" => {}
+        "including linked pages" => plain.push_str(" and the pages it links"),
+        "including who links" => plain.push_str(" and who links to it"),
+        other => {
+            plain.push(' ');
+            plain.push_str(&other.replace('"', ""));
+        }
+    }
+    plain
+}
+
+/// An entity's state in the words status uses everywhere.
+pub fn state_words(state: &str, skip_kind: Option<&str>, generating: bool) -> String {
+    match state {
+        "ready" => "has catalysts".to_string(),
+        "skipped" => format!("skipped: {}", why(skip_kind.unwrap_or("skipped"), None)),
+        _ if generating => "building".to_string(),
+        _ => "waiting for catalysts".to_string(),
+    }
 }

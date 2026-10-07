@@ -49,8 +49,8 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show your Workspace: what Margins learns about, its index and
-    /// catalysts, Sources, connections, and captures
+    /// Show your Workspace: what Margins learns about, its index, its
+    /// catalysts (questions Margins prepares from your notes), and its Sources
     Status {
         /// Also show, per reading, what it picked and why some are skipped
         #[arg(long)]

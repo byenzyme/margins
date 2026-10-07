@@ -1358,6 +1358,64 @@ pub fn discard_new_workspace(margins_home: &Path, id: &str) -> Result<()> {
     })
 }
 
+/// An exclusive lock for Margins' own derived state in a Workspace state
+/// directory (the attention snapshot). It is separate from the program lock,
+/// so a caller holding that one can never deadlock on it. Released on drop.
+pub fn lock_derived_state(state_dir: &Path) -> Result<File> {
+    std::fs::create_dir_all(state_dir)
+        .with_context(|| format!("creating workspace state at {}", state_dir.display()))?;
+    let path = state_dir.join("derived.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    file.lock_exclusive()
+        .with_context(|| format!("locking {}", path.display()))?;
+    Ok(file)
+}
+
+/// How names are written in the Workspace's Markdown sources: lowercase
+/// folder names and note titles (file stems) mapped to their own casing, so
+/// output can show "Alice Chen" where the engine reports "alice chen".
+pub fn name_casing(workspace: &ResolvedWorkspace) -> BTreeMap<String, String> {
+    let mut names = BTreeMap::new();
+    for root in workspace
+        .config
+        .bindings
+        .values()
+        .filter_map(WorkspaceBinding::native_markdown_path)
+    {
+        for entry in WalkDir::new(root)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|entry| {
+                entry.depth() == 0
+                    || !entry.file_name().to_str().is_some_and(|name| name.starts_with('.'))
+            })
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.depth() > 0)
+        {
+            let name = if entry.file_type().is_dir() {
+                entry.file_name().to_str().map(str::to_string)
+            } else {
+                entry
+                    .path()
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .filter(|extension| extension.eq_ignore_ascii_case("md"))
+                    .and_then(|_| entry.path().file_stem()?.to_str().map(str::to_string))
+            };
+            if let Some(name) = name {
+                names.entry(name.to_lowercase()).or_insert(name);
+            }
+        }
+    }
+    names
+}
+
 /// Whether `folder` may become a new Workspace's notes folder for `margins
 /// init`. The refusals are the implicit-Workspace ones; a folder the person
 /// named (`explicit`) may also be temporary or hold no Markdown yet, and each

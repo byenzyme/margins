@@ -587,7 +587,7 @@ fn read_like_commands_never_create_a_workspace_and_only_init_establishes_one() {
         )),
         "{init_stdout}"
     );
-    assert!(init_stdout.contains("\nRecall: 1 note indexed · search finds direct matches"), "{init_stdout}");
+    assert!(init_stdout.contains("\nRecall: 1 note indexed · catalysts are off"), "{init_stdout}");
     assert!(init_stdout.contains("margins setup --only catalyst"), "{init_stdout}");
     let config_path = margins_home.join("configs/fresh-notes.enzyme");
     assert!(config_path.is_file());
@@ -895,7 +895,7 @@ fn init_indexes_only_without_a_usable_generator_and_says_so() {
     assert!(stdout.starts_with("Workspace init-status ("), "{stdout}");
     assert!(
         stdout.contains(
-            "\nRecall: 5 notes indexed · search finds direct matches; catalysts are not set up\n  Catalysts are off, so search finds direct matches only. Turn them on with `margins setup --only catalyst`.\n"
+            "\nRecall: 5 notes indexed · catalysts are off\n  Catalysts are off, so search finds direct matches only. Turn them on with `margins setup --only catalyst`.\n"
         ),
         "{stdout}"
     );

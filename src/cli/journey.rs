@@ -60,8 +60,8 @@ fn run_init_journey(
                     eprintln!("Note: {note}");
                 }
             }
-            offer_catalysts(&margins_home, json);
-            // Fill and check the preset before anything is written.
+            // Fill and check the preset before anything is written or
+            // downloaded.
             let mut config =
                 match margins_workflows::workspace::new_workspace_config(&margins_home, &id, &folder) {
                     Ok(config) => config,
@@ -78,6 +78,7 @@ fn run_init_journey(
                     Err(error) => return fail(error),
                 }
             };
+            offer_catalysts(&margins_home, json);
             let workspace = match margins_workflows::workspace::create_workspace_with_config(
                 &margins_home,
                 &config,
@@ -142,15 +143,35 @@ fn finish_init(
     json: bool,
 ) -> i32 {
     use margins_cli::commands::init::{self as init, InitReceipt, InitRecall};
+    use margins_cli::commands::status::{plain_entity, state_words, why};
     let catalyst = margins_workflows::catalyst::selected_status(margins_home);
-    let mut learns_about = init::declared_readings(workspace);
-    if workspace.config.policy.automatic.is_some() {
-        learns_about.push(if learns_about.is_empty() {
-            "whatever it picks automatically".to_string()
-        } else {
-            "…plus what those miss, picked automatically".to_string()
-        });
-    }
+    let casing = margins_workflows::workspace::name_casing(workspace);
+    let label = |entity: &crate::attention::Entity| {
+        let name = casing
+            .get(&entity.name.to_lowercase())
+            .cloned()
+            .unwrap_or_else(|| entity.name.clone());
+        plain_entity(&entity.entity_type, &name)
+    };
+    let generating = status.status != "index_only";
+    let learns_about = status
+        .entities
+        .iter()
+        .filter(|entity| entity.state != "skipped")
+        .map(|entity| match entity.state.as_str() {
+            "ready" => label(entity),
+            state => format!("{} ({})", label(entity), state_words(state, None, generating)),
+        })
+        .collect::<Vec<_>>();
+    let skipped = status
+        .entities
+        .iter()
+        .filter(|entity| entity.state == "skipped")
+        .map(|entity| init::InitSkip {
+            what: label(entity),
+            why: why(entity.skip_kind.as_deref().unwrap_or("skipped"), None),
+        })
+        .collect::<Vec<_>>();
     let next_step = match status.status {
         "index_only" => Some(crate::recall::ENABLE_CATALYSTS_HINT.to_string()),
         "catalysts_pending" => Some(
@@ -180,7 +201,10 @@ fn finish_init(
             catalyst_mode: catalyst.mode.as_str().to_string(),
             next_step,
         },
-        learns_about,
+        reads: init::declared_readings(workspace),
+        learns_about: Some(learns_about),
+        skipped,
+        leaves_out: init::left_out(workspace),
         attention,
         notes: if json { notes } else { Vec::new() },
     };
@@ -239,9 +263,10 @@ fn offer_catalysts(margins_home: &Path, json: bool) {
     }
     let local_size = local_model_size(margins_home);
     eprintln!();
-    eprintln!("Search works now. Catalysts add related notes that share no words with your query:");
-    eprintln!("Margins learns the questions your notes keep raising. Choose how it writes them:");
-    eprintln!("  1) Hosted — no download; excerpts of your notes are sent to Margins' hosted service");
+    eprintln!("Search works now. Catalysts (questions Margins prepares from your notes) also find");
+    eprintln!("related notes that share no words with your query. Choose how they are written:");
+    eprintln!("  1) Hosted — no sign-in and no download; excerpts of your notes are sent to");
+    eprintln!("     Margins' hosted catalyst service, which writes the questions from them");
     match &local_size {
         Some(size) => eprintln!("  2) Local  — runs on this computer; downloads a {size} model once"),
         None => eprintln!("  2) Local  — not available in this build"),
@@ -395,13 +420,14 @@ fn engine_view(
         });
     }
     let state = if status.needs_rebuild() { "outdated" } else { "indexed" };
+    let casing = margins_workflows::workspace::name_casing(workspace);
     let snapshot = crate::attention::snapshot(&status, "", "");
     let entities = snapshot
         .entities
         .into_iter()
         .map(|entity| EntityView {
             entity_type: entity.entity_type,
-            name: entity.name,
+            name: casing.get(&entity.name.to_lowercase()).cloned().unwrap_or(entity.name),
             origin: entity.origin,
             state: entity.state,
             catalysts: entity.catalysts,
@@ -409,11 +435,20 @@ fn engine_view(
         })
         .collect();
     let explain = if explain && state == "indexed" {
-        Some(explain_view(&engine.spec_plan(
-            &workspace.config.id,
-            &workspace.state_dir,
-            None,
-        )?))
+        // An index that must be refreshed first (exit 3) or is being built
+        // (exit 4) leaves the rest of status useful; say why instead.
+        Some(match engine.spec_plan(&workspace.config.id, None) {
+            Ok(plan) => explain_view(&plan, &casing),
+            Err(crate::enzyme_cli::EngineError::Config(_)) => margins_cli::commands::status::ExplainView {
+                unavailable: Some("the index must be refreshed first: run `margins sync`".to_string()),
+                ..Default::default()
+            },
+            Err(crate::enzyme_cli::EngineError::Busy(_)) => margins_cli::commands::status::ExplainView {
+                unavailable: Some("another Margins command is updating the index; try again in a moment".to_string()),
+                ..Default::default()
+            },
+            Err(error) => return Err(error.into()),
+        })
     } else {
         None
     };
@@ -443,12 +478,18 @@ fn engine_view(
     })
 }
 
-/// `--explain` from `enzyme.spec-plan.v1`: the explain view (`entities`,
-/// `skipped`, `counts`) of enzyme 0.12.2, or, from the pinned 0.12.1, the
-/// per-reading jobs and skips (TODO(E6): drop that branch with the pin).
+/// `--explain` from the explain view of `enzyme.spec-plan.v1` (`entities`,
+/// `skipped`, `counts`), grouped by the reading each entry points into.
 #[cfg(feature = "recall")]
-fn explain_view(plan: &serde_json::Value) -> margins_cli::commands::status::ExplainView {
-    use margins_cli::commands::status::{why, ExplainReading, ExplainSkip, ExplainView};
+fn explain_view(
+    plan: &serde_json::Value,
+    casing: &std::collections::BTreeMap<String, String>,
+) -> margins_cli::commands::status::ExplainView {
+    use margins_cli::commands::status::{plain_entity, why, ExplainReading, ExplainSkip, ExplainView};
+    let named = |kind: &str, name: &str| {
+        let name = casing.get(&name.to_lowercase()).map_or(name, String::as_str);
+        plain_entity(kind, name)
+    };
     let empty = Vec::new();
     let vault = &plan["vaults"][0];
     let readings = vault["readings"].as_array().unwrap_or(&empty);
@@ -464,30 +505,45 @@ fn explain_view(plan: &serde_json::Value) -> margins_cli::commands::status::Expl
         reading: "picked automatically".to_string(),
         ..Default::default()
     });
-    let group_of = |value: &serde_json::Value| {
-        value
+    // Entities the engine cannot tie to one reading (`origin: unattributed`).
+    let unattributed = groups.len();
+    groups.push(ExplainReading {
+        reading: "not tied to one reading".to_string(),
+        ..Default::default()
+    });
+    let group_of = |entry: &serde_json::Value| {
+        entry["reading"]
             .as_u64()
             .map(|index| index as usize)
             .filter(|index| *index < automatic)
-            .unwrap_or(automatic)
+            .unwrap_or(if entry["origin"] == "unattributed" {
+                unattributed
+            } else {
+                automatic
+            })
     };
     let mut view = ExplainView::default();
     // The explain view sits beside the readings in the planned vault.
     let plan = if vault["entities"].is_array() { vault } else { plan };
-    if let Some(entities) = plan["entities"].as_array() {
+    let empty_entities = Vec::new();
+    {
+        let entities = plan["entities"].as_array().unwrap_or(&empty_entities);
         for entity in entities {
-            let name = entity["name"].as_str().unwrap_or("?");
-            let group = &mut groups[group_of(&entity["reading"])];
+            let name = named(
+                entity["kind"].as_str().unwrap_or("link"),
+                entity["name"].as_str().unwrap_or("?"),
+            );
+            let group = &mut groups[group_of(entity)];
             if entity["status"] == "planned" {
                 group.learns.push(match entity["origin"].as_str() {
                     Some("expanded") => format!("{name} (linked page)"),
-                    _ => name.to_string(),
+                    _ => name,
                 });
             } else {
                 let code = entity["skip"]["code"].as_str().unwrap_or("skipped");
                 group.skipped.push(ExplainSkip {
                     code: code.to_string(),
-                    what: name.to_string(),
+                    what: name,
                     why: why(code, entity["skip"]["reason"].as_str()),
                 });
             }
@@ -499,14 +555,14 @@ fn explain_view(plan: &serde_json::Value) -> margins_cli::commands::status::Expl
             let code = skip["code"].as_str().unwrap_or("skipped");
             let count = skip["count"].as_u64().unwrap_or(1);
             let what = match skip["name"].as_str() {
-                Some(name) => name.to_string(),
+                Some(name) => named(skip["kind"].as_str().unwrap_or("link"), name),
                 None if skip["scope"] == "candidates" => format!(
                     "{count} more {}",
                     if count == 1 { "page" } else { "pages" }
                 ),
                 None => format!("{count} more"),
             };
-            groups[group_of(&skip["reading"])].skipped.push(ExplainSkip {
+            groups[group_of(skip)].skipped.push(ExplainSkip {
                 code: code.to_string(),
                 what,
                 why: why(code, skip["reason"].as_str()),
@@ -517,37 +573,15 @@ fn explain_view(plan: &serde_json::Value) -> margins_cli::commands::status::Expl
         view.skipped = counts["skipped"].as_u64().unwrap_or(0) as usize;
         view.candidates_skipped = counts["candidates_skipped"].as_u64().unwrap_or(0) as usize;
         view.truncated = plan["truncated"].is_object();
-    } else {
-        let jobs = |group: &mut ExplainReading, jobs: &serde_json::Value| {
-            for job in jobs.as_array().unwrap_or(&Vec::new()) {
-                if let Some(name) = job["entity_name"].as_str() {
-                    group.learns.push(name.to_string());
-                }
-            }
-        };
-        let skips = |group: &mut ExplainReading, skipped: &serde_json::Value| {
-            for skip in skipped.as_array().unwrap_or(&Vec::new()) {
-                let code = skip["reason"]["kind"].as_str().unwrap_or("skipped");
-                group.skipped.push(ExplainSkip {
-                    code: code.to_string(),
-                    what: skip["entity_name"].as_str().unwrap_or("?").to_string(),
-                    why: why(code, None),
-                });
-            }
-        };
-        for (index, reading) in readings.iter().enumerate() {
-            jobs(&mut groups[index], &reading["jobs"]);
-            skips(&mut groups[index], &reading["skipped"]);
-        }
-        jobs(&mut groups[automatic], &vault["other_jobs"]);
-        skips(&mut groups[automatic], &vault["other_skipped"]);
-        view.planned = vault["totals"]["jobs"].as_u64().unwrap_or(0) as usize;
-        view.skipped = vault["totals"]["skipped"].as_u64().unwrap_or(0) as usize;
     }
-    if groups[automatic].learns.is_empty() && groups[automatic].skipped.is_empty() {
-        groups.pop();
-    }
-    view.readings = groups;
+    view.readings = groups
+        .into_iter()
+        .enumerate()
+        .filter(|(index, group)| {
+            *index < automatic || !group.learns.is_empty() || !group.skipped.is_empty()
+        })
+        .map(|(_, group)| group)
+        .collect();
     view
 }
 
@@ -568,16 +602,15 @@ fn edit_preview(
         let engine = crate::enzyme_cli::Engine::for_inspection(&margins_home)?;
         let file = tempfile::Builder::new().suffix(".enzyme").tempfile()?;
         std::fs::write(file.path(), program)?;
-        let view = explain_view(&engine.spec_plan(
-            &workspace.config.id,
-            &workspace.state_dir,
-            Some(file.path()),
-        )?);
+        let view = explain_view(
+            &engine.spec_plan(&workspace.config.id, Some(file.path()))?,
+            &margins_workflows::workspace::name_casing(workspace),
+        );
         let mut lines = Vec::new();
         for reading in &view.readings {
             lines.push(format!(
                 "{}: {}",
-                reading.reading,
+                margins_cli::commands::status::plain_reading(&reading.reading),
                 if reading.learns.is_empty() {
                     "nothing yet".to_string()
                 } else {

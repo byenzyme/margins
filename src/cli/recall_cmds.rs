@@ -134,7 +134,7 @@ fn run_sync(workspace_selector: Option<&str>, source_filter: Option<&str>, json:
             serde_json::to_string_pretty(&envelope).unwrap_or_else(|_| envelope.to_string())
         );
     } else {
-        println!("Sync workspace {}", workspace.config.id);
+        println!("Synced Workspace {}", workspace.config.id);
         for source in envelope
             .get("sources")
             .and_then(serde_json::Value::as_array)
@@ -149,19 +149,36 @@ fn run_sync(workspace_selector: Option<&str>, source_filter: Option<&str>, json:
                 .get("status")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("unknown");
-            println!("- {binding}: {status}");
+            let status = match status {
+                "synced" | "ready" => "up to date".to_string(),
+                other => other.replace('_', " "),
+            };
+            println!("  {binding}: {status}");
         }
         let recall_status = envelope
             .get("recall")
             .and_then(|recall| recall.get("status"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or("unknown");
-        println!("- recall: {recall_status}");
+        let index = match recall_status {
+            "ok" => "index up to date; catalysts ready".to_string(),
+            "index_only" => "index up to date".to_string(),
+            "catalysts_pending" => "index up to date; catalysts still building".to_string(),
+            _ => format!(
+                "the index could not be refreshed: {}",
+                envelope["recall"]["error"].as_str().unwrap_or("unknown error")
+            ),
+        };
+        println!("  recall: {index}");
         if recall_status == "index_only" {
             println!("  {}", crate::recall::ENABLE_CATALYSTS_HINT);
         }
         if let Some(attention) = &attention {
-            println!("Attention: {}", attention.summary);
+            let mut summary = attention.summary.clone();
+            if let Some(first) = summary.get(..1) {
+                summary.replace_range(..1, &first.to_uppercase());
+            }
+            println!("{summary}");
         }
     }
     if ok {
@@ -494,10 +511,7 @@ fn run_workspace_status(selector: Option<&str>, json: bool) -> i32 {
 
 fn report_error(message: &str) -> i32 {
     let message = margins_user_message(message);
-    eprintln!(
-        "<margins_error code=\"command_failed\">{}</margins_error>",
-        margins_cli::output::xml_escape_text(&message)
-    );
+    let _ = margins_cli::output::write_error_parts(&mut io::stderr(), "command_failed", &message);
     1
 }
 

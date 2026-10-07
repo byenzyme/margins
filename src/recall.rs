@@ -764,6 +764,7 @@ fn classify_init_status(status: &StatusEnvelope) -> InitStatus {
             documents: status.documents,
             catalysts: status.catalysts,
             attention: None,
+            entities: Vec::new(),
         };
     }
     InitStatus {
@@ -773,6 +774,7 @@ fn classify_init_status(status: &StatusEnvelope) -> InitStatus {
         documents: status.documents,
         catalysts: status.catalysts,
         attention: None,
+        entities: Vec::new(),
     }
 }
 
@@ -788,6 +790,8 @@ pub struct InitStatus {
     pub catalysts: usize,
     /// What changed in attention since the previous refresh.
     pub attention: Option<crate::attention::Diff>,
+    /// What the engine selected after this refresh.
+    pub entities: Vec<crate::attention::Entity>,
 }
 
 /// The one line that turns catalysts on, for output that reports
@@ -1031,15 +1035,12 @@ fn provision(workspace: &ResolvedWorkspace, mode: Provision) -> Result<InitStatu
     let revision = margins_workflows::workspace::workspace_revision(workspace)
         .unwrap_or_default();
     let next = crate::attention::snapshot(&status, &revision, crate::enzyme_cli::required_version());
-    let previous = crate::attention::load(&workspace.state_dir);
-    init_status.attention = Some(crate::attention::diff(
-        previous.as_ref(),
-        &next,
-        generator.generates(),
-    ));
-    if let Err(error) = crate::attention::save(&workspace.state_dir, &next) {
-        debug_strategy(&format!("attention snapshot not saved: {error:#}"));
+    let casing = margins_workflows::workspace::name_casing(workspace);
+    match crate::attention::record(&workspace.state_dir, &next, generator.generates(), &casing) {
+        Ok(diff) => init_status.attention = Some(diff),
+        Err(error) => debug_strategy(&format!("attention snapshot not saved: {error:#}")),
     }
+    init_status.entities = next.entities;
     Ok(init_status)
 }
 

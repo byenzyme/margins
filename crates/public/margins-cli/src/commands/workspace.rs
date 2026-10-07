@@ -423,7 +423,8 @@ pub fn edit(
             "workspace_edit_requires_terminal",
             format!(
                 "edit opens an editor and asks before applying anything, so it needs an interactive terminal; nothing was changed. \
-                 {program}To change it without a terminal: save the output of `{margins} edit --print` as program.enzyme, change that copy, \
+                 {program}Run `{margins} edit` in a terminal to change it. \
+                 Agents without one: save the output of `{margins} edit --print` as program.enzyme, change that copy, \
                  review it with `{margins} workspace plan --desired program.enzyme`, \
                  then run the `margins workspace apply --plan …` command it prints."
             ),
@@ -926,7 +927,7 @@ pub fn resolve(
 /// Why a read-like command found no Workspace; nothing was created.
 pub const NO_WORKSPACE_MESSAGE: &str = "No Margins Workspace covers this folder, and Margins did not create one. \
 Make one for your notes with `margins init` in your notes folder (or `margins init /path/to/notes`), \
-or pick an existing one with `margins --workspace <id> …` (`margins workspace list` shows them).";
+or run Margins from inside a Workspace's notes folder.";
 
 /// Resolution for read-only commands (recall, status, source list,
 /// integrations status): never creates or migrates a Workspace. Uses the

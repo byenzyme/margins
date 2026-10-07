@@ -510,7 +510,10 @@ fn status_shows_the_index_and_catalysts_separately() {
     );
     // The public build has no engine: it never claims catalysts.
     assert!(status.contains("\nIndex: none in this build; recall reads 1 note directly\n"), "{status}");
-    assert!(status.contains("\nCatalysts: not set up — search finds direct matches only\n"), "{status}");
+    assert!(
+        status.contains("\nCatalysts (questions Margins prepares from your notes to find related ones): not set up — search finds direct matches only\n"),
+        "{status}"
+    );
     assert!(status.contains("\nLearns about:\n"), "{status}");
     assert!(status.contains("\nSources:\n  captures — recordings, "), "{status}");
     assert!(status.contains("\nCaptures: none yet — `margins new` starts one\n"), "{status}");

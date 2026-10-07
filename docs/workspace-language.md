@@ -330,7 +330,7 @@ The readable `workspace plan` and `edit` colour the program diff
 `auto`, the default, colours only a terminal and honours `NO_COLOR`, so piped
 output is byte-identical to `--color never`; JSON is never coloured.
 `edit --print` prints the program uncoloured: the bundled enzyme
-0.12.1 highlights only programs it generates (`compile --color`), not an
+highlights only programs it generates (`compile --color`), not an
 existing file, and Margins keeps no highlighter of its own.
 
 ### Inspecting a Workspace: `margins status`
@@ -345,7 +345,8 @@ readings, the engine's picks from them and its automatic picks, each `ready`,
 `pending`, or `skipped` with a reason kind); what it leaves out; where new notes
 go; Sources; machine connections; integration health; and captures.
 `--explain` adds, per reading, what a catalyst build would do and why entities
-yield none (from `enzyme spec plan`, read-only, no model calls). `--json` is
+yield none (from `enzyme --workspace <id> spec plan --json`, read-only, no model
+calls); `edit` previews a desired program the same way. `--json` is
 `margins.status.v1`; `workspace status --json` is unchanged.
 
 The default view runs one `enzyme status --json` (about 0.6 s on a 7,000-note

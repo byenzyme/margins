@@ -181,12 +181,25 @@ pub struct InitReceipt {
     pub default_set: bool,
     pub preset: Option<InitPreset>,
     pub recall: InitRecall,
-    /// What Margins learns about now (readings, then automatic picks).
-    pub learns_about: Vec<String>,
+    /// What the program asks Margins to read, in plain words.
+    pub reads: Vec<String>,
+    /// What the engine selected after indexing and does not skip, in plain
+    /// words; `None` without an engine index (public build).
+    pub learns_about: Option<Vec<String>>,
+    /// Selected but skipped, with the reason in plain words.
+    pub skipped: Vec<InitSkip>,
+    /// What the program leaves out.
+    pub leaves_out: Vec<String>,
     /// Changes in attention since the previous index refresh, when known.
     pub attention: Option<serde_json::Value>,
     /// Allowances for an explicitly named folder (temporary, empty).
     pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InitSkip {
+    pub what: String,
+    pub why: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -243,9 +256,9 @@ pub fn declared_readings(workspace: &ResolvedWorkspace) -> Vec<String> {
                 .entries()
                 .into_iter()
                 .map(|(entity_ref, options)| {
-                    let mut label = reading_label(entity_ref).to_string();
+                    let mut label = workspace_text::describe_ref(entity_ref);
                     if options.is_some_and(|options| options.expandable) {
-                        label.push_str(" (and pages they link)");
+                        label.push_str(" and the pages it links");
                     }
                     if let Some(profile) = options.and_then(|options| options.profile.as_deref()) {
                         label.push_str(&format!(" — {profile}"));
@@ -254,6 +267,25 @@ pub fn declared_readings(workspace: &ResolvedWorkspace) -> Vec<String> {
                 })
                 .collect::<Vec<_>>()
         })
+        .chain(workspace.config.policy.automatic.is_some().then(|| {
+            if workspace.config.policy.entities.is_empty() {
+                "what it picks automatically".to_string()
+            } else {
+                "…plus what those miss, picked automatically".to_string()
+            }
+        }))
+        .collect()
+}
+
+/// What the program leaves out, in plain words.
+pub fn left_out(workspace: &ResolvedWorkspace) -> Vec<String> {
+    let policy = &workspace.config.policy;
+    policy
+        .excluded_folders
+        .iter()
+        .cloned()
+        .chain(policy.excluded_tags.iter().map(|tag| format!("#{}", tag.trim_start_matches('#'))))
+        .chain(policy.excluded_entities.iter().map(|entity| reading_label(entity).to_string()))
         .collect()
 }
 
@@ -292,14 +324,37 @@ fn write_text(receipt: &InitReceipt, out: &mut dyn Write) -> std::io::Result<()>
             None => writeln!(out, "Workspace {} ({})", ws.id, ws.home)?,
         }
     }
-    if receipt.learns_about.is_empty() {
-        writeln!(out, "Margins learns about: whatever it picks automatically")?;
-    } else {
-        writeln!(out, "Margins learns about:")?;
-        for item in &receipt.learns_about {
-            writeln!(out, "  {item}")?;
-        }
+    if !receipt.reads.is_empty() {
+        writeln!(out, "Reads: {}", receipt.reads.join(" · "))?;
     }
+    if let Some(learns) = &receipt.learns_about {
+        writeln!(
+            out,
+            "Learns about now: {}",
+            if learns.is_empty() {
+                "nothing yet".to_string()
+            } else {
+                learns.join(", ")
+            }
+        )?;
+    }
+    if !receipt.skipped.is_empty() {
+        let skipped = receipt
+            .skipped
+            .iter()
+            .map(|skip| format!("{} ({})", skip.what, skip.why))
+            .collect::<Vec<_>>();
+        writeln!(out, "Skipped: {}", skipped.join("; "))?;
+    }
+    writeln!(
+        out,
+        "Leaves out: {}",
+        if receipt.leaves_out.is_empty() {
+            "nothing".to_string()
+        } else {
+            receipt.leaves_out.join(" · ")
+        }
+    )?;
     if let Some(preset) = &receipt.preset {
         if !preset.skipped_readings.is_empty() {
             let skipped = preset
@@ -342,7 +397,7 @@ fn write_text(receipt: &InitReceipt, out: &mut dyn Write) -> std::io::Result<()>
             notes(recall.documents)
         ),
         _ => format!(
-            "Recall: {} indexed · search finds direct matches; catalysts are not set up",
+            "Recall: {} indexed · catalysts are off",
             notes(recall.documents)
         ),
     };

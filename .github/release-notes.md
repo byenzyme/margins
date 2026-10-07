@@ -1,3 +1,15 @@
+<!-- Draft lines for the next release (CLI-1, PR #33); fold into its notes. -->
+- **`margins sync --json` without a catalyst generator now succeeds.** It
+  reports `ok: true`, `recall.status: "index_only"`, and exits 0; 0.4.18
+  reported `ok: false` and exited 1. Scripts that treated that failure as
+  "catalysts are not set up" should read `recall.status` instead.
+- **`margins recall` without catalysts returns direct matches** instead of
+  failing: the JSON has `reason: "catalysts_not_set_up"` and
+  `search_strategy: "direct"`, and readable output says catalysts are off and
+  how to turn them on.
+- The bundled engine is `enzyme` 0.12.2.
+<!-- End of draft lines. -->
+
 Margins 0.4.18 makes the CLI easier to start with on its own and fixes the bb
 program editor. The release archives contain `margins`, `margins-server`, and
 the bundled `enzyme` 0.12.1.

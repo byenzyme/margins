@@ -53,20 +53,17 @@ impl Entity {
         (self.entity_type.clone(), self.name.to_lowercase())
     }
 
-    fn label(&self) -> String {
-        match self.entity_type.as_str() {
-            "folder" => format!("{} (folder)", self.name),
-            "tag" => format!("#{}", self.name.trim_start_matches('#')),
-            _ => self.name.clone(),
-        }
+    /// In the words `status` uses: "the Meetings folder", "Alice Chen".
+    fn label(&self, casing: &BTreeMap<String, String>) -> String {
+        let name = casing
+            .get(&self.name.to_lowercase())
+            .cloned()
+            .unwrap_or_else(|| self.name.clone());
+        margins_cli::commands::status::plain_entity(&self.entity_type, &name)
     }
 
-    fn state_label(&self) -> String {
-        match (self.state.as_str(), self.skip_kind.as_deref()) {
-            ("skipped", Some(kind)) => format!("skipped: {}", kind.replace('_', " ")),
-            ("pending" | "unchecked", _) => "building".to_string(),
-            (state, _) => state.to_string(),
-        }
+    fn state_label(&self, generating: bool) -> String {
+        margins_cli::commands::status::state_words(&self.state, self.skip_kind.as_deref(), generating)
     }
 }
 
@@ -146,17 +143,50 @@ pub fn load(state_dir: &Path) -> Option<Snapshot> {
         .filter(|snapshot| snapshot.schema_version == ATTENTION_SCHEMA)
 }
 
+/// Write the snapshot through a uniquely named temporary file in the state
+/// directory, flushed to disk before it replaces the old one, so a crash or a
+/// concurrent refresh never leaves a torn file. Callers hold
+/// [`margins_workflows::workspace::lock_derived_state`].
 pub fn save(state_dir: &Path, snapshot: &Snapshot) -> Result<()> {
+    use std::io::Write;
     let path = state_dir.join(ATTENTION_FILE);
-    let temp = state_dir.join(format!(".{ATTENTION_FILE}.tmp"));
-    std::fs::write(&temp, serde_json::to_vec_pretty(snapshot)?)
-        .with_context(|| format!("writing {}", temp.display()))?;
-    std::fs::rename(&temp, &path).with_context(|| format!("writing {}", path.display()))
+    let mut temp = tempfile::Builder::new()
+        .prefix(".attention.")
+        .suffix(".tmp")
+        .tempfile_in(state_dir)
+        .with_context(|| format!("creating a temporary file in {}", state_dir.display()))?;
+    temp.write_all(&serde_json::to_vec_pretty(snapshot)?)?;
+    temp.as_file().sync_all()?;
+    temp.persist(&path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+/// Compare `next` with the saved snapshot and save `next`, under the
+/// derived-state lock so concurrent refreshes (a sync and a reconcile) diff
+/// and write one at a time.
+pub fn record(
+    state_dir: &Path,
+    next: &Snapshot,
+    generating: bool,
+    casing: &BTreeMap<String, String>,
+) -> Result<Diff> {
+    let _lock = margins_workflows::workspace::lock_derived_state(state_dir)?;
+    let previous = load(state_dir);
+    let diff = diff(previous.as_ref(), next, generating, casing);
+    save(state_dir, next)?;
+    Ok(diff)
 }
 
 /// `generating`: whether a catalyst generator is set up, so entities without
 /// catalysts are being built rather than waiting for one.
-pub fn diff(previous: Option<&Snapshot>, next: &Snapshot, generating: bool) -> Diff {
+pub fn diff(
+    previous: Option<&Snapshot>,
+    next: &Snapshot,
+    generating: bool,
+    casing: &BTreeMap<String, String>,
+) -> Diff {
     let building = next
         .entities
         .iter()
@@ -175,7 +205,7 @@ pub fn diff(previous: Option<&Snapshot>, next: &Snapshot, generating: bool) -> D
             generating,
             summary: String::new(),
         };
-        diff.summary = summarize(&diff, next);
+        diff.summary = summarize(&diff, next, casing);
         return diff;
     };
     let before = previous
@@ -233,7 +263,7 @@ pub fn diff(previous: Option<&Snapshot>, next: &Snapshot, generating: bool) -> D
         generating,
         summary: String::new(),
     };
-    diff.summary = summarize(&diff, next);
+    diff.summary = summarize(&diff, next, casing);
     diff
 }
 
@@ -245,7 +275,7 @@ fn listed<T>(items: &[T], show: impl Fn(&T) -> String) -> String {
     parts.join(", ")
 }
 
-fn describe_change(change: &Change) -> String {
+fn describe_change(change: &Change, generating: bool, casing: &BTreeMap<String, String>) -> String {
     let before = Entity {
         state: change.from_state.clone(),
         skip_kind: change.from_skip_kind.clone(),
@@ -260,10 +290,14 @@ fn describe_change(change: &Change) -> String {
             origin_label(&change.entity.origin)
         ));
     }
-    if before.state_label() != change.entity.state_label() {
-        moves.push(format!("{} → {}", before.state_label(), change.entity.state_label()));
+    if before.state_label(generating) != change.entity.state_label(generating) {
+        moves.push(format!(
+            "{} → {}",
+            before.state_label(generating),
+            change.entity.state_label(generating)
+        ));
     }
-    format!("{} ({})", change.entity.label(), moves.join("; "))
+    format!("{} ({})", change.entity.label(casing), moves.join("; "))
 }
 
 fn origin_label(origin: &str) -> &str {
@@ -274,7 +308,7 @@ fn origin_label(origin: &str) -> &str {
     }
 }
 
-fn summarize(diff: &Diff, next: &Snapshot) -> String {
+fn summarize(diff: &Diff, next: &Snapshot, casing: &BTreeMap<String, String>) -> String {
     let mut parts = Vec::new();
     if diff.baseline {
         parts.push(format!(
@@ -284,13 +318,16 @@ fn summarize(diff: &Diff, next: &Snapshot) -> String {
         ));
     } else {
         if !diff.added.is_empty() {
-            parts.push(format!("+ {}", listed(&diff.added, Entity::label)));
+            parts.push(format!("+ {}", listed(&diff.added, |entity| entity.label(casing))));
         }
         if !diff.removed.is_empty() {
-            parts.push(format!("− {}", listed(&diff.removed, Entity::label)));
+            parts.push(format!("− {}", listed(&diff.removed, |entity| entity.label(casing))));
         }
         if !diff.changed.is_empty() {
-            parts.push(format!("~ {}", listed(&diff.changed, describe_change)));
+            parts.push(format!(
+                "~ {}",
+                listed(&diff.changed, |change| describe_change(change, diff.generating, casing))
+            ));
         }
         if parts.is_empty() {
             parts.push("no change in what Margins learns about".to_string());
@@ -338,7 +375,7 @@ mod tests {
     #[test]
     fn first_refresh_records_a_baseline_without_listing_everything_as_new() {
         let next = snap("a", vec![entity("alice", "automatic", "pending", None)]);
-        let diff = diff(None, &next, true);
+        let diff = diff(None, &next, true, &BTreeMap::new());
         assert!(diff.baseline);
         assert!(diff.added.is_empty());
         assert_eq!(diff.summary, "baseline recorded: learning about 1 thing · 1 still building");
@@ -360,30 +397,59 @@ mod tests {
                 entity("bob", "automatic", "skipped", Some("thin_context")),
             ],
         );
-        let diff = diff(Some(&before), &after, true);
+        let diff = diff(Some(&before), &after, true, &BTreeMap::from([("alice".to_string(), "Alice Chen".to_string())]));
         assert_eq!(diff.cause, "notes_changed");
         assert_eq!(diff.added.len(), 1);
         assert_eq!(diff.removed.len(), 1);
         assert_eq!(diff.changed.len(), 1);
         assert_eq!(
             diff.summary,
-            "+ bob · − projects · ~ Alice (building → ready)"
+            "+ bob · − projects · ~ Alice Chen (building → has catalysts)"
         );
 
-        let program_changed = super::diff(Some(&before), &snap("b", before.entities.clone()), true);
+        let program_changed = super::diff(Some(&before), &snap("b", before.entities.clone()), true, &BTreeMap::new());
         assert_eq!(program_changed.cause, "program_changed");
         assert_eq!(program_changed.summary, "no change in what Margins learns about · 1 still building");
         // A reading removed while the engine keeps picking it automatically.
         let mut moved = before.entities.clone();
         moved[1].origin = "automatic".to_string();
-        let moved = super::diff(Some(&before), &snap("b", moved), true);
+        let moved = super::diff(Some(&before), &snap("b", moved), true, &BTreeMap::new());
         assert_eq!(
             moved.summary,
             "~ projects (from a reading → picked automatically) · (program changed) · 1 still building"
         );
-        let same = super::diff(Some(&before), &before, false);
+        let same = super::diff(Some(&before), &before, false, &BTreeMap::new());
         assert_eq!(same.summary, "no change in what Margins learns about · 1 waiting for catalysts");
         assert_eq!(same.cause, "none");
+    }
+
+    #[test]
+    fn concurrent_records_never_tear_the_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().to_path_buf();
+        let threads = (0..8)
+            .map(|index| {
+                let state = state.clone();
+                std::thread::spawn(move || {
+                    let next = snap(&format!("r{index}"), vec![entity("alice", "reading", "ready", None)]);
+                    record(&state, &next, true, &BTreeMap::new()).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let baselines = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .filter(|diff| diff.baseline)
+            .count();
+        // Diffs run one at a time: exactly one refresh saw no snapshot.
+        assert_eq!(baselines, 1);
+        assert!(load(&state).is_some());
+        let leftovers = std::fs::read_dir(&state)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(leftovers, 0);
     }
 
     #[test]

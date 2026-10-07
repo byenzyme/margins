@@ -945,7 +945,10 @@ fn public_init(
             catalyst_mode: "none".to_string(),
             next_step: None,
         },
-        learns_about: commands::init::declared_readings(&workspace),
+        reads: commands::init::declared_readings(&workspace),
+        learns_about: None,
+        skipped: Vec::new(),
+        leaves_out: commands::init::left_out(&workspace),
         attention: None,
         notes,
     };
@@ -1059,6 +1062,8 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
+    let args = args.into_iter().map(Into::into).collect::<Vec<OsString>>();
+    output::choose_error_form(&args);
     let services = standalone_services();
     let invocation_dir = match std::env::current_dir() {
         Ok(path) => path,

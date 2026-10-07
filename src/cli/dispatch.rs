@@ -119,6 +119,7 @@ where
     T: Into<OsString> + Clone,
 {
     let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
+    margins_cli::output::choose_error_form(&args);
     if let Some(code) = release_smoke(&args) {
         return code;
     }
@@ -304,11 +305,15 @@ where
                         })
                     );
                 } else {
-                    eprintln!(
-                        "<margins_error code=\"{}\">{}</margins_error>",
-                        error.code(),
-                        message
-                    );
+                    if margins_cli::output::plain_errors() {
+                        eprintln!("margins: {message}");
+                    } else {
+                        eprintln!(
+                            "<margins_error code=\"{}\">{}</margins_error>",
+                            error.code(),
+                            message
+                        );
+                    }
                 }
                 error.exit_code()
             }

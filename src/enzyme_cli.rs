@@ -615,10 +615,11 @@ impl Engine {
     /// Workspace's program (or of a `desired` program for it) against its
     /// index: per reading, what a catalyst build would learn about and why
     /// some of it yields nothing. Read-only; no model calls.
+    /// Exit 3 (`EngineError::Config`): no program declares the Workspace, or
+    /// its index is missing or must be refreshed first.
     pub fn spec_plan(
         &self,
         workspace: &str,
-        state_dir: &Path,
         desired: Option<&Path>,
     ) -> Result<serde_json::Value, EngineError> {
         let mut command = self.command(Some(workspace));
@@ -626,47 +627,6 @@ impl Engine {
         if let Some(desired) = desired {
             command.arg(desired);
         }
-        let output = self.run(command)?;
-        match check_status(&output, &[]) {
-            Ok(()) => return spec_plan_envelope(&output.stdout),
-            // TODO(E6): enzyme 0.12.1 refuses `spec plan --workspace` (a FILE
-            // is required, and "spec commands take Markdown vault paths").
-            // Until the pin moves to 0.12.2, plan the state directory as a
-            // vault instead; remove this fallback with that pin.
-            Err(EngineError::Usage(_)) => {}
-            Err(error) => return Err(error),
-        }
-        let configs = self.home.join(margins_workflows::workspace::CONFIGS_DIR);
-        // A program outside `configs/` is read on its own there, so a desired
-        // program carries the source kinds and shared profiles inline.
-        let scratch;
-        let program = match desired {
-            None => configs.join(format!("{workspace}.enzyme")),
-            Some(desired) => {
-                let mut text = margins_workflows::source_kinds::SOURCES_TEXT.to_string();
-                if let Ok(profiles) = std::fs::read_to_string(
-                    configs.join(margins_workflows::workspace::SHARED_PROFILES_PROGRAM),
-                ) {
-                    text.push_str(&format!("\n{profiles}"));
-                }
-                let desired = std::fs::read_to_string(desired).map_err(|error| {
-                    EngineError::Protocol(format!("reading {}: {error}", desired.display()))
-                })?;
-                text.push_str(&format!("\n{desired}"));
-                scratch = tempfile::Builder::new()
-                    .suffix(".enzyme")
-                    .tempfile()
-                    .map_err(|error| EngineError::Protocol(error.to_string()))?;
-                std::fs::write(scratch.path(), text)
-                    .map_err(|error| EngineError::Protocol(error.to_string()))?;
-                scratch.path().to_path_buf()
-            }
-        };
-        let mut command = self.command(None);
-        command
-            .args(["spec", "plan", "--json", "-p"])
-            .arg(state_dir)
-            .arg(&program);
         let output = self.run(command)?;
         check_status(&output, &[])?;
         spec_plan_envelope(&output.stdout)
