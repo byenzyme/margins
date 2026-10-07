@@ -190,7 +190,7 @@ Release in this order:
    a fresh BB plugin install against the new release, including that the plugin
    placed `enzyme` beside the runtime and at
    `~/.local/libexec/margins/enzyme`.
-7. After runtime assets are live, create and push an immutable plugin tag
+7. After runtime assets are live, create and push a plugin tag
    `margins-plugin/vX.Y.Z` at the release commit. BB can track a semver range
    with `--tag-prefix margins-plugin/`; the plugin tag comes last so BB cannot
    offer a version whose runtime is not yet published.

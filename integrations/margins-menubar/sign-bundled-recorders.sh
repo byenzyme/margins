@@ -40,5 +40,10 @@ if [[ "$entitlements" != *'<key>com.apple.security.device.audio-input</key><true
   echo "microphone entitlement missing after signing: $capture" >&2
   exit 1
 fi
+entitlements="$(codesign --display --entitlements :- "$app" 2>/dev/null | tr -d '[:space:]')"
+if [[ "$entitlements" != *'<key>com.apple.security.device.audio-input</key><true/>'* ]]; then
+  echo "microphone entitlement missing after signing: $app" >&2
+  exit 1
+fi
 codesign --verify --deep --strict --verbose=2 "$app"
 echo "Bundled capture helper signed with microphone access: $app"
