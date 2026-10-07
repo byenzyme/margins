@@ -1,5 +1,7 @@
 pub use margins_capture::app;
 pub use margins_capture::asr;
+#[cfg(feature = "recall")]
+pub mod attention;
 pub mod audio_info;
 pub mod audio_pipeline;
 #[cfg(feature = "recall-local-model")]

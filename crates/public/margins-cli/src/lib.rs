@@ -273,6 +273,7 @@ fn run_inner(
                 workspace_selector.as_deref(),
                 invocation_dir,
                 color.enabled(std::io::stdout().is_terminal()),
+                None,
                 &mut std::io::stdin().lock(),
                 stdout,
                 stderr,
@@ -304,16 +305,6 @@ fn run_inner(
                 "composition_unavailable",
                 "this build cannot fill presets; install the official Margins CLI, which runs the enzyme engine",
             ));
-        }
-        Some(Command::Workspace {
-            command: WorkspaceCommand::Migrate { dry_run, json },
-        }) => {
-            return commands::workspace::migrate(
-                workspace_selector.as_deref(),
-                dry_run,
-                json,
-                stdout,
-            );
         }
         Some(Command::Workspace {
             command: WorkspaceCommand::Apply { plan, json },
@@ -400,13 +391,80 @@ fn run_inner(
                 stdout,
             );
         }
-        Some(Command::Init) => {
-            let workspace = commands::workspace::resolve(
+        Some(Command::Init {
+            path,
+            id,
+            no_preset,
+            json,
+        }) => {
+            return public_init(
+                workspace_selector.as_deref(),
+                path.as_deref(),
+                id.as_deref(),
+                no_preset,
+                json,
+                invocation_dir,
+                stdout,
+            );
+        }
+        Some(Command::Status { explain, all, json }) => {
+            let (workspace, selected_by) =
+                commands::status::select(workspace_selector.as_deref(), invocation_dir)?;
+            let home = margins_workflows::workspace::margins_home().map_err(CliError::from_anyhow)?;
+            let report = commands::status::build(
+                &workspace,
+                selected_by,
+                commands::status::CatalystView {
+                    mode: "none".to_string(),
+                    usable: false,
+                    reason: "not_in_this_build".to_string(),
+                    next_step: Some(
+                        "Catalysts need the official Margins CLI, which runs the enzyme engine."
+                            .to_string(),
+                    ),
+                    ..Default::default()
+                },
+                None,
+                all,
+                commands::status::connections(&home),
+                commands::status::integrations(&workspace),
+                commands::status::captures(services, &workspace),
+            )?;
+            if explain && !json {
+                writeln!(
+                    stderr,
+                    "--explain needs the official Margins CLI, which runs the enzyme engine."
+                )
+                .map_err(|error| CliError::from_anyhow(error.into()))?;
+            }
+            return commands::status::write(&report, json, all, stdout);
+        }
+        Some(Command::Edit {
+            print,
+            path,
+            json,
+            color,
+        }) => {
+            use std::io::IsTerminal;
+            if print || path || json {
+                return commands::workspace::show(
+                    workspace_selector.as_deref(),
+                    invocation_dir,
+                    print || json,
+                    json,
+                    stdout,
+                    stderr,
+                );
+            }
+            return commands::workspace::edit(
                 workspace_selector.as_deref(),
                 invocation_dir,
+                color.enabled(std::io::stdout().is_terminal()),
+                None,
+                &mut std::io::stdin().lock(),
+                stdout,
                 stderr,
-            )?;
-            return commands::recall::init(&workspace, stdout);
+            );
         }
         Some(Command::Setup {
             only,
@@ -442,12 +500,6 @@ fn run_inner(
             command: GuideCommand::Glossary,
         }) => {
             return commands::guide::glossary(stdout);
-        }
-        Some(Command::Enzyme { .. }) => {
-            return Err(CliError::new(
-                "composition_unavailable",
-                "this build has no bundled enzyme engine; install the official Margins CLI",
-            ));
         }
         Some(Command::Capabilities) => {
             return commands::capabilities::public(stdout);
@@ -770,6 +822,78 @@ fn run_session_command(
     }
 }
 
+/// `margins init` in the public composition: the same target rules as the
+/// official CLI, without an engine to fill the preset or build an index.
+fn public_init(
+    selector: Option<&str>,
+    path: Option<&Path>,
+    id: Option<&str>,
+    no_preset: bool,
+    json: bool,
+    cwd: &Path,
+    stdout: &mut dyn Write,
+) -> Result<(), CliError> {
+    use commands::init::{InitReceipt, InitRecall, InitTarget};
+    let margins_home = margins_workflows::workspace::margins_home().map_err(CliError::from_anyhow)?;
+    let (workspace, created, covered_by, default_set, mut notes) =
+        match commands::init::target(selector, path, id, cwd)? {
+            InitTarget::Existing {
+                workspace,
+                covered_by,
+            } => (*workspace, false, covered_by, false, Vec::new()),
+            InitTarget::New { folder, id, notes } => {
+                let config =
+                    margins_workflows::workspace::new_workspace_config(&margins_home, &id, &folder)
+                        .map_err(CliError::from_anyhow)?;
+                let workspace = margins_workflows::workspace::create_workspace_with_config(
+                    &margins_home,
+                    &config,
+                    None,
+                )
+                .map_err(CliError::from_anyhow)?;
+                let default_set = margins_workflows::workspace::default_workspace(&margins_home)
+                    .map_err(CliError::from_anyhow)?
+                    .is_none();
+                if default_set {
+                    margins_workflows::workspace::set_default_workspace(&margins_home, &id)
+                        .map_err(CliError::from_anyhow)?;
+                }
+                (workspace, true, None, default_set, notes)
+            }
+        };
+    if created && !no_preset {
+        notes.push(
+            "This build cannot fill the margins-meetings preset; the official Margins CLI does."
+                .to_string(),
+        );
+    }
+    let documents = margins_workflows::local_recall::status(&workspace)
+        .map_err(CliError::from_anyhow)?
+        .documents;
+    let receipt = InitReceipt {
+        schema_version: commands::init::INIT_SCHEMA,
+        workspace: InitReceipt::workspace_view(&workspace),
+        created,
+        covered_by,
+        default_set,
+        preset: None,
+        recall: InitRecall {
+            status: "lexical".to_string(),
+            documents,
+            catalysts: 0,
+            catalyst_mode: "none".to_string(),
+            next_step: None,
+        },
+        reads: commands::init::declared_readings(&workspace),
+        learns_about: None,
+        skipped: Vec::new(),
+        leaves_out: commands::init::left_out(&workspace),
+        attention: None,
+        notes,
+    };
+    commands::init::write(&receipt, json, stdout)
+}
+
 fn workspace_project_adapter(
     workspace: &margins_workflows::workspace::ResolvedWorkspace,
 ) -> margins_workflows::project::ResolvedProject {
@@ -871,6 +995,8 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
+    let args = args.into_iter().map(Into::into).collect::<Vec<OsString>>();
+    output::choose_error_form(&args);
     let services = standalone_services();
     let invocation_dir = match std::env::current_dir() {
         Ok(path) => path,

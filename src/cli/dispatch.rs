@@ -119,6 +119,7 @@ where
     T: Into<OsString> + Clone,
 {
     let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
+    margins_cli::output::choose_error_form(&args);
     if let Some(code) = release_smoke(&args) {
         return code;
     }
@@ -226,8 +227,41 @@ where
     }
 
     #[cfg(feature = "recall")]
-    if let Some(Command::Enzyme { args: enzyme_args }) = &parsed.command {
-        return run_enzyme(workspace_selector.as_deref(), enzyme_args);
+    if let Some(Command::Status { explain, all, json }) = &parsed.command {
+        return run_status_journey(workspace_selector.as_deref(), *explain, *all, *json);
+    }
+
+    // `edit` (and the `workspace edit` alias) previews what the edited
+    // program would have the engine learn, before asking to apply it.
+    #[cfg(feature = "recall")]
+    {
+        let edit_color = match &parsed.command {
+            Some(Command::Edit {
+                print: false,
+                path: false,
+                json: false,
+                color,
+            })
+            | Some(Command::Workspace {
+                command: margins_cli::args::WorkspaceCommand::Edit { color },
+            }) => Some(*color),
+            _ => None,
+        };
+        if let Some(color) = edit_color {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+            return match margins_cli::commands::workspace::edit(
+                workspace_selector.as_deref(),
+                &cwd,
+                color.enabled(io::stdout().is_terminal()),
+                Some(&edit_preview),
+                &mut io::stdin().lock(),
+                &mut io::stdout(),
+                &mut io::stderr(),
+            ) {
+                Ok(()) => 0,
+                Err(error) => report_cli_error(error),
+            };
+        }
     }
 
     if let Some(Command::Connect {
@@ -271,11 +305,15 @@ where
                         })
                     );
                 } else {
-                    eprintln!(
-                        "<margins_error code=\"{}\">{}</margins_error>",
-                        error.code(),
-                        message
-                    );
+                    if margins_cli::output::plain_errors() {
+                        eprintln!("margins: {message}");
+                    } else {
+                        eprintln!(
+                            "<margins_error code=\"{}\">{}</margins_error>",
+                            error.code(),
+                            message
+                        );
+                    }
                 }
                 error.exit_code()
             }
@@ -424,12 +462,23 @@ where
         };
     }
 
-    // The official binary owns vault indexing because it composes the private
-    // recall engine. Establish first, then publish success only after the index
-    // and catalysts have been refreshed.
+    // The official binary owns indexing because it runs the engine: init
+    // fills the preset, offers catalysts, and indexes before it reports.
     #[cfg(feature = "recall")]
-    if matches!(parsed.command, Some(Command::Init)) {
-        return run_init(workspace_selector.as_deref());
+    if let Some(Command::Init {
+        path,
+        id,
+        no_preset,
+        json,
+    }) = &parsed.command
+    {
+        return run_init_journey(
+            workspace_selector.as_deref(),
+            path.as_deref(),
+            id.as_deref(),
+            *no_preset,
+            *json,
+        );
     }
 
     // Intercept Recall: the official binary composes the vendored associative

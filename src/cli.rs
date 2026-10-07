@@ -142,6 +142,7 @@ fn ensure_capture_permissions(source: &dyn CapturePermissionSource) -> Result<()
 
 include!("cli/dispatch.rs");
 include!("cli/recall_cmds.rs");
+include!("cli/journey.rs");
 include!("cli/setup.rs");
 include!("cli/capture_local.rs");
 include!("cli/capture_remote.rs");

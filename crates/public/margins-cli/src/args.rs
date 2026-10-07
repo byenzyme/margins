@@ -5,11 +5,13 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(
     name = "margins",
-    about = "Record meetings and work with their notes and transcripts",
-    after_help = "Your Workspace is one editable program, $MARGINS_HOME/configs/<id>.enzyme: it says which \
-notes Margins reads, what it leaves out, and where it writes new notes.\n  \
-Read it:   margins --workspace <id> workspace show --text\n  \
-Change it: margins --workspace <id> workspace edit\n\
+    about = "Record meetings and work with the notes they connect to",
+    after_help = "Start here: run `margins init` in your notes folder (or `margins init <folder>`).\n\
+Running `margins` with no command opens the recorder for the current session.\n\
+Your Workspace is one editable program, $MARGINS_HOME/configs/<id>.enzyme: it says which notes \
+Margins learns from, what it leaves out, and where new notes go.\n  \
+See what it learns: margins status --explain\n  \
+Change it:          margins edit\n\
 New to the words? Run `margins guide glossary`."
 )]
 pub struct Args {
@@ -17,7 +19,7 @@ pub struct Args {
     #[arg(long, global = true, conflicts_with = "local")]
     pub remote: Option<String>,
     /// Force the direct local adapter even when MARGINS_REMOTE is set
-    #[arg(long, global = true, conflicts_with = "remote")]
+    #[arg(long, global = true, conflicts_with = "remote", hide = true)]
     pub local: bool,
     /// Print the version, build commit, and composition
     #[arg(short = 'V', long)]
@@ -26,34 +28,88 @@ pub struct Args {
     pub command: Option<Command>,
 }
 
+/// Commands are listed by journey: set up and refine a Workspace, use it,
+/// then record. Plumbing for agents, plugins, and recovery hints stays
+/// callable (argv, flags, and JSON unchanged) but hidden from help.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Inspect and recover opt-in remote capture transfers
-    Transfers {
-        #[command(subcommand)]
-        command: TransfersCommand,
+    /// Make a Workspace for your notes folder and index it, or refresh the
+    /// Workspace that already covers it
+    Init {
+        /// Notes folder (default: the current folder). Naming a folder also
+        /// allows an empty or temporary one.
+        path: Option<PathBuf>,
+        /// Workspace id for a new Workspace (default: from the folder name)
+        #[arg(long)]
+        id: Option<String>,
+        /// Start from a minimal program instead of the margins-meetings preset
+        #[arg(long)]
+        no_preset: bool,
+        /// Emit the margins.init.v1 JSON receipt instead of readable output
+        #[arg(long)]
+        json: bool,
     },
-    /// Administer or discover the local Workspace service
-    Service {
-        #[command(subcommand)]
-        command: ServiceCommand,
+    /// Show your Workspace: what Margins learns about, its index, its
+    /// catalysts (questions Margins prepares from your notes), and its Sources
+    Status {
+        /// Also show, per reading, what it picked and why some are skipped
+        #[arg(long)]
+        explain: bool,
+        /// List every automatic pick and skipped entity instead of a summary
+        #[arg(long)]
+        all: bool,
+        /// Emit the margins.status.v1 JSON contract
+        #[arg(long)]
+        json: bool,
     },
-    /// See and change your Workspace: the program that says which notes
-    /// Margins reads and where it writes
-    #[command(after_help = "Each Workspace is one editable program, $MARGINS_HOME/configs/<id>.enzyme.\n  \
-Where it is: margins --workspace <id> workspace show\n  \
-Read it:     margins --workspace <id> workspace show --text\n  \
-Change it:   margins --workspace <id> workspace edit")]
-    Workspace {
-        #[command(subcommand)]
-        command: WorkspaceCommand,
+    /// Change your Workspace program in $VISUAL or $EDITOR, with a preview of
+    /// the effect before anything is applied
+    Edit {
+        /// Print the program text instead of opening an editor
+        #[arg(long, conflicts_with = "path")]
+        print: bool,
+        /// Print only the program's path
+        #[arg(long)]
+        path: bool,
+        /// Emit the id, program path, revision, and text as JSON
+        #[arg(long, conflicts_with = "path")]
+        json: bool,
+        /// Colour the reviewed change: auto (only on a terminal), always, never
+        #[arg(long, value_enum, default_value_t = ColorArg::Auto)]
+        color: ColorArg,
     },
-    /// Declare and inspect workspace sources
-    Source {
-        #[command(subcommand)]
-        command: SourceCommand,
+    /// Refresh your notes and connected Sources, then say what changed in
+    /// what Margins learns about
+    Sync {
+        /// Narrow sync to one declared source binding
+        #[arg(long)]
+        source: Option<String>,
+        /// Emit the stable margins.sync.v1 JSON contract
+        #[arg(long)]
+        json: bool,
     },
-    /// Set up the capabilities available in this Margins installation
+    /// Search your notes for what relates to a query
+    Recall {
+        /// What to look for, in the vault's own language where possible
+        query: String,
+        /// Restrict results to one declared source name
+        #[arg(long)]
+        source: Option<String>,
+        /// Emit the margins.recall.v1 JSON envelope instead of readable results
+        #[arg(long)]
+        json: bool,
+    },
+    /// Connect Margins to Google or Granola
+    Connect {
+        #[command(subcommand)]
+        command: ConnectCommand,
+    },
+    /// Disconnect Margins from an external service
+    Disconnect {
+        #[command(subcommand)]
+        command: DisconnectCommand,
+    },
+    /// Set up everything at once: catalysts, agent skills, and the speech model
     Setup {
         /// Run only this setup area; repeat to select more than one
         #[arg(long, value_enum)]
@@ -76,12 +132,6 @@ Change it:   margins --workspace <id> workspace edit")]
         #[arg(long)]
         title: Option<String>,
     },
-    /// Open your coding agent ready to distill the latest session
-    Note {
-        /// Print the selected agent and command without launching it
-        #[arg(long)]
-        print: bool,
-    },
     /// Open the recorder for the current session, adding a new segment
     Attach {
         /// Make this existing session current before attaching
@@ -92,9 +142,65 @@ Change it:   margins --workspace <id> workspace edit")]
     /// List recording sessions
     #[command(alias = "list")]
     Ls,
+    /// Print the complete transcript for a meeting (every utterance plus memo
+    /// timeline; falls back to the memo-aligned artifact)
+    Transcript {
+        /// Stable meeting id from `margins ls`; defaults to `latest`
+        meeting_id: Option<String>,
+        /// Output format
+        #[arg(long, value_enum, default_value = "text")]
+        format: TranscriptFormat,
+    },
+    /// Transcribe an existing recording as a new session
+    Transcribe {
+        /// Audio file to decode in Rust, such as WAV, M4A, MP3, FLAC, or AAC
+        audio_path: PathBuf,
+        /// Session name. Defaults to a slug derived from the audio filename.
+        #[arg(long)]
+        name: Option<String>,
+        /// Optional memo/context markdown captured at the same time.
+        #[arg(long)]
+        memo: Option<PathBuf>,
+        /// Speaker count for diarizing the downmixed mono audio. Default is 1.
+        #[arg(long)]
+        speakers: Option<usize>,
+    },
+    /// Open your coding agent ready to distill the latest session
+    Note {
+        /// Print the selected agent and command without launching it
+        #[arg(long)]
+        print: bool,
+    },
+    /// Inspect and recover opt-in remote capture transfers
+    #[command(hide = true)]
+    Transfers {
+        #[command(subcommand)]
+        command: TransfersCommand,
+    },
+    /// Administer or discover the local Workspace service
+    #[command(hide = true)]
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
+    /// Workspace plumbing for agents and plugins (people use init, status,
+    /// and edit)
+    #[command(hide = true)]
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommand,
+    },
+    /// Declare and inspect workspace sources
+    #[command(hide = true)]
+    Source {
+        #[command(subcommand)]
+        command: SourceCommand,
+    },
     /// Change the current session's display title
+    #[command(hide = true)]
     Rename { title: String },
     /// Read or revision-check an edit to the remote timed memo
+    #[command(hide = true)]
     Memo {
         /// Stable meeting id; defaults to the client-scoped current session
         meeting_id: Option<String>,
@@ -115,6 +221,7 @@ Change it:   margins --workspace <id> workspace edit")]
         paused: bool,
     },
     /// Read, link, or unlink a Source-relative session note reference
+    #[command(hide = true)]
     NoteAssociation {
         /// Stable meeting id; defaults to the client-scoped current session
         meeting_id: Option<String>,
@@ -144,58 +251,41 @@ Change it:   margins --workspace <id> workspace edit")]
         memo_revision: Option<String>,
     },
     /// Show the latest Margins processing job independently of note links
+    #[command(hide = true)]
     ProcessingStatus {
         /// Stable meeting id; defaults to the client-scoped current session
         meeting_id: Option<String>,
     },
     /// List recent Margins meetings as XML
+    #[command(hide = true)]
     Recent {
         /// List meetings across every registered vault, not just this one
         #[arg(long)]
         all: bool,
     },
-    /// Print the complete transcript for a meeting (every utterance plus memo
-    /// timeline; falls back to the memo-aligned artifact)
-    Transcript {
-        /// Stable meeting id from `margins recent`; defaults to `latest`
-        meeting_id: Option<String>,
-        /// Output format
-        #[arg(long, value_enum, default_value = "text")]
-        format: TranscriptFormat,
-    },
     /// Materialize scriptable WAV files for a meeting from its durable audio
-    #[command(name = "audio-export")]
+    #[command(name = "audio-export", hide = true)]
     AudioExport {
         /// Meeting id from `margins recent`; defaults to `latest`
         meeting_id: Option<String>,
     },
     /// List registered artifacts for a meeting as XML
+    #[command(hide = true)]
     Artifacts {
         /// Stable meeting id from `margins recent`, or `latest`
         meeting_id: String,
     },
     /// Delete expired temporary registered artifacts
+    #[command(hide = true)]
     ArtifactsPrune,
     /// Keep aligned transcripts in the visible `_margins/` vault folder
+    #[command(hide = true)]
     Archive {
         #[command(subcommand)]
         command: ArchiveCommand,
     },
-    /// Transcribe/import-prep an existing audio file
-    Transcribe {
-        /// Audio file to decode in Rust, such as WAV, M4A, MP3, FLAC, or AAC
-        audio_path: PathBuf,
-        /// Session name. Defaults to a slug derived from the audio filename.
-        #[arg(long)]
-        name: Option<String>,
-        /// Optional memo/context markdown captured at the same time.
-        #[arg(long)]
-        memo: Option<PathBuf>,
-        /// Speaker count for diarizing the downmixed mono audio. Default is 1.
-        #[arg(long)]
-        speakers: Option<usize>,
-    },
     /// Process every segment of an existing recording session
+    #[command(hide = true)]
     Process {
         /// Stable session id from `margins recent`, or `current`/`latest`
         session: String,
@@ -207,72 +297,32 @@ Change it:   margins --workspace <id> workspace edit")]
         align_only: bool,
     },
     /// Import external meeting exports
+    #[command(hide = true)]
     Import {
         #[command(subcommand)]
         command: ImportCommand,
     },
     /// Install Margins usage instructions into project agent files
+    #[command(hide = true)]
     Agents {
         #[command(subcommand)]
         command: AgentsCommand,
     },
-    /// Search the vault for notes and connections related to a query
-    Recall {
-        /// What to look for, in the vault's own language where possible
-        query: String,
-        /// Restrict results to one declared source name
-        #[arg(long)]
-        source: Option<String>,
-        /// Emit the margins.recall.v1 JSON envelope instead of readable results
-        #[arg(long)]
-        json: bool,
-    },
-    /// Refresh declared workspace sources and the recall snapshot
-    Sync {
-        /// Narrow sync to one declared source binding
-        #[arg(long)]
-        source: Option<String>,
-        /// Emit the stable margins.sync.v1 JSON contract
-        #[arg(long)]
-        json: bool,
-    },
     /// Reconcile and inspect source integrations declared by the Workspace
+    #[command(hide = true)]
     Integrations {
         #[command(subcommand)]
         command: IntegrationsCommand,
     },
     /// Preview and apply explicit Workspace integration retention
+    #[command(hide = true)]
     Retention {
         #[command(subcommand)]
         command: RetentionCommand,
     },
-    /// Connect Margins to external services
-    Connect {
-        #[command(subcommand)]
-        command: ConnectCommand,
-    },
-    /// Disconnect Margins from an external service
-    Disconnect {
-        #[command(subcommand)]
-        command: DisconnectCommand,
-    },
     /// Print this installation's machine-readable capabilities as JSON
+    #[command(hide = true)]
     Capabilities,
-    /// Run the enzyme engine that ships inside Margins, on Margins' own data
-    ///
-    /// Margins bundles its own `enzyme`, separate from any `enzyme` you
-    /// install yourself, and keeps its data in $MARGINS_HOME (never
-    /// ~/.enzyme). Arguments pass through unchanged, for example
-    /// `margins enzyme --workspace <id> status` or
-    /// `margins enzyme scan --workspace <id> --json`.
-    #[command(disable_help_flag = true)]
-    Enzyme {
-        /// Arguments for the bundled `enzyme`
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
-        args: Vec<std::ffi::OsString>,
-    },
-    /// Establish or refresh a Margins vault in this folder
-    Init,
 }
 
 #[derive(Debug, Subcommand)]
@@ -430,15 +480,6 @@ pub enum WorkspaceCommand {
         #[arg(long)]
         plan: PathBuf,
         /// Emit margins.workspace.apply.v2 JSON instead of a readable receipt
-        #[arg(long)]
-        json: bool,
-    },
-    /// Convert retired `workspaces/<id>/config.toml` files to `configs/<id>.enzyme`
-    Migrate {
-        /// Print the programs without writing anything
-        #[arg(long)]
-        dry_run: bool,
-        /// Emit margins.workspace.migrate.v1 JSON lines
         #[arg(long)]
         json: bool,
     },

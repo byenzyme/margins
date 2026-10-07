@@ -396,16 +396,13 @@ fn write_setup_program_note(
         _ => {
             writeln!(
                 report,
-                "Your Workspace will be one editable program at {}/<id>.enzyme once you create it:",
+                "Your Workspace will be one editable program at {}/<id>.enzyme once you make it.",
                 configs.display()
             )?;
+            writeln!(report, "  Make it: run `margins init` in your notes folder (or `margins init /path/to/your/notes`)")?;
             writeln!(
                 report,
-                "  margins workspace new <id> --home /path/to/your/notes"
-            )?;
-            writeln!(
-                report,
-                "  Then read it with `margins --workspace <id> workspace show --text` and change it with `margins --workspace <id> workspace edit`."
+                "  Then see what it learns with `margins status` and change it with `margins edit`."
             )?;
         }
     }

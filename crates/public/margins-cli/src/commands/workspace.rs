@@ -381,7 +381,7 @@ pub fn show(
         let margins = workspace_text::margins_for(id, workspace_text::is_machine_default(id));
         writeln!(
             stderr,
-            "That file is the program for Workspace {id}. Read it with `{margins} workspace show --text`; change it with `{margins} workspace edit`."
+            "That file is the program for Workspace {id}. Read it with `{margins} edit --print`; change it with `{margins} edit`."
         )
         .map_err(output)
     }
@@ -391,10 +391,16 @@ pub fn show(
 /// change and apply it through the same plan/apply path as `workspace plan`
 /// and `workspace apply`. An edit that does not validate is never applied;
 /// the user's text stays in a kept file they can reopen or plan from.
+/// What an edited program would change in attention, as readable lines
+/// (the official composition asks the engine; `None` shows only the program
+/// effect).
+pub type EditPreview<'a> = &'a dyn Fn(&ResolvedWorkspace, &str) -> Vec<String>;
+
 pub fn edit(
     selector: Option<&str>,
     cwd: &Path,
     color: bool,
+    preview: Option<EditPreview<'_>>,
     stdin: &mut dyn std::io::BufRead,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
@@ -403,20 +409,23 @@ pub fn edit(
 
     let assume_terminal = std::env::var_os(EDIT_ASSUME_TERMINAL_ENV).is_some_and(|value| value == "1");
     if !assume_terminal && !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
-        let margins = match inspect_existing(selector, cwd) {
+        let (margins, program) = match inspect_existing(selector, cwd) {
             Ok(workspace) => {
                 let id = &workspace.config.id;
-                workspace_text::margins_for(id, workspace_text::is_machine_default(id))
+                (
+                    workspace_text::margins_for(id, workspace_text::is_machine_default(id)),
+                    format!("The program is {}. ", workspace.config_path.display()),
+                )
             }
-            Err(_) => "margins --workspace <id>".to_string(),
+            Err(_) => ("margins --workspace <id>".to_string(), String::new()),
         };
         return Err(CliError::new(
             "workspace_edit_requires_terminal",
             format!(
-                "workspace edit opens an editor and asks before applying, so it needs an interactive terminal. \
-                 Without one: print the program with `{margins} workspace show --text`, \
-                 save a changed copy as program.enzyme, review it with \
-                 `{margins} workspace plan --desired program.enzyme`, \
+                "edit opens an editor and asks before applying anything, so it needs an interactive terminal; nothing was changed. \
+                 {program}Run `{margins} edit` in a terminal to change it. \
+                 Agents without one: save the output of `{margins} edit --print` as program.enzyme, change that copy, \
+                 review it with `{margins} workspace plan --desired program.enzyme`, \
                  then run the `margins workspace apply --plan …` command it prints."
             ),
         ));
@@ -447,7 +456,7 @@ pub fn edit(
             format!(
                 "{message}\nYour edit is kept at {path}. Reopen it with your editor, then review it with\n  \
                  {margins} workspace plan --desired {path}\n\
-                 and run the apply command it prints, or start over with `{margins} workspace edit`.",
+                 and run the apply command it prints, or start over with `{margins} edit`.",
                 path = edit_path.display()
             ),
         )
@@ -473,11 +482,26 @@ pub fn edit(
                 return Err(kept(format!("The edited program is not valid: {}", error.message())));
             }
         };
+        writeln!(stdout, "Changes:").map_err(output)?;
         for action in &plan.actions {
             for summary in workspace_text::plain_summaries(action) {
                 writeln!(stdout, "  • {summary}").map_err(output)?;
             }
         }
+        writeln!(stdout).map_err(output)?;
+        workspace_text::write_effect(stdout, &workspace.config, &plan).map_err(output)?;
+        if let Some(preview) = preview {
+            let lines = preview(&workspace, &plan.desired_program);
+            if !lines.is_empty() {
+                writeln!(stdout).map_err(output)?;
+                writeln!(stdout, "With your notes as they are now:").map_err(output)?;
+                for line in lines {
+                    writeln!(stdout, "  {line}").map_err(output)?;
+                }
+            }
+        }
+        writeln!(stdout).map_err(output)?;
+        writeln!(stdout, "Exact change to the program:").map_err(output)?;
         workspace_text::write_diff(stdout, &plan.diff, color).map_err(output)?;
         if !ask(stdin, stderr, &format!("Apply this change to Workspace {id}? [y/N] "), false)
             .map_err(output)?
@@ -673,82 +697,6 @@ pub fn apply(
     serde_json::to_writer_pretty(&mut *stdout, &receipt)
         .map_err(|error| CliError::new("output_failed", error.to_string()))?;
     writeln!(stdout).map_err(|error| CliError::new("output_failed", error.to_string()))
-}
-
-/// Convert retired `workspaces/<id>/config.toml` files to programs. With
-/// `--workspace`, only that Workspace; otherwise every one still to migrate.
-pub fn migrate(
-    selector: Option<&str>,
-    dry_run: bool,
-    json: bool,
-    stdout: &mut dyn Write,
-) -> Result<(), CliError> {
-    let home = workspace::margins_home().map_err(CliError::from_anyhow)?;
-    let ids = match selector {
-        Some(id) => vec![id.to_string()],
-        None => workspace::legacy_workspace_ids(&home).map_err(CliError::from_anyhow)?,
-    };
-    let output = |error: std::io::Error| CliError::from_anyhow(error.into());
-    let mut failed = Vec::new();
-    for id in ids {
-        let migration = match if dry_run {
-            workspace::preview_workspace_migration(&home, &id)
-        } else {
-            workspace::migrate_workspace(&home, &id)
-        } {
-            Ok(migration) => migration,
-            Err(error) => {
-                // One Workspace that cannot migrate must not block the others;
-                // its legacy file stays in place.
-                if json {
-                    serde_json::to_writer(
-                        &mut *stdout,
-                        &serde_json::json!({
-                            "schema_version": workspace::WORKSPACE_MIGRATE_SCHEMA,
-                            "workspace_id": id, "status": "failed", "error": format!("{error:#}"),
-                        }),
-                    )
-                    .map_err(|error| CliError::from_anyhow(error.into()))?;
-                    writeln!(stdout).map_err(output)?;
-                } else {
-                    writeln!(stdout, "{id}: failed: {error:#}").map_err(output)?;
-                }
-                failed.push((id, error));
-                continue;
-            }
-        };
-        if json {
-            serde_json::to_writer(&mut *stdout, &migration)
-                .map_err(|error| CliError::from_anyhow(error.into()))?;
-            writeln!(stdout).map_err(output)?;
-        } else {
-            writeln!(
-                stdout,
-                "{}: {} -> {}",
-                migration.workspace_id,
-                migration.status,
-                migration.program_path.display()
-            )
-            .map_err(output)?;
-            for warning in &migration.warnings {
-                writeln!(stdout, "  warning: {warning}").map_err(output)?;
-            }
-            if dry_run {
-                write!(stdout, "{}", migration.program).map_err(output)?;
-            }
-        }
-    }
-    match failed.len() {
-        0 => Ok(()),
-        1 => Err(CliError::from_anyhow(failed.remove(0).1)),
-        n => Err(CliError::new(
-            "workspace_migration_failed",
-            format!(
-                "{n} Workspaces could not migrate: {}",
-                failed.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>().join(", ")
-            ),
-        )),
-    }
 }
 
 pub fn require_explicit_workspace(selector: Option<&str>) -> Result<&str, CliError> {
@@ -978,9 +926,8 @@ pub fn resolve(
 
 /// Why a read-like command found no Workspace; nothing was created.
 pub const NO_WORKSPACE_MESSAGE: &str = "No Margins Workspace covers this folder, and Margins did not create one. \
-Pick one with `margins --workspace <id> …` (`margins workspace list` shows them; \
-`margins workspace default --set <id>` makes one the default), or create one for your notes with \
-`margins workspace new <id> --home /path/to/notes`.";
+Make one for your notes with `margins init` in your notes folder (or `margins init /path/to/notes`), \
+or run Margins from inside a Workspace's notes folder.";
 
 /// Resolution for read-only commands (recall, status, source list,
 /// integrations status): never creates or migrates a Workspace. Uses the
@@ -1095,16 +1042,19 @@ fn render_workspace(
             .map_err(|error| CliError::from_anyhow(error.into()))?;
         writeln!(stdout, "State: {}", view.state_dir)
             .map_err(|error| CliError::from_anyhow(error.into()))?;
+        // The public build has no engine index and no catalysts.
         writeln!(
             stdout,
-            "Recall: {} (available={}, documents={})",
-            view.recall.mode, view.recall.available, view.recall.documents,
+            "Index: none in this build; recall reads {} documents directly",
+            view.recall.documents,
         )
         .map_err(|error| CliError::from_anyhow(error.into()))?;
+        writeln!(stdout, "Catalysts: not in this build")
+            .map_err(|error| CliError::from_anyhow(error.into()))?;
         let margins = workspace_text::margins_for(view.id, workspace_text::is_machine_default(view.id));
         writeln!(
             stdout,
-            "Read the program with `{margins} workspace show --text`; change it with `{margins} workspace edit`."
+            "Read the program with `{margins} edit --print`; change it with `{margins} edit`."
         )
         .map_err(|error| CliError::from_anyhow(error.into()))
     }
@@ -1146,16 +1096,26 @@ fn render_runtime_workspace(
             .map_err(|error| CliError::from_anyhow(error.into()))?;
         writeln!(stdout, "State: {}", view.state_dir)
             .map_err(|error| CliError::from_anyhow(error.into()))?;
-        writeln!(
-            stdout,
-            "Recall: {} (available={}, documents={})",
-            view.recall.mode, view.recall.available, view.recall.documents,
-        )
-        .map_err(|error| CliError::from_anyhow(error.into()))?;
+        // The index and catalysts separately: an index without catalysts
+        // finds direct matches only and is not full recall.
+        let index = match view.recall.mode.as_str() {
+            "indexed" => format!("indexed · {} documents", view.recall.documents),
+            mode => format!("not built ({mode}, {} documents readable directly)", view.recall.documents),
+        };
+        writeln!(stdout, "Index: {index}").map_err(|error| CliError::from_anyhow(error.into()))?;
+        let catalysts = match view.catalyst.mode.as_str() {
+            "none" => format!(
+                "not set up ({}); search finds direct matches only — `margins setup --only catalyst`",
+                view.catalyst.reason
+            ),
+            mode => format!("{mode} ({})", view.catalyst.reason),
+        };
+        writeln!(stdout, "Catalysts: {catalysts}")
+            .map_err(|error| CliError::from_anyhow(error.into()))?;
         let margins = workspace_text::margins_for(view.id, workspace_text::is_machine_default(view.id));
         writeln!(
             stdout,
-            "Read the program with `{margins} workspace show --text`; change it with `{margins} workspace edit`."
+            "Read the program with `{margins} edit --print`; change it with `{margins} edit`."
         )
         .map_err(|error| CliError::from_anyhow(error.into()))
     }

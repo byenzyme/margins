@@ -9,6 +9,7 @@ mod tests {
     include!("tests/setup.rs");
     include!("tests/capture_local.rs");
     include!("tests/dispatch.rs");
+    include!("tests/journey.rs");
 }
 #[cfg(test)]
 mod bare_capture_decision_tests {
