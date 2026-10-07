@@ -1,7 +1,7 @@
 <!-- BEGIN MARGINS AGENT INSTRUCTIONS -->
 ## Margins Meeting Artifacts
 
-This directory is a Margins vault (a folder with `.margins/`). Use the `margins` CLI to inspect meeting artifacts before guessing paths or searching the whole vault.
+This folder belongs to a Margins Workspace. Use the `margins` CLI to inspect meeting artifacts before guessing paths or searching the whole vault.
 
 Useful commands:
 ```bash
@@ -21,10 +21,10 @@ margins import granola <export.json-or-csv>  # offline export only, not the OAut
 margins recall "<query>"
 ```
 
-Vault routing:
-- The vault is discovered git-style: the CLI walks up from the current folder for a `.margins/` directory.
-- Pass `--project <path>` to target a different vault without cd-ing into it.
-- Do not create `.margins` folders manually; use `margins init` (establish) or `margins new` (record).
+Workspace routing:
+- Session commands use the Workspace that covers the current folder, else the default Workspace; pass `--workspace <id>` to choose one. With neither, they refuse: run `margins init` in the notes folder first.
+- Recordings are kept in the Workspace's capture store, never in a `.margins/` folder here. A `.margins/` folder from an earlier release stays readable (`margins --project <path> ls`, `transcript`) and `margins attach` can finish a session already in it, but new sessions never start there.
+- Do not create `.margins` folders manually.
 
 Recording lifecycle:
 - `margins new` starts a separate meeting, generates its stable id, makes it current, and opens the recorder.

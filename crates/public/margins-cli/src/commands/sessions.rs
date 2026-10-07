@@ -126,11 +126,7 @@ pub fn list(
 ) -> Result<(), CliError> {
     let margins_dir = work_dir.join(".margins");
     if !margins_dir.exists() {
-        line(
-            stderr,
-            format_args!("No sessions found (no .margins/ directory)."),
-        )
-        .map_err(CliError::from_anyhow)?;
+        line(stderr, format_args!("No sessions found.")).map_err(CliError::from_anyhow)?;
         return Ok(());
     }
     let sessions = services

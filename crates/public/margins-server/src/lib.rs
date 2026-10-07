@@ -26,6 +26,19 @@ use std::{
     sync::Arc,
 };
 
+/// Error code for a launch that names a Workspace this machine does not have.
+pub const WORKSPACE_NOT_FOUND: &str = "workspace_not_found";
+
+/// How long a bb-launched server that could not open its Workspace stays up to
+/// report why; the launcher normally stops it as soon as it has read the error.
+const UNAVAILABLE_REPORT_SECS: u64 = 120;
+
+fn missing_workspace_message(workspace_id: &str) -> String {
+    format!(
+        "Margins Workspace '{workspace_id}' does not exist on this machine. Run `margins init` in your notes folder, then choose that Workspace."
+    )
+}
+
 fn selected_workspace(
     margins_home: &std::path::Path,
     workspace_id: &str,
@@ -40,6 +53,10 @@ fn selected_workspace(
         // migrate a retired layout; it is upgraded together with the CLI.
         workspace::resolve_workspace(margins_home, Some(workspace_id), work_dir)
     } else if provision {
+        // Only an operator's explicit `MARGINS_SERVICE_PROVISION` creates a
+        // Workspace. A bb launch naming a missing one is refused: creating it
+        // here would put both its notes and its recordings in the launcher's
+        // directory.
         workspace::ensure_service_workspace(
             margins_home,
             workspace_id,
@@ -48,9 +65,22 @@ fn selected_workspace(
             work_dir,
         )
     } else {
-        workspace::resolve_workspace(margins_home, Some(workspace_id), work_dir)
+        Err(anyhow::Error::new(MissingWorkspace(
+            missing_workspace_message(workspace_id),
+        )))
     }
 }
+
+#[derive(Debug)]
+struct MissingWorkspace(String);
+
+impl std::fmt::Display for MissingWorkspace {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for MissingWorkspace {}
 
 #[derive(Clone)]
 pub struct ServerState {
@@ -93,13 +123,31 @@ async fn run_async() -> anyhow::Result<()> {
         .unwrap_or_else(|_| data_dir.join("margins-home"));
     let workspace_id = std::env::var("MARGINS_WORKSPACE")
         .context("MARGINS_WORKSPACE is required for margins-server")?;
-    let workspace = selected_workspace(
+    let workspace = match selected_workspace(
         &margins_home,
         &workspace_id,
         &work_dir,
-        std::env::var_os("MARGINS_SERVICE_PROVISION").is_some()
-            || std::env::var_os("MARGINS_BB_CAPTURE_WORKSPACE").is_some(),
-    )?;
+        std::env::var_os("MARGINS_SERVICE_PROVISION").is_some(),
+    ) {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            let Some(missing) = error.downcast_ref::<MissingWorkspace>() else {
+                return Err(error);
+            };
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "schema_version": 1,
+                    "ok": false,
+                    "error": {"code": WORKSPACE_NOT_FOUND, "message": missing.0},
+                })
+            );
+            if std::env::var_os("MARGINS_BB_CAPTURE_WORKSPACE").is_none() {
+                return Err(error);
+            }
+            return report_unavailable(listen_addr, &data_dir, missing.0.clone()).await;
+        }
+    };
     let instance_id = std::env::var("MARGINS_INSTANCE_ID").unwrap_or_else(|_| "local".into());
     let workspace_service = Arc::new(WorkspaceService::open_with_capabilities(
         &instance_id,
@@ -190,6 +238,24 @@ async fn run_async() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Serve the startup error to the bb launcher, which reads `/v1/capabilities`
+/// after `/health` and shows a non-404 error message to the user. Writes no
+/// discovery state and opens no Workspace.
+async fn report_unavailable(
+    listen_addr: SocketAddr,
+    data_dir: &std::path::Path,
+    message: String,
+) -> anyhow::Result<()> {
+    auth::load_or_create_token(data_dir)?;
+    let listener = tokio::net::TcpListener::bind(listen_addr).await?;
+    let app = http::unavailable_router(WORKSPACE_NOT_FOUND, message);
+    let shutdown = tokio::time::sleep(std::time::Duration::from_secs(UNAVAILABLE_REPORT_SECS));
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await?;
+    anyhow::bail!("{WORKSPACE_NOT_FOUND}: Workspace is missing; nothing was created")
+}
+
 fn loopback_socket_addr(host: &str, port: u16) -> anyhow::Result<SocketAddr> {
     let ip = match host {
         "127.0.0.1" | "localhost" => IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
@@ -219,6 +285,21 @@ mod tests {
         );
         assert!(loopback_socket_addr("0.0.0.0", 8787).is_err());
         assert!(loopback_socket_addr("localhost.example", 8787).is_err());
+    }
+
+    #[test]
+    fn bb_launch_naming_a_missing_workspace_creates_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let launcher = temp.path().join("launcher");
+        std::fs::create_dir_all(&launcher).unwrap();
+        let error = selected_workspace(&home, "practice", &launcher, false).unwrap_err();
+        assert!(error.downcast_ref::<MissingWorkspace>().is_some());
+        assert!(error.to_string().contains("margins init"));
+        assert!(!workspace::workspace_state_dir(&home, "practice")
+            .unwrap()
+            .exists());
+        assert!(std::fs::read_dir(&launcher).unwrap().next().is_none());
     }
 
     #[test]

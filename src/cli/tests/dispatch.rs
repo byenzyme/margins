@@ -85,3 +85,36 @@
         assert!(value["catalyst"].get("profile").is_none());
         assert!(value["catalyst"].get("expires_at").is_none());
     }
+
+    #[test]
+    fn transcribe_resolves_the_workspace_before_offering_the_speech_download() {
+        let _guard = PROCESS_ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().join("folder");
+        std::fs::create_dir_all(&folder).unwrap();
+        let _restore = EnvRestore::capture(&["MARGINS_HOME", "MARGINS_WORKSPACE"]);
+        let margins_home = temp.path().join("state");
+        std::env::set_var("MARGINS_HOME", &margins_home);
+        std::env::remove_var("MARGINS_WORKSPACE");
+        let offers = AtomicUsize::new(0);
+        let offer = || {
+            offers.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        };
+
+        // Remote transcription never offers this host's model.
+        transcribe_preflight(true, Some("missing"), None, &folder, offer).unwrap();
+        assert_eq!(offers.load(Ordering::SeqCst), 0);
+        // A named Workspace that does not exist is refused first.
+        assert!(transcribe_preflight(false, Some("missing"), None, &folder, offer).is_err());
+        assert_eq!(offers.load(Ordering::SeqCst), 0);
+
+        let error = transcribe_preflight(false, None, None, &folder, offer).unwrap_err();
+        assert_eq!(error.code(), "workspace_required");
+        assert_eq!(offers.load(Ordering::SeqCst), 0, "no download offer without a Workspace");
+
+        margins_workflows::workspace::create_workspace(&margins_home, "practice", None, &folder)
+            .unwrap();
+        transcribe_preflight(false, None, None, &folder, offer).unwrap();
+        assert_eq!(offers.load(Ordering::SeqCst), 1);
+    }

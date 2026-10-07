@@ -22,7 +22,7 @@ Building from source: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
     margins setup
 
-**3. Record, in the folder where your notes live.** The first time you run `margins new` in a folder, that folder quietly becomes your notes home.
+**3. Record, in the folder where your notes live.** Recordings go to the Workspace that covers that folder, or to your default Workspace; if there is none yet, `margins new` asks you to run `margins init` there first.
 
     cd ~/notes
     margins new
