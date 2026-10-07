@@ -59,10 +59,22 @@ digest-verified Margins release when needed. That release contains:
   when it manages the CLI in `~/.local/bin`, to `~/.local/libexec/margins/enzyme`,
   off `PATH`, so it never replaces a user's own `enzyme`.
 
-The plugin pins `v0.4.21`, whose Linux and Apple Silicon macOS archives include
+The plugin pins `v0.4.22`, whose Linux and Apple Silicon macOS archives include
 all three executables. That release must be published before a clean installation
 can start the project service. Development builds can use
 `MARGINS_CLI_BIN` and `MARGINS_PROJECT_SERVER_PATH` as explicit overrides.
+
+Install from the versioned Git source with:
+
+```sh
+bb plugin install git:https://github.com/byenzyme/margins.git@^0.4.0 \
+  --subdirectory integrations/bb-plugin-margins \
+  --tag-prefix margins-plugin/
+```
+
+The Community marketplace listing uses the same Git source. Plugin tags are
+published after their matching runtime assets. On a Mac, install `Margins.app`
+separately to record both microphone and computer audio.
 
 The service is launched with the bb project's default source path as
 `MARGINS_WORK_DIR` and an explicit `MARGINS_WORKSPACE`. It uses that Workspace's
@@ -140,7 +152,7 @@ memo through Finish and Linux transcription. This was a development bundle,
 not an installed-app first-run test. A menu-owned meeting's memo is editable in
 bb through the Workspace service; the native bridge itself carries audio and
 control only. The plugin's release-pinned installation also requires a published
-release archive containing `margins`, `margins-server`, and `enzyme`. The 0.4.21 CLI
+release archive containing `margins`, `margins-server`, and `enzyme`. The 0.4.22 CLI
 includes `native-bridge` for this path.
 
 `@Margins` is also withheld until the project recording service exposes a

@@ -26,14 +26,23 @@ fi
 
 # Hardened Runtime silently prevents microphone authorization without this
 # entitlement. Sign the nested apps first, then reseal the parent bundle.
-codesign --force --options runtime --sign "$identity" \
+signing_args=(--force --options runtime --timestamp --sign "$identity")
+if [[ -n "${MARGINS_SIGN_KEYCHAIN:-}" ]]; then
+  signing_args+=(--keychain "$MARGINS_SIGN_KEYCHAIN")
+fi
+codesign "${signing_args[@]}" \
   --entitlements "$repo_dir/src/cli/MarginsNativeBridge.entitlements" "$capture"
-codesign --force --options runtime --sign "$identity" \
+codesign "${signing_args[@]}" \
   --entitlements "$repo_dir/src/cli/MarginsNativeBridge.entitlements" "$app"
 
 entitlements="$(codesign --display --entitlements :- "$capture" 2>/dev/null | tr -d '[:space:]')"
 if [[ "$entitlements" != *'<key>com.apple.security.device.audio-input</key><true/>'* ]]; then
   echo "microphone entitlement missing after signing: $capture" >&2
+  exit 1
+fi
+entitlements="$(codesign --display --entitlements :- "$app" 2>/dev/null | tr -d '[:space:]')"
+if [[ "$entitlements" != *'<key>com.apple.security.device.audio-input</key><true/>'* ]]; then
+  echo "microphone entitlement missing after signing: $app" >&2
   exit 1
 fi
 codesign --verify --deep --strict --verbose=2 "$app"

@@ -128,6 +128,7 @@ runs:
         APPLE_ID: ${{ inputs.apple-id }}
         APPLE_PASSWORD: ${{ inputs.apple-password }}
         APPLE_TEAM_ID: ${{ inputs.apple-team-id }}
+        VERSION: ${{ inputs.version }}
         BINARY_PATHS: target/${{ inputs.target }}/release/margins-private target/${{ inputs.target }}/release/margins-server target/${{ inputs.target }}/release/enzyme-pinned/enzyme
       run: |
         set -euo pipefail
@@ -247,12 +248,17 @@ runs:
             echo "::notice::spctl execute-assessment is non-authoritative for a bare Mach-O; relying on codesign --verify and notarization status"
         done
 
+        integrations/margins-menubar/package-release.sh "$VERSION" \
+          "target/${{ inputs.target }}/release/margins-private" \
+          "$SIGNING_IDENTITY" "$KEYCHAIN_PATH"
+
         {
           echo "### macOS CLI signing"
           echo "- Developer ID Application signature: verified"
           echo "- Hardened runtime and secure timestamp: enabled"
           echo "- Apple notarization status: Accepted"
           echo "- Stapling: unsupported for bare Mach-O; ticket is served online"
+          echo "- Margins.app: signed, notarized, stapled, and Gatekeeper-assessed"
         } >> "$GITHUB_STEP_SUMMARY"
 
     - name: Package archive and checksum
