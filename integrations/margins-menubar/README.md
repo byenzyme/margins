@@ -1,4 +1,4 @@
-# Margins menu bar recorder
+# Margins.app menu bar recorder
 
 The menu records only into a bb-connected Workspace through `native-bridge`.
 
@@ -61,6 +61,11 @@ Microphone settings pane.
 Run `./build-and-run.sh` to build and launch the menu-only app. Set
 `MARGINS_MENU_TEST_WINDOW=1` to compile the same controls as a normal window for
 accessibility automation. `--build-only` compiles and signs without launching.
+
+The official Apple Silicon release builds `Margins.app` from this source and
+bundles the signed `margins` capture helper. The GitHub release publishes a
+notarized, stapled `Margins-X.Y.Z-macos-arm64.zip`. `build-and-run.sh` remains
+the local test build and does not create a distributable app.
 
 For a scoped test, set `MARGINS_MENU_SETTINGS_DOMAIN` to a unique preferences
 suite. `MARGINS_MENU_BRIDGE_APP` selects a signed test bundle; a packaged app can

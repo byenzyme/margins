@@ -68,5 +68,7 @@ jobs:
           path: |
             margins-${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz
             margins-${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz.sha256
+            Margins-${{ steps.version.outputs.version }}-macos-arm64.zip
+            Margins-${{ steps.version.outputs.version }}-macos-arm64.zip.sha256
           if-no-files-found: error
           retention-days: 7

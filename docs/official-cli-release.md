@@ -1,4 +1,4 @@
-# Official CLI release pipeline
+# Margins release pipeline
 
 The official `margins` executable is built from a tag in the public
 `byenzyme/margins` source tree. The private `byenzyme/margins-desktop` repository
@@ -25,8 +25,11 @@ a platform ASR/diarization backend. Official builds fail closed by explicitly
 enabling the target's full media and recall feature set and asserting its
 capabilities in the packaged-binary smoke test.
 
-The Apple Silicon archive no longer includes `margins-live`; the desktop app
-and its live runtime were retired on 2026-10-02 (PR #100).
+The Apple Silicon job also builds `Margins.app` from the menu bar source, with
+the signed capture helper in `Contents/Helpers/Margins Capture.app`. It signs,
+notarizes, staples, and publishes `Margins-X.Y.Z-macos-arm64.zip` alongside the
+CLI archives. The retired Tauri desktop app and `margins-live` are not part of
+this release.
 
 Each native runner creates its archive, extracts it, and executes that exact
 packaged binary's `__release-smoke` contract. A separate publish job verifies
@@ -143,8 +146,11 @@ against it.
 ## Release order and BB plugin runtime pairing
 
 The BB plugin pins its runtime exactly (`RUNTIME_RELEASE_VERSION` in
-`integrations/bb-plugin-margins/src/runtime-manager.ts`) and installs from the
-`dist/` committed on `main`. Plugin and server upgrade as a pair; there is no
+`integrations/bb-plugin-margins/src/runtime-manager.ts`). Its built `dist/` is
+committed with source. BB installs the plugin from this repository's
+`integrations/bb-plugin-margins` subdirectory; the Community marketplace entry
+points to that Git source and does not host runtime binaries. Plugin and server
+upgrade as a pair; there is no
 back-compat layer. A remote or overridden server with a mismatched protocol
 fails with an explicit "upgrade both" error.
 
@@ -180,9 +186,14 @@ Release in this order:
    3. That tag push triggers `cli-release.yml`, which builds, signs, notarizes
       and publishes on GitHub. This is the only validation-adjacent work that
       runs on GitHub runners besides the optional dry run below.
-6. Verify the published archives and a fresh BB plugin install against the new
-   release, including that the plugin placed `enzyme` beside the runtime and
-   at `~/.local/libexec/margins/enzyme`.
+6. Verify the published archives, a clean `Margins.app` install on a Mac, and
+   a fresh BB plugin install against the new release, including that the plugin
+   placed `enzyme` beside the runtime and at
+   `~/.local/libexec/margins/enzyme`.
+7. After runtime assets are live, create and push an immutable plugin tag
+   `margins-plugin/vX.Y.Z` at the release commit. BB can track a semver range
+   with `--tag-prefix margins-plugin/`; the plugin tag comes last so BB cannot
+   offer a version whose runtime is not yet published.
 
 ## Required secrets and permissions
 
