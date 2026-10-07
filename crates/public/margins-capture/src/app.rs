@@ -5,6 +5,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8};
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::text_helpers::*;
 
@@ -67,6 +68,15 @@ pub struct App {
     /// worker cannot recover queue drops, so the drop counters are final.
     pub live_unrecovered_frames: Option<Arc<AtomicU64>>,
     pub capture_paused: bool,
+    /// Session name shown in the frame title; falls back to the memo stem.
+    pub session_label: Option<String>,
+    /// This App continues an existing session (`margins attach`).
+    pub resumed_session: bool,
+    /// When the ignition sweep began. Set once per App, so pause/resume and
+    /// device-switch re-entries into the TUI do not replay it.
+    pub intro_started_at: Option<Instant>,
+    /// When capture last resumed from pause, for the title's resume pulse.
+    pub resumed_at: Option<Instant>,
     pub remote_delivery_state: Arc<AtomicU8>,
     pub remote_pending_chunks: Arc<AtomicU64>,
     pub remote_pending_bytes: Arc<AtomicU64>,
@@ -125,6 +135,10 @@ impl App {
             live_system_dropped_samples: Arc::new(AtomicU64::new(0)),
             live_unrecovered_frames: None,
             capture_paused: false,
+            session_label: None,
+            resumed_session: false,
+            intro_started_at: None,
+            resumed_at: None,
             remote_delivery_state: Arc::new(AtomicU8::new(REMOTE_DELIVERY_LOCAL)),
             remote_pending_chunks: Arc::new(AtomicU64::new(0)),
             remote_pending_bytes: Arc::new(AtomicU64::new(0)),
@@ -188,6 +202,10 @@ impl App {
             live_system_dropped_samples: Arc::new(AtomicU64::new(0)),
             live_unrecovered_frames: None,
             capture_paused: false,
+            session_label: None,
+            resumed_session: false,
+            intro_started_at: None,
+            resumed_at: None,
             remote_delivery_state: Arc::new(AtomicU8::new(REMOTE_DELIVERY_LOCAL)),
             remote_pending_chunks: Arc::new(AtomicU64::new(0)),
             remote_pending_bytes: Arc::new(AtomicU64::new(0)),
@@ -196,6 +214,23 @@ impl App {
             observed_memo: None,
             pending_conflict: None,
         }
+    }
+
+    /// Name the session in the frame title and mark `margins attach`.
+    pub fn set_session_identity(&mut self, label: String, resumed: bool) {
+        self.session_label = Some(label);
+        self.resumed_session = resumed;
+    }
+
+    /// The name the frame title shows for this session.
+    pub fn session_title(&self) -> String {
+        if let Some(label) = &self.session_label {
+            return label.clone();
+        }
+        std::path::Path::new(&self.output_path)
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default()
     }
 
     pub fn bind_workspace_authority(&mut self, margins_dir: PathBuf, session_id: String) {
@@ -288,6 +323,9 @@ impl App {
             self.pause_block_ordinal = self.pause_block_ordinal.saturating_add(1);
         }
         self.capture_paused = paused;
+        if !paused {
+            self.resumed_at = Some(Instant::now());
+        }
     }
 
     pub fn display_ts(&self, i: usize) -> Option<(f64, bool)> {
