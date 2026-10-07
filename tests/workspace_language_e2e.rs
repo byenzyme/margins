@@ -1334,7 +1334,14 @@ fn cli_only_newcomer_learns_the_program_and_sees_it_through_status() {
         "{init_stdout}"
     );
     assert!(!init_stdout.contains("<margins_init"), "{init_stdout}");
-    assert!(init_stdout.contains("\nReads: the Meetings folder — operational · "), "{init_stdout}");
+    // A reading the engine skipped is listed once, under Skipped, with why.
+    assert!(init_stdout.contains("\nReads: "), "{init_stdout}");
+    let reads = init_stdout.lines().find(|line| line.starts_with("Reads: ")).unwrap();
+    if init_stdout.contains("\nSkipped: the Meetings folder (") {
+        assert!(!reads.contains("Meetings"), "{init_stdout}");
+    } else {
+        assert!(reads.contains("the Meetings folder — operational"), "{init_stdout}");
+    }
     assert!(init_stdout.contains("\nLearns about now: "), "{init_stdout}");
     assert!(init_stdout.contains("\nLeaves out: templates · Attachments\n"), "{init_stdout}");
     assert!(!init_stdout.contains("Skipped from the preset"), "{init_stdout}");
