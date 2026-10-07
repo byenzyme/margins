@@ -35,7 +35,7 @@ dasp = "0.11"
 dirs = "6"
 fs4 = { version = "0.13", features = ["sync"] }
 hound = "3.5"
-margins-cli = { version = "0.4.20", path = "../margins-cli" }
+margins-cli = { version = "0.4.21", path = "../margins-cli" }
 margins-core = { version = "0.1.0", path = "../margins-core" }
 margins-media = { version = "0.1.0", path = "../margins-media" }
 margins-meeting-protocol = { version = "0.1.0", path = "../margins-meeting-protocol" }

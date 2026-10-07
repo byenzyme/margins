@@ -3,10 +3,10 @@
   "sdkVersion": "0.4.34",
   "artifactFormatVersion": 1,
   "pluginId": "margins",
-  "pluginVersion": "0.4.20",
+  "pluginVersion": "0.4.21",
   "builtWith": {
     "bbVersion": "0.41.0",
     "pluginSdkVersion": "0.4.34"
   },
-  "artifactDigest": "4f305c5a16cf0176f8b99c9ac9f08ca0c33e9fe68a61a1a01aae7ba70d10bc29"
+  "artifactDigest": "2f37547b1912fc80ef8387d818ad139e8376f313c974cb0bd2a4ee60ed4ab9b6"
 }
