@@ -299,6 +299,16 @@ pub fn write(receipt: &InitReceipt, json: bool, out: &mut dyn Write) -> Result<(
     write_text(receipt, out).map_err(output)
 }
 
+/// A reading's identity for matching "Reads" against "Skipped": its plain name
+/// without how it is read (`… and the pages it links`, `— profile`).
+fn reading_key(label: &str) -> String {
+    let base = label.split(" and the pages it links").next().unwrap_or(label);
+    let base = base.split(" — ").next().unwrap_or(base).trim();
+    base.strip_prefix("notes tagged ")
+        .unwrap_or(base)
+        .to_lowercase()
+}
+
 fn write_text(receipt: &InitReceipt, out: &mut dyn Write) -> std::io::Result<()> {
     let ws = &receipt.workspace;
     let margins = workspace_text::margins_for(&ws.id, ws.is_default);
@@ -324,8 +334,20 @@ fn write_text(receipt: &InitReceipt, out: &mut dyn Write) -> std::io::Result<()>
             None => writeln!(out, "Workspace {} ({})", ws.id, ws.home)?,
         }
     }
-    if !receipt.reads.is_empty() {
-        writeln!(out, "Reads: {}", receipt.reads.join(" · "))?;
+    // A reading the engine skipped is shown once, under Skipped, with why.
+    let skipped_whats = receipt
+        .skipped
+        .iter()
+        .map(|skip| reading_key(&skip.what))
+        .collect::<std::collections::BTreeSet<_>>();
+    let reads = receipt
+        .reads
+        .iter()
+        .filter(|read| !skipped_whats.contains(&reading_key(read)))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if !reads.is_empty() {
+        writeln!(out, "Reads: {}", reads.join(" · "))?;
     }
     if let Some(learns) = &receipt.learns_about {
         writeln!(
@@ -412,4 +434,54 @@ fn write_text(receipt: &InitReceipt, out: &mut dyn Write) -> std::io::Result<()>
 
 fn notes(count: usize) -> String {
     format!("{count} {}", if count == 1 { "note" } else { "notes" })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_skipped_reading_is_listed_once_under_skipped() {
+        let receipt = InitReceipt {
+            schema_version: INIT_SCHEMA,
+            workspace: InitWorkspace {
+                id: "notes".into(),
+                home: "/notes".into(),
+                program: "/state/configs/notes.enzyme".into(),
+                is_default: true,
+            },
+            created: true,
+            covered_by: None,
+            default_set: false,
+            preset: None,
+            recall: InitRecall {
+                status: "ok".into(),
+                documents: 3,
+                catalysts: 2,
+                catalyst_mode: "hosted".into(),
+                next_step: None,
+            },
+            reads: vec![
+                "the Meetings folder".into(),
+                "the People folder and the pages it links".into(),
+                "…plus what those miss, picked automatically".into(),
+            ],
+            learns_about: Some(vec!["the Meetings folder".into()]),
+            skipped: vec![InitSkip {
+                what: "the People folder".into(),
+                why: "too few notes".into(),
+            }],
+            leaves_out: Vec::new(),
+            attention: None,
+            notes: Vec::new(),
+        };
+        let mut out = Vec::new();
+        write(&receipt, false, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let reads = text.lines().find(|line| line.starts_with("Reads: ")).unwrap();
+        assert!(!reads.contains("People"), "{text}");
+        assert!(reads.contains("the Meetings folder"), "{text}");
+        assert!(text.contains("Skipped: the People folder (too few notes)"), "{text}");
+        assert_eq!(text.matches("People").count(), 1, "{text}");
+    }
 }

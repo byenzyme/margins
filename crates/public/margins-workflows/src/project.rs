@@ -89,27 +89,57 @@ fn discover_vault_root_with_machine_state(
     cwd: &Path,
     machine_state: Option<&Path>,
 ) -> Option<PathBuf> {
+    discover_vault_root_within(cwd, machine_state, dirs::home_dir().as_deref())
+}
+
+/// The walk stops at `home` when `cwd` is inside it: a folder above the user's
+/// home is never their vault, and `~/.margins` there may be another profile's
+/// Margins home.
+fn discover_vault_root_within(
+    cwd: &Path,
+    machine_state: Option<&Path>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    let home = home.map(canonicalize_for_compare);
+    let stop_at = home.filter(|home| canonicalize_for_compare(cwd).starts_with(home));
     let mut dir = Some(cwd);
     while let Some(current) = dir {
         let margins_dir = current.join(".margins");
         let margins_is_machine_state = machine_state.is_some_and(|state| {
             canonicalize_for_compare(state) == canonicalize_for_compare(&margins_dir)
-        });
+        }) || looks_like_margins_home(&margins_dir);
         if (margins_dir.is_dir() && !margins_is_machine_state) || current.join(".obsidian").is_dir()
         {
             return Some(current.to_path_buf());
+        }
+        if stop_at
+            .as_deref()
+            .is_some_and(|home| canonicalize_for_compare(current) == home)
+        {
+            return None;
         }
         dir = current.parent();
     }
     None
 }
 
-/// Whether `path` is Margins' machine-level configuration/state directory,
-/// rather than a vault-local session store that happens to share its name.
+/// Whether `path` holds Margins' machine layout (`configs/`, `workspaces/`,
+/// `margins.toml`): some Margins home, whichever `MARGINS_HOME` is in effect.
+/// A per-folder session store never has these.
+fn looks_like_margins_home(path: &Path) -> bool {
+    path.join("configs").is_dir()
+        || path.join("workspaces").is_dir()
+        || path.join("margins.toml").is_file()
+}
+
+/// Whether `path` is Margins' machine-level configuration/state directory
+/// (the current `MARGINS_HOME`, or any directory laid out like a Margins
+/// home), rather than a vault-local session store that shares its name.
 pub fn is_margins_machine_state_dir(path: &Path) -> bool {
-    crate::workspace::margins_home()
-        .ok()
-        .is_some_and(|state| canonicalize_for_compare(&state) == canonicalize_for_compare(path))
+    looks_like_margins_home(path)
+        || crate::workspace::margins_home().ok().is_some_and(|state| {
+            canonicalize_for_compare(&state) == canonicalize_for_compare(path)
+        })
 }
 
 /// Resolve the vault for a session command, git-style. The model is simply:
@@ -1085,6 +1115,40 @@ mod tests {
             discover_vault_root_with_machine_state(&nested, Some(&machine_state)),
             None,
             "machine state must not make the entire home directory a session vault"
+        );
+    }
+
+    #[test]
+    fn discover_vault_root_stops_at_home_and_skips_other_margins_homes() {
+        // A test HOME inside a real home whose ~/.margins is another profile's
+        // Margins home (not the MARGINS_HOME in effect).
+        let tmp = tempfile::tempdir().unwrap();
+        let real_home = tmp.path().join("real");
+        std::fs::create_dir_all(real_home.join(".margins/workspaces")).unwrap();
+        std::fs::create_dir_all(real_home.join(".margins/configs")).unwrap();
+        let test_home = real_home.join("test-home");
+        let folder = test_home.join("notes");
+        std::fs::create_dir_all(&folder).unwrap();
+        let active_state = test_home.join(".margins");
+
+        assert_eq!(
+            discover_vault_root_within(&folder, Some(&active_state), Some(&test_home)),
+            None,
+            "the walk must stop at HOME"
+        );
+        // Even without a HOME bound, a Margins-home layout is never a vault.
+        assert_eq!(
+            discover_vault_root_within(&folder, Some(&active_state), None),
+            None,
+            "another Margins home is not a per-folder store"
+        );
+        assert!(looks_like_margins_home(&real_home.join(".margins")));
+
+        // A real per-folder store inside HOME is still found.
+        std::fs::create_dir_all(folder.join(".margins")).unwrap();
+        assert_eq!(
+            discover_vault_root_within(&folder.join("inbox"), Some(&active_state), Some(&test_home)),
+            Some(folder.clone())
         );
     }
 
