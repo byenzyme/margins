@@ -145,6 +145,14 @@ fn invoke(
     invocation_dir: &std::path::Path,
     args: &[&str],
 ) -> (Result<(), margins_cli::CliError>, String, String) {
+    // Session commands consult Workspaces; keep them off the real Margins home.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    let _lock = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let old = std::env::var_os("MARGINS_HOME");
+    std::env::set_var("MARGINS_HOME", home.path());
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let result = margins_cli::run(
@@ -154,6 +162,10 @@ fn invoke(
         &mut stdout,
         &mut stderr,
     );
+    match old {
+        Some(old) => std::env::set_var("MARGINS_HOME", old),
+        None => std::env::remove_var("MARGINS_HOME"),
+    }
     (
         result,
         String::from_utf8(stdout).unwrap(),
@@ -189,7 +201,7 @@ fn realistic_multipart_processing_is_exact_once_offset_once_and_session_confined
     let (result, stdout, stderr) = invoke(
         &provider_services,
         &invocation,
-        &["margins", "process", "multi"],
+        &["margins", "--project", "test", "process", "multi"],
     );
     assert!(result.is_ok(), "{stderr}");
     assert!(stdout.contains("<segments>3</segments>"));
@@ -263,7 +275,7 @@ fn realistic_multipart_processing_is_exact_once_offset_once_and_session_confined
     let (result, stdout, stderr) = invoke(
         &align_only_services,
         &invocation,
-        &["margins", "process", "multi", "--align-only"],
+        &["margins", "--project", "test", "process", "multi", "--align-only"],
     );
     assert!(result.is_ok(), "{stderr}");
     assert!(stdout.contains("<transcript_entries>6</transcript_entries>"));
@@ -324,7 +336,7 @@ fn multipart_failures_preserve_existing_outputs_and_artifacts() {
     let align_only = services(&project, defaults.asr);
     let (result, stdout, _) = invoke(
         &align_only,
-        temp.path(),
+        &project,
         &["margins", "process", "multi", "--align-only"],
     );
     assert_eq!(result.unwrap_err().code(), "command_failed");
@@ -333,7 +345,7 @@ fn multipart_failures_preserve_existing_outputs_and_artifacts() {
 
     let unavailable = CliServices::default();
     let unavailable = services(&project, unavailable.asr);
-    let (result, stdout, _) = invoke(&unavailable, temp.path(), &["margins", "process", "multi"]);
+    let (result, stdout, _) = invoke(&unavailable, &project, &["margins", "process", "multi"]);
     assert_eq!(result.unwrap_err().code(), "asr_unavailable");
     assert!(stdout.is_empty());
     assert_unchanged();
@@ -342,7 +354,7 @@ fn multipart_failures_preserve_existing_outputs_and_artifacts() {
     let preflight_services = services(&project, preflight_asr.clone());
     let (result, stdout, _) = invoke(
         &preflight_services,
-        temp.path(),
+        &project,
         &["margins", "process", "multi", "--speakers", "2"],
     );
     assert_eq!(result.unwrap_err().code(), "diarization_unavailable");
@@ -352,7 +364,7 @@ fn multipart_failures_preserve_existing_outputs_and_artifacts() {
 
     let (result, stdout, _) = invoke(
         &preflight_services,
-        temp.path(),
+        &project,
         &["margins", "process", "../escaped"],
     );
     let error = result.unwrap_err();
@@ -373,7 +385,7 @@ fn multipart_failures_preserve_existing_outputs_and_artifacts() {
     let failing_services = services(&project, failing_asr.clone());
     let (result, stdout, _) = invoke(
         &failing_services,
-        temp.path(),
+        &project,
         &["margins", "process", "multi"],
     );
     assert!(result.is_err());

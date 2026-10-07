@@ -25,7 +25,7 @@ Building from source: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 `margins status` shows what Margins learns about; `margins edit` changes it; `margins sync` refreshes it and says what changed.
 
-**3. Record, in the folder where your notes live.**
+**3. Record, in the folder where your notes live.** Recordings go to the Workspace that covers that folder, or to your default Workspace; if there is none yet, `margins new` asks you to run `margins init` there first.
 
     margins new
 

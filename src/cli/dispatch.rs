@@ -437,6 +437,24 @@ where
         };
     }
 
+    // The first transcription is where the speech model is offered (onboarding
+    // never downloads it); the public dispatcher then finds it installed.
+    #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
+    if matches!(parsed.command, Some(Command::Transcribe { .. })) {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+        if let Err(error) = transcribe_preflight(
+            remote_selected,
+            workspace_selector.as_deref(),
+            project_selector.as_deref(),
+            &cwd,
+            ensure_speech_model_for_transcribe,
+        ) {
+            let exit_code = error.exit_code();
+            let _ = margins_cli::output::write_error(&mut io::stderr(), &error);
+            return exit_code;
+        }
+    }
+
     if let Some(Command::Note { print }) = &parsed.command {
         return match crate::note::run(*print) {
             Ok(()) => 0,
@@ -605,29 +623,30 @@ where
 
     let services = margins_cli::standalone_services();
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let env_workspace = std::env::var("MARGINS_WORKSPACE")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
-    let selected_workspace = workspace_selector.as_deref().or(env_workspace.as_deref());
-    if selected_workspace.is_some() && project_selector.is_some() {
-        return report_error("`--project` cannot be combined with an explicit Workspace selection");
-    }
-    let capture_root = if selected_workspace.is_some() {
-        let workspace = match resolve_workspace(selected_workspace) {
-            Ok(workspace) => workspace,
-            Err(error) => return report_error(&error.to_string()),
-        };
-        match workspace.capture_store_dir() {
-            Ok(path) => path,
-            Err(error) => return report_error(&error.to_string()),
+    let capture_root = match margins_cli::commands::capture_target::resolve(
+        &services,
+        workspace_selector.as_deref(),
+        project_selector.as_deref(),
+        &cwd,
+        match &parsed.command {
+            Some(Command::Attach { session }) => {
+                margins_cli::commands::capture_target::CaptureIntent::Attach(session.as_deref())
+            }
+            _ => margins_cli::commands::capture_target::CaptureIntent::Record,
+        },
+        &mut io::stderr(),
+    ) {
+        Ok(margins_cli::commands::capture_target::CaptureTarget::Workspace {
+            capture_root, ..
+        }) => capture_root,
+        // Only `attach` continues a session already in an old per-folder store.
+        Ok(margins_cli::commands::capture_target::CaptureTarget::Legacy(project)) => {
+            project.work_dir
         }
-    } else {
-        match services
-            .projects
-            .resolve_vault(project_selector.as_deref(), &cwd)
-        {
-            Ok(project) => project.work_dir,
-            Err(error) => return report_error(&error.to_string()),
+        Err(error) => {
+            let exit_code = error.exit_code();
+            let _ = margins_cli::output::write_error(&mut io::stderr(), &error);
+            return exit_code;
         }
     };
     let create = if create_if_missing {
@@ -656,6 +675,32 @@ where
         Ok(()) => 0,
         Err(error) => report_error(&format!("{error:#}")),
     }
+}
+
+/// Resolve where `transcribe` will keep the session (after `--remote` is
+/// ruled out) before offering the speech model download, so nobody downloads it only to learn there is no Workspace.
+/// The public dispatcher resolves again (and announces a default) afterwards.
+#[cfg_attr(not(all(feature = "coreml-asr", target_os = "macos")), allow(dead_code))]
+fn transcribe_preflight(
+    remote_selected: bool,
+    workspace_selector: Option<&str>,
+    project_selector: Option<&str>,
+    cwd: &Path,
+    offer_download: impl FnOnce() -> Result<()>,
+) -> Result<(), margins_cli::CliError> {
+    // Remote transcription runs on the remote host's model, never this one.
+    if remote_selected {
+        return Ok(());
+    }
+    margins_cli::commands::capture_target::resolve(
+        &margins_cli::standalone_services(),
+        workspace_selector,
+        project_selector,
+        cwd,
+        margins_cli::commands::capture_target::CaptureIntent::Record,
+        &mut Vec::new(),
+    )?;
+    offer_download().map_err(|error| margins_cli::CliError::new("command_failed", format!("{error:#}")))
 }
 
 fn bare_capture_creates(current: Option<&str>, current_exists: bool) -> bool {

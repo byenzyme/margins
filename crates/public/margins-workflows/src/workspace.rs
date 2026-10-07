@@ -1654,6 +1654,24 @@ fn select_workspace(
             })
         });
     }
+    let (id, via_default) = match covering_workspace_id(margins_home, cwd)? {
+        Some(id) => (id, false),
+        None => match default_workspace(margins_home)? {
+            Some(id) => (id, true),
+            None => return Ok(None),
+        },
+    };
+    resolution.at(margins_home, &id).map(|workspace| {
+        Some(SelectedWorkspace {
+            workspace,
+            via_default,
+        })
+    })
+}
+
+/// The one Workspace whose home or a declared folder contains `cwd`, ignoring
+/// any selection or default. Reads only; several matches are an error.
+pub fn covering_workspace_id(margins_home: &Path, cwd: &Path) -> Result<Option<String>> {
     let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
     // Matching only reads; only the chosen Workspace is resolved for writing.
     let mut matches = Resolution::ReadOnly
@@ -1662,20 +1680,11 @@ fn select_workspace(
         .filter(|workspace| declares_folder(workspace, &cwd))
         .map(|workspace| workspace.config.id)
         .collect::<Vec<_>>();
-    let (id, via_default) = match matches.len() {
-        1 => (matches.remove(0), false),
-        0 => match default_workspace(margins_home)? {
-            Some(id) => (id, true),
-            None => return Ok(None),
-        },
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(Some(matches.remove(0))),
         _ => bail!("multiple workspaces declare this folder; pass --workspace <id> explicitly"),
-    };
-    resolution.at(margins_home, &id).map(|workspace| {
-        Some(SelectedWorkspace {
-            workspace,
-            via_default,
-        })
-    })
+    }
 }
 
 fn declares_folder(workspace: &ResolvedWorkspace, cwd: &Path) -> bool {

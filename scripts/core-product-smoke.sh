@@ -202,6 +202,9 @@ run_live_smoke() {
   local smoke_root
   smoke_root="$(mktemp -d "$LOG_ROOT/live-runroot.XXXXXX")"
   mkdir -p "$smoke_root/home" "$smoke_root/margins-home" "$smoke_root/vault"
+  # Recording goes to the Workspace covering the cwd; declare one for the vault.
+  HOME="$smoke_root/home" MARGINS_HOME="$smoke_root/margins-home" \
+    "$binary" workspace new smoke --home "$smoke_root/vault" --json >/dev/null
 
   log "RUN live-capture: root=$smoke_root duration=${DURATION_SECS}s model=$model_dir"
   python3 - "$binary" "$smoke_root" "$DURATION_SECS" "$TITLE" "$model_dir" "$LOG_ROOT/live-pty.log" <<'PY'
@@ -282,7 +285,9 @@ import wave
 
 root = pathlib.Path(sys.argv[1])
 log_root = pathlib.Path(sys.argv[2])
-margins_dir = root / "vault" / ".margins"
+margins_dir = root / "margins-home" / "workspaces" / "smoke" / "captures" / ".margins"
+if (root / "vault" / ".margins").exists():
+    raise SystemExit("recording created a per-folder .margins store in the vault")
 current = margins_dir / "current"
 if not current.is_file():
     raise SystemExit("missing current pointer")

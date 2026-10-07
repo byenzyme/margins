@@ -3,6 +3,7 @@ pub mod archive;
 pub mod artifacts;
 pub mod capabilities;
 pub mod capture;
+pub mod capture_target;
 pub mod connect;
 pub mod guide;
 pub mod import;
