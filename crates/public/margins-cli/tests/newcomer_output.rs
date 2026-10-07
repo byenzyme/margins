@@ -897,3 +897,51 @@ fn saving_a_plan_prunes_old_and_excess_plans_but_never_follows_symlinks() {
     assert_eq!(std::fs::read_to_string(&canary).unwrap(), "keep me");
     assert!(unrelated.exists());
 }
+
+#[test]
+fn listing_sessions_without_a_workspace_points_to_init() {
+    let fixture = Fixture::new();
+    let elsewhere = fixture.root().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    for command in ["ls", "current"] {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let result = margins_cli::run(
+            &CliServices::default(),
+            &elsewhere,
+            ["margins", command],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(result.unwrap_err().code(), "workspace_required", "{command}");
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(stderr.contains("there are no recordings to show"), "{command}: {stderr}");
+        assert!(stderr.contains("Run `margins init` in your notes folder first"), "{command}: {stderr}");
+        assert!(!stderr.contains("this recording"), "{command}: {stderr}");
+    }
+}
+
+#[test]
+fn explain_lines_never_repeat_the_reading() {
+    use margins_cli::commands::status::{explain_line, ExplainReading};
+    let reading = |source: &str, learns: &[&str]| ExplainReading {
+        reading: source.to_string(),
+        learns: learns.iter().map(|learned| learned.to_string()).collect(),
+        skipped: Vec::new(),
+    };
+    assert_eq!(
+        explain_line(&reading("folder \"Meetings\"", &["the Meetings folder"])),
+        "the Meetings folder: learned about"
+    );
+    assert_eq!(
+        explain_line(&reading(
+            "folder \"People\" including linked pages",
+            &["the People folder", "Alice Chen (linked page)"]
+        )),
+        "the People folder and the pages it links: learned about, with Alice Chen (linked page)"
+    );
+    assert_eq!(
+        explain_line(&reading("folder \"Projects\"", &[])),
+        "the Projects folder: nothing yet"
+    );
+}

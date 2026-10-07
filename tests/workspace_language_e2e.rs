@@ -1337,6 +1337,7 @@ fn cli_only_newcomer_learns_the_program_and_sees_it_through_status() {
     assert!(init_stdout.contains("\nReads: the Meetings folder — operational · "), "{init_stdout}");
     assert!(init_stdout.contains("\nLearns about now: "), "{init_stdout}");
     assert!(init_stdout.contains("\nLeaves out: templates · Attachments\n"), "{init_stdout}");
+    assert!(!init_stdout.contains("Skipped from the preset"), "{init_stdout}");
     assert!(init_stdout.contains(" notes indexed · "), "{init_stdout}");
     assert!(
         init_stdout.ends_with(
@@ -1402,7 +1403,7 @@ fn cli_only_newcomer_learns_the_program_and_sees_it_through_status() {
         " notes indexed",
         "\nLearns about:\n  the Meetings folder — operational\n",
         "\nWhy (the next catalyst build: ",
-        "\n  the Meetings folder: ",
+        "\n  the Meetings folder: nothing yet\n    the Meetings folder — too little written about it yet\n",
     ] {
         assert!(readable.contains(expected), "missing {expected:?} in:\n{readable}");
     }

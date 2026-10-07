@@ -608,15 +608,7 @@ fn edit_preview(
         );
         let mut lines = Vec::new();
         for reading in &view.readings {
-            lines.push(format!(
-                "{}: {}",
-                margins_cli::commands::status::plain_reading(&reading.reading),
-                if reading.learns.is_empty() {
-                    "nothing yet".to_string()
-                } else {
-                    reading.learns.join(", ")
-                }
-            ));
+            lines.push(margins_cli::commands::status::explain_line(reading));
             lines.extend(
                 reading
                     .skipped
