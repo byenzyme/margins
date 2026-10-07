@@ -223,3 +223,75 @@ fn covering_workspace_wins_and_names_the_earlier_store() {
     assert!(stdout(&output).contains("earlier-meeting"));
     assert!(!inbox.join(".margins").exists());
 }
+
+#[test]
+fn another_margins_home_above_home_is_never_an_earlier_store() {
+    // A test HOME inside a "real" home whose ~/.margins is a Margins home.
+    let machine = Machine::new();
+    let real_home = machine.folder("real");
+    fs::create_dir_all(real_home.join(".margins/workspaces")).unwrap();
+    fs::create_dir_all(real_home.join(".margins/configs")).unwrap();
+    fs::write(real_home.join(".margins/margins.toml"), "").unwrap();
+    let test_home = machine.folder("real/test-home");
+    let notes = machine.folder("real/test-home/notes");
+    let run = |cwd: &Path, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_margins-private"))
+            .args(args)
+            .current_dir(cwd)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", &test_home)
+            .env("XDG_CONFIG_HOME", test_home.join(".config"))
+            .env("MARGINS_HOME", test_home.join(".margins"))
+            .output()
+            .unwrap()
+    };
+    let output = run(
+        &test_home,
+        &["workspace", "new", "practice", "--home", notes.to_str().unwrap(), "--json"],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    for args in [vec!["transcribe", "missing.wav"], vec!["ls"]] {
+        let output = run(&notes, &args);
+        assert!(
+            !stderr(&output).contains("Earlier recordings"),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
+fn hints_in_a_covered_folder_use_plain_commands() {
+    let machine = Machine::new();
+    let notes = machine.folder("notes");
+    let other = machine.folder("other");
+    let elsewhere = machine.folder("elsewhere");
+    create_workspace(&machine, "practice", &notes);
+    create_workspace(&machine, "team", &other);
+    let output = machine.run(&machine.root, &["workspace", "default", "--set", "team"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    // `practice` is not the default, but it covers `notes`: plain commands.
+    let output = machine.run(&notes, &["workspace", "show"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stderr(&output).contains("`margins edit`"), "{}", stderr(&output));
+    assert!(!stderr(&output).contains("--workspace"), "{}", stderr(&output));
+
+    // Elsewhere, plain `margins` would pick the default: spell it out.
+    let output = machine.run(&elsewhere, &["--workspace", "practice", "workspace", "show"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("`margins --workspace practice edit`"),
+        "{}",
+        stderr(&output)
+    );
+    // And the default Workspace from inside another's folder needs the flag.
+    let output = machine.run(&notes, &["--workspace", "team", "workspace", "show"]);
+    assert!(
+        stderr(&output).contains("`margins --workspace team edit`"),
+        "{}",
+        stderr(&output)
+    );
+}

@@ -182,13 +182,37 @@ pub fn is_machine_default(id: &str) -> bool {
         .is_ok_and(|default| default.as_deref() == Some(id))
 }
 
-/// The start of a printed command for Workspace `id`: `margins`, plus
-/// `--workspace <id>` unless it is the machine default.
+/// The start of a printed command for Workspace `id`: plain `margins` when
+/// that alone selects `id` from here (`MARGINS_WORKSPACE`, else the Workspace
+/// covering the current folder, else the default), otherwise with
+/// `--workspace <id>`.
 pub fn margins_for(id: &str, is_default: bool) -> String {
-    if is_default {
+    let cwd = std::env::current_dir().ok();
+    if plain_selects(id, is_default, cwd.as_deref()) {
         "margins".to_string()
     } else {
         format!("margins --workspace {id}")
+    }
+}
+
+fn plain_selects(id: &str, is_default: bool, cwd: Option<&Path>) -> bool {
+    if let Some(selected) = std::env::var("MARGINS_WORKSPACE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return selected.trim() == id;
+    }
+    let covering = cwd.and_then(|cwd| {
+        margins_workflows::workspace::margins_home()
+            .and_then(|home| margins_workflows::workspace::covering_workspace_id(&home, cwd))
+            .ok()
+    });
+    match covering {
+        Some(Some(covering)) => covering == id,
+        // No Workspace covers the folder: the default is what plain selects.
+        Some(None) => is_default,
+        // Unreadable, or several cover it: spell the Workspace out.
+        None => false,
     }
 }
 
