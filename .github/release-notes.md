@@ -1,22 +1,11 @@
-Margins 0.4.21 gives the recording screen a clearer start and a visible
-recording state. The release archives contain `margins`, `margins-server`, and
-the bundled `enzyme` 0.12.2.
+Margins 0.4.22 adds a downloadable Apple Silicon `Margins.app` for recording
+from the Mac menu bar. The app includes its capture helper and is signed,
+notarized, and stapled for installation.
 
-- Starting a recording (`margins new`, bare `margins`, or `margins attach`)
-  plays a short ignition sweep around the editor frame. A white-hot spark runs
-  clockwise and cools through flame colors into the steady border. It plays
-  once per session, and pausing, resuming, or switching microphones does not
-  replay it.
-- The frame title shows the recording state and session:
-  `● rec · margins — <session>`, plus `(resumed)` after `margins attach`. The
-  red dot fades gently while recording. Pausing shows `‖ paused`, and resuming
-  flashes the dot. On narrow terminals the title keeps the recording indicator
-  and drops the rest first.
-- Set `MARGINS_NO_ANIMATION=1` to turn off the sweep and the fading dot, or
-  `NO_COLOR=1` to turn off color as well.
+The release also contains the `margins` CLI, `margins-server`, and bundled
+`enzyme` archives for Apple Silicon macOS and x86-64 Linux. Upgrade the bb
+plugin with the runtime: the plugin pins this release and installs the matching
+server and CLI on the project host. Install `Margins.app` separately on the
+recording Mac for microphone and computer audio.
 
-Upgrade the CLI and the bb plugin (with its `margins-server`) together. The
-plugin installs `margins`, `margins-server`, and `enzyme` from the 0.4.21
-archive as one runtime.
-
-Known limits: Linux live transcription is not available.
+Known limit: Linux live transcription is not available.
