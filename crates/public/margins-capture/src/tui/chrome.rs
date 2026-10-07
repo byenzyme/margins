@@ -97,16 +97,20 @@ impl Chrome {
         Self::fg(self.rgb_or(ACCENT, Color::Cyan))
     }
 
-    /// The border before the head has reached it.
+    /// The border before the head has reached it. The terminal theme's own
+    /// dim color, so it recedes on light and dark backgrounds alike.
     fn faint(&self) -> Style {
-        Self::fg(self.rgb_or(FAINT, Color::DarkGray))
+        match self.color {
+            ColorMode::None => Style::default(),
+            _ => Style::default().fg(Color::DarkGray),
+        }
     }
 
     /// The sweep head, and the tail color `distance` (0.0 head .. 1.0 settled).
     fn tail(&self, distance: f32) -> Style {
         match self.color {
             ColorMode::TrueColor => {
-                let (r, g, b) = lerp_rgb(HIGHLIGHT, ACCENT, distance);
+                let (r, g, b) = fire(distance);
                 let style = Style::default().fg(Color::Rgb(r, g, b));
                 if distance == 0.0 {
                     style.add_modifier(Modifier::BOLD)
@@ -115,10 +119,14 @@ impl Chrome {
                 }
             }
             ColorMode::Basic => {
-                let color = if distance < 0.34 {
+                let color = if distance < 0.15 {
                     Color::White
-                } else if distance < 0.67 {
-                    Color::LightCyan
+                } else if distance < 0.35 {
+                    Color::Yellow
+                } else if distance < 0.6 {
+                    Color::LightRed
+                } else if distance < 0.85 {
+                    Color::Red
                 } else {
                     Color::Cyan
                 };
@@ -150,11 +158,38 @@ impl Chrome {
 }
 
 const ACCENT: (u8, u8, u8) = (0x8f, 0xa7, 0xb8);
-const HIGHLIGHT: (u8, u8, u8) = (0xee, 0xf5, 0xf9);
-const FAINT: (u8, u8, u8) = (0x3a, 0x46, 0x50);
-const REC: (u8, u8, u8) = (0xe5, 0x53, 0x4b);
-const REC_DIM: (u8, u8, u8) = (0x7a, 0x2e, 0x2a);
-const PAUSED: (u8, u8, u8) = (0xa9, 0x95, 0x7d);
+const WHITE_HOT: (u8, u8, u8) = (0xff, 0xf4, 0xd6);
+const YELLOW: (u8, u8, u8) = (0xff, 0xd8, 0x4a);
+const ORANGE: (u8, u8, u8) = (0xff, 0x9a, 0x1f);
+const FLAME: (u8, u8, u8) = (0xf0, 0x50, 0x2e);
+const EMBER: (u8, u8, u8) = (0x9c, 0x33, 0x20);
+/// The rec dot breathes between these; both hold at least 3.4:1 contrast on
+/// dark (#1e1e1e) and light (#ffffff) backgrounds.
+const REC: (u8, u8, u8) = FLAME;
+const REC_DIM: (u8, u8, u8) = (0xc4, 0x45, 0x2c);
+const PAUSED: (u8, u8, u8) = (0xf2, 0xa3, 0x3a);
+
+/// The sweep tail cools from the white-hot head through flame into an ember,
+/// which then settles into the steady frame accent.
+const FIRE: [(f32, (u8, u8, u8)); 6] = [
+    (0.0, WHITE_HOT),
+    (0.15, YELLOW),
+    (0.35, ORANGE),
+    (0.6, FLAME),
+    (0.85, EMBER),
+    (1.0, ACCENT),
+];
+
+fn fire(distance: f32) -> (u8, u8, u8) {
+    let distance = distance.clamp(0.0, 1.0);
+    for pair in FIRE.windows(2) {
+        let ((from_at, from), (to_at, to)) = (pair[0], pair[1]);
+        if distance <= to_at {
+            return lerp_rgb(from, to, (distance - from_at) / (to_at - from_at));
+        }
+    }
+    ACCENT
+}
 
 fn lerp_rgb(from: (u8, u8, u8), to: (u8, u8, u8), t: f32) -> (u8, u8, u8) {
     let t = t.clamp(0.0, 1.0);
@@ -194,7 +229,7 @@ pub(super) fn paint_sweep(
     }
     let progress = since_intro.as_secs_f32() / SWEEP.as_secs_f32();
     let head = (progress * cells.len() as f32) as usize;
-    let tail_len = (cells.len() / 6).max(4);
+    let tail_len = (cells.len() / 4).max(6);
     for (index, &(x, y)) in cells.iter().enumerate() {
         let style = if index > head {
             chrome.faint()
@@ -305,7 +340,7 @@ fn indicator_style(state: Recording, chrome: &Chrome, clock: &TitleClock) -> Sty
         Recording::Live => {
             let pulsing = chrome.animate && clock.since_resume.is_some_and(|t| t < RESUME_PULSE);
             if pulsing {
-                return Chrome::fg(chrome.rgb_or(HIGHLIGHT, Color::White))
+                return Chrome::fg(chrome.rgb_or(WHITE_HOT, Color::White))
                     .add_modifier(Modifier::BOLD);
             }
             match chrome.color {
@@ -399,12 +434,12 @@ mod tests {
         let mut buf = Buffer::empty(area);
         assert!(paint_sweep(&mut buf, area, &TRUE, SWEEP / 2));
         let head = cells.len() / 2;
-        let faint = Color::Rgb(FAINT.0, FAINT.1, FAINT.2);
+        let faint = Color::DarkGray;
         let accent = Color::Rgb(ACCENT.0, ACCENT.1, ACCENT.2);
         let (hx, hy) = cells[head];
         assert_eq!(
             fg_at(&buf, hx, hy),
-            Color::Rgb(HIGHLIGHT.0, HIGHLIGHT.1, HIGHLIGHT.2)
+            Color::Rgb(WHITE_HOT.0, WHITE_HOT.1, WHITE_HOT.2)
         );
         assert!(buf
             .cell((hx, hy))
@@ -425,6 +460,49 @@ mod tests {
         );
         let (lx, ly) = *cells.last().unwrap();
         assert_eq!(fg_at(&buf, lx, ly), faint);
+    }
+
+    #[test]
+    fn sweep_tail_cools_from_white_hot_through_flame_to_the_accent() {
+        assert_eq!(fire(0.0), WHITE_HOT);
+        assert_eq!(fire(0.15), YELLOW);
+        assert_eq!(fire(0.35), ORANGE);
+        assert_eq!(fire(0.6), FLAME);
+        assert_eq!(fire(0.85), EMBER);
+        assert_eq!(fire(1.0), ACCENT);
+        // Cooling: green falls monotonically from the head to the ember.
+        let greens: Vec<u8> = (0..=17).map(|step| fire(step as f32 * 0.05).1).collect();
+        assert!(
+            greens.windows(2).all(|pair| pair[1] <= pair[0]),
+            "{greens:?}"
+        );
+    }
+
+    fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f32 {
+        let luminance = |(r, g, b): (u8, u8, u8)| {
+            let channel = |c: u8| {
+                let c = c as f32 / 255.0;
+                if c <= 0.039_28 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+        };
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn rec_dot_stays_legible_on_dark_and_light_terminals_through_its_breath() {
+        for background in [(0x1e, 0x1e, 0x1e), (0xff, 0xff, 0xff)] {
+            for step in 0..=10 {
+                let color = lerp_rgb(REC, REC_DIM, step as f32 / 10.0);
+                let ratio = contrast(color, background);
+                assert!(ratio >= 3.0, "{color:?} on {background:?}: {ratio}");
+            }
+        }
     }
 
     #[test]
@@ -513,7 +591,7 @@ mod tests {
         assert_eq!(style_at(Recording::Live, None, 2_000).fg, Some(rec));
         assert_eq!(
             style_at(Recording::Live, Some(100), 1_000).fg,
-            Some(Color::Rgb(HIGHLIGHT.0, HIGHLIGHT.1, HIGHLIGHT.2))
+            Some(Color::Rgb(WHITE_HOT.0, WHITE_HOT.1, WHITE_HOT.2))
         );
         assert_eq!(style_at(Recording::Live, Some(400), 1_000).fg, Some(dim));
         let paused = Color::Rgb(PAUSED.0, PAUSED.1, PAUSED.2);
