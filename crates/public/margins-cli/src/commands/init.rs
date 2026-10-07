@@ -338,12 +338,22 @@ fn write_text(receipt: &InitReceipt, out: &mut dyn Write) -> std::io::Result<()>
             }
         )?;
     }
-    if !receipt.skipped.is_empty() {
-        let skipped = receipt
-            .skipped
-            .iter()
-            .map(|skip| format!("{} ({})", skip.what, skip.why))
-            .collect::<Vec<_>>();
+    // One list: what the engine skipped, and preset folders the notes lack.
+    let mut skipped = receipt
+        .skipped
+        .iter()
+        .map(|skip| format!("{} ({})", skip.what, skip.why))
+        .collect::<Vec<_>>();
+    if let Some(preset) = &receipt.preset {
+        skipped.extend(preset.skipped_readings.iter().map(|reading| {
+            let why = match preset.skip_reasons.get(reading).map(String::as_str) {
+                None | Some("no such folder") => "not in your notes",
+                Some(reason) => reason,
+            };
+            format!("{} ({why})", workspace_text::describe_ref(reading))
+        }));
+    }
+    if !skipped.is_empty() {
         writeln!(out, "Skipped: {}", skipped.join("; "))?;
     }
     writeln!(
@@ -356,17 +366,6 @@ fn write_text(receipt: &InitReceipt, out: &mut dyn Write) -> std::io::Result<()>
         }
     )?;
     if let Some(preset) = &receipt.preset {
-        if !preset.skipped_readings.is_empty() {
-            let skipped = preset
-                .skipped_readings
-                .iter()
-                .map(|reading| match preset.skip_reasons.get(reading) {
-                    Some(reason) => format!("{} ({reason})", reading_label(reading)),
-                    None => reading_label(reading).to_string(),
-                })
-                .collect::<Vec<_>>();
-            writeln!(out, "Skipped from the preset: {}", skipped.join(" · "))?;
-        }
         let folder = if preset.note_folder == "." {
             ws.home.clone()
         } else {
