@@ -1183,6 +1183,10 @@ fn run_remote_native_capture(
     app.preferred_mic_name = preference.as_ref().map(|choice| choice.name.clone());
     app.preferred_mic_uid = preference.as_ref().and_then(|choice| choice.uid.clone());
     app.message = preference_note;
+    app.set_session_identity(
+        session_id.clone(),
+        matches!(command, Some(Command::Attach { .. })),
+    );
     let uploader_done = Arc::new(AtomicBool::new(false));
     let uploader_state = Arc::new(AtomicU8::new(crate::app::REMOTE_DELIVERY_CURRENT));
     let uploader_pending_chunks = Arc::new(AtomicU64::new(0));

@@ -11,7 +11,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph},
     Terminal,
 };
 use std::io;
@@ -19,6 +19,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::app::{App, AppMode, GUTTER_WIDTH};
+
+mod chrome;
+use chrome::{Chrome, Recording, TitleClock};
 
 /// Show silence beside the speaker meter without interrupting the mic meter.
 const SYSTEM_AUDIO_SILENCE_MARKER_SECS: u64 = 3;
@@ -367,23 +370,45 @@ fn event_loop(
     let mut spool_progress = [SpoolProgress::default(), SpoolProgress::default()];
     let mut system_audio_permission_probe_pending = cfg!(target_os = "macos");
     let mut live_drop_warned = false;
+    let chrome = Chrome::from_env();
+    if chrome.animate && app.intro_started_at.is_none() {
+        app.intro_started_at = Some(std::time::Instant::now());
+    }
 
     loop {
-        terminal.draw(|f| render(f, app))?;
+        terminal.draw(|f| render(f, app, &chrome, std::time::Instant::now()))?;
 
         if app.native_spool_overflow.load(Ordering::Acquire) {
             app.message = Some(
                 "Audio storage fell over 60s behind. Capture is stopping; run margins attach to resume."
                     .into(),
             );
-            terminal.draw(|f| render(f, app))?;
+            terminal.draw(|f| render(f, app, &chrome, std::time::Instant::now()))?;
             std::thread::sleep(std::time::Duration::from_millis(750));
             return Err(Box::new(io::Error::other(
                 "audio storage fell over 60 seconds behind; recording stopped. Run margins attach to resume this session",
             )));
         }
 
-        if event::poll(std::time::Duration::from_millis(250))? {
+        let now = std::time::Instant::now();
+        let title_chars = chrome::title_text(
+            Recording::Live,
+            &app.session_title(),
+            app.resumed_session,
+            u16::MAX,
+        )
+        .chars()
+        .count();
+        let tick = if chrome.animating(
+            app.intro_started_at.map(|at| now.duration_since(at)),
+            app.resumed_at.map(|at| now.duration_since(at)),
+            title_chars,
+        ) {
+            chrome::ANIMATION_FRAME
+        } else {
+            std::time::Duration::from_millis(250)
+        };
+        if event::poll(tick)? {
             match event::read()? {
                 Event::Key(key) => {
                     app.message = None;
@@ -614,7 +639,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
     }
 }
 
-fn render(f: &mut ratatui::Frame, app: &mut App) {
+fn render(f: &mut ratatui::Frame, app: &mut App, chrome: &Chrome, now: std::time::Instant) {
     let input_notice = app.message.as_deref().is_some_and(|message| {
         message.starts_with("Saved mic '") || message.starts_with("Could not read saved mic choice")
     });
@@ -679,14 +704,41 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
         ]));
     }
 
+    let since = |at: Option<std::time::Instant>| at.map(|at| now.saturating_duration_since(at));
+    let since_intro = since(app.intro_started_at);
     let title = if draft_lines.is_some() {
-        " local draft (read only) "
+        Line::from(" local draft (read only) ")
     } else {
-        " margins "
+        let state = if app.capture_paused {
+            Recording::Paused
+        } else {
+            Recording::Live
+        };
+        let text = chrome::title_text(
+            state,
+            &app.session_title(),
+            app.resumed_session,
+            editor_area.width,
+        );
+        let clock = TitleClock {
+            since_intro,
+            since_resume: since(app.resumed_at),
+            since_start: (chrono::Local::now() - app.start_time)
+                .to_std()
+                .unwrap_or_default(),
+        };
+        chrome::title_line(&text, state, chrome, &clock)
     };
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(chrome.accent())
+        .title(title);
     let paragraph = Paragraph::new(display_lines).block(block);
     f.render_widget(paragraph, editor_area);
+    if let Some(since_intro) = since_intro {
+        chrome::paint_sweep(f.buffer_mut(), editor_area, chrome, since_intro);
+    }
 
     // Cursor
     if draft_lines.is_none() {
@@ -1134,7 +1186,9 @@ mod tests {
         app.mic_level.store(0.5f32.to_bits(), Ordering::Relaxed);
         let backend = TestBackend::new(width, 8);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(frame, app)).unwrap();
+        terminal
+            .draw(|frame| render(frame, app, &Chrome::still(), std::time::Instant::now()))
+            .unwrap();
         terminal
             .backend()
             .buffer()
@@ -1151,7 +1205,9 @@ mod tests {
         app.mic_level.store(0.5f32.to_bits(), Ordering::Relaxed);
         let backend = TestBackend::new(width, 8);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(frame, app)).unwrap();
+        terminal
+            .draw(|frame| render(frame, app, &Chrome::still(), std::time::Instant::now()))
+            .unwrap();
         let rows = terminal.backend().buffer().content.chunks(width as usize);
         rows.skip(8 - lines)
             .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
@@ -1348,6 +1404,57 @@ mod tests {
             ));
             assert!(message.is_some());
         }
+    }
+
+    fn rendered_top_row(app: &mut App, width: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+        terminal
+            .draw(|frame| render(frame, app, &Chrome::still(), std::time::Instant::now()))
+            .unwrap();
+        terminal.backend().buffer().content[..width as usize]
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn frame_title_names_the_session_and_its_recording_state() {
+        let mut app = App::new(
+            "/tmp/.margins/2026-10-07-standup.md".into(),
+            chrono::Local::now(),
+            "mic".into(),
+        );
+        let top = rendered_top_row(&mut app, 60);
+        assert!(
+            top.starts_with("╭ ● rec · margins — 2026-10-07-standup ─"),
+            "{top}"
+        );
+        assert!(top.ends_with('╮'), "{top}");
+
+        app.set_session_identity("standup".into(), true);
+        let top = rendered_top_row(&mut app, 60);
+        assert!(
+            top.contains(" ● rec · margins — standup (resumed) "),
+            "{top}"
+        );
+
+        app.set_capture_paused(true);
+        let top = rendered_top_row(&mut app, 60);
+        assert!(
+            top.contains(" ‖ paused · margins — standup (resumed) "),
+            "{top}"
+        );
+        assert!(rendered_top_row(&mut app, 14).contains(" ‖ paused "));
+    }
+
+    #[test]
+    fn resuming_capture_arms_the_title_pulse_once() {
+        let mut app = App::new("meeting.md".into(), chrono::Local::now(), "mic".into());
+        assert!(app.resumed_at.is_none());
+        app.set_capture_paused(true);
+        assert!(app.resumed_at.is_none());
+        app.set_capture_paused(false);
+        assert!(app.resumed_at.is_some());
     }
 
     #[test]

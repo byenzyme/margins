@@ -157,6 +157,7 @@ fn create_native_session(work_dir: &Path, title: Option<&str>) -> Result<()> {
         mic_name,
     );
     app.bind_workspace_authority(margins_dir.clone(), name.clone());
+    app.set_session_identity(name.clone(), false);
     let observed =
         margins_store::SqliteWorkspaceAuthorityStorage::open(&margins_dir)?.memo(&name)?;
     app.observe_memo(observed.revision, observed.lines);
@@ -245,6 +246,7 @@ fn attach_native_session(work_dir: &Path, selected: Option<&str>) -> Result<()> 
         mic_name,
     );
     app.bind_workspace_authority(margins_dir.clone(), name.clone());
+    app.set_session_identity(name.clone(), true);
     app.observe_memo(observed.revision, observed.lines);
     app.live_transcription_status = live_status;
     if let Some(worker) = &live {
