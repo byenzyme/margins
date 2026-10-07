@@ -66,19 +66,22 @@ setup_and_query() {
   "$MARGINS_BIN" workspace new "$WORKSPACE_ID" --home "$NOTES" > "$RUNROOT/workspace-new.txt"
   (
     cd "$HOME"
-    run_workspace init > "$RUNROOT/init.xml"
+    run_workspace init --json > "$RUNROOT/init.json"
     run_workspace sync --json > "$RUNROOT/sync.json"
     run_workspace recall --json "$query" > "$RUNROOT/recall.json"
     run_workspace workspace status --json > "$RUNROOT/status.json"
     run_workspace source list --json > "$RUNROOT/sources.json"
   )
 
-  grep -q 'status="ok"' "$RUNROOT/init.xml"
-  python3 - "$RUNROOT/recall.json" "$RUNROOT/sync.json" "$RUNROOT/status.json" "$RUNROOT/sources.json" "$NOTES" "$WORKSPACE_ID" <<'PY'
+  python3 - "$RUNROOT/recall.json" "$RUNROOT/sync.json" "$RUNROOT/status.json" "$RUNROOT/sources.json" "$NOTES" "$WORKSPACE_ID" "$RUNROOT/init.json" <<'PY'
 import json
 from pathlib import Path
 import sys
 
+init = json.load(open(sys.argv[7]))
+assert init["schema_version"] == "margins.init.v1", init
+assert init["workspace"]["id"] == sys.argv[6], init
+assert init["created"] is False, init
 recall = json.load(open(sys.argv[1]))
 sync = json.load(open(sys.argv[2]))
 status = json.load(open(sys.argv[3]))

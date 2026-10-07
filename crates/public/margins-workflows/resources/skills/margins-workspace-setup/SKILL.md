@@ -25,8 +25,9 @@ session, or draft a note as part of this workflow.
   Margins may write an approved note. Reference Sources may be searched but not
   modified.
 - Each Workspace is one **program**, `$MARGINS_HOME/configs/<id>.enzyme`
-  (`margins --workspace <id> workspace show` prints its path and
-  `workspace show --text` its text). It says which folders Margins reads, where
+  (`margins --workspace <id> edit --path` prints its path and
+  `edit --print` its text; `margins --workspace <id> status` shows what it
+  learns about). It says which folders Margins reads, where
   it writes notes, and what it leaves out. `margins guide glossary` explains
   these words for the user.
 - Setup starts every program from the **Margins meetings preset**: notes go to
@@ -41,8 +42,10 @@ session, or draft a note as part of this workflow.
   a preset-made program that lacks it and changes nothing else.
 - **Plan** turns the preset into an exact, reviewable list of changes. **Apply**
   commits only that plan.
-- **Init** and **sync** prepare recall. **Recall** proves that the notes folder is
-  reachable.
+- **Init** and **sync** prepare recall: init builds the index (search works
+  from the index alone, with no download), and catalysts add related notes
+  once a catalyst generator is set up. **Recall** proves that the notes folder
+  is reachable.
 - Connected services, including Granola, are two-step: first authorize the
   machine connection, then bind the account as a typed Workspace Source before
   sync. A successful connection alone does not expand the Workspace boundary.
@@ -86,16 +89,21 @@ below. For one notes folder on a build without it, use the direct path.
 
 ## 2. Direct setup when the preset is unavailable
 
-Run these commands from the notes folder:
+Name the notes folder; init makes the Workspace and indexes it:
 
 ```bash
-cd "/absolute/path/to/notes"
-margins init
+margins init "/absolute/path/to/notes" --json
 margins sync --json
 margins recall --json "an exact phrase from these notes"
-margins workspace status --json
+margins status --json
 ```
 
+`margins init` prints a `margins.init.v1` receipt with `--json`; its
+`recall.status` is `ok` (index and catalysts), `index_only` (no catalyst
+generator is set up: search finds direct matches), or `catalysts_pending`.
+On a build with the preset, plain `margins init <folder>` also starts the
+program from the meetings preset without a review step; this guide uses the
+reviewed path below instead, so the user sees the plan first.
 Do not run recall before `margins init` has completed for this Workspace.
 An exact-phrase result pointing to an existing note proves that the folder is
 inside the recall boundary. Report that plainly.
@@ -103,7 +111,9 @@ inside the recall boundary. Report that plainly.
 ## 3. Declare the Workspace and its Sources
 
 Create the Workspace with its one writable home (skip this when a Workspace for
-that folder already exists), and add each read-only reference Source:
+that folder already exists), and add each read-only reference Source.
+`workspace new` declares the Workspace without indexing, so the plan below is
+reviewed before anything is built:
 
 ```bash
 margins workspace new practice --home "/absolute/path/to/notes"
@@ -212,10 +222,11 @@ coverage, not as the official semantic index size. Never relabel that number as
 persisted engine index count and may be described that way. A recall response's
 `note_count` is the exact number of documents searched by that recall call.
 
-Then initialize and prove recall in this order:
+Then initialize and prove recall in this order. `init` on an existing
+Workspace refreshes it and never changes its program:
 
 ```bash
-margins --workspace practice init
+margins --workspace practice init --json
 margins --workspace practice sync --json
 margins --workspace practice recall --json "<distinctive phrase from a note>"
 margins --workspace practice recall --json "<distinctive phrase from research>" --source research
@@ -235,8 +246,9 @@ the Workspace and its read/write boundary, the folders it learns from and the
 preset folders it skipped, where new notes go, whether machine-level catalyst
 setup changed, whether `init` and `sync` succeeded, the recall proof, and
 confirmation that notes were not modified. Always tell the user where the program
-lives (`program_path`, or `margins --workspace <id> workspace show`) and that they
-can change it with `margins --workspace <id> workspace edit`. Exact state paths
+lives (`program_path`, or `margins --workspace <id> edit --path`), that
+`margins --workspace <id> status` shows what Margins learns about, and that they
+can change it with `margins --workspace <id> edit`. Exact state paths
 other than the program, revision hashes, similarity scores, and profile names are
 optional; include them only when the user asks or they explain a consequential
 limitation.
@@ -246,8 +258,8 @@ Do not begin connected-note distillation as part of setup.
 ## Refining the program
 
 Refinement is optional and never a setup step. In a terminal,
-`margins --workspace practice workspace edit` opens the program in `$EDITOR`, then
-shows the plan and applies it after confirmation. An agent changes the program by
+`margins --workspace practice edit` opens the program in `$EDITOR`, then
+shows the change and its effect and applies it after confirmation. An agent changes the program by
 copying the complete program from `program_path`, changing only the requested
 statement, keeping every other statement exactly as written, and planning it:
 
@@ -259,12 +271,22 @@ margins --workspace practice workspace plan \
 
 Show the user the plan's user-visible consequences before applying it, then
 apply that plan unchanged. An agent that
-wants evidence about the notes before proposing a change may read the engine's own
-read-only inventory, `margins enzyme scan --workspace <id> --json`. Margins ships
-its own `enzyme`, separate from any `enzyme` the user installed, and
-`margins enzyme` runs that bundled engine on the Margins home (never
-`~/.enzyme`). The Knowledge Practice Review Contract below applies to that
-optional review only.
+wants evidence about the notes before proposing a change reads the refinement
+view, which never refreshes or writes:
+
+```bash
+margins --workspace practice status --explain --json
+```
+
+Its `attention` object lists the program's `readings`, what the engine picked
+`from_readings` and `automatic`ally, each with its `state` (`ready`, `pending`,
+`skipped`) and `skip_kind`, and `skipped_by_reason`; `explain.readings` says per
+reading which linked pages it brought in, how many catalyst jobs it yields, and
+why an entity yields none (for example thin context). `index.notes_changed`
+counts notes changed since the last sync. Never run a separately installed
+`enzyme` against `~/.enzyme` to inspect a Margins Workspace: Margins keeps its own
+engine data in `$MARGINS_HOME`. The Knowledge Practice Review Contract below
+applies to that optional review only.
 
 An entity is an existing thread—such as a folder, tag, linked note, or running
 log—that Margins can build recall catalysts around. In the program each one is a

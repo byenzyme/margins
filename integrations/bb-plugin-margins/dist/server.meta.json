@@ -3,7 +3,7 @@
   "sdkVersion": "0.4.34",
   "artifactFormatVersion": 1,
   "pluginId": "margins",
-  "pluginVersion": "0.4.18",
+  "pluginVersion": "0.4.20",
   "builtWith": {
     "bbVersion": "0.41.0",
     "pluginSdkVersion": "0.4.34"

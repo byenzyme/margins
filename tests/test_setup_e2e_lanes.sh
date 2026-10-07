@@ -77,7 +77,7 @@ PY
   init)
     touch "$(state_dir "$workspace")/index.db"
     log "$workspace init"
-    printf '<margins_init status="ok" />\n'
+    printf '{"schema_version":"margins.init.v1","workspace":{"id":"%s"},"created":false,"recall":{"status":"lexical"}}\n' "$workspace"
     ;;
   sync)
     log "$workspace sync"

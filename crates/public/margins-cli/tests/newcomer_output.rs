@@ -334,8 +334,8 @@ fn readable_plan_saves_the_exact_json_plan_and_apply_names_the_program() {
              • Learn from the people folder (new)\n  \
              • Leave out the archive folder\n\n\
              Your Workspace is the program at {}\n  \
-             Read it:   margins --workspace practice workspace show --text\n  \
-             Change it: margins --workspace practice workspace edit\n",
+             See what it learns: margins --workspace practice status\n  \
+             Change it:          margins --workspace practice edit\n",
             program.display()
         )
     );
@@ -421,7 +421,7 @@ fn status_show_and_edit_point_at_the_program() {
         "{status}"
     );
     assert!(status.ends_with(
-        "Read the program with `margins --workspace practice workspace show --text`; change it with `margins --workspace practice workspace edit`.\n"
+        "Read the program with `margins --workspace practice edit --print`; change it with `margins --workspace practice edit`.\n"
     ), "{status}");
     // The JSON status is unchanged: no new keys.
     let (json, _) = fixture.ok(&["--workspace", "practice", "workspace", "status", "--json"]);
@@ -450,79 +450,233 @@ fn status_show_and_edit_point_at_the_program() {
     assert_eq!(path, format!("{}\n", program.display()));
     assert_eq!(
         hint,
-        "That file is the program for Workspace practice. Read it with `margins --workspace practice workspace show --text`; change it with `margins --workspace practice workspace edit`.\n"
+        "That file is the program for Workspace practice. Read it with `margins --workspace practice edit --print`; change it with `margins --workspace practice edit`.\n"
     );
     let (text, quiet) = fixture.ok(&["--workspace", "practice", "workspace", "show", "--text"]);
     assert_eq!(text, std::fs::read_to_string(&program).unwrap());
     assert!(quiet.is_empty());
 
-    // Tests never run with a terminal on both stdin and stdout.
-    let (refused, _, stderr) = fixture.invoke(&["--workspace", "practice", "workspace", "edit"]);
+    // `edit --print`, `--path`, and `--json` are `workspace show` for people.
     assert_eq!(
-        refused.unwrap_err().code(),
-        "workspace_edit_requires_terminal"
+        fixture.ok(&["--workspace", "practice", "edit", "--print"]).0,
+        text
     );
-    for expected in [
-        "margins --workspace practice workspace show --text",
-        "margins --workspace practice workspace plan --desired program.enzyme",
-        "margins workspace apply --plan",
+    assert_eq!(
+        fixture.ok(&["--workspace", "practice", "edit", "--path"]).0,
+        path
+    );
+    assert_eq!(
+        fixture.ok(&["--workspace", "practice", "edit", "--json"]).0,
+        fixture
+            .ok(&["--workspace", "practice", "workspace", "show", "--text", "--json"])
+            .0
+    );
+
+    // Tests never run with a terminal on both stdin and stdout: edit (and its
+    // hidden `workspace edit` alias) changes nothing and says how to.
+    for args in [
+        &["--workspace", "practice", "edit"][..],
+        &["--workspace", "practice", "workspace", "edit"],
     ] {
-        assert!(stderr.contains(expected), "{expected}: {stderr}");
+        let (refused, _, stderr) = fixture.invoke(args);
+        assert_eq!(
+            refused.unwrap_err().code(),
+            "workspace_edit_requires_terminal"
+        );
+        for expected in [
+            "nothing was changed",
+            &format!("The program is {}", program.display()),
+            "save the output of `margins --workspace practice edit --print` as program.enzyme",
+            "margins --workspace practice workspace plan --desired program.enzyme",
+            "margins workspace apply --plan",
+        ] {
+            assert!(stderr.contains(expected), "{expected}: {stderr}");
+        }
+        assert!(!stderr.contains("--json"), "{stderr}");
     }
-    assert!(!stderr.contains("--json"), "{stderr}");
 }
 
 #[test]
-fn help_and_guide_explain_the_program_in_plain_words() {
+fn status_shows_the_index_and_catalysts_separately() {
+    let fixture = Fixture::new();
+    let (status, _) = fixture.ok(&["--workspace", "practice", "status"]);
+    assert!(
+        status.starts_with(&format!(
+            "Workspace practice (selected) — notes in {}\n  Program: {} · revision ",
+            fixture.root().join("vault").display(),
+            fixture.program_path().display()
+        )),
+        "{status}"
+    );
+    // The public build has no engine: it never claims catalysts.
+    assert!(status.contains("\nIndex: none in this build; recall reads 1 note directly\n"), "{status}");
+    assert!(
+        status.contains("\nCatalysts (questions Margins prepares from your notes to find related ones): not set up — search finds direct matches only\n"),
+        "{status}"
+    );
+    assert!(status.contains("\nLearns about:\n"), "{status}");
+    assert!(status.contains("\nSources:\n  captures — recordings, "), "{status}");
+    assert!(status.contains("\nCaptures: none yet — `margins new` starts one\n"), "{status}");
+    assert!(!status.contains("Recall: available"), "{status}");
+
+    let (json, _) = fixture.ok(&["--workspace", "practice", "status", "--json"]);
+    let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(json["schema_version"], "margins.status.v1");
+    assert_eq!(json["workspace"]["id"], "practice");
+    assert_eq!(json["workspace"]["selected_by"], "selection");
+    assert_eq!(json["index"]["state"], "lexical");
+    assert_eq!(json["catalysts"]["usable"], false);
+    assert_eq!(json["sources"].as_array().unwrap().len(), 2);
+
+    // Without a selection, the folder's Workspace; elsewhere, none.
+    let (_, _) = fixture.ok(&["status"]);
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let elsewhere = margins_cli::run(
+        &CliServices::default(),
+        &fixture.root().join("machine"),
+        ["margins", "status"],
+        &mut stdout,
+        &mut stderr,
+    );
+    assert_eq!(elsewhere.unwrap_err().code(), "workspace_required");
+    assert!(
+        String::from_utf8(stderr).unwrap().contains("margins init"),
+        "the way out is init"
+    );
+}
+
+#[test]
+fn init_makes_a_workspace_for_a_named_folder_and_refreshes_a_covered_one() {
+    let fixture = Fixture::new();
+    // A folder already in a Workspace is refreshed, not re-made.
+    let (covered, _) = fixture.ok(&["init"]);
+    assert!(
+        covered.starts_with(&format!(
+            "Already part of Workspace practice ({})\n",
+            fixture.root().join("vault").display()
+        )),
+        "{covered}"
+    );
+    assert!(!covered.contains("<margins_init"), "{covered}");
+    let (json, _) = fixture.ok(&["init", "--json"]);
+    let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(json["schema_version"], "margins.init.v1");
+    assert_eq!(json["created"], false);
+    assert_eq!(json["covered_by"], "home");
+
+    // A named empty folder is allowed, with a note; it becomes the default
+    // only when there is none.
+    let empty = fixture.root().join("fresh notes");
+    std::fs::create_dir_all(&empty).unwrap();
+    let (created, _) = fixture.ok(&["init", empty.to_str().unwrap(), "--json"]);
+    let created: serde_json::Value = serde_json::from_str(&created).unwrap();
+    assert_eq!(created["created"], true);
+    assert_eq!(created["workspace"]["id"], "fresh-notes");
+    assert_eq!(created["default_set"], true);
+    assert!(created["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|note| note.as_str().unwrap().contains("no Markdown notes")));
+    assert!(fixture
+        .root()
+        .join("machine/configs/fresh-notes.enzyme")
+        .is_file());
+
+    // Naming an existing Workspace's folder under another id is refused, as
+    // is a folder above a Workspace's notes; nothing is created.
+    let (refused, _, _) = fixture.invoke(&["init", empty.to_str().unwrap(), "--id", "other"]);
+    assert_eq!(refused.unwrap_err().code(), "folder_already_in_workspace");
+    let (refused, _, stderr) = fixture.invoke(&["init", fixture.root().to_str().unwrap()]);
+    assert_eq!(refused.unwrap_err().code(), "folder_refused", "{stderr}");
+    assert!(stderr.contains("contains the notes folder of Workspace"), "{stderr}");
+    // --workspace refreshes; it cannot be combined with a folder.
+    let (refused, _, _) =
+        fixture.invoke(&["--workspace", "practice", "init", empty.to_str().unwrap()]);
+    assert_eq!(refused.unwrap_err().code(), "usage");
+    let (missing, _, stderr) = fixture.invoke(&["--workspace", "nope", "init"]);
+    assert_eq!(missing.unwrap_err().code(), "workspace_not_found");
+    assert!(stderr.contains("margins init /path/to/notes --id nope"), "{stderr}");
+}
+
+/// The commands `margins --help` lists, in order.
+fn listed_commands(help: &str) -> Vec<String> {
+    help.split("Commands:\n")
+        .nth(1)
+        .unwrap()
+        .split("\n\n")
+        .next()
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.split_whitespace().next().map(str::to_string))
+        .collect()
+}
+
+#[test]
+fn help_lists_journeys_and_hides_plumbing_that_stays_callable() {
     let help = Args::try_parse_from(["margins", "--help"])
         .unwrap_err()
         .to_string();
+    assert_eq!(
+        listed_commands(&help),
+        [
+            "init", "status", "edit", "sync", "recall", "connect", "disconnect", "setup", "guide",
+            "new", "attach", "current", "ls", "transcript", "transcribe", "note", "help",
+        ]
+    );
+    assert!(help.contains("Start here: run `margins init` in your notes folder"), "{help}");
     assert!(
         help.contains("Your Workspace is one editable program, $MARGINS_HOME/configs/<id>.enzyme"),
         "{help}"
     );
-    assert!(
-        help.contains("margins --workspace <id> workspace show --text"),
-        "{help}"
-    );
-    assert!(
-        help.contains("margins --workspace <id> workspace edit"),
-        "{help}"
-    );
+    assert!(help.contains("margins status --explain"), "{help}");
+    assert!(help.contains("margins edit"), "{help}");
     assert!(help.contains("margins guide glossary"), "{help}");
     assert!(!help.contains("memory boundary"), "{help}");
-    assert!(help.contains("enzyme"), "{help}");
+    assert!(!help.contains("--local"), "{help}");
 
-    let workspace_help = Args::try_parse_from(["margins", "workspace", "--help"])
-        .unwrap_err()
-        .to_string();
-    assert!(
-        workspace_help.contains("Each Workspace is one editable program"),
-        "{workspace_help}"
-    );
-    assert!(
-        workspace_help.contains("workspace show --text"),
-        "{workspace_help}"
-    );
-
-    // Plan and apply no longer require --json.
-    Args::try_parse_from(["margins", "workspace", "plan", "--desired", "d.enzyme"]).unwrap();
-    Args::try_parse_from(["margins", "workspace", "apply", "--plan", "p.json"]).unwrap();
-    // --color on the readable plan and edit; auto by default.
+    // Hidden plumbing still parses exactly as before.
     for args in [
-        &["margins", "workspace", "plan", "--desired", "d.enzyme", "--color", "always"][..],
+        &["margins", "workspace", "new", "x", "--home", "/n", "--name", "X", "--json"][..],
+        &["margins", "workspace", "show", "--text", "--json"],
+        &["margins", "workspace", "status", "--json"],
+        &["margins", "workspace", "list", "--json"],
+        &["margins", "workspace", "default", "--set", "x", "--json"],
+        &["margins", "workspace", "destination", "--json"],
+        &["margins", "workspace", "plan", "--preset", "margins-meetings", "--json"],
+        &["margins", "workspace", "plan", "--desired", "d.enzyme"],
+        &["margins", "workspace", "apply", "--plan", "p.json"],
         &["margins", "workspace", "edit", "--color", "never"],
-        &["margins", "workspace", "edit"],
+        &["margins", "source", "list", "--json"],
+        &["margins", "integrations", "status", "--json"],
+        &["margins", "capabilities"],
+        &["margins", "recent"],
+        &["margins", "artifacts", "latest"],
+        &["margins", "process", "latest", "--align-only"],
+        &["margins", "import", "granola", "export.json"],
+        &["margins", "service", "discover", "--json"],
+        &["margins", "transfers", "list", "--json"],
+        &["margins", "--local", "ls"],
     ] {
-        Args::try_parse_from(args).unwrap();
+        Args::try_parse_from(args).unwrap_or_else(|error| panic!("{args:?}: {error}"));
     }
     assert!(Args::try_parse_from(["margins", "workspace", "edit", "--color", "sometimes"]).is_err());
-    // `margins enzyme` passes everything through, help included.
-    let parsed = Args::try_parse_from(["margins", "enzyme", "scan", "--json", "--help"]).unwrap();
-    assert!(matches!(
-        parsed.command,
-        Some(margins_cli::args::Command::Enzyme { ref args }) if args.len() == 3
-    ));
+    // `workspace migrate` (migration is automatic) and `margins enzyme`
+    // (replaced by `status --explain`) are gone.
+    assert!(Args::try_parse_from(["margins", "workspace", "migrate"]).is_err());
+    assert!(Args::try_parse_from(["margins", "enzyme", "status"]).is_err());
+    // The journey commands' flags.
+    for args in [
+        &["margins", "init", "/notes", "--id", "practice", "--no-preset", "--json"][..],
+        &["margins", "status", "--explain", "--all", "--json"],
+        &["margins", "edit", "--print"],
+        &["margins", "edit", "--path"],
+        &["margins", "edit", "--json"],
+    ] {
+        Args::try_parse_from(args).unwrap_or_else(|error| panic!("{args:?}: {error}"));
+    }
+    assert!(Args::try_parse_from(["margins", "edit", "--print", "--path"]).is_err());
 
     let fixture = Fixture::new();
     let (glossary, _) = fixture.ok(&["guide", "glossary"]);
@@ -533,6 +687,7 @@ fn help_and_guide_explain_the_program_in_plain_words() {
         "catalyst",
         "profile",
         "learn questions",
+        "index",
         "enzyme",
     ] {
         assert!(
@@ -541,10 +696,8 @@ fn help_and_guide_explain_the_program_in_plain_words() {
         );
     }
     assert!(glossary.contains("never ~/.enzyme"));
-
-    // The public build has no bundled engine to run.
-    let (result, _, _) = fixture.invoke(&["enzyme", "status"]);
-    assert_eq!(result.unwrap_err().code(), "composition_unavailable");
+    assert!(glossary.contains("margins status --explain"));
+    assert!(!glossary.contains("margins enzyme"));
 }
 
 #[test]
@@ -598,13 +751,13 @@ fn apply_takes_the_workspace_from_the_plan_and_hints_drop_the_default_selector()
     );
     assert!(
         applied.ends_with(
-            "  Read it:   margins workspace show --text\n  Change it: margins workspace edit\n"
+            "  See what it learns: margins status\n  Change it:          margins edit\n"
         ),
         "{applied}"
     );
     let (_, hint) = fixture.ok(&["workspace", "show"]);
     assert!(
-        hint.contains("Read it with `margins workspace show --text`"),
+        hint.contains("Read it with `margins edit --print`"),
         "{hint}"
     );
 
@@ -743,4 +896,52 @@ fn saving_a_plan_prunes_old_and_excess_plans_but_never_follows_symlinks() {
     assert!(link.symlink_metadata().is_ok(), "symlinks are left alone");
     assert_eq!(std::fs::read_to_string(&canary).unwrap(), "keep me");
     assert!(unrelated.exists());
+}
+
+#[test]
+fn listing_sessions_without_a_workspace_points_to_init() {
+    let fixture = Fixture::new();
+    let elsewhere = fixture.root().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    for command in ["ls", "current"] {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let result = margins_cli::run(
+            &CliServices::default(),
+            &elsewhere,
+            ["margins", command],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(result.unwrap_err().code(), "workspace_required", "{command}");
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(stderr.contains("there are no recordings to show"), "{command}: {stderr}");
+        assert!(stderr.contains("Run `margins init` in your notes folder first"), "{command}: {stderr}");
+        assert!(!stderr.contains("this recording"), "{command}: {stderr}");
+    }
+}
+
+#[test]
+fn explain_lines_never_repeat_the_reading() {
+    use margins_cli::commands::status::{explain_line, ExplainReading};
+    let reading = |source: &str, learns: &[&str]| ExplainReading {
+        reading: source.to_string(),
+        learns: learns.iter().map(|learned| learned.to_string()).collect(),
+        skipped: Vec::new(),
+    };
+    assert_eq!(
+        explain_line(&reading("folder \"Meetings\"", &["the Meetings folder"])),
+        "the Meetings folder: learned about"
+    );
+    assert_eq!(
+        explain_line(&reading(
+            "folder \"People\" including linked pages",
+            &["the People folder", "Alice Chen (linked page)"]
+        )),
+        "the People folder and the pages it links: learned about, with Alice Chen (linked page)"
+    );
+    assert_eq!(
+        explain_line(&reading("folder \"Projects\"", &[])),
+        "the Projects folder: nothing yet"
+    );
 }

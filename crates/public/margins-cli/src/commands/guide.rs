@@ -25,8 +25,7 @@ Workspace   The notes Margins works with for one practice (one area of your
             folder where it writes new notes.
 program     Your Workspace written down as one editable text file,
             $MARGINS_HOME/configs/<id>.enzyme. Read it with
-            `margins --workspace <id> workspace show --text`; change it with
-            `margins --workspace <id> workspace edit`.
+            `margins edit --print`; change it with `margins edit`.
 Source      A place a Workspace reads: your notes folder (its home, where new
             notes go), a read-only reference folder, recordings, or a
             connected account.
@@ -43,12 +42,16 @@ catalyst    One of those learned questions. Margins uses catalysts to find
 profile     The kind of questions Margins develops for a reading, such as
             `about relationships` or `about decisions`. It is not a weight or
             a score.
-plan, apply `workspace plan` shows exactly what a change to the program would
-            do and saves it; `workspace apply` makes exactly that change.
-init, sync  Build or refresh the index Margins searches. `recall` searches it.
+index       What Margins searches: your notes, read and stored in
+            $MARGINS_HOME. `init` builds it; `sync` brings it up to date.
+            Search works from the index alone; catalysts add related notes.
+init, sync  `init` makes a Workspace for your notes and builds its index;
+            `sync` refreshes it and says what changed in what Margins learns
+            about. `recall` searches it; `status` shows all of it.
 enzyme      The engine that indexes and searches your notes. Margins ships its
             own copy, separate from any `enzyme` you install, and keeps its
-            data in $MARGINS_HOME (never ~/.enzyme). `margins enzyme …` runs it.
+            data in $MARGINS_HOME (never ~/.enzyme). `margins status --explain`
+            shows what it decided and why.
 ";
 
 pub fn glossary(stdout: &mut dyn Write) -> Result<(), CliError> {

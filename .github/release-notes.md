@@ -1,34 +1,16 @@
-Margins 0.4.18 makes the CLI easier to start with on its own and fixes the bb
-program editor. The release archives contain `margins`, `margins-server`, and
-the bundled `enzyme` 0.12.1.
+Margins 0.4.20 is a small follow-up to 0.4.19. The release archives contain
+`margins`, `margins-server`, and the bundled `enzyme` 0.12.2.
 
-- **`margins recall` now prints readable text by default.** Scripts and
-  agents that parse its output must pass `--json` to get the
-  `margins.recall.v1` envelope.
-- **`margins enzyme <args…>`** runs the bundled engine's read-only commands
-  (`status`, `search`, `catalyze`, `scan`, `spec`, `model list`) against your
-  Margins home and the selected Workspace. It never uses `~/.enzyme`, and it
-  refuses every other command.
-- `margins workspace plan` and `margins workspace apply` read in plain
-  language without `--json`. A plan is saved under `~/.margins/plans`, and
-  `plan` prints the exact `apply --plan` command to run. After `setup`,
-  `init`, and `apply`, Margins says where your Workspace program lives and how
-  to read and change it.
-- `workspace plan` and `workspace edit` colour their diffs on a terminal
-  (`--color auto|always|never`). Saved plans are pruned to the newest 40 from
-  the last day. `margins enzyme` refuses `spec plan --prompts`.
-- Only `margins init` creates a Workspace. `recall`, `workspace status`,
-  `source list`, `sync`, integrations, and Granola import no longer create one
-  for the current folder. Without a Workspace they fail with
-  `workspace_required` (exit 1) and say how to pick or create one.
-- In bb, **Workspace program** opens the program editor again. Switching
-  meetings no longer depends on saving the memo first. A memo that cannot be
-  saved stays in the tab with a Copy action, and it comes back when you reopen
-  that meeting.
-- Discarding a session also removes its live-transcript files.
+- Margins looks for older per-folder `.margins/` stores only up to your home
+  folder, and never mistakes a Margins home (such as `~/.margins`) for one. It
+  no longer tells you that earlier recordings in `~/.margins` stay readable.
+- `margins init` lists a folder the engine skipped once, under **Skipped** with
+  its reason, instead of also under **Reads**. The JSON output is unchanged.
+- Suggested commands are plain `margins …` when the current folder already
+  selects that Workspace, and add `--workspace <id>` only when it does not.
 
 Upgrade the CLI and the bb plugin (with its `margins-server`) together. The
-plugin installs `margins`, `margins-server`, and `enzyme` from the 0.4.18
+plugin installs `margins`, `margins-server`, and `enzyme` from the 0.4.20
 archive as one runtime.
 
 Known limits: Linux live transcription is not available.

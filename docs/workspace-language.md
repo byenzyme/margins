@@ -103,11 +103,16 @@ note destination outside the declaring Markdown source.
 - `workspace apply --plan <plan.json>` refuses a plan whose digest does not match
   its text, or whose base no longer matches the file; otherwise atomically writes
   the program and a receipt. Re-applying an applied plan is a no-op.
-- `workspace show [--text] [--json]` prints the program path (or its text);
-  `workspace edit` opens a copy in `$VISUAL`/`$EDITOR`, shows the diff, and
-  applies it through this same plan/apply path after confirmation. An invalid
-  or declined edit is never applied; the text stays in a kept file. Without an
-  interactive terminal, `edit` refuses and points to `show`/`plan`/`apply`.
+- `edit --print|--path|--json` (and the hidden `workspace show [--text]
+  [--json]`) print the program text, its path, or both as JSON; `edit` (and
+  the hidden `workspace edit`) opens a copy in `$VISUAL`/`$EDITOR`, shows the
+  changes, their effect ("Once applied, Margins: …", and in the official build
+  what the next catalyst build would do with the notes as indexed now, from a
+  read-only `enzyme spec plan`), and the diff, and applies it through this same
+  plan/apply path after confirmation. An invalid or declined edit is never
+  applied; the text stays in a kept file. Without an interactive terminal,
+  `edit` changes nothing, exits 1 (`workspace_edit_requires_terminal`), and
+  points to `edit --print`/`workspace plan`/`workspace apply`.
 - Commands that change sources (`connect`, `integrations`, `add/remove source`)
   edit the program AST and re-render it through `enzyme_spec::render_program`
   (comments are not preserved, matching Enzyme's own readable-file writes).
@@ -118,16 +123,16 @@ On first resolution of a Workspace that has `workspaces/<id>/config.toml` and no
 `configs/<id>.enzyme`, Margins converts it deterministically, validates the
 result, writes the program atomically, and renames the old file to
 `config.toml.migrated`. The conversion is idempotent and covered by fixtures for
-every binding kind. `margins workspace migrate --dry-run` prints the program
-without writing.
+every binding kind. There is no migrate command: any command that resolves the
+Workspace for writing (init, sync, imports, `workspace apply`, `source add`, …)
+migrates it; read-only commands (status, recall) never do.
 
 Migration keeps exactly what the previous engine honored. A learning entity is
 read only as `#tag`, `[[link]]`, `log:<name>`, or `folder:<path>`; an excluded
 entity only as `folder:<path>`, `#tag`, or `[[link]]`. Other forms (`Project:
 Atlas`, `person:ada`, `tag:x`, bare names), learning entities that are also
 excluded (including folders at or under an excluded folder), repeated entities, and `expandable` on anything but a folder were
-ignored then and are dropped now, each reported in the migration `warnings`
-(`workspace migrate --json`) and on stderr. An unqualified legacy `folder:<path>`
+ignored then and are dropped now, each reported as a warning on stderr. An unqualified legacy `folder:<path>`
 is Home-relative; with several Markdown sources it is qualified with the Home
 source name even when its first segment names another source.
 `folder:markdown_<hash>/<path>` (the old internal identity of a Markdown root)
@@ -228,7 +233,7 @@ the server together.
   `preset` (`readings`, `skipped_readings`, `note_folder`) to the plan JSON.
   (`workspace compile` and `margins.workspace.compile.v2` were removed with the
   scan, 2026-10-06.)
-- Migration also runs explicitly: `margins workspace migrate [--dry-run] [--json]`.
+- Migration is automatic (`workspace migrate` was removed, 2026-10-07).
   Enzyme's implicit folder exclusions (`.git`, `node_modules`, …) are not written.
   With several Markdown sources, unqualified legacy folder references are
   qualified with the Home source name. `workspace plan --preset` qualifies
@@ -320,33 +325,45 @@ For `recall`, `workspace status`, and `sync` the exit code is:
 `recall` prints readable results; pass `--json` for the `margins.recall.v1`
 envelope.
 
-The readable `workspace plan` and `workspace edit` colour the program diff
+The readable `workspace plan` and `edit` colour the program diff
 (added lines green, removed lines red) with `--color auto|always|never`.
 `auto`, the default, colours only a terminal and honours `NO_COLOR`, so piped
 output is byte-identical to `--color never`; JSON is never coloured.
-`workspace show --text` prints the program uncoloured: the bundled enzyme
-0.12.1 highlights only programs it generates (`compile --color`), not an
+`edit --print` prints the program uncoloured: the bundled enzyme
+highlights only programs it generates (`compile --color`), not an
 existing file, and Margins keeps no highlighter of its own.
 
-### Inspecting a Workspace with `margins enzyme`
+### Inspecting a Workspace: `margins status`
 
-Margins ships its own `enzyme`, separate from any `enzyme` you install, and a
-Margins home is an Enzyme home. `margins enzyme <args…>` runs that bundled
-engine with the same lookup, version check, and scrubbed environment Margins
-uses, `ENZYME_HOME=$MARGINS_HOME` (never `~/.enzyme`), and the selected
-Workspace (`--workspace`, `MARGINS_WORKSPACE`, the one whose notes folder holds
-the current directory, or the default):
+`margins status [--explain] [--all] [--json]` is the read-only view of the
+selected Workspace (`--workspace`, `MARGINS_WORKSPACE`, the one whose notes
+folder holds the current directory, or the default). It never refreshes or
+writes. In order: the Workspace and program; the index and catalysts on
+separate lines (an index without a catalyst generator serves direct matches and
+is never reported as full recall); what Margins learns about (the program's
+readings, the engine's picks from them and its automatic picks, each `ready`,
+`pending`, or `skipped` with a reason kind); what it leaves out; where new notes
+go; Sources; machine connections; integration health; and captures.
+`--explain` adds, per reading, what a catalyst build would do and why entities
+yield none (from `enzyme --workspace <id> spec plan --json`, read-only, no model
+calls); `edit` previews a desired program the same way. `--json` is
+`margins.status.v1`; `workspace status --json` is unchanged.
 
-```bash
-margins enzyme --workspace <id> status
-margins enzyme --workspace <id> status --json
-margins enzyme --workspace <id> search "a phrase" --json
-margins enzyme scan --workspace <id> --json
-```
+The default view runs one `enzyme status --json` (about 0.6 s on a 7,000-note
+Workspace); `--explain` adds one `spec plan` (about 0.5 s there). `margins
+enzyme` (a raw engine passthrough) was removed in favour of this view;
+maintainers debugging the engine run the pinned binary directly:
+`ENZYME_HOME=$MARGINS_HOME "$(scripts/enzyme-bin)" --workspace <id> status`.
 
-`init` and `refresh` get Margins' catalyst generator unless you pass `--llm`.
-`update`, `login`, and `logout` are refused: Margins pins the engine it ships
-and never uses an Enzyme account.
+### What changed: the attention snapshot
+
+After every successful index build or refresh (init, sync, reconcile, imports,
+retention), Margins saves the engine's selection to
+`$MARGINS_HOME/workspaces/<id>/attention.json` (`margins.attention.v1`) and
+compares it with the previous one. `sync` prints `Attention: …` and adds an
+`attention` object (`added`, `removed`, `changed`, `cause`, `building`,
+`summary`) to `margins.sync.v1`; `init` reports it too. The first refresh
+records a baseline instead of listing everything as new.
 
 ## Open items
 

@@ -1,11 +1,12 @@
 // Managed by Margins: Margins rewrites this file to its shipped text when it
 // sets up a Workspace, so local edits do not last. Edit a Workspace's own
-// program instead (`margins workspace edit`).
+// program instead (`margins edit`).
 //
 // The program a new Margins Workspace starts from. `enzyme compile --preset`
 // fills __WORKSPACE__ with the Workspace id and __SOURCE__ with the notes
 // folder. Margins then drops each folder reading whose folder the notes folder
-// does not have, and shows the result for review before it is saved. The
+// does not have; `workspace plan --preset` shows the result for review before
+// it is saved, and `margins init` saves it for a new Workspace directly. The
 // engine's automatic selection keeps running alongside these readings.
 workspace __WORKSPACE__ {
   source markdown "home" { path __SOURCE__ }
