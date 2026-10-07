@@ -1454,7 +1454,11 @@ mod tests {
         app.set_capture_paused(true);
         assert!(app.resumed_at.is_none());
         app.set_capture_paused(false);
-        assert!(app.resumed_at.is_some());
+        let armed = app.resumed_at;
+        assert!(armed.is_some());
+        // A repeated resume is not a transition and must not re-arm the pulse.
+        app.set_capture_paused(false);
+        assert_eq!(app.resumed_at, armed);
     }
 
     #[test]
