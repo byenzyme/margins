@@ -15,8 +15,10 @@ margins sync --json
 margins recall "a phrase already in these notes"
 ```
 
-`init` resolves or creates a Workspace. `sync` confirms declared Sources are
-ready. `recall` reads declared Markdown at query time and returns source-backed
+`init` refreshes the Workspace that covers the folder, or makes one for it
+(`margins init <folder>` names the folder; a named folder may be empty or
+temporary). `status` shows the Workspace, `edit` changes its program, and
+`sync` confirms declared Sources are ready. `recall` reads declared Markdown at query time and returns source-backed
 `margins.recall.v1` results, with no separate indexing command or wait.
 
 For multiple folders:

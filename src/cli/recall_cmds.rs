@@ -83,18 +83,22 @@ fn run_sync(workspace_selector: Option<&str>, source_filter: Option<&str>, json:
         };
     sources.extend(external_rows.into_iter().map(sync_connector_row_json));
 
+    let mut attention = None;
     let recall = match crate::recall::refresh_workspace(&workspace) {
-        Ok(status) => serde_json::json!({
-            "ok": status.status != "catalysts_pending",
-            "status": status.status,
-            "reason": status.reason,
-            "readiness": {
-                "entities_curated": status.readiness.entities_curated,
-                "catalysts_present": status.readiness.catalysts_present,
-                "items_pending": status.readiness.items_pending,
-                "reasons": status.readiness.reasons,
-            },
-        }),
+        Ok(status) => {
+            attention = status.attention.clone();
+            serde_json::json!({
+                "ok": status.status != "catalysts_pending",
+                "status": status.status,
+                "reason": status.reason,
+                "readiness": {
+                    "entities_curated": status.readiness.entities_curated,
+                    "catalysts_present": status.readiness.catalysts_present,
+                    "items_pending": status.readiness.items_pending,
+                    "reasons": status.readiness.reasons,
+                },
+            })
+        }
         Err(error) => serde_json::json!({
             "ok": false,
             "status": "error",
@@ -120,6 +124,9 @@ fn run_sync(workspace_selector: Option<&str>, source_filter: Option<&str>, json:
         },
         "sources": sources,
         "recall": recall,
+        // What changed in what Margins learns about since the last refresh
+        // (additive; `null` when the refresh failed).
+        "attention": attention,
     });
     if json {
         println!(
@@ -150,6 +157,12 @@ fn run_sync(workspace_selector: Option<&str>, source_filter: Option<&str>, json:
             .and_then(serde_json::Value::as_str)
             .unwrap_or("unknown");
         println!("- recall: {recall_status}");
+        if recall_status == "index_only" {
+            println!("  {}", crate::recall::ENABLE_CATALYSTS_HINT);
+        }
+        if let Some(attention) = &attention {
+            println!("Attention: {}", attention.summary);
+        }
     }
     if ok {
         0
@@ -409,45 +422,6 @@ fn workspace_plan_preset(
     Ok(value)
 }
 
-#[cfg(feature = "recall")]
-fn run_init(workspace_selector: Option<&str>) -> i32 {
-    let workspace = match resolve_workspace(workspace_selector) {
-        Ok(workspace) => workspace,
-        Err(error) => return report_error(&error.to_string()),
-    };
-    let margins_home = match crate::hosted_credentials::margins_home() {
-        Ok(home) => home,
-        Err(error) => return report_error(&error.to_string()),
-    };
-    eprintln!("Building or refreshing recall index and catalysts…");
-    match crate::recall::provision_workspace_for_init(&workspace) {
-        Ok(status) => {
-            if status.status == "catalysts_pending" {
-                return report_error(&status.readiness.message());
-            }
-            let catalyst = margins_workflows::catalyst::selected_status(&margins_home);
-            if let Err(error) = margins_cli::commands::projects::write_init(
-                &mut io::stdout(),
-                &workspace.home_dir,
-                status.status,
-                Some(&workspace.config_path),
-                Some(&catalyst),
-            ) {
-                return report_error(&error.to_string());
-            }
-            // stdout stays the one-line init receipt; the reminder is for people.
-            let _ = margins_cli::commands::workspace_text::write_program_block(
-                &mut io::stderr(),
-                &workspace.config.id,
-                &workspace.config_path,
-                margins_cli::commands::workspace_text::is_machine_default(&workspace.config.id),
-            );
-            0
-        }
-        Err(error) => report_error(&format!("indexing vault: {error:#}")),
-    }
-}
-
 /// [`margins_cli::commands::workspace::resolve_read_only`] from the process cwd.
 #[cfg(feature = "recall")]
 fn read_only_workspace(
@@ -482,36 +456,6 @@ fn resolve_workspace(
         );
     }
     Ok(resolution.workspace)
-}
-
-/// `margins enzyme <args>`: the bundled engine on the Margins home, never
-/// `~/.enzyme` or an inherited `ENZYME_HOME`.
-#[cfg(feature = "recall")]
-fn run_enzyme(workspace_selector: Option<&str>, args: &[OsString]) -> i32 {
-    let run = || -> anyhow::Result<i32> {
-        let margins_home = margins_workflows::workspace::margins_home()?;
-        // The selected Workspace, else the one whose notes folder holds the
-        // cwd, else the machine default; never the engine's own cwd vault.
-        let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
-        let selected = margins_workflows::workspace::inspect_workspace_or_default(
-            &margins_home,
-            workspace_selector,
-            &cwd,
-        )?;
-        if let Some(selected) = selected.as_ref().filter(|selected| selected.via_default) {
-            eprintln!("Using Workspace {} (default)", selected.workspace.config.id);
-        }
-        let workspace = selected.map(|selected| selected.workspace.config.id);
-        let args = crate::enzyme_cli::passthrough_args(workspace.as_deref(), args)
-            .map_err(anyhow::Error::msg)?;
-        let engine = crate::enzyme_cli::Engine::for_home(&margins_home)?;
-        let status = engine.passthrough(&args)?;
-        Ok(status.code().unwrap_or(1))
-    };
-    match run() {
-        Ok(code) => code,
-        Err(error) => report_error(&format!("{error:#}")),
-    }
 }
 
 #[cfg(feature = "recall")]

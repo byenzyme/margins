@@ -18,18 +18,20 @@ Most meeting summaries help humans keep record, but agents need something more b
 
 Building from source: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-**2. Download local models and copy the setup handoff.** Run this from the folder you want to use as the Margins base, then paste the printed prompt into your agent.
-
-    margins setup
-
-**3. Record, in the folder where your notes live.** The first time you run `margins new` in a folder, that folder quietly becomes your notes home.
+**2. Point Margins at your notes.** Run this in your notes folder (or name it: `margins init ~/notes`). It makes your Workspace from the Margins meetings preset and indexes your notes right away, so search works with no download. In a terminal it asks once whether to add catalysts, either hosted (no download) or a small local model (its size is shown first).
 
     cd ~/notes
+    margins init
+
+`margins status` shows what Margins learns about; `margins edit` changes it; `margins sync` refreshes it and says what changed.
+
+**3. Record, in the folder where your notes live.**
+
     margins new
 
 A recorder opens: a bordered pane titled `margins`, a running clock, your mic and the other side's audio both captured. Type into a memo pad with timestamped lines. Hit `^C` to stop the session.
 
-**4. Turn it into a note.** `margins setup` installs the writing skill into Claude Code, Codex, or Cursor automatically (but you can customize its templates):
+**4. Turn it into a note.** `margins setup` sets everything up at once, including the writing skill for Claude Code, Codex, or Cursor (you can customize its templates) and the speech model:
 
     /margins latest
 
@@ -43,7 +45,7 @@ Margins is built on Enzyme, a local-first compile step for your knowledge base t
 
 It generates "catalysts" by first temporally sampling content in markdown (e.g. folders, a frontmatter field representing people, or around interleaved tags and wikilinks) or in SQLite tables (e.g. around columns that represent simliar). Then, it embeds both documents and catalysts and ranks the best content for each catalyst. Catalysts are a layer of indirection that lets even sparse agent queries to find deep connections.
 
-Your Workspace is one editable program, `~/.margins/configs/<id>.enzyme`. Setup starts it from the Margins meetings preset; it looks like this:
+Your Workspace is one editable program, `~/.margins/configs/<id>.enzyme`. `margins init` starts it from the Margins meetings preset; it looks like this:
 
 ```enzyme
 workspace "notes" {
@@ -62,7 +64,7 @@ workspace "notes" {
 }
 ```
 
-Read it with `margins --workspace notes workspace show --text` and change it with `margins --workspace notes workspace edit`, which shows the change in plain language before applying it. `margins guide glossary` explains the words. Margins ships its own copy of the engine, separate from any `enzyme` you install; `margins enzyme --workspace notes status` runs it on Margins' data.
+See what it learns about with `margins status` (add `--explain` for why some notes yield no catalysts), and change it with `margins edit`, which shows the change and its effect in plain language before applying it. `margins guide glossary` explains the words. Margins ships its own copy of the engine, separate from any `enzyme` you install, and keeps its data in `~/.margins`.
 
 Using this, Enzyme then periodically refreshes its index with new content and directions.
 
@@ -83,7 +85,6 @@ Margins converts each meeting into an ordinary note in your vault.
 Look at the raw pieces of any recording:
 
     margins ls                 # your sessions
-    margins recent             # recent meetings, as data
     margins transcript <id>    # the full transcript + your timed notes
 
 ---

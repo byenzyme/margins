@@ -1256,6 +1256,135 @@ pub fn create_workspace(
     resolve_at(margins_home, id)
 }
 
+/// The program a new Workspace for `home_notes` would start from: one Home
+/// and the Workspace's own captures store. Nothing is written; `margins init`
+/// fills the setup preset into this before creating the Workspace.
+pub fn new_workspace_config(
+    margins_home: &Path,
+    id: &str,
+    home_notes: &Path,
+) -> Result<WorkspaceConfig> {
+    validate_id(id)?;
+    if is_reserved_id(id) {
+        return Err(reserved_id_error(id));
+    }
+    let home_notes = home_notes
+        .canonicalize()
+        .with_context(|| format!("notes folder does not exist: {}", home_notes.display()))?;
+    let state_dir = workspace_state_dir(margins_home, id)?;
+    Ok(initial_config(id, &home_notes, &state_dir.join("captures")))
+}
+
+/// Create a Workspace whose first program is `config` (from
+/// [`new_workspace_config`], possibly with a preset filled in), in one write:
+/// no minimal program is ever left behind for a later apply to replace.
+pub fn create_workspace_with_config(
+    margins_home: &Path,
+    config: &WorkspaceConfig,
+    name: Option<&str>,
+) -> Result<ResolvedWorkspace> {
+    let id = config.id.as_str();
+    validate_id(id)?;
+    if is_reserved_id(id) {
+        return Err(reserved_id_error(id));
+    }
+    let state_dir = workspace_state_dir(margins_home, id)?;
+    let program_path = workspace_program_path(margins_home, id)?;
+    if state_dir.exists() || program_path.exists() {
+        bail!("workspace '{id}' already exists at {}", state_dir.display());
+    }
+    let captures = state_dir.join("captures");
+    let declares_own_captures = config.bindings.values().any(|binding| {
+        matches!(binding, WorkspaceBinding::Captures { path } if *path == captures)
+    });
+    if !declares_own_captures {
+        bail!("a new Workspace must declare its own captures store");
+    }
+    // Validate before anything exists on disk.
+    let program = program_from_config(
+        config,
+        &program_lang::empty_program(id),
+        FolderQualification::Program,
+    )?;
+    validate_program(margins_home, &program)?;
+    std::fs::create_dir_all(&captures)
+        .with_context(|| format!("creating workspace state at {}", state_dir.display()))?;
+    let written = write_program(margins_home, id, program.text()).and_then(|()| match name {
+        Some(name) => set_workspace_display_name(margins_home, id, Some(name)),
+        None => Ok(()),
+    });
+    if let Err(error) = written {
+        let _ = discard_new_workspace(margins_home, id);
+        return Err(error);
+    }
+    resolve_at(margins_home, id)
+}
+
+/// Undo a Workspace this process just created when establishing it failed:
+/// its program, its state (index, ledger, captures store), its display name,
+/// and the machine default when it points at it. Declared Source folders are
+/// never touched. Only for a Workspace created moments ago by the same
+/// command; use [`remove_empty_workspace`] for anything a person has used.
+pub fn discard_new_workspace(margins_home: &Path, id: &str) -> Result<()> {
+    validate_id(id)?;
+    let program_path = workspace_program_path(margins_home, id)?;
+    let state_dir = workspace_state_dir(margins_home, id)?;
+    if program_path.exists() {
+        std::fs::remove_file(&program_path)
+            .with_context(|| format!("removing {}", program_path.display()))?;
+    }
+    if state_dir.exists() {
+        std::fs::remove_dir_all(&state_dir)
+            .with_context(|| format!("removing {}", state_dir.display()))?;
+    }
+    update_machine_config(margins_home, |table| {
+        let mut emptied = false;
+        if let Some(workspace) = table.get_mut("workspace").and_then(toml::Value::as_table_mut) {
+            if workspace.get("default").and_then(toml::Value::as_str) == Some(id) {
+                workspace.remove("default");
+            }
+            if let Some(names) = workspace.get_mut("names").and_then(toml::Value::as_table_mut) {
+                names.remove(id);
+                if names.is_empty() {
+                    workspace.remove("names");
+                }
+            }
+            emptied = workspace.is_empty();
+        }
+        if emptied {
+            table.remove("workspace");
+        }
+        Ok(())
+    })
+}
+
+/// Whether `folder` may become a new Workspace's notes folder for `margins
+/// init`. The refusals are the implicit-Workspace ones; a folder the person
+/// named (`explicit`) may also be temporary or hold no Markdown yet, and each
+/// such allowance is returned as a note to show them. The filesystem root, the
+/// home directory, Margins/Enzyme state, and folders above a declared home are
+/// always refused.
+pub fn check_new_workspace_folder(
+    roots: &ImplicitWorkspaceRoots,
+    folder: &Path,
+    explicit: bool,
+) -> Result<Vec<String>> {
+    let folder = folder
+        .canonicalize()
+        .with_context(|| format!("folder does not exist: {}", folder.display()))?;
+    if !folder.is_dir() {
+        bail!("not a folder: {}", folder.display());
+    }
+    let workspaces = Resolution::ReadOnly.list(&roots.margins_home)?;
+    refuse_unsafe_home(&folder, &workspaces, roots, explicit)
+}
+
+/// The id `margins init` gives a new Workspace for `folder`: its name as a
+/// lowercase slug, suffixed `-2`, `-3`, … when taken.
+pub fn new_workspace_id(margins_home: &Path, folder: &Path) -> Result<String> {
+    available_implicit_id(margins_home, folder)
+}
+
 /// Provision an explicitly routed service Workspace without inferring either
 /// its notes home or capture authority from the server process cwd.
 ///
@@ -1559,24 +1688,35 @@ fn resolve_or_create_workspace_with(
 fn refuse_unsafe_implicit_home(
     cwd: &Path,
     workspaces: &[ResolvedWorkspace],
-    candidate_id: &str,
+    _candidate_id: &str,
     roots: &ImplicitWorkspaceRoots,
 ) -> Result<()> {
-    let explicit = || {
-        format!(
-            "margins workspace new {candidate_id} --home {}",
-            cwd.display()
-        )
-    };
-    let refuse = |reason: &str| -> Result<()> {
-        bail!(
-            "cannot create implicit workspace: {reason}; use explicit setup instead: {}",
-            explicit()
-        )
+    refuse_unsafe_home(cwd, workspaces, roots, false).map(|_| ())
+}
+
+/// See [`check_new_workspace_folder`]. Returns the notes for allowances an
+/// explicit folder received.
+fn refuse_unsafe_home(
+    cwd: &Path,
+    workspaces: &[ResolvedWorkspace],
+    roots: &ImplicitWorkspaceRoots,
+    explicit: bool,
+) -> Result<Vec<String>> {
+    let mut notes = Vec::new();
+    let refuse = |reason: &str| -> Result<Vec<String>> {
+        let hint = if explicit {
+            "choose your notes folder instead".to_string()
+        } else {
+            format!(
+                "if this really is your notes folder, name it: margins init {}",
+                cwd.display()
+            )
+        };
+        bail!("Margins won't make a Workspace here: {reason}; {hint}")
     };
 
     if cwd.parent().is_none() {
-        return refuse("current directory is the filesystem root");
+        return refuse("this is the filesystem root");
     }
     if roots
         .home_dir
@@ -1584,24 +1724,24 @@ fn refuse_unsafe_implicit_home(
         .map(|path| canonical_or_absolute(path, cwd))
         .is_some_and(|home| cwd == home)
     {
-        return refuse("current directory is the user home directory");
+        return refuse("this is your home folder");
     }
 
     let canonical_margins_home = canonical_or_absolute(&roots.margins_home, cwd);
     if cwd.starts_with(&canonical_margins_home) {
-        return refuse("current directory is Margins configuration or state storage");
+        return refuse("this folder holds Margins configuration or state");
     }
     for state_name in [".margins", ".enzyme"] {
         if cwd
             .components()
             .any(|component| component.as_os_str() == state_name)
         {
-            return refuse("current directory is Margins or Enzyme configuration or state storage");
+            return refuse("this folder holds Margins or Enzyme configuration or state");
         }
     }
     if let Some(enzyme_home) = roots.enzyme_home.as_deref() {
         if cwd.starts_with(canonical_or_absolute(enzyme_home, cwd)) {
-            return refuse("current directory is Enzyme configuration or state storage");
+            return refuse("this folder holds Enzyme configuration or state");
         }
     }
     if roots
@@ -1610,14 +1750,18 @@ fn refuse_unsafe_implicit_home(
         .map(|root| canonical_or_absolute(root, cwd))
         .any(|root| cwd.starts_with(root))
     {
-        return refuse("current directory is Margins or Enzyme configuration or state storage");
+        return refuse("this folder holds Margins or Enzyme configuration or state");
     }
 
-    if workspaces
+    if let Some(below) = workspaces
         .iter()
-        .any(|workspace| workspace.home_dir.starts_with(cwd) && workspace.home_dir != cwd)
+        .find(|workspace| workspace.home_dir.starts_with(cwd) && workspace.home_dir != cwd)
     {
-        return refuse("current directory is above a declared workspace home");
+        return refuse(&format!(
+            "it contains the notes folder of Workspace {} ({})",
+            below.config.id,
+            below.home_dir.display()
+        ));
     }
 
     if roots
@@ -1626,7 +1770,10 @@ fn refuse_unsafe_implicit_home(
         .map(|root| canonical_or_absolute(root, cwd))
         .any(|root| cwd.starts_with(root))
     {
-        return refuse("current directory is inside a temporary directory");
+        if !explicit {
+            return refuse("this is a temporary folder");
+        }
+        notes.push("This is a temporary folder; the Workspace stops working if it is deleted.".to_string());
     }
 
     let has_markdown = WalkDir::new(cwd)
@@ -1652,9 +1799,12 @@ fn refuse_unsafe_implicit_home(
                     })
         });
     if !has_markdown {
-        return refuse("current directory contains no Markdown note evidence");
+        if !explicit {
+            return refuse("there are no Markdown notes here");
+        }
+        notes.push("There are no Markdown notes here yet; Margins learns from them as you add them and run `margins sync`.".to_string());
     }
-    Ok(())
+    Ok(notes)
 }
 
 fn available_implicit_id(margins_home: &Path, cwd: &Path) -> Result<String> {
@@ -3833,10 +3983,14 @@ mod tests {
         assert_eq!(
             error.to_string(),
             format!(
-                "cannot create implicit workspace: current directory is above a declared workspace home; use explicit setup instead: margins workspace new notes-root --home {}",
+                "Margins won't make a Workspace here: it contains the notes folder of Workspace practice ({}); if this really is your notes folder, name it: margins init {}",
+                notes.canonicalize().unwrap().display(),
                 ancestor.canonicalize().unwrap().display()
             )
         );
+        // Naming the folder does not lift this refusal.
+        let error = check_new_workspace_folder(&roots, &ancestor, true).unwrap_err();
+        assert!(error.to_string().contains("contains the notes folder of Workspace practice"));
     }
 
     #[test]
@@ -3848,9 +4002,13 @@ mod tests {
         std::fs::create_dir_all(&temporary).unwrap();
         std::fs::write(temporary.join("note.md"), "# Note").unwrap();
         let temp_error = resolve_or_create_workspace(&roots, None, &temporary).unwrap_err();
-        assert!(temp_error.to_string().contains(
-            "cannot create implicit workspace: current directory is inside a temporary directory; use explicit setup instead: margins workspace new"
-        ));
+        assert_eq!(
+            temp_error.to_string(),
+            format!(
+                "Margins won't make a Workspace here: this is a temporary folder; if this really is your notes folder, name it: margins init {}",
+                temporary.canonicalize().unwrap().display()
+            )
+        );
 
         let empty = safe.path().join("empty-notes");
         std::fs::create_dir_all(&empty).unwrap();
@@ -3858,10 +4016,45 @@ mod tests {
         assert_eq!(
             empty_error.to_string(),
             format!(
-                "cannot create implicit workspace: current directory contains no Markdown note evidence; use explicit setup instead: margins workspace new empty-notes --home {}",
+                "Margins won't make a Workspace here: there are no Markdown notes here; if this really is your notes folder, name it: margins init {}",
                 empty.canonicalize().unwrap().display()
             )
         );
+
+        // A folder the person names may be temporary or empty, with a note.
+        let notes = check_new_workspace_folder(&roots, &temporary, true).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("temporary folder"), "{notes:?}");
+        let notes = check_new_workspace_folder(&roots, &empty, true).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("no Markdown notes"), "{notes:?}");
+        // The home folder never qualifies, named or not.
+        let home = roots.home_dir.clone().unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let error = check_new_workspace_folder(&roots, &home, true).unwrap_err();
+        assert!(error.to_string().contains("this is your home folder"), "{error:#}");
+    }
+
+    #[test]
+    fn workspace_created_from_config_and_discarded_leaves_nothing() {
+        let temp = safe_tempdir();
+        let margins_home = temp.path().join("state");
+        let notes = temp.path().join("notes");
+        std::fs::create_dir_all(notes.join("Meetings")).unwrap();
+        let mut config = new_workspace_config(&margins_home, "notes", &notes).unwrap();
+        config.policy.entities.push(WorkspaceEntity::simple("folder:Meetings"));
+        let created = create_workspace_with_config(&margins_home, &config, Some("My notes")).unwrap();
+        assert!(created.program.text().contains("folder \"Meetings\""), "{}", created.program.text());
+        assert!(created.state_dir.join("captures").is_dir());
+        set_default_workspace(&margins_home, "notes").unwrap();
+        assert!(create_workspace_with_config(&margins_home, &config, None).is_err());
+
+        discard_new_workspace(&margins_home, "notes").unwrap();
+        assert!(!created.config_path.exists());
+        assert!(!created.state_dir.exists());
+        assert_eq!(default_workspace(&margins_home).unwrap(), None);
+        assert_eq!(workspace_display_name(&margins_home, "notes").unwrap(), None);
+        assert!(notes.join("Meetings").is_dir());
     }
 
     #[test]

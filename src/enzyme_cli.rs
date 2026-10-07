@@ -31,6 +31,7 @@ pub const STATUS_SCHEMA: &str = "enzyme.status.v1";
 pub const PROFILES_SCHEMA: &str = "enzyme.profiles.v1";
 pub const MODELS_SCHEMA: &str = "enzyme.models.v1";
 pub const COMPILE_SCHEMA: &str = "compile.v2";
+pub const SPEC_PLAN_SCHEMA: &str = "enzyme.spec-plan.v1";
 
 /// Parent variables the child may inherit. Everything else, notably
 /// `ENZYME_*`, `OPENAI_*`, and `OPENROUTER_*`, is dropped.
@@ -610,34 +611,65 @@ impl Engine {
             .ok_or_else(|| EngineError::Protocol("compile printed no program".into()))
     }
 
-    /// `margins enzyme <args>`: run the engine for a person, with the
-    /// terminal attached, and return its exit status. `args` come from
-    /// [`passthrough_args`], which admits only read-only commands.
-    pub fn passthrough(
+    /// `--workspace <id> spec plan --json [desired]`: the explain view of a
+    /// Workspace's program (or of a `desired` program for it) against its
+    /// index: per reading, what a catalyst build would learn about and why
+    /// some of it yields nothing. Read-only; no model calls.
+    pub fn spec_plan(
         &self,
-        args: &[std::ffi::OsString],
-    ) -> Result<std::process::ExitStatus, EngineError> {
-        let mut command = self.scrubbed();
-        // Display only: let the engine see the terminal it is drawing on.
-        for name in ["TERM", "COLORTERM", "NO_COLOR", "COLUMNS"] {
-            if let Some(value) = std::env::var_os(name) {
-                command.env(name, value);
-            }
+        workspace: &str,
+        state_dir: &Path,
+        desired: Option<&Path>,
+    ) -> Result<serde_json::Value, EngineError> {
+        let mut command = self.command(Some(workspace));
+        command.args(["spec", "plan", "--json"]);
+        if let Some(desired) = desired {
+            command.arg(desired);
         }
-        command.args(args);
-        debug(&format!(
-            "{} {}",
-            self.bin.display(),
-            command
-                .get_args()
-                .map(|arg| arg.to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join(" ")
-        ));
-        command.status().map_err(|error| EngineError::Failed {
-            code: None,
-            message: format!("starting {}: {error}", self.bin.display()),
-        })
+        let output = self.run(command)?;
+        match check_status(&output, &[]) {
+            Ok(()) => return spec_plan_envelope(&output.stdout),
+            // TODO(E6): enzyme 0.12.1 refuses `spec plan --workspace` (a FILE
+            // is required, and "spec commands take Markdown vault paths").
+            // Until the pin moves to 0.12.2, plan the state directory as a
+            // vault instead; remove this fallback with that pin.
+            Err(EngineError::Usage(_)) => {}
+            Err(error) => return Err(error),
+        }
+        let configs = self.home.join(margins_workflows::workspace::CONFIGS_DIR);
+        // A program outside `configs/` is read on its own there, so a desired
+        // program carries the source kinds and shared profiles inline.
+        let scratch;
+        let program = match desired {
+            None => configs.join(format!("{workspace}.enzyme")),
+            Some(desired) => {
+                let mut text = margins_workflows::source_kinds::SOURCES_TEXT.to_string();
+                if let Ok(profiles) = std::fs::read_to_string(
+                    configs.join(margins_workflows::workspace::SHARED_PROFILES_PROGRAM),
+                ) {
+                    text.push_str(&format!("\n{profiles}"));
+                }
+                let desired = std::fs::read_to_string(desired).map_err(|error| {
+                    EngineError::Protocol(format!("reading {}: {error}", desired.display()))
+                })?;
+                text.push_str(&format!("\n{desired}"));
+                scratch = tempfile::Builder::new()
+                    .suffix(".enzyme")
+                    .tempfile()
+                    .map_err(|error| EngineError::Protocol(error.to_string()))?;
+                std::fs::write(scratch.path(), text)
+                    .map_err(|error| EngineError::Protocol(error.to_string()))?;
+                scratch.path().to_path_buf()
+            }
+        };
+        let mut command = self.command(None);
+        command
+            .args(["spec", "plan", "--json", "-p"])
+            .arg(state_dir)
+            .arg(&program);
+        let output = self.run(command)?;
+        check_status(&output, &[])?;
+        spec_plan_envelope(&output.stdout)
     }
 
     /// `model list --json`: the registry and what is installed in
@@ -810,6 +842,9 @@ pub struct Selection {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SelectedEntity {
     pub name: String,
+    /// `reading` (from a declared reading) or `automatic`.
+    #[serde(default)]
+    pub origin: Option<String>,
     #[serde(rename = "type")]
     pub entity_type: String,
     pub state: String,
@@ -907,6 +942,18 @@ fn check_status(output: &Output, events: &[serde_json::Value]) -> Result<(), Eng
     })
 }
 
+fn spec_plan_envelope(stdout: &[u8]) -> Result<serde_json::Value, EngineError> {
+    let envelope: serde_json::Value = parse_json(stdout)?;
+    expect_schema(
+        envelope
+            .get("schema")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default(),
+        SPEC_PLAN_SCHEMA,
+    )?;
+    Ok(envelope)
+}
+
 fn parse_json<T: serde::de::DeserializeOwned>(stdout: &[u8]) -> Result<T, EngineError> {
     serde_json::from_slice(stdout).map_err(|error| {
         EngineError::Protocol(format!(
@@ -960,149 +1007,6 @@ pub fn selected_generator(engine: &Engine, margins_home: &Path) -> Result<Genera
         }
         CatalystMode::None => Generator::None,
     })
-}
-
-/// What `margins enzyme` may run: the engine's read-only commands. Everything
-/// else is refused with the Margins command that does it.
-const ALLOWED_SUBCOMMANDS: &[&str] = &["status", "search", "catalyze", "scan", "spec", "model", "help"];
-/// `spec` subcommands that only read: no `migrate` (it rewrites config files)
-/// and no `serve`.
-const ALLOWED_SPEC: &[&str] = &["compile", "profiles", "inspect", "plan", "help"];
-/// `model` subcommands that only read.
-const ALLOWED_MODEL: &[&str] = &["list", "help"];
-/// Engine subcommands that read no vault or Workspace.
-const VAULTLESS_SUBCOMMANDS: &[&str] = &["help", "model", "spec"];
-
-/// Long options of the engine (at any level) that take a value.
-const LONG_VALUE_OPTIONS: &[&str] = &[
-    "--workspace",
-    "--collection",
-    "--vault",
-    "--limit",
-    "--phrase",
-    "--target",
-    "--prompts",
-];
-/// Short options of the engine (at any level) that take a value.
-const SHORT_VALUE_OPTIONS: &[char] = &['p', 'n'];
-/// Options that name a vault or Workspace instead of Margins' selection.
-const LOCATION_OPTIONS: &[&str] = &["--workspace", "--collection", "--vault"];
-
-/// How to do through Margins what `margins enzyme` refuses.
-fn refusal(command: &str) -> String {
-    let how = match command {
-        "update" => "Margins ships and pins its own engine; update Margins instead",
-        "login" | "logout" => "Margins never uses an Enzyme account; use `margins setup` for catalyst access",
-        "init" | "refresh" => "use `margins init` or `margins sync`, which give the engine Margins' generator",
-        "workspace" | "compile" | "spec migrate" => {
-            "change the program with `margins workspace edit`, or `margins workspace plan` and `margins workspace apply`"
-        }
-        "model install" | "model use" | "model auto" | "model disable" | "model rm" | "model verify" | "model status" => {
-            "use `margins setup --only catalyst --local-model always` to install and select a local model"
-        }
-        "install" => "Margins installs its own agent skills with `margins setup --only skills`",
-        "catalyze --target" => "search the Workspace itself; a target directory would be prepared outside Margins",
-        "spec plan --prompts" => "`spec plan` previews without it; `--prompts` writes prompt files into a directory outside Margins",
-        _ => "it is not one of the read-only commands Margins runs (status, search, catalyze, scan, spec, model list)",
-    };
-    format!("`enzyme {command}` is not available through `margins enzyme`: {how}.")
-}
-
-/// The positional arguments before `--`, and whether a vault or Workspace was
-/// named, with every value-taking option's value skipped. Short options may be
-/// clustered (`-vp /x`, `-vp/x`, `-p=/x`) and long ones may use `=`.
-fn positionals(args: &[String]) -> (Vec<String>, bool, bool, bool) {
-    let mut found = Vec::new();
-    let mut located = false;
-    let mut target = false;
-    let mut prompts = false;
-    let mut index = 0;
-    while index < args.len() {
-        let arg = &args[index];
-        index += 1;
-        if arg == "--" {
-            break;
-        }
-        if let Some(long) = arg.strip_prefix("--") {
-            let name = format!("--{}", long.split('=').next().unwrap_or_default());
-            located |= LOCATION_OPTIONS.contains(&name.as_str());
-            target |= name == "--target";
-            prompts |= name == "--prompts";
-            if LONG_VALUE_OPTIONS.contains(&name.as_str()) && !long.contains('=') {
-                index += 1;
-            }
-        } else if let Some(cluster) = arg.strip_prefix('-').filter(|cluster| !cluster.is_empty()) {
-            for (position, flag) in cluster.char_indices() {
-                if SHORT_VALUE_OPTIONS.contains(&flag) {
-                    located |= flag == 'p';
-                    // The value is the rest of the cluster, or the next argument.
-                    if position + flag.len_utf8() == cluster.len() {
-                        index += 1;
-                    }
-                    break;
-                }
-            }
-        } else {
-            found.push(arg.clone());
-        }
-    }
-    (found, located, target, prompts)
-}
-
-/// Arguments for `margins enzyme`: only the engine's read-only commands, on
-/// the Workspace Margins selected unless the caller named a vault or
-/// collection itself. Anything else is refused with how to do it in Margins.
-pub fn passthrough_args(
-    workspace: Option<&str>,
-    args: &[std::ffi::OsString],
-) -> Result<Vec<std::ffi::OsString>, String> {
-    let text = args
-        .iter()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    let (positional, located, target, prompts) = positionals(&text);
-    let subcommand = positional.first().map(String::as_str);
-    match subcommand {
-        // `--help`, `--version`, or nothing: the engine's own help.
-        None => {
-            let after_separator = text.iter().position(|arg| arg == "--");
-            if after_separator.is_some_and(|at| at + 1 < text.len()) {
-                return Err(refusal(&text[after_separator.unwrap() + 1]));
-            }
-        }
-        Some(command) if !ALLOWED_SUBCOMMANDS.contains(&command) => return Err(refusal(command)),
-        Some(command @ ("spec" | "model")) => {
-            let allowed = if command == "spec" { ALLOWED_SPEC } else { ALLOWED_MODEL };
-            match positional.get(1) {
-                Some(nested) if allowed.contains(&nested.as_str()) => {}
-                Some(nested) => return Err(refusal(&format!("{command} {nested}"))),
-                None if text.iter().any(|arg| arg == "--help" || arg == "-h") => {}
-                None => return Err(refusal(command)),
-            }
-            // Only `spec plan` takes `--prompts`, which writes prompt files.
-            if command == "spec" && prompts {
-                return Err(refusal("spec plan --prompts"));
-            }
-        }
-        Some("catalyze") if target => return Err(refusal("catalyze --target")),
-        Some(_) => {}
-    }
-    // Without a Workspace or vault the engine would use the cwd as a vault and
-    // write `.enzyme/` into it; only commands that need no vault may run so.
-    let needs_vault = subcommand.is_some_and(|command| !VAULTLESS_SUBCOMMANDS.contains(&command));
-    if workspace.is_none() && !located && needs_vault {
-        return Err(
-            "choose a Workspace with `margins enzyme --workspace ID …`; `margins workspace list` shows them"
-                .to_string(),
-        );
-    }
-    let mut full = Vec::new();
-    if let Some(workspace) = workspace.filter(|_| !located) {
-        full.push("--workspace".into());
-        full.push(workspace.into());
-    }
-    full.extend(args.iter().cloned());
-    Ok(full)
 }
 
 fn debug(message: &str) {
@@ -1304,77 +1208,5 @@ mod tests {
             None => std::env::remove_var(ENZYME_BIN_ENV),
         }
         assert!(error.to_string().contains(&missing.display().to_string()));
-    }
-
-    fn passthrough(workspace: Option<&str>, args: &[&str]) -> Result<Vec<String>, String> {
-        let args = args.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
-        passthrough_args(workspace, &args).map(|full| {
-            full.iter()
-                .map(|arg| arg.to_string_lossy().into_owned())
-                .collect()
-        })
-    }
-
-    #[test]
-    fn passthrough_runs_read_only_commands_on_the_selected_workspace() {
-        assert_eq!(passthrough(Some("notes"), &["status"]).unwrap(), ["--workspace", "notes", "status"]);
-        for allowed in [
-            &["search", "update", "--json"][..],
-            &["-v", "catalyze", "a query", "-n", "5"],
-            &["scan", "--json"],
-            &["spec", "profiles", "--json"],
-            &["spec", "compile", "x.enzyme"],
-            &["model", "list", "--json"],
-            &["-p", "/v", "status"],
-            &["search", "--", "--looks-like-a-flag"],
-        ] {
-            assert!(passthrough(Some("notes"), allowed).is_ok(), "{allowed:?}");
-        }
-        // A vault or collection the caller names is used instead.
-        for located in [&["-p", "/v", "status"][..], &["--vault=/v", "status"], &["--collection", "x", "status"], &["-vp/v", "status"]] {
-            assert_eq!(passthrough(Some("notes"), located).unwrap(), located.to_vec(), "{located:?}");
-        }
-        for vaultless in [&["--version"][..], &["--help"], &["model", "list"], &["spec", "profiles"], &["model", "--help"], &[]] {
-            assert_eq!(passthrough(None, vaultless).unwrap(), vaultless.to_vec(), "{vaultless:?}");
-        }
-    }
-
-    #[test]
-    fn passthrough_refuses_everything_but_read_only_commands_however_it_is_spelled() {
-        for refused in [
-            &["update"][..],
-            &["-vp", "/x", "update"],
-            &["-vp/x", "update"],
-            &["-p=/x", "login"],
-            &["--vault=/x", "logout"],
-            &["--vault", "/x", "-v", "install"],
-            &["--", "update"],
-            &["init", "--llm", "none"],
-            &["refresh"],
-            &["workspace", "apply", "plan.json"],
-            &["compile", "--preset", "x"],
-            &["model", "install"],
-            &["model", "-p", "/x", "rm", "m"],
-            &["model"],
-            &["spec", "migrate"],
-            &["spec", "serve"],
-            &["serve"],
-            &["mcp"],
-            &["ingest"],
-            &["catalyze", "q", "--target", "/elsewhere"],
-            &["catalyze", "q", "--target=/elsewhere"],
-            &["spec", "plan", "--prompts", "/elsewhere"],
-            &["spec", "plan", "x.enzyme", "--prompts=/elsewhere"],
-            &["-v", "spec", "--prompts", "/elsewhere", "plan"],
-        ] {
-            let error = passthrough(Some("notes"), refused).unwrap_err();
-            assert!(error.contains("is not available through `margins enzyme`"), "{refused:?}: {error}");
-        }
-        assert!(passthrough(Some("notes"), &["-vp", "/x", "update"]).unwrap_err().contains("update Margins"));
-        assert!(passthrough(Some("notes"), &["login"]).unwrap_err().contains("Enzyme account"));
-        assert!(passthrough(Some("notes"), &["init"]).unwrap_err().contains("margins init"));
-        assert!(passthrough(Some("notes"), &["workspace", "apply"]).unwrap_err().contains("margins workspace edit"));
-        // Never the cwd vault.
-        assert!(passthrough(None, &["status"]).unwrap_err().contains("--workspace ID"));
     }
 }

@@ -473,14 +473,24 @@ fn search_index(
     // An index without catalysts serves direct search only when no selected
     // entity could have catalysts (none selected, or all too thin);
     // otherwise catalysts are missing and recall fails closed.
-    if status
+    // Without a generator set up, the index serves direct and exact matches
+    // and says so (`catalysts_not_set_up`). With one, missing catalysts mean
+    // a build is incomplete, and recall fails closed until it finishes.
+    let generator_ready = ensure_usable_generator().is_ok();
+    let awaiting = status
         .selection
         .as_ref()
-        .is_some_and(|selection| selection.entities.iter().any(awaits_catalysts))
-    {
-        anyhow::bail!(RECALL_UNAVAILABLE_MESSAGE);
+        .is_some_and(|selection| selection.entities.iter().any(awaits_catalysts));
+    if generator_ready && awaiting {
+        anyhow::bail!(
+            "Recall is waiting for catalysts that are still being built for this Workspace; run `margins sync` to finish them."
+        );
     }
-    ensure_usable_generator()?;
+    let reason = if generator_ready {
+        "no_entities"
+    } else {
+        "catalysts_not_set_up"
+    };
     let direct_hits = response
         .direct_hits
         .into_iter()
@@ -490,7 +500,7 @@ fn search_index(
         filter_recall_hits(workspace, exact_hits, source_filter),
         filter_recall_hits(workspace, direct_hits, source_filter),
     );
-    Ok(("ok", "no_entities", "direct", hits, Vec::new()))
+    Ok(("ok", reason, "direct", hits, Vec::new()))
 }
 
 fn is_distinctive_phrase(query: &str) -> bool {
@@ -751,29 +761,39 @@ fn classify_init_status(status: &StatusEnvelope) -> InitStatus {
             status: "catalysts_pending",
             reason: "catalysts_pending",
             readiness,
+            documents: status.documents,
+            catalysts: status.catalysts,
+            attention: None,
         };
     }
-    if status.catalysts > 0 {
-        InitStatus {
-            status: "ok",
-            reason: "catalyst",
-            readiness,
-        }
-    } else {
-        InitStatus {
-            status: "ok",
-            reason: "no_entities",
-            readiness,
-        }
+    InitStatus {
+        status: "ok",
+        reason: if status.catalysts > 0 { "catalyst" } else { "no_entities" },
+        readiness,
+        documents: status.documents,
+        catalysts: status.catalysts,
+        attention: None,
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitStatus {
+    /// `ok`, `catalysts_pending`, or `index_only` (indexed and searchable
+    /// directly; no catalyst generator is set up).
     pub status: &'static str,
     pub reason: &'static str,
     pub readiness: CatalystReadiness,
+    /// Indexed documents and catalysts after this refresh.
+    pub documents: usize,
+    pub catalysts: usize,
+    /// What changed in attention since the previous refresh.
+    pub attention: Option<crate::attention::Diff>,
 }
+
+/// The one line that turns catalysts on, for output that reports
+/// `index_only`.
+pub const ENABLE_CATALYSTS_HINT: &str =
+    "Catalysts are off, so search finds direct matches only. Turn them on with `margins setup --only catalyst`.";
 
 
 /// Require the setup-selected generator to be usable without discovery,
@@ -1000,10 +1020,25 @@ fn provision(workspace: &ResolvedWorkspace, mode: Provision) -> Result<InitStatu
             .map_or(0, |summary| summary.entities_generated),
         init_status.status,
     ));
-    // Without a generator the documents are indexed (`--llm none`), but recall
-    // fails closed until setup chooses one.
+    // Without a generator the documents are indexed (`--llm none`) and
+    // searchable directly; catalysts wait until setup chooses a generator.
     if !generator.generates() {
-        anyhow::bail!(RECALL_UNAVAILABLE_MESSAGE);
+        init_status.status = "index_only";
+        init_status.reason = "catalysts_not_set_up";
+    }
+    // Remember what Margins learns about, and say what changed since the
+    // previous refresh. A failed write only costs the next diff a baseline.
+    let revision = margins_workflows::workspace::workspace_revision(workspace)
+        .unwrap_or_default();
+    let next = crate::attention::snapshot(&status, &revision, crate::enzyme_cli::required_version());
+    let previous = crate::attention::load(&workspace.state_dir);
+    init_status.attention = Some(crate::attention::diff(
+        previous.as_ref(),
+        &next,
+        generator.generates(),
+    ));
+    if let Err(error) = crate::attention::save(&workspace.state_dir, &next) {
+        debug_strategy(&format!("attention snapshot not saved: {error:#}"));
     }
     Ok(init_status)
 }
@@ -1273,6 +1308,9 @@ pub fn render_recall_json(output: &RecallOutput) -> Result<String> {
 pub fn render_recall_tree(output: &RecallOutput, terminal_width: usize) -> String {
     let mut tree = String::new();
     let _ = writeln!(tree, "Catalyze \"{}\"", output.query);
+    if output.reason == "catalysts_not_set_up" {
+        let _ = writeln!(tree, "├─ {ENABLE_CATALYSTS_HINT}");
+    }
 
     if output.top_contributing_catalysts.is_empty() {
         if output.results.is_empty() {

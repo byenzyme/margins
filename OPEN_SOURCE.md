@@ -40,7 +40,9 @@ margins-meetings`: notes go to `Meetings`, `Templates` and `Attachments` are lef
 out, and Margins learns from the `Meetings`, `People`, and `Projects` folders that
 exist. Your Source declarations still define the full recall boundary. The plan
 finally applied is always the exact one last reviewed, unchanged, before `init`
-and `sync`; `margins workspace edit` changes the program later.
+and `sync`; `margins edit` changes the program later, and `margins status`
+shows what it learns about. People can skip the review: `margins init <folder>`
+makes the Workspace from the same preset and indexes it in one step.
 
 ## Distillation
 

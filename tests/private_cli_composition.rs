@@ -104,8 +104,15 @@ fn production_binary_logs_migration_warnings_to_stderr() {
         ),
     )
     .unwrap();
+    // Migration is automatic: the first command that resolves the Workspace
+    // for writing migrates it, and stdout keeps only that command's JSON.
+    let reference = temp.path().join("reference");
+    fs::create_dir_all(&reference).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_margins-private"))
-        .args(["workspace", "migrate", "--json"])
+        .args(["--workspace", "odd", "source", "add", "notes", "--name", "reference"])
+        .args(["--role", "reference", "--path"])
+        .arg(&reference)
+        .arg("--json")
         .env_clear()
         .env("HOME", temp.path())
         .env("MARGINS_HOME", &margins_home)
@@ -114,8 +121,8 @@ fn production_binary_logs_migration_warnings_to_stderr() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
-    let migration: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(migration["warnings"].as_array().unwrap().len(), 1);
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
+    assert!(margins_home.join("configs/odd.enzyme").is_file());
     assert!(
         stderr.lines().any(
             |line| line.starts_with("margins: warning: migrated Workspace 'odd': ")
@@ -371,17 +378,17 @@ fn workspace_commands_refuse_unsafe_home_and_state_cwds_with_exact_reasons() {
     for (cwd, reason, id) in [
         (
             &machine_home,
-            "current directory is the user home directory",
+            "this is your home folder",
             "home-with-notes",
         ),
         (
             &margins_home,
-            "current directory is Margins configuration or state storage",
+            "this folder holds Margins configuration or state",
             "margins",
         ),
         (
             &workspace_state_root,
-            "current directory is Margins configuration or state storage",
+            "this folder holds Margins configuration or state",
             "workspaces",
         ),
     ] {
@@ -408,15 +415,16 @@ fn workspace_commands_refuse_unsafe_home_and_state_cwds_with_exact_reasons() {
             let message = if explicit_source_mutation {
                 "this mutation requires literal --workspace <id>".to_string()
             } else if establishes {
+                let _ = id;
                 format!(
-                    "cannot create implicit workspace: {reason}; use explicit setup instead: margins workspace new {id} --home {}",
+                    "Margins won't make a Workspace here: {reason}; if this really is your notes folder, name it: margins init {}",
                     cwd.canonicalize().unwrap().display()
                 )
             } else {
                 margins_cli::commands::workspace::NO_WORKSPACE_MESSAGE.to_string()
             };
             let code = if establishes {
-                "command_failed"
+                "folder_refused"
             } else {
                 "workspace_required"
             };
@@ -521,6 +529,7 @@ fn read_like_commands_never_create_a_workspace_and_only_init_establishes_one() {
             .env_clear()
             .env("HOME", &machine_home)
             .env("MARGINS_HOME", &margins_home)
+            .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
             .env(
                 margins_workflows::workspace::IMPLICIT_WORKSPACE_DENY_ROOTS_ENV,
                 &deny_roots,
@@ -554,7 +563,7 @@ fn read_like_commands_never_create_a_workspace_and_only_init_establishes_one() {
             );
         }
         assert!(stderr.contains("did not create one"), "{args:?}: {stderr}");
-        assert!(stderr.contains("margins workspace new"), "{args:?}: {stderr}");
+        assert!(stderr.contains("margins init"), "{args:?}: {stderr}");
         assert!(!stderr.contains("Created workspace"), "{args:?}: {stderr}");
         assert!(
             !margins_home.join("configs").exists() && !margins_home.join("workspaces").exists(),
@@ -567,16 +576,20 @@ fn read_like_commands_never_create_a_workspace_and_only_init_establishes_one() {
     assert_eq!(run(&["workspace", "status", "--bogus"]).status.code(), Some(2));
     assert_eq!(run(&["sync", "--bogus"]).status.code(), Some(2));
 
-    // `init` is the one command that establishes the cwd as a Workspace.
+    // `init` is the one command that establishes the cwd as a Workspace:
+    // from the preset, indexed at once, with no catalyst generator needed.
     let init = run(&["init"]);
+    let init_stdout = String::from_utf8_lossy(&init.stdout);
+    assert!(init.status.success(), "{}", String::from_utf8_lossy(&init.stderr));
     assert!(
-        String::from_utf8_lossy(&init.stderr).contains(&format!(
-            "Created workspace fresh-notes with home {}",
+        init_stdout.starts_with(&format!(
+            "Created Workspace fresh-notes for {} (now your default)\n",
             canonical_notes.display()
         )),
-        "{}",
-        String::from_utf8_lossy(&init.stderr)
+        "{init_stdout}"
     );
+    assert!(init_stdout.contains("\nRecall: 1 note indexed · search finds direct matches"), "{init_stdout}");
+    assert!(init_stdout.contains("margins setup --only catalyst"), "{init_stdout}");
     let config_path = margins_home.join("configs/fresh-notes.enzyme");
     assert!(config_path.is_file());
     let config = margins_workflows::workspace::resolve_at(&margins_home, "fresh-notes")
@@ -848,7 +861,7 @@ fn connection_commands_do_not_implicitly_create_a_workspace() {
 
 #[test]
 #[cfg(feature = "recall")]
-fn init_fails_closed_without_a_usable_generator() {
+fn init_indexes_only_without_a_usable_generator_and_says_so() {
     let temp = tempfile::tempdir().unwrap();
     let margins_home = temp.path().join("margins-home");
     let notes = temp.path().join("notes");
@@ -872,12 +885,126 @@ fn init_fails_closed_without_a_usable_generator() {
         .output()
         .unwrap();
 
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    // Search works from the index alone; init says catalysts are off and
+    // names the one command that turns them on, and exits 0.
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "Building or refreshing recall index and catalysts…\n<margins_error code=\"command_failed\">indexing vault: Recall unavailable: no usable generator is configured. Run `margins setup`.</margins_error>\n"
+        "Refreshing Workspace init-status…\n"
     );
+    assert!(stdout.starts_with("Workspace init-status ("), "{stdout}");
+    assert!(
+        stdout.contains(
+            "\nRecall: 5 notes indexed · search finds direct matches; catalysts are not set up\n  Catalysts are off, so search finds direct matches only. Turn them on with `margins setup --only catalyst`.\n"
+        ),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("<margins_init"), "{stdout}");
+
+    let json = Command::new(env!("CARGO_BIN_EXE_margins-private"))
+        .args(["--workspace", "init-status", "init", "--json"])
+        .env_clear()
+        .env("MARGINS_HOME", &margins_home)
+        .env("HOME", temp.path())
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
+        .output()
+        .unwrap();
+    assert!(json.status.success());
+    assert!(json.stderr.is_empty(), "{}", String::from_utf8_lossy(&json.stderr));
+    let receipt: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(receipt["schema_version"], "margins.init.v1");
+    assert_eq!(receipt["created"], false);
+    assert_eq!(receipt["recall"]["status"], "index_only");
+    assert_eq!(receipt["recall"]["documents"], 5);
+    assert_eq!(receipt["recall"]["catalyst_mode"], "none");
+    // The second refresh compares attention with the first.
+    assert_eq!(receipt["attention"]["baseline"], false);
+    assert!(margins_home.join("workspaces/init-status/attention.json").is_file());
+
+    // `status` keeps the index and catalysts apart: indexed, catalysts off.
+    let status = Command::new(env!("CARGO_BIN_EXE_margins-private"))
+        .args(["--workspace", "init-status", "status", "--json"])
+        .env_clear()
+        .env("MARGINS_HOME", &margins_home)
+        .env("HOME", temp.path())
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
+        .output()
+        .unwrap();
+    assert!(status.status.success(), "{}", String::from_utf8_lossy(&status.stderr));
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["schema_version"], "margins.status.v1");
+    assert_eq!(status["index"]["state"], "indexed");
+    assert_eq!(status["index"]["documents"], 5);
+    assert_eq!(status["catalysts"]["usable"], false);
+    assert_eq!(status["catalysts"]["mode"], "none");
+    assert_eq!(
+        status["catalysts"]["next_step"],
+        "Turn catalysts on: `margins setup --only catalyst`"
+    );
+
+    // Recall serves direct matches and says why there are no catalysts.
+    let recall = Command::new(env!("CARGO_BIN_EXE_margins-private"))
+        .args(["--workspace", "init-status", "recall", "Portable catalyst status evidence", "--json"])
+        .env_clear()
+        .env("MARGINS_HOME", &margins_home)
+        .env("HOME", temp.path())
+        .env("MARGINS_ENZYME_BIN", enzyme_bin::enzyme_bin())
+        .output()
+        .unwrap();
+    assert!(recall.status.success(), "{}", String::from_utf8_lossy(&recall.stderr));
+    let recall: serde_json::Value = serde_json::from_slice(&recall.stdout).unwrap();
+    assert_eq!(recall["status"], "ok");
+    assert_eq!(recall["reason"], "catalysts_not_set_up");
+    assert_eq!(recall["search_strategy"], "direct");
+    assert!(recall["total_results"].as_u64().unwrap() > 0, "{recall}");
+}
+
+#[test]
+#[cfg(feature = "recall")]
+fn init_leaves_nothing_behind_when_its_first_index_fails() {
+    let temp = tempfile::tempdir().unwrap();
+    let margins_home = temp.path().join("margins-home");
+    let notes = temp.path().join("notes");
+    fs::create_dir_all(&notes).unwrap();
+    fs::write(notes.join("note.md"), "# Note\nSomething worth keeping.").unwrap();
+    // An engine whose `init` fails, after the preset was filled and the
+    // Workspace written.
+    let failing = temp.path().join("enzyme");
+    fs::write(
+        &failing,
+        format!(
+            "#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = init ] && {{ echo 'Error: simulated' >&2; exit 1; }}; done\nexec {:?} \"$@\"\n",
+            enzyme_bin::enzyme_bin()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&failing, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_margins-private"))
+        .arg("init")
+        .arg(&notes)
+        .arg("--json")
+        .env_clear()
+        .env("MARGINS_HOME", &margins_home)
+        .env("HOME", temp.path())
+        .env("MARGINS_ENZYME_BIN", &failing)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "index_failed");
+    assert!(!margins_home.join("configs/notes.enzyme").exists());
+    assert!(!margins_home.join("workspaces/notes").exists());
+    assert_eq!(
+        margins_workflows::workspace::default_workspace(&margins_home).unwrap(),
+        None
+    );
+    assert!(notes.join("note.md").is_file());
 }
 
 #[test]

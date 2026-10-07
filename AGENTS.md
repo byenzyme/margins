@@ -93,15 +93,31 @@ The Codex plugin is parked outside core; see
   engine home, so the preview writes nothing; Margins drops folder readings
   whose folders do not exist) → reviewed
   `workspace apply` → `init` → exact-phrase recall proves a declared Source is
-  reachable → tell the user the program path and `margins workspace edit`. The
-  setup skill and `margins guide workspace-setup` are the single source of truth
-  for that flow.
+  reachable → tell the user the program path, `margins status`, and
+  `margins edit`. The setup skill and `margins guide workspace-setup` are the
+  single source of truth for that agent flow.
+- People onboard with `margins init [<folder>]` alone (decided 2026-10-07): it
+  fills the same preset before writing anything, creates the Workspace in one
+  write, indexes it at once (search works with no download), offers catalysts
+  inline (hosted or local, size stated) only at a terminal, and removes the
+  Workspace again if its first index fails. It never routes through
+  `margins setup` and never downloads the speech model. `--json` is
+  `margins.init.v1`.
+- The CLI is organized around journeys. Visible: init, status, edit, sync,
+  recall, connect/disconnect, setup, guide, new, attach, current, ls,
+  transcript, transcribe, note. Everything else (`workspace …`, `source`,
+  `integrations`, `capabilities`, `recent`, `artifacts`, `process`, …) is hidden
+  but keeps its argv, flags, exit codes, and JSON byte for byte: shipped bb
+  plugins, installed skills, and recovery hints call it. Never add deprecation
+  lines to stderr of hidden plumbing (the plugin parses stderr JSON).
+  `workspace migrate` (migration is automatic) and `margins enzyme` are gone.
 - There is no scan or grounded review in setup, and no promised-question recall
-  test. Refinement is optional and later: `margins workspace edit`, or an agent
-  that wants evidence reads the engine's own inventory with
-  `margins enzyme scan --workspace <id> --json` (the bundled engine on the
-  Margins home).
-  Margins keeps no copy of engine scan or selection logic.
+  test. Refinement is optional and later: `margins edit`, or an agent that wants
+  evidence reads `margins --workspace <id> status --explain --json` (readings,
+  automatic picks, skips with reasons, and per-reading `spec plan` detail).
+  Margins keeps no copy of engine scan or selection logic. Maintainers debugging
+  the engine itself run `ENZYME_HOME=$MARGINS_HOME enzyme --workspace <id> …`
+  with the pinned binary from `scripts/enzyme-bin`.
 - A desired program is compiled with `workspace plan --desired` (or `--preset`).
   The **final reviewed** plan is applied unchanged—`workspace apply` reads the
   plan's base revision, derives its retry identity, commits only the exact plan
@@ -334,8 +350,9 @@ The standalone `enzyme` CLI below is for the *agent research* pass and reads
 `~/.enzyme/enzyme.db`. Product retrieval is a different path: the Margins home
 is its own Enzyme home (`ENZYME_HOME=$MARGINS_HOME`), and Margins indexes and
 reads `$MARGINS_HOME/workspaces/<id>/enzyme.db` by running the shipped `enzyme`
-CLI (inspect it with `margins enzyme --workspace <id> status|search`, which runs
-the bundled engine with `ENZYME_HOME=$MARGINS_HOME`;
+CLI (inspect it with `margins --workspace <id> status --explain --json`, or
+debug the engine directly with
+`ENZYME_HOME=$MARGINS_HOME "$(scripts/enzyme-bin)" --workspace <id> status|search`;
 tests need `MARGINS_ENZYME_BIN`, see `scripts/enzyme-bin`). When testing
 product retrieval, declare Sources and pass `--workspace <id>` to `margins init`;
 initializing an Enzyme fixture leaves the product path unindexed.

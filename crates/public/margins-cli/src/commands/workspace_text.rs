@@ -205,8 +205,8 @@ pub fn write_program_block(
         "Your Workspace is the program at {}",
         program_path.display()
     )?;
-    writeln!(out, "  Read it:   {margins} workspace show --text")?;
-    writeln!(out, "  Change it: {margins} workspace edit")
+    writeln!(out, "  See what it learns: {margins} status")?;
+    writeln!(out, "  Change it:          {margins} edit")
 }
 
 /// The desired program's view, for what Margins will do once it is applied.
@@ -311,31 +311,10 @@ pub fn save_plan(margins_home: &Path, workspace_id: &str, plan_json: &[u8]) -> i
         .map_err(|error| error.error)
 }
 
-/// The consequences of a plan in plain language, the exact diff, and how to
-/// apply it. `saved` is the plan file (`None` when there is nothing to apply).
-pub fn write_plan(
-    out: &mut dyn Write,
-    current: &WorkspaceConfig,
-    program_path: &Path,
-    plan: &WorkspacePlan,
-    preset: Option<&PresetOutcome>,
-    saved: Option<&Path>,
-    color: bool,
-) -> io::Result<()> {
-    let id = &plan.workspace_id;
-    writeln!(out, "Workspace {id}: plan for {}", program_path.display())?;
-    writeln!(out)?;
-    if plan.actions.is_empty() && plan.diff.is_empty() {
-        writeln!(out, "No changes: the program already says this.")?;
-    } else {
-        writeln!(out, "Changes:")?;
-        for action in &plan.actions {
-            for summary in plain_summaries(action) {
-                writeln!(out, "  • {summary}")?;
-            }
-        }
-    }
-    writeln!(out)?;
+/// "Once applied, Margins: learns from … leaves out … notes go to …": the
+/// effect of a plan on what Margins reads, shown by `workspace plan` and
+/// before `edit` asks to apply.
+pub fn write_effect(out: &mut dyn Write, current: &WorkspaceConfig, plan: &WorkspacePlan) -> io::Result<()> {
     writeln!(out, "Once applied, Margins:")?;
     if let Some(view) = desired_view(plan, current) {
         let kept = readings(&view.policy)
@@ -377,6 +356,35 @@ pub fn write_plan(
             writeln!(out, "  Notes will go to {}", destination.display())?;
         }
     }
+    Ok(())
+}
+
+/// The consequences of a plan in plain language, the exact diff, and how to
+/// apply it. `saved` is the plan file (`None` when there is nothing to apply).
+pub fn write_plan(
+    out: &mut dyn Write,
+    current: &WorkspaceConfig,
+    program_path: &Path,
+    plan: &WorkspacePlan,
+    preset: Option<&PresetOutcome>,
+    saved: Option<&Path>,
+    color: bool,
+) -> io::Result<()> {
+    let id = &plan.workspace_id;
+    writeln!(out, "Workspace {id}: plan for {}", program_path.display())?;
+    writeln!(out)?;
+    if plan.actions.is_empty() && plan.diff.is_empty() {
+        writeln!(out, "No changes: the program already says this.")?;
+    } else {
+        writeln!(out, "Changes:")?;
+        for action in &plan.actions {
+            for summary in plain_summaries(action) {
+                writeln!(out, "  • {summary}")?;
+            }
+        }
+    }
+    writeln!(out)?;
+    write_effect(out, current, plan)?;
     if let Some(preset) = preset {
         if !preset.skipped_readings.is_empty() {
             let skipped = preset
@@ -532,15 +540,15 @@ mod tests {
         assert_eq!(
             block(false),
             "Your Workspace is the program at /m/configs/practice.enzyme\n  \
-             Read it:   margins --workspace practice workspace show --text\n  \
-             Change it: margins --workspace practice workspace edit\n"
+             See what it learns: margins --workspace practice status\n  \
+             Change it:          margins --workspace practice edit\n"
         );
         // The machine default needs no selector.
         assert_eq!(
             block(true),
             "Your Workspace is the program at /m/configs/practice.enzyme\n  \
-             Read it:   margins workspace show --text\n  \
-             Change it: margins workspace edit\n"
+             See what it learns: margins status\n  \
+             Change it:          margins edit\n"
         );
     }
 

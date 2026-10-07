@@ -162,7 +162,7 @@ program comes from Margins' managed `margins-meetings` preset via
 - recall was proven: `init` (and `sync` for connected Sources) then an
   exact-phrase recall that returned the note the phrase came from; and
 - the user was told where to edit: the program path and/or
-  `margins workspace edit`.
+  `margins edit` (the hidden `margins workspace edit` alias is equivalent).
 
 Useful findings also include unknown seam failures, unnecessary tool churn, weak
 causal stories, missed evidence, authority drift, hidden fallback, leaked

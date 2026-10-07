@@ -90,7 +90,7 @@ fn workspace_default_and_destination_are_explicit_json_reads() {
 }
 
 #[test]
-fn workspace_plan_apply_and_migrate_use_enzyme_programs() {
+fn workspace_plan_apply_and_automatic_migration_use_enzyme_programs() {
     let _guard = ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -226,7 +226,8 @@ fn workspace_plan_apply_and_migrate_use_enzyme_programs() {
     );
     assert_eq!(refused.unwrap_err().code(), "workspace_desired_invalid");
 
-    // Migration of a retired config.toml: dry run, then write, then nothing left.
+    // A retired config.toml migrates automatically the first time a command
+    // resolves the Workspace for writing; `workspace migrate` is gone.
     let legacy_dir = machine.join("workspaces/old");
     std::fs::create_dir_all(&legacy_dir).unwrap();
     std::fs::write(
@@ -237,42 +238,20 @@ fn workspace_plan_apply_and_migrate_use_enzyme_programs() {
         ),
     )
     .unwrap();
-    let (dry, output, stderr) = invoke(
+    let (removed, _, _) = invoke(
         &service,
         &vault,
-        &["margins", "workspace", "migrate", "--dry-run", "--json"],
+        &["margins", "workspace", "migrate", "--json"],
     );
-    assert!(dry.is_ok(), "{stderr}");
-    let preview: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
-    assert_eq!(preview["schema_version"], "margins.workspace.migrate.v1");
-    assert_eq!(preview["status"], "would_migrate");
+    assert_eq!(removed.unwrap_err().code(), "usage");
     assert!(!machine.join("configs/old.enzyme").exists());
-    let (migrated, output, stderr) = invoke(
-        &service,
-        &vault,
-        &["margins", "workspace", "migrate", "--json"],
-    );
-    assert!(migrated.is_ok(), "{stderr}");
-    let migration: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
-    assert_eq!(migration["status"], "migrated");
-    assert_eq!(migration["program"], preview["program"]);
-    assert_eq!(
-        std::fs::read_to_string(machine.join("configs/old.enzyme")).unwrap(),
-        preview["program"].as_str().unwrap()
-    );
+    workspace::resolve_at(&machine, "old").unwrap();
+    assert!(machine.join("configs/old.enzyme").is_file());
     assert!(legacy_dir.join("config.toml.migrated").is_file());
-    let (again, output, _) = invoke(
-        &service,
-        &vault,
-        &["margins", "workspace", "migrate", "--json"],
-    );
-    assert!(again.is_ok());
-    assert!(output.is_empty());
 
-    // Forms the previous engine ignored are reported, not fatal; a Workspace
-    // that cannot migrate is listed with its error and keeps its legacy file.
-    // Programs in one configs directory resolve together, and two Workspaces
-    // may not declare the same Markdown folder: give these their own.
+    // A Workspace that cannot migrate keeps its legacy file and is listed
+    // with its error. Programs in one configs directory resolve together,
+    // and two Workspaces may not declare the same Markdown folder.
     let odd_notes = temp.path().join("odd-notes");
     std::fs::create_dir_all(&odd_notes).unwrap();
     let home_binding = format!(
@@ -286,6 +265,10 @@ fn workspace_plan_apply_and_migrate_use_enzyme_programs() {
         format!("id = \"odd\"\n\n[policy]\nentities = [\"person:ada\", \"#craft\"]\n{home_binding}"),
     )
     .unwrap();
+    workspace::resolve_at(&machine, "odd").unwrap();
+    assert!(std::fs::read_to_string(machine.join("configs/odd.enzyme"))
+        .unwrap()
+        .contains("learn questions from tag \"craft\""));
     let broken_dir = machine.join("workspaces/broken");
     std::fs::create_dir_all(&broken_dir).unwrap();
     let broken = format!(
@@ -293,25 +276,7 @@ fn workspace_plan_apply_and_migrate_use_enzyme_programs() {
         home_binding.replace("role = \"home\"", "role = \"home\"\nnote_folder = \"../out\"")
     );
     std::fs::write(broken_dir.join("config.toml"), &broken).unwrap();
-    let (migrated, output, _) = invoke(
-        &service,
-        &vault,
-        &["margins", "workspace", "migrate", "--json"],
-    );
-    assert!(migrated.is_err());
-    let lines: Vec<serde_json::Value> = output
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    assert_eq!(lines.len(), 2, "{output}");
-    assert_eq!(lines[0]["workspace_id"], "broken");
-    assert_eq!(lines[0]["status"], "failed");
-    assert_eq!(lines[1]["workspace_id"], "odd");
-    assert_eq!(lines[1]["status"], "migrated", "{output}");
-    let warnings = lines[1]["warnings"].as_array().unwrap();
-    assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(warnings[0].as_str().unwrap().contains("person:ada"));
-    assert!(lines[1]["program"].as_str().unwrap().contains("learn questions from tag \"craft\""));
+    assert!(workspace::resolve_at(&machine, "broken").is_err());
     assert_eq!(std::fs::read_to_string(broken_dir.join("config.toml")).unwrap(), broken);
 
     let (listed, output, stderr) = invoke(
@@ -831,7 +796,7 @@ fn parser_accepts_workspace_plan_apply_and_integrations_reconcile() {
         "--json",
     ])
     .unwrap();
-    Args::try_parse_from(["margins", "workspace", "migrate", "--dry-run", "--json"]).unwrap();
+    assert!(Args::try_parse_from(["margins", "workspace", "migrate", "--dry-run", "--json"]).is_err());
     Args::try_parse_from([
         "margins",
         "workspace",
@@ -2592,15 +2557,16 @@ fn workspace_setup_guide_is_the_preset_flow_and_is_read_only() {
     assert!(stdout.contains("margins sync --json"));
     assert!(stdout.contains("margins recall --json \"an exact phrase from these notes\""));
     assert!(stdout.contains("source add notes"));
-    assert!(stdout.contains("Run these commands from the notes folder"));
-    assert!(stdout.contains("cd \"/absolute/path/to/notes\""));
+    assert!(stdout.contains("margins init \"/absolute/path/to/notes\" --json"));
+    assert!(stdout.contains("`recall.status` is `ok` (index and catalysts), `index_only`"));
     assert!(stdout.contains("`workspace.preset: true`"));
     assert!(stdout.contains("workspace plan --preset margins-meetings --json"));
     assert!(stdout.contains("`skipped_readings`"));
     assert!(stdout.contains("`program_path`"));
-    assert!(stdout.contains("workspace show"));
-    assert!(stdout.contains("workspace edit"));
-    assert!(stdout.contains("margins enzyme scan --workspace <id> --json"));
+    assert!(stdout.contains("edit --path"));
+    assert!(stdout.contains("margins --workspace <id> edit"));
+    assert!(stdout.contains("margins --workspace practice status --explain --json"));
+    assert!(!stdout.contains("margins enzyme"));
     assert!(stdout.contains("Never open, cat, print, or summarize credential bundles"));
     assert!(stdout.contains("Use only redacted Margins product status"));
     assert!(stdout.contains("Do not run recall before `margins init`"));
@@ -2842,10 +2808,12 @@ fn public_init_recall_and_sync_form_an_autonomous_local_loop() {
     let (init, init_stdout, init_stderr) = invoke(
         &services,
         &notes,
-        &["margins", "--workspace", "practice", "init"],
+        &["margins", "--workspace", "practice", "init", "--json"],
     );
     assert!(init.is_ok(), "{init_stderr}");
-    assert!(init_stdout.contains("mode=\"live_lexical\""));
+    let init: serde_json::Value = serde_json::from_str(&init_stdout).unwrap();
+    assert_eq!(init["schema_version"], "margins.init.v1");
+    assert_eq!(init["recall"]["status"], "lexical");
 
     let (recall, recall_stdout, recall_stderr) = invoke(
         &services,
