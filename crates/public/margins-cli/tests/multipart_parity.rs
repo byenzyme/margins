@@ -145,6 +145,14 @@ fn invoke(
     invocation_dir: &std::path::Path,
     args: &[&str],
 ) -> (Result<(), margins_cli::CliError>, String, String) {
+    // Session commands consult Workspaces; keep them off the real Margins home.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    let _lock = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let old = std::env::var_os("MARGINS_HOME");
+    std::env::set_var("MARGINS_HOME", home.path());
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let result = margins_cli::run(
@@ -154,6 +162,10 @@ fn invoke(
         &mut stdout,
         &mut stderr,
     );
+    match old {
+        Some(old) => std::env::set_var("MARGINS_HOME", old),
+        None => std::env::remove_var("MARGINS_HOME"),
+    }
     (
         result,
         String::from_utf8(stdout).unwrap(),

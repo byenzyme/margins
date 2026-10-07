@@ -556,29 +556,24 @@ where
 
     let services = margins_cli::standalone_services();
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let env_workspace = std::env::var("MARGINS_WORKSPACE")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
-    let selected_workspace = workspace_selector.as_deref().or(env_workspace.as_deref());
-    if selected_workspace.is_some() && project_selector.is_some() {
-        return report_error("`--project` cannot be combined with an explicit Workspace selection");
-    }
-    let capture_root = if selected_workspace.is_some() {
-        let workspace = match resolve_workspace(selected_workspace) {
-            Ok(workspace) => workspace,
-            Err(error) => return report_error(&error.to_string()),
-        };
-        match workspace.capture_store_dir() {
-            Ok(path) => path,
-            Err(error) => return report_error(&error.to_string()),
+    let capture_root = match margins_cli::commands::capture_target::resolve(
+        &services,
+        workspace_selector.as_deref(),
+        project_selector.as_deref(),
+        &cwd,
+        margins_cli::commands::capture_target::CaptureIntent::Record,
+        &mut io::stderr(),
+    ) {
+        Ok(margins_cli::commands::capture_target::CaptureTarget::Workspace {
+            capture_root, ..
+        }) => capture_root,
+        Ok(margins_cli::commands::capture_target::CaptureTarget::Legacy(_)) => {
+            unreachable!("recording never resolves a per-folder store")
         }
-    } else {
-        match services
-            .projects
-            .resolve_vault(project_selector.as_deref(), &cwd)
-        {
-            Ok(project) => project.work_dir,
-            Err(error) => return report_error(&error.to_string()),
+        Err(error) => {
+            let exit_code = error.exit_code();
+            let _ = margins_cli::output::write_error(&mut io::stderr(), &error);
+            return exit_code;
         }
     };
     let create = if create_if_missing {

@@ -23,6 +23,40 @@ use std::time::Duration;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+/// Points `MARGINS_HOME` at an empty temp home for one test, so session
+/// commands never consult the developer's real Workspaces or default.
+struct HermeticHome {
+    old: Option<std::ffi::OsString>,
+    home: PathBuf,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl HermeticHome {
+    fn new(root: &Path) -> Self {
+        let lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = root.join("margins-home");
+        let old = std::env::var_os("MARGINS_HOME");
+        std::env::set_var("MARGINS_HOME", &home);
+        std::env::remove_var("MARGINS_WORKSPACE");
+        Self {
+            old,
+            home,
+            _lock: lock,
+        }
+    }
+}
+
+impl Drop for HermeticHome {
+    fn drop(&mut self) {
+        match self.old.take() {
+            Some(old) => std::env::set_var("MARGINS_HOME", old),
+            None => std::env::remove_var("MARGINS_HOME"),
+        }
+    }
+}
+
 #[test]
 fn workspace_default_and_destination_are_explicit_json_reads() {
     let _guard = ENV_LOCK
@@ -513,6 +547,7 @@ fn version_flag_is_top_level_only_and_leaves_subcommand_parsing_alone() {
 #[test]
 fn project_preprocessing_accepts_both_historical_spellings_anywhere() {
     let temp = tempfile::tempdir().unwrap();
+    let _home = HermeticHome::new(temp.path());
     let services = services(temp.path());
     for args in [
         vec!["margins", "--project", "test", "recent"],
@@ -3146,6 +3181,7 @@ impl ProjectService for RecordingProject {
 #[test]
 fn selected_project_is_forwarded_without_changing_process_cwd() {
     let temp = tempfile::tempdir().unwrap();
+    let _home = HermeticHome::new(temp.path());
     let project_root = temp.path().join("selected-project");
     std::fs::create_dir_all(&project_root).unwrap();
     let projects = Arc::new(RecordingProject {
@@ -3174,6 +3210,7 @@ fn selected_project_is_forwarded_without_changing_process_cwd() {
 #[test]
 fn concrete_meeting_commands_find_the_unique_owning_vault() {
     let temp = tempfile::tempdir().unwrap();
+    let _home = HermeticHome::new(temp.path());
     let active = temp.path().join("active");
     let owner = temp.path().join("owner");
     std::fs::create_dir_all(active.join(".margins")).unwrap();
@@ -3202,6 +3239,7 @@ fn concrete_meeting_commands_find_the_unique_owning_vault() {
 #[test]
 fn concrete_meeting_lookup_deduplicates_the_active_vault() {
     let temp = tempfile::tempdir().unwrap();
+    let _home = HermeticHome::new(temp.path());
     let active = temp.path().join("active");
     seed_inspectable_session(&active, "active-meeting", "active transcript");
     let projects = Arc::new(MultiProject {
@@ -3225,6 +3263,7 @@ fn concrete_meeting_lookup_deduplicates_the_active_vault() {
 #[test]
 fn duplicate_concrete_meeting_ids_fail_closed_even_when_active_has_one() {
     let temp = tempfile::tempdir().unwrap();
+    let _home = HermeticHome::new(temp.path());
     let active = temp.path().join("active");
     let other = temp.path().join("other");
     seed_inspectable_session(&active, "duplicate", "active transcript");
@@ -3252,6 +3291,7 @@ fn duplicate_concrete_meeting_ids_fail_closed_even_when_active_has_one() {
 #[test]
 fn explicit_project_remains_authoritative_for_duplicate_meeting_ids() {
     let temp = tempfile::tempdir().unwrap();
+    let _home = HermeticHome::new(temp.path());
     let active = temp.path().join("active");
     let other = temp.path().join("other");
     seed_inspectable_session(&active, "duplicate", "active transcript");
@@ -3280,6 +3320,7 @@ fn explicit_project_remains_authoritative_for_duplicate_meeting_ids() {
 #[test]
 fn latest_remains_scoped_to_the_active_vault() {
     let temp = tempfile::tempdir().unwrap();
+    let _home = HermeticHome::new(temp.path());
     let active = temp.path().join("active");
     let other = temp.path().join("other");
     seed_inspectable_session(&active, "active-latest", "active transcript");
@@ -3304,6 +3345,7 @@ fn latest_remains_scoped_to_the_active_vault() {
 #[test]
 fn transcript_defaults_to_latest_json_and_preserves_default_xml() {
     let temp = tempfile::tempdir().unwrap();
+    let _home = HermeticHome::new(temp.path());
     seed_inspectable_session(temp.path(), "latest-json", "latest transcript");
     let services = services(temp.path());
 
@@ -3355,6 +3397,7 @@ fn transcript_defaults_to_latest_json_and_preserves_default_xml() {
 #[test]
 fn transcript_xml_marks_finished_short_live_checkpoint_incomplete() {
     let temp = tempfile::tempdir().unwrap();
+    let _home = HermeticHome::new(temp.path());
     let meeting_id = "short-live";
     seed_checkpoint_session(temp.path(), meeting_id, true, 11);
     let dir = temp.path().join(".margins");
@@ -3374,6 +3417,7 @@ fn transcript_xml_marks_finished_short_live_checkpoint_incomplete() {
 #[test]
 fn transcript_xml_keeps_pending_remote_sessions_out_of_offline_processing() {
     let temp = tempfile::tempdir().unwrap();
+    let _home = HermeticHome::new(temp.path());
     let dir = temp.path().join(".margins");
     std::fs::create_dir_all(&dir).unwrap();
     for name in ["remote-pending", "remote-active"] {
@@ -3414,6 +3458,7 @@ fn transcript_xml_keeps_pending_remote_sessions_out_of_offline_processing() {
 #[test]
 fn active_remote_checkpoint_is_live_in_default_xml() {
     let temp = tempfile::tempdir().unwrap();
+    let _home = HermeticHome::new(temp.path());
     let dir = temp.path().join(".margins");
     std::fs::create_dir_all(&dir).unwrap();
     canonical::create_session(
@@ -3469,6 +3514,7 @@ fn active_remote_checkpoint_is_live_in_default_xml() {
 #[test]
 fn remote_session_with_stale_final_remains_pending_for_server_asr() {
     let temp = tempfile::tempdir().unwrap();
+    let _home = HermeticHome::new(temp.path());
     let dir = temp.path().join(".margins");
     std::fs::create_dir_all(&dir).unwrap();
     canonical::create_session(
@@ -3515,6 +3561,7 @@ fn remote_session_with_stale_final_remains_pending_for_server_asr() {
 #[test]
 fn crashed_local_session_with_partial_final_is_explicitly_incomplete() {
     let temp = tempfile::tempdir().unwrap();
+    let _home = HermeticHome::new(temp.path());
     let dir = temp.path().join(".margins");
     std::fs::create_dir_all(&dir).unwrap();
     canonical::create_session(
@@ -3559,6 +3606,7 @@ fn transcript_json_reports_live_and_terminal_checkpoint_state() {
         ("terminal-meeting", true, false, 67_890),
     ] {
         let temp = tempfile::tempdir().unwrap();
+        let _home = HermeticHome::new(temp.path());
         seed_checkpoint_session(temp.path(), meeting_id, terminal, decoded);
         if expected_live {
             margins_store::SqliteWorkspaceAuthorityStorage::open(temp.path().join(".margins"))
@@ -3605,10 +3653,13 @@ impl AsrBackend for EmptyAsr {
 #[test]
 fn transcribe_resolves_audio_and_memo_relative_to_invocation() {
     let temp = tempfile::tempdir().unwrap();
+    let home = HermeticHome::new(temp.path());
     let invocation = temp.path().join("invocation");
     let project = temp.path().join("project");
     std::fs::create_dir_all(&invocation).unwrap();
     std::fs::create_dir_all(&project).unwrap();
+    let workspace = workspace::create_workspace(&home.home, "practice", None, &invocation).unwrap();
+    let store = workspace.capture_store_dir().unwrap().join(".margins");
     margins_media::audio::write_interleaved_wav(
         &invocation.join("input.wav"),
         &[0.0; 320],
@@ -3636,11 +3687,12 @@ fn transcribe_resolves_audio_and_memo_relative_to_invocation() {
     assert!(result.is_ok(), "{stderr}");
     assert!(stdout.contains("meeting_id=\"relative\""));
     assert_eq!(
-        std::fs::read_to_string(project.join(".margins/relative.md")).unwrap(),
+        std::fs::read_to_string(store.join("relative.md")).unwrap(),
         "[00:00] relative memo\n"
     );
-    assert!(project.join(".margins/relative_seg0.wav").is_file());
+    assert!(store.join("relative_seg0.wav").is_file());
     assert!(!invocation.join(".margins").exists());
+    assert!(!project.join(".margins").exists());
 }
 
 #[test]
@@ -3779,8 +3831,12 @@ fn unavailable_capture_is_stable_and_precedes_all_mutation() {
         vec!["margins", "attach", "missing"],
     ] {
         let temp = tempfile::tempdir().unwrap();
+        let home = HermeticHome::new(temp.path());
+        let notes = temp.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        let workspace = workspace::create_workspace(&home.home, "practice", None, &notes).unwrap();
         let services = services(temp.path());
-        let (result, stdout, stderr) = invoke(&services, temp.path(), &args);
+        let (result, stdout, stderr) = invoke(&services, &notes, &args);
         let error = result.unwrap_err();
         assert_eq!(error.code(), "capture_unavailable");
         assert_eq!(error.exit_code(), 69);
@@ -3797,7 +3853,160 @@ fn unavailable_capture_is_stable_and_precedes_all_mutation() {
             )
         );
         assert!(!temp.path().join(".margins").exists());
+        assert!(!notes.join(".margins").exists());
+        assert!(!workspace
+            .capture_store_dir()
+            .unwrap()
+            .join(".margins")
+            .exists());
     }
+}
+
+#[test]
+fn recording_without_a_workspace_points_at_init_and_creates_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    let _home = HermeticHome::new(temp.path());
+    let folder = temp.path().join("folder");
+    std::fs::create_dir_all(&folder).unwrap();
+    let services = services(&folder);
+    for args in [
+        vec!["margins"],
+        vec!["margins", "new", "--title", "Nowhere"],
+        vec!["margins", "attach"],
+        vec!["margins", "transcribe", "missing.wav"],
+        vec!["margins", "ls"],
+        vec!["margins", "current"],
+    ] {
+        let (result, stdout, stderr) = invoke(&services, &folder, &args);
+        let error = result.unwrap_err();
+        assert_eq!(error.code(), "workspace_required", "{args:?}");
+        assert!(stdout.is_empty());
+        assert!(stderr.contains("margins init"), "{stderr}");
+    }
+    assert!(!folder.join(".margins").exists());
+    assert!(!temp.path().join("margins-home/workspaces").exists());
+}
+
+#[test]
+fn recording_uses_the_covering_workspace_then_the_default() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = HermeticHome::new(temp.path());
+    let notes = temp.path().join("notes");
+    let other = temp.path().join("other");
+    let elsewhere = temp.path().join("elsewhere");
+    for path in [&notes, &other, &elsewhere] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    // A per-folder store from an earlier release sits inside the notes home.
+    std::fs::create_dir_all(notes.join(".margins")).unwrap();
+    let practice = workspace::create_workspace(&home.home, "practice", None, &notes).unwrap();
+    let team = workspace::create_workspace(&home.home, "team", None, &other).unwrap();
+    workspace::set_default_workspace(&home.home, "team").unwrap();
+    let mut services = services(&notes);
+    services.asr = Arc::new(EmptyAsr);
+    let audio = temp.path().join("input.wav");
+    margins_media::audio::write_interleaved_wav(&audio, &[0.0; 320], 16_000, 1).unwrap();
+    let audio = audio.to_str().unwrap();
+
+    let (result, _, stderr) = invoke(
+        &services,
+        &notes.join("sub"),
+        &["margins", "transcribe", audio, "--name", "covered"],
+    );
+    assert!(result.is_ok(), "{stderr}");
+    assert!(!stderr.contains("(default)"), "{stderr}");
+    assert!(stderr.contains("stay readable"), "{stderr}");
+    let practice_store = practice.capture_store_dir().unwrap().join(".margins");
+    assert!(practice_store.join("covered_seg0.wav").is_file());
+    assert!(!notes.join(".margins/covered_seg0.wav").exists());
+
+    let services = {
+        let mut services = self::services(&elsewhere);
+        services.asr = Arc::new(EmptyAsr);
+        services
+    };
+    let (result, _, stderr) = invoke(
+        &services,
+        &elsewhere,
+        &["margins", "transcribe", audio, "--name", "defaulted"],
+    );
+    assert!(result.is_ok(), "{stderr}");
+    assert!(
+        stderr.contains("Using Workspace team (default)"),
+        "{stderr}"
+    );
+    let team_store = team.capture_store_dir().unwrap().join(".margins");
+    assert!(team_store.join("defaulted_seg0.wav").is_file());
+    assert!(!elsewhere.join(".margins").exists());
+}
+
+#[test]
+fn per_folder_stores_from_earlier_releases_stay_readable_but_take_no_recordings() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = HermeticHome::new(temp.path());
+    let vault = temp.path().join("vault");
+    let notes = temp.path().join("notes");
+    std::fs::create_dir_all(&notes).unwrap();
+    let margins_dir = vault.join(".margins");
+    std::fs::create_dir_all(&margins_dir).unwrap();
+    let started = Local.with_ymd_and_hms(2026, 8, 10, 10, 0, 0).unwrap();
+    canonical::create_session(
+        &margins_dir,
+        "old-meeting",
+        &started,
+        ".margins/old-meeting.md",
+    )
+    .unwrap();
+    std::fs::write(margins_dir.join("current"), "old-meeting\n").unwrap();
+    let services = services(&vault);
+
+    // No Workspace at all: existing sessions are still listed and read.
+    let (result, stdout, stderr) = invoke(&services, &vault, &["margins", "current"]);
+    assert!(result.is_ok(), "{stderr}");
+    assert!(stdout.contains("old-meeting"), "{stdout}");
+    let (result, _, stderr) = invoke(&services, &vault, &["margins", "new"]);
+    assert_eq!(result.unwrap_err().code(), "workspace_required", "{stderr}");
+
+    // With a default Workspace elsewhere, the folder's own sessions still win
+    // for reading, and recording goes to the default.
+    let workspace = workspace::create_workspace(&home.home, "practice", None, &notes).unwrap();
+    workspace::set_default_workspace(&home.home, "practice").unwrap();
+    let (result, stdout, stderr) = invoke(&services, &vault, &["margins", "current"]);
+    assert!(result.is_ok(), "{stderr}");
+    assert!(stdout.contains("old-meeting"), "{stdout}");
+    let (result, _, stderr) = invoke(&services, &vault, &["margins", "new"]);
+    assert_eq!(
+        result.unwrap_err().code(),
+        "capture_unavailable",
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Using Workspace practice (default)"),
+        "{stderr}"
+    );
+
+    // `--project` reads the old store but never records into it.
+    let (result, _, stderr) = invoke(&services, &notes, &["margins", "--project", "test", "new"]);
+    assert_eq!(
+        result.unwrap_err().code(),
+        "legacy_store_read_only",
+        "{stderr}"
+    );
+    let (result, stdout, stderr) = invoke(
+        &services,
+        &notes,
+        &["margins", "--project", "test", "current"],
+    );
+    assert!(result.is_ok(), "{stderr}");
+    assert!(stdout.contains("old-meeting"), "{stdout}");
+
+    // The old store is untouched; nothing was copied into the Workspace.
+    assert!(canonical::list_sessions(&margins_dir).unwrap().len() == 1);
+    assert!(!workspace
+        .capture_store_dir()
+        .unwrap()
+        .join(".margins")
+        .exists());
 }
 
 #[test]
@@ -3878,6 +4087,8 @@ fn explicit_workspace_rejects_project_before_capture_side_effects() {
 #[test]
 fn no_feature_asr_fails_before_transcribe_writes() {
     let temp = tempfile::tempdir().unwrap();
+    let home = HermeticHome::new(temp.path());
+    let workspace = workspace::create_workspace(&home.home, "practice", None, temp.path()).unwrap();
     let audio = temp.path().join("relative.wav");
     margins_media::audio::write_interleaved_wav(&audio, &[0.0; 320], 16_000, 1).unwrap();
     let project = temp.path().join("project");
@@ -3892,16 +4103,24 @@ fn no_feature_asr_fails_before_transcribe_writes() {
     assert!(stdout.is_empty());
     assert_eq!(stderr, "<margins_error code=\"asr_unavailable\">ASR is unavailable in this build</margins_error>\n");
     assert!(!project.join(".margins").exists());
+    assert!(!workspace
+        .capture_store_dir()
+        .unwrap()
+        .join(".margins")
+        .exists());
 }
 
 #[test]
 fn read_only_input_errors_precede_backend_unavailability() {
     let temp = tempfile::tempdir().unwrap();
+    let home = HermeticHome::new(temp.path());
     let project = temp.path().join("project");
     let invocation = temp.path().join("invocation");
     std::fs::create_dir_all(&project).unwrap();
     std::fs::create_dir_all(&invocation).unwrap();
     let services = services(&project);
+    let workspace = workspace::create_workspace(&home.home, "practice", None, &invocation).unwrap();
+    let store = workspace.capture_store_dir().unwrap().join(".margins");
 
     let (result, stdout, stderr) = invoke(
         &services,
@@ -3922,11 +4141,14 @@ fn read_only_input_errors_precede_backend_unavailability() {
         "<margins_error code=\"store_not_found\">No .margins/ directory found.</margins_error>\n"
     );
     assert!(!project.join(".margins").exists());
+    assert!(!invocation.join(".margins").exists());
+    assert!(!store.exists());
 }
 
 #[test]
 fn unavailable_process_backends_do_not_replace_existing_outputs() {
     let temp = tempfile::tempdir().unwrap();
+    let _home = HermeticHome::new(temp.path());
     let project = temp.path().join("project");
     let margins_dir = project.join(".margins");
     std::fs::create_dir_all(&margins_dir).unwrap();
@@ -3965,6 +4187,7 @@ fn unavailable_process_backends_do_not_replace_existing_outputs() {
 #[test]
 fn xml_and_json_presenters_escape_user_controlled_values() {
     let temp = tempfile::tempdir().unwrap();
+    let _home = HermeticHome::new(temp.path());
     let services = services(temp.path());
     let margins_dir = temp.path().join(".margins");
     let started = Local.with_ymd_and_hms(2026, 8, 10, 10, 0, 0).unwrap();
@@ -3986,6 +4209,8 @@ fn xml_and_json_presenters_escape_user_controlled_values() {
 #[test]
 fn no_feature_diarization_fails_before_transcribe_writes() {
     let temp = tempfile::tempdir().unwrap();
+    let home = HermeticHome::new(temp.path());
+    let workspace = workspace::create_workspace(&home.home, "practice", None, temp.path()).unwrap();
     let audio = temp.path().join("relative.wav");
     margins_media::audio::write_interleaved_wav(&audio, &[0.0; 320], 16_000, 1).unwrap();
     let project = temp.path().join("project");
@@ -4000,11 +4225,17 @@ fn no_feature_diarization_fails_before_transcribe_writes() {
     assert!(stdout.is_empty());
     assert_eq!(stderr, "<margins_error code=\"diarization_unavailable\">diarization is unavailable in this build</margins_error>\n");
     assert!(!project.join(".margins").exists());
+    assert!(!workspace
+        .capture_store_dir()
+        .unwrap()
+        .join(".margins")
+        .exists());
 }
 
 #[test]
 fn align_only_does_not_consult_unavailable_asr() {
     let temp = tempfile::tempdir().unwrap();
+    let _home = HermeticHome::new(temp.path());
     let margins_dir = temp.path().join(".margins");
     let memo = temp.path().join("memo.md");
     std::fs::write(&memo, "[00:01] checkpoint").unwrap();
@@ -4043,6 +4274,7 @@ fn align_only_does_not_consult_unavailable_asr() {
 #[test]
 fn archive_commands_route_new_aligned_output_to_visible_default_folder() {
     let temp = tempfile::tempdir().unwrap();
+    let _home = HermeticHome::new(temp.path());
     let margins_dir = temp.path().join(".margins");
     let memo = margins_dir.join("meeting.md");
     std::fs::create_dir_all(&margins_dir).unwrap();
@@ -4104,6 +4336,7 @@ fn archive_commands_route_new_aligned_output_to_visible_default_folder() {
 #[test]
 fn session_catalog_and_artifact_commands_emit_vault_anchored_paths() {
     let temp = tempfile::tempdir().unwrap();
+    let _home = HermeticHome::new(temp.path());
     let vault = temp.path().join("vault");
     let margins_dir = vault.join(".margins");
     std::fs::create_dir_all(&margins_dir).unwrap();
@@ -4176,6 +4409,8 @@ fn public_note_handoff_defaults_to_latest_session_in_selected_workspace() {
 #[test]
 fn bare_public_cli_is_unavailable_without_side_effects() {
     let temp = tempfile::tempdir().unwrap();
+    let home = HermeticHome::new(temp.path());
+    workspace::create_workspace(&home.home, "practice", None, temp.path()).unwrap();
     let services = services(temp.path());
     for _ in 0..2 {
         let (result, _, _) = invoke(&services, temp.path(), &["margins"]);

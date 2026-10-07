@@ -21,7 +21,11 @@ margins-server
 
 Provisioning creates the named Workspace only when its notes and Captures bindings
 exactly match. Later starts should omit `MARGINS_SERVICE_PROVISION`; a mismatched
-mapping is rejected rather than inferred from the current directory. The server
+mapping is rejected rather than inferred from the current directory. Without
+`MARGINS_SERVICE_PROVISION`, a start naming a missing Workspace creates nothing and
+fails with `workspace_not_found`; a bb launch (`MARGINS_BB_CAPTURE_WORKSPACE=1`)
+instead stays up briefly to answer `/v1/capabilities` with that error, so the panel
+can show it. The server
 writes non-secret discovery metadata to `$MARGINS_DATA_DIR/service.json` and keeps
 hashed scoped credentials in an owner-only file.
 

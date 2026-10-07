@@ -23,6 +23,7 @@ use args::{
     SetupLocalModelPolicyArg, SourceCommand, WorkspaceCommand,
 };
 use clap::Parser;
+use commands::capture_target::{CaptureIntent, CaptureTarget};
 use commands::projects::absolute_from;
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
@@ -382,60 +383,6 @@ fn run_inner(
                 stderr,
             );
         }
-        // A Workspace owns both recall state and captured-session state. Keep
-        // read-only session resolution on that same selector: removing native
-        // capture from a build must not turn `latest` into a lookup against an
-        // unrelated legacy project directory.
-        Some(Command::Recent { all }) if workspace_selected => {
-            if all {
-                return Err(CliError::usage(
-                    "`recent --all` is a cross-project discovery command and cannot be combined with a Workspace selection",
-                ));
-            }
-            let workspace = commands::workspace::resolve(
-                workspace_selector.as_deref(),
-                invocation_dir,
-                stderr,
-            )?;
-            return commands::transcript::recent(&workspace_capture_root(&workspace)?, stdout);
-        }
-        Some(Command::Transcript { meeting_id, format }) if workspace_selected => {
-            let workspace = commands::workspace::resolve(
-                workspace_selector.as_deref(),
-                invocation_dir,
-                stderr,
-            )?;
-            return commands::transcript::transcript(
-                &workspace_capture_root(&workspace)?,
-                meeting_id.as_deref().unwrap_or("latest"),
-                format,
-                stdout,
-            );
-        }
-        Some(Command::AudioExport { meeting_id }) if workspace_selected => {
-            let workspace = commands::workspace::resolve(
-                workspace_selector.as_deref(),
-                invocation_dir,
-                stderr,
-            )?;
-            return commands::sessions::export_audio(
-                &workspace_capture_root(&workspace)?,
-                meeting_id.as_deref().unwrap_or("latest"),
-                stdout,
-            );
-        }
-        Some(Command::Artifacts { meeting_id }) if workspace_selected => {
-            let workspace = commands::workspace::resolve(
-                workspace_selector.as_deref(),
-                invocation_dir,
-                stderr,
-            )?;
-            return commands::artifacts::list(
-                &workspace_capture_root(&workspace)?,
-                &meeting_id,
-                stdout,
-            );
-        }
         Some(Command::Import {
             command: ImportCommand::Granola { path },
         }) => {
@@ -590,33 +537,6 @@ fn run_inner(
             )?;
             return commands::recall::sync(&workspace, source.as_deref(), json, stdout);
         }
-        Some(Command::Transcribe {
-            audio_path,
-            name,
-            memo,
-            speakers,
-        }) if workspace_selected => {
-            let workspace = commands::workspace::resolve(
-                workspace_selector.as_deref(),
-                invocation_dir,
-                stderr,
-            )?;
-            let audio_path = absolute_from(invocation_dir, &audio_path);
-            let memo_path = memo
-                .as_deref()
-                .map(|path| absolute_from(invocation_dir, path));
-            let started_at = audio_start_time(&audio_path).unwrap_or_else(|| services.clock.now());
-            return commands::process::transcribe(
-                services,
-                &workspace_capture_root(&workspace)?,
-                &audio_path,
-                name.as_deref(),
-                memo_path.as_deref(),
-                speakers.unwrap_or(1),
-                started_at,
-                stdout,
-            );
-        }
         Some(Command::Note { print }) => {
             let workspace = workspace_selector.as_deref().or(env_workspace.as_deref());
             return commands::guide::note_handoff(workspace, print, stdout);
@@ -624,154 +544,161 @@ fn run_inner(
         _ => {}
     }
 
-    if workspace_selected {
-        let workspace =
-            commands::workspace::resolve(workspace_selector.as_deref(), invocation_dir, stderr)?;
-        let capture_root = workspace_capture_root(&workspace)?;
-        return match args.command {
-            None => commands::capture::run(services, &capture_root, None, None, false, true),
-            Some(Command::New { title }) => {
-                commands::capture::run(services, &capture_root, None, title.as_deref(), true, false)
-            }
-            Some(Command::Attach { session }) => commands::capture::run(
-                services,
-                &capture_root,
-                session.as_deref(),
-                None,
-                false,
-                false,
-            ),
-            Some(Command::Current) => {
-                commands::sessions::show_current(services, &capture_root, stdout)
-            }
-            Some(Command::Ls) => commands::sessions::list(services, &capture_root, stderr),
-            Some(Command::Rename { title }) => {
-                commands::sessions::rename(services, &capture_root, &title, stdout)
-            }
-            Some(command @ Command::Memo { .. })
-            | Some(command @ Command::NoteAssociation { .. })
-            | Some(command @ Command::ProcessingStatus { .. }) => {
-                commands::application::run(workspace, command, stdout)
-            }
-            Some(Command::Process {
-                session,
-                speakers,
-                align_only,
-            }) => commands::process::process_session(
-                services,
-                &capture_root,
-                &session,
-                speakers.unwrap_or(1),
-                align_only,
-                stdout,
-            ),
-            Some(Command::ArtifactsPrune) => {
-                commands::artifacts::prune(&capture_root, services.clock.now(), stdout)
-            }
-            Some(Command::Archive { command }) => match command {
-                ArchiveCommand::On => commands::archive::set(&capture_root, true, stdout),
-                ArchiveCommand::Off => commands::archive::set(&capture_root, false, stdout),
-                ArchiveCommand::Status => commands::archive::status(&capture_root, stdout),
-            },
-            Some(unsupported) => Err(CliError::usage(format!(
-                "command {unsupported:?} does not support an explicit Workspace"
-            ))),
-        };
+    if let Some(Command::Recent { all: true }) = &args.command {
+        if workspace_selected {
+            return Err(CliError::usage(
+                "`recent --all` is a cross-project discovery command and cannot be combined with a Workspace selection",
+            ));
+        }
+        let vaults = services.projects.list().map_err(CliError::from_anyhow)?;
+        return commands::transcript::recent_all(&vaults, stdout);
     }
 
-    let project = services
-        .projects
-        .resolve_vault(project_selector.as_deref(), invocation_dir)
-        .map_err(CliError::from_anyhow)?;
-    if matches!(args.command, Some(Command::Integrations { .. })) {
-        vault_guard::require_evidenced_vault(&project)?;
-    }
-    let project = match &args.command {
-        Some(Command::Transcript { meeting_id, .. })
-        | Some(Command::AudioExport { meeting_id }) => resolve_meeting_owner(
+    if let Some(intent) = capture_intent(&args.command) {
+        let target = commands::capture_target::resolve(
             services,
-            project,
-            project_selector.is_some(),
-            meeting_id.as_deref().unwrap_or("latest"),
-        )?,
-        Some(Command::Artifacts { meeting_id }) => {
-            resolve_meeting_owner(services, project, project_selector.is_some(), meeting_id)?
-        }
-        _ => project,
-    };
-    let work_dir = &project.work_dir;
+            workspace_selector.as_deref(),
+            project_selector.as_deref(),
+            invocation_dir,
+            intent,
+            stderr,
+        )?;
+        let root = match target {
+            CaptureTarget::Workspace { capture_root, .. } => capture_root,
+            CaptureTarget::Legacy(project) => {
+                let project = match &args.command {
+                    Some(Command::Transcript { meeting_id, .. })
+                    | Some(Command::AudioExport { meeting_id }) => resolve_meeting_owner(
+                        services,
+                        project,
+                        project_selector.is_some(),
+                        meeting_id.as_deref().unwrap_or("latest"),
+                    )?,
+                    Some(Command::Artifacts { meeting_id }) => resolve_meeting_owner(
+                        services,
+                        project,
+                        project_selector.is_some(),
+                        meeting_id,
+                    )?,
+                    _ => project,
+                };
+                project.work_dir
+            }
+        };
+        return run_session_command(
+            services,
+            invocation_dir,
+            &root,
+            args.command,
+            stdout,
+            stderr,
+        );
+    }
+
     match args.command {
-        Some(Command::Connect { .. }) | Some(Command::Disconnect { .. }) => {
-            unreachable!("connection commands return before vault resolution")
-        }
-        None => commands::capture::run(services, work_dir, None, None, false, true),
-        Some(Command::New { title }) => {
-            commands::capture::run(services, work_dir, None, title.as_deref(), true, false)
-        }
-        Some(Command::Attach { session }) => {
-            commands::capture::run(services, work_dir, session.as_deref(), None, false, false)
-        }
-        Some(Command::Current) => commands::sessions::show_current(services, work_dir, stdout),
-        Some(Command::Ls) => commands::sessions::list(services, work_dir, stderr),
-        Some(Command::Rename { title }) => {
-            commands::sessions::rename(services, work_dir, &title, stdout)
+        Some(
+            Command::Memo { .. }
+            | Command::NoteAssociation { .. }
+            | Command::ProcessingStatus { .. },
+        ) if workspace_selected => {
+            let workspace = commands::workspace::resolve(
+                workspace_selector.as_deref(),
+                invocation_dir,
+                stderr,
+            )?;
+            let command = args.command.expect("matched a command");
+            commands::application::run(workspace, command, stdout)
         }
         Some(Command::Memo { .. })
         | Some(Command::NoteAssociation { .. })
         | Some(Command::ProcessingStatus { .. }) => Err(CliError::usage(
             "memo, note-association, and processing-status require an explicit Workspace",
         )),
-        Some(Command::Recent { all }) => {
-            if all {
-                let vaults = services.projects.list().map_err(CliError::from_anyhow)?;
-                commands::transcript::recent_all(&vaults, stdout)
-            } else {
-                commands::transcript::recent(work_dir, stdout)
+        Some(Command::Agents { command }) => {
+            if workspace_selected {
+                return Err(CliError::usage(
+                    "`agents install` writes into the current folder and does not accept a Workspace",
+                ));
+            }
+            let project = services
+                .projects
+                .resolve_vault(project_selector.as_deref(), invocation_dir)
+                .map_err(CliError::from_anyhow)?;
+            match command {
+                AgentsCommand::Install => {
+                    commands::projects::install_agents(&project.work_dir, stdout)
+                }
             }
         }
+        other => unreachable!("{other:?} is handled before session resolution"),
+    }
+}
+
+/// Session commands, and whether they may start a recording.
+fn capture_intent(command: &Option<Command>) -> Option<CaptureIntent> {
+    match command {
+        None
+        | Some(Command::New { .. })
+        | Some(Command::Attach { .. })
+        | Some(Command::Transcribe { .. }) => Some(CaptureIntent::Record),
+        Some(Command::Current)
+        | Some(Command::Ls)
+        | Some(Command::Rename { .. })
+        | Some(Command::Process { .. })
+        | Some(Command::ArtifactsPrune)
+        | Some(Command::Archive { .. })
+        | Some(Command::Recent { all: false })
+        | Some(Command::Transcript { .. })
+        | Some(Command::AudioExport { .. })
+        | Some(Command::Artifacts { .. }) => Some(CaptureIntent::Existing),
+        _ => None,
+    }
+}
+
+/// Run a session command against one capture store (`root/.margins`).
+fn run_session_command(
+    services: &CliServices,
+    invocation_dir: &Path,
+    root: &Path,
+    command: Option<Command>,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<(), CliError> {
+    match command {
+        None => commands::capture::run(services, root, None, None, false, true),
+        Some(Command::New { title }) => {
+            commands::capture::run(services, root, None, title.as_deref(), true, false)
+        }
+        Some(Command::Attach { session }) => {
+            commands::capture::run(services, root, session.as_deref(), None, false, false)
+        }
+        Some(Command::Current) => commands::sessions::show_current(services, root, stdout),
+        Some(Command::Ls) => commands::sessions::list(services, root, stderr),
+        Some(Command::Rename { title }) => {
+            commands::sessions::rename(services, root, &title, stdout)
+        }
+        Some(Command::Recent { .. }) => commands::transcript::recent(root, stdout),
         Some(Command::Transcript { meeting_id, format }) => commands::transcript::transcript(
-            work_dir,
+            root,
             meeting_id.as_deref().unwrap_or("latest"),
             format,
             stdout,
         ),
         Some(Command::AudioExport { meeting_id }) => commands::sessions::export_audio(
-            work_dir,
+            root,
             meeting_id.as_deref().unwrap_or("latest"),
             stdout,
         ),
-        Some(Command::Integrations { command }) => match command {
-            IntegrationsCommand::Reconcile {
-                connector,
-                account,
-                if_revision,
-                request_id,
-                json,
-            } => {
-                debug_assert!(json);
-                commands::integrations::reconcile(
-                    work_dir,
-                    connector.as_deref(),
-                    account.as_deref(),
-                    &if_revision,
-                    &request_id,
-                    stdout,
-                )
-            }
-            IntegrationsCommand::Status { json } => {
-                commands::integrations::status(work_dir, json, stdout)
-            }
-        },
         Some(Command::Artifacts { meeting_id }) => {
-            commands::artifacts::list(work_dir, &meeting_id, stdout)
+            commands::artifacts::list(root, &meeting_id, stdout)
         }
         Some(Command::ArtifactsPrune) => {
-            commands::artifacts::prune(work_dir, services.clock.now(), stdout)
+            commands::artifacts::prune(root, services.clock.now(), stdout)
         }
         Some(Command::Archive { command }) => match command {
-            ArchiveCommand::On => commands::archive::set(work_dir, true, stdout),
-            ArchiveCommand::Off => commands::archive::set(work_dir, false, stdout),
-            ArchiveCommand::Status => commands::archive::status(work_dir, stdout),
+            ArchiveCommand::On => commands::archive::set(root, true, stdout),
+            ArchiveCommand::Off => commands::archive::set(root, false, stdout),
+            ArchiveCommand::Status => commands::archive::status(root, stdout),
         },
         Some(Command::Transcribe {
             audio_path,
@@ -786,7 +713,7 @@ fn run_inner(
             let started_at = audio_start_time(&audio_path).unwrap_or_else(|| services.clock.now());
             commands::process::transcribe(
                 services,
-                work_dir,
+                root,
                 &audio_path,
                 name.as_deref(),
                 memo_path.as_deref(),
@@ -801,32 +728,13 @@ fn run_inner(
             align_only,
         }) => commands::process::process_session(
             services,
-            work_dir,
+            root,
             &session,
             speakers.unwrap_or(1),
             align_only,
             stdout,
         ),
-        Some(Command::Import { .. }) => unreachable!("imports return after workspace resolution"),
-        Some(Command::Agents { command }) => match command {
-            AgentsCommand::Install => commands::projects::install_agents(work_dir, stdout),
-        },
-        Some(Command::Recall { .. }) => unreachable!("handled before project resolution"),
-        Some(Command::Sync { .. }) => unreachable!("handled before project resolution"),
-        Some(Command::Capabilities) => unreachable!("handled before project resolution"),
-        Some(Command::Init) => unreachable!("handled before project resolution"),
-        Some(Command::Note { .. }) => unreachable!("handled before project resolution"),
-        Some(Command::Enzyme { .. }) => unreachable!("handled before project resolution"),
-        Some(Command::Setup { .. }) | Some(Command::Guide { .. }) => {
-            unreachable!("handled before project resolution")
-        }
-        Some(Command::Workspace { .. })
-        | Some(Command::Source { .. })
-        | Some(Command::Retention { .. })
-        | Some(Command::Transfers { .. })
-        | Some(Command::Service { .. }) => {
-            unreachable!("handled before project resolution")
-        }
+        Some(other) => unreachable!("{other:?} is not a session command"),
     }
 }
 
@@ -850,12 +758,6 @@ fn workspace_project_adapter(
         root_dir: workspace.home_dir.clone(),
         work_dir: workspace.state_dir.clone(),
     }
-}
-
-fn workspace_capture_root(
-    workspace: &margins_workflows::workspace::ResolvedWorkspace,
-) -> Result<PathBuf, CliError> {
-    workspace.capture_store_dir().map_err(CliError::from_anyhow)
 }
 
 /// Resolve a concrete meeting id across registered vaults for read-only

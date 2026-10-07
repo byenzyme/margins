@@ -20,6 +20,18 @@ use margins_workflows::workspace_service::{ServicePrincipal, OP_SESSION_WRITE, O
 use serde_json::{json, Value};
 use tower_http::cors::{Any, CorsLayer};
 
+/// Router for a bb-launched server whose Workspace could not be opened. It
+/// answers `/health` so the launcher connects, and every other request with the
+/// reason, so the panel shows it instead of a generic start failure.
+pub fn unavailable_router(code: &'static str, message: String) -> Router {
+    Router::new()
+        .route("/health", get(|| async { Json(json!({"ok": true})) }))
+        .fallback(move || {
+            let message = message.clone();
+            async move { workspace_error(StatusCode::CONFLICT, code, false, message) }
+        })
+}
+
 pub fn build_router(state: ServerState) -> Router {
     let health_cors = CorsLayer::new()
         .allow_origin(Any)
