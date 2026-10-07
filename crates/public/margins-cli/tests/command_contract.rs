@@ -3941,7 +3941,7 @@ fn recording_uses_the_covering_workspace_then_the_default() {
 }
 
 #[test]
-fn per_folder_stores_from_earlier_releases_stay_readable_but_take_no_recordings() {
+fn per_folder_stores_from_earlier_releases_stay_readable_and_continuable() {
     let temp = tempfile::tempdir().unwrap();
     let home = HermeticHome::new(temp.path());
     let vault = temp.path().join("vault");
@@ -3950,13 +3950,8 @@ fn per_folder_stores_from_earlier_releases_stay_readable_but_take_no_recordings(
     let margins_dir = vault.join(".margins");
     std::fs::create_dir_all(&margins_dir).unwrap();
     let started = Local.with_ymd_and_hms(2026, 8, 10, 10, 0, 0).unwrap();
-    canonical::create_session(
-        &margins_dir,
-        "old-meeting",
-        &started,
-        ".margins/old-meeting.md",
-    )
-    .unwrap();
+    canonical::create_session(&margins_dir, "old-meeting", &started, ".margins/old-meeting.md")
+        .unwrap();
     std::fs::write(margins_dir.join("current"), "old-meeting\n").unwrap();
     let services = services(&vault);
 
@@ -3967,41 +3962,55 @@ fn per_folder_stores_from_earlier_releases_stay_readable_but_take_no_recordings(
     let (result, _, stderr) = invoke(&services, &vault, &["margins", "new"]);
     assert_eq!(result.unwrap_err().code(), "workspace_required", "{stderr}");
 
-    // With a default Workspace elsewhere, the folder's own sessions still win
-    // for reading, and recording goes to the default.
+    // With a default Workspace, reads and recordings in this folder meet the
+    // same store (the default), and the old store is named on stderr.
     let workspace = workspace::create_workspace(&home.home, "practice", None, &notes).unwrap();
     workspace::set_default_workspace(&home.home, "practice").unwrap();
     let (result, stdout, stderr) = invoke(&services, &vault, &["margins", "current"]);
+    assert_eq!(result.unwrap_err().code(), "session_not_found", "{stdout}");
+    assert!(stderr.contains("Using Workspace practice (default)"), "{stderr}");
+    assert!(stderr.contains("stay readable with `margins --project"), "{stderr}");
+    let (result, _, stderr) = invoke(&services, &vault, &["margins", "new"]);
+    assert_eq!(result.unwrap_err().code(), "capture_unavailable", "{stderr}");
+    assert!(stderr.contains("Using Workspace practice (default)"), "{stderr}");
+
+    // A concrete id the Workspace lacks is found in the old store.
+    let (result, stdout, stderr) =
+        invoke(&services, &vault, &["margins", "artifacts", "old-meeting"]);
     assert!(result.is_ok(), "{stderr}");
     assert!(stdout.contains("old-meeting"), "{stdout}");
-    let (result, _, stderr) = invoke(&services, &vault, &["margins", "new"]);
-    assert_eq!(
-        result.unwrap_err().code(),
-        "capture_unavailable",
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains("Using Workspace practice (default)"),
-        "{stderr}"
-    );
 
-    // `--project` reads the old store but never records into it.
+    // `attach` continues a session started before the upgrade in its own store:
+    // by name, or the unfinished current one.
+    for args in [
+        vec!["margins", "attach", "old-meeting"],
+        vec!["margins", "attach"],
+    ] {
+        let (result, _, stderr) = invoke(&services, &vault, &args);
+        assert_eq!(result.unwrap_err().code(), "capture_unavailable", "{args:?}");
+        assert!(!stderr.contains("Using Workspace"), "{args:?}: {stderr}");
+    }
+    // An unknown name is not the old store's; it goes to the Workspace.
+    let (result, _, stderr) = invoke(&services, &vault, &["margins", "attach", "other"]);
+    assert_eq!(result.unwrap_err().code(), "capture_unavailable");
+    assert!(stderr.contains("Using Workspace practice (default)"), "{stderr}");
+
+    // `--project` reads and continues the old store but never starts a session.
     let (result, _, stderr) = invoke(&services, &notes, &["margins", "--project", "test", "new"]);
-    assert_eq!(
-        result.unwrap_err().code(),
-        "legacy_store_read_only",
-        "{stderr}"
-    );
-    let (result, stdout, stderr) = invoke(
+    assert_eq!(result.unwrap_err().code(), "legacy_store_read_only", "{stderr}");
+    let (result, _, _) = invoke(
         &services,
         &notes,
-        &["margins", "--project", "test", "current"],
+        &["margins", "--project", "test", "attach", "old-meeting"],
     );
+    assert_eq!(result.unwrap_err().code(), "capture_unavailable");
+    let (result, stdout, stderr) =
+        invoke(&services, &notes, &["margins", "--project", "test", "current"]);
     assert!(result.is_ok(), "{stderr}");
     assert!(stdout.contains("old-meeting"), "{stdout}");
 
     // The old store is untouched; nothing was copied into the Workspace.
-    assert!(canonical::list_sessions(&margins_dir).unwrap().len() == 1);
+    assert_eq!(canonical::list_sessions(&margins_dir).unwrap().len(), 1);
     assert!(!workspace
         .capture_store_dir()
         .unwrap()
@@ -4171,7 +4180,7 @@ fn unavailable_process_backends_do_not_replace_existing_outputs() {
         vec!["margins", "process", "meeting"],
         vec!["margins", "process", "meeting", "--speakers", "2"],
     ] {
-        let (result, stdout, _) = invoke(&services, temp.path(), &args);
+        let (result, stdout, _) = invoke(&services, &project, &args);
         let error = result.unwrap_err();
         assert!(matches!(
             error.code(),
@@ -4372,7 +4381,7 @@ fn session_catalog_and_artifact_commands_emit_vault_anchored_paths() {
         vec!["margins", "artifacts", "meeting"],
         vec!["margins", "transcript", "meeting"],
     ] {
-        let (result, stdout, stderr) = invoke(&services, temp.path(), &args);
+        let (result, stdout, stderr) = invoke(&services, &vault, &args);
         assert!(result.is_ok(), "{args:?}: {stderr}");
         assert!(
             stdout.contains(&vault.to_string_lossy().to_string()),

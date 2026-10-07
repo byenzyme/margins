@@ -23,7 +23,7 @@ margins recall "<query>"
 
 Workspace routing:
 - Session commands use the Workspace that covers the current folder, else the default Workspace; pass `--workspace <id>` to choose one. With neither, they refuse: run `margins init` in the notes folder first.
-- Recordings are kept in the Workspace's capture store, never in a `.margins/` folder here. A `.margins/` folder from an earlier release stays readable (`margins --project <path> ls`, `transcript`), but nothing new is recorded into it.
+- Recordings are kept in the Workspace's capture store, never in a `.margins/` folder here. A `.margins/` folder from an earlier release stays readable (`margins --project <path> ls`, `transcript`) and `margins attach` can finish a session already in it, but new sessions never start there.
 - Do not create `.margins` folders manually.
 
 Recording lifecycle:

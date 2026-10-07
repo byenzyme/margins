@@ -561,14 +561,20 @@ where
         workspace_selector.as_deref(),
         project_selector.as_deref(),
         &cwd,
-        margins_cli::commands::capture_target::CaptureIntent::Record,
+        match &parsed.command {
+            Some(Command::Attach { session }) => {
+                margins_cli::commands::capture_target::CaptureIntent::Attach(session.as_deref())
+            }
+            _ => margins_cli::commands::capture_target::CaptureIntent::Record,
+        },
         &mut io::stderr(),
     ) {
         Ok(margins_cli::commands::capture_target::CaptureTarget::Workspace {
             capture_root, ..
         }) => capture_root,
-        Ok(margins_cli::commands::capture_target::CaptureTarget::Legacy(_)) => {
-            unreachable!("recording never resolves a per-folder store")
+        // Only `attach` continues a session already in an old per-folder store.
+        Ok(margins_cli::commands::capture_target::CaptureTarget::Legacy(project)) => {
+            project.work_dir
         }
         Err(error) => {
             let exit_code = error.exit_code();

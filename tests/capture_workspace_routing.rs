@@ -149,25 +149,33 @@ fn old_layout_store_stays_readable_and_untouched() {
         stderr(&output)
     );
 
-    // A default Workspace elsewhere takes new recordings; the old sessions are
-    // still the ones this folder shows.
+    // Once a default Workspace exists, every command in this folder uses it,
+    // and names the old store.
     let notes = machine.folder("notes");
     let captures = create_workspace(&machine, "practice", &notes);
-    let output = machine.run(
-        &machine.root,
-        &["workspace", "default", "--set", "practice"],
-    );
+    let output = machine.run(&machine.root, &["workspace", "default", "--set", "practice"]);
     assert!(output.status.success(), "{}", stderr(&output));
     let output = machine.run(&old, &["current"]);
-    assert!(output.status.success(), "{}", stderr(&output));
-    assert!(stdout(&output).contains("earlier-meeting"));
-    let output = machine.run(&old, &["transcribe", "missing.wav"]);
     assert!(!output.status.success());
     assert!(
         stderr(&output).contains("Using Workspace practice (default)"),
         "{}",
         stderr(&output)
     );
+    assert!(stderr(&output).contains("stay readable with `margins --project"));
+    let output = machine.run(&old, &["transcribe", "missing.wav"]);
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("Using Workspace practice (default)"));
+
+    // A recording started before the upgrade is continued in its own store.
+    // (Without native capture the recorder itself is unavailable; routing is
+    // what is checked.)
+    if !cfg!(feature = "audio-capture") {
+        let output = machine.run(&old, &["attach", "earlier-meeting"]);
+        assert!(!output.status.success());
+        assert!(!stderr(&output).contains("Using Workspace"), "{}", stderr(&output));
+        assert!(!captures.join(".margins").exists());
+    }
 
     // `--project <path>` reads the old store from anywhere, but never records.
     let old_arg = old.to_str().unwrap();

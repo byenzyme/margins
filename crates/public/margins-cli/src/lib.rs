@@ -564,7 +564,33 @@ fn run_inner(
             stderr,
         )?;
         let root = match target {
-            CaptureTarget::Workspace { capture_root, .. } => capture_root,
+            CaptureTarget::Workspace {
+                capture_root,
+                legacy,
+                ..
+            } => {
+                // A concrete meeting id the Workspace lacks may predate it.
+                let meeting_id = match &args.command {
+                    Some(Command::Transcript { meeting_id, .. })
+                    | Some(Command::AudioExport { meeting_id }) => meeting_id.as_deref(),
+                    Some(Command::Artifacts { meeting_id }) => Some(meeting_id.as_str()),
+                    _ => None,
+                }
+                .filter(|id| *id != "latest");
+                match (meeting_id, legacy) {
+                    (Some(id), Some(project))
+                        if !session_exists(services, &capture_root, id) =>
+                    {
+                        let owner = resolve_meeting_owner(services, project, false, id)?;
+                        if session_exists(services, &owner.work_dir, id) {
+                            owner.work_dir
+                        } else {
+                            capture_root
+                        }
+                    }
+                    _ => capture_root,
+                }
+            }
             CaptureTarget::Legacy(project) => {
                 let project = match &args.command {
                     Some(Command::Transcript { meeting_id, .. })
@@ -634,13 +660,19 @@ fn run_inner(
     }
 }
 
+/// Whether `root/.margins` holds `id`, without creating the store.
+fn session_exists(services: &CliServices, root: &Path, id: &str) -> bool {
+    let margins_dir = root.join(".margins");
+    margins_dir.is_dir() && services.sessions.exists(&margins_dir, id).unwrap_or(false)
+}
+
 /// Session commands, and whether they may start a recording.
-fn capture_intent(command: &Option<Command>) -> Option<CaptureIntent> {
+fn capture_intent(command: &Option<Command>) -> Option<CaptureIntent<'_>> {
     match command {
-        None
-        | Some(Command::New { .. })
-        | Some(Command::Attach { .. })
-        | Some(Command::Transcribe { .. }) => Some(CaptureIntent::Record),
+        None | Some(Command::New { .. }) | Some(Command::Transcribe { .. }) => {
+            Some(CaptureIntent::Record)
+        }
+        Some(Command::Attach { session }) => Some(CaptureIntent::Attach(session.as_deref())),
         Some(Command::Current)
         | Some(Command::Ls)
         | Some(Command::Rename { .. })
