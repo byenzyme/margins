@@ -717,8 +717,16 @@ fn offer_speech_download(
 }
 
 /// Before the first `margins transcribe`, offer the speech model download.
+/// `announcement` names the Workspace the transcription goes to; it is shown
+/// before the offer, and only when there is an offer (otherwise the
+/// transcription itself announces it).
 #[cfg(all(feature = "coreml-asr", target_os = "macos"))]
-fn ensure_speech_model_for_transcribe() -> Result<()> {
+fn ensure_speech_model_for_transcribe(announcement: &[u8]) -> Result<()> {
+    if margins_media::model_registry::resolve_coreml_dir().is_none() {
+        let mut stderr = io::stderr().lock();
+        stderr.write_all(announcement)?;
+        stderr.flush()?;
+    }
     ensure_speech_model_with(SpeechPurpose::Transcribe)
 }
 

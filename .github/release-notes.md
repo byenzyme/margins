@@ -27,7 +27,7 @@ the bundled `enzyme` 0.12.2.
   above the current folder, and `margins --project <id|path> ls` opens one
   directly. Margins tells you when a Workspace now hides one.
 - The first `new` or `transcribe` offers to download the speech model (about
-  464 MB). `init` never downloads it.
+  495 MB). `init` never downloads it.
 - At a terminal, errors print as plain text instead of JSON.
 - The bundled engine is `enzyme` 0.12.2.
 
