@@ -1,5 +1,7 @@
 # Margins
 
+<img width="530" height="360" margin="0 auto" alt="margins_demo_x_rightcrop" src="https://github.com/user-attachments/assets/4423babc-e9bf-4ea4-bfa4-3a404e48c107" />
+
 Margins is a local meeting notepad that's built to make sense of the stray words you just happened to write down. It helps those brush strokes paint the full picture, empowering agentic workflows with the context they need most.
 
 And because it picks up the conversation's thread, it produces something that you'll actually find rewarding to read.
