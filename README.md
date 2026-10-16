@@ -2,13 +2,17 @@
 
 <img width="530" height="360" margin="0 auto" alt="margins_demo_x_rightcrop" src="https://github.com/user-attachments/assets/4423babc-e9bf-4ea4-bfa4-3a404e48c107" />
 
-Margins is a local meeting notepad that's built to make sense of the stray words you just happened to write down. It helps those brush strokes paint the full picture, empowering agentic workflows with the context they need most.
+Margins is a framework for building meeting capture UX into wherever your agents already do their work. Tell an agent to adapt it to BB, T3, Orca, Claude, and Codex.
+
+It offers a local meeting notepad that's built to make sense of the stray words you just happened to write down. Using context from other meetings and documents, it enriches those brush strokes to paint the full picture, empowering agentic workflows with the context they need most.
 
 And because it picks up the conversation's thread, it produces something that you'll actually find rewarding to read.
 
 Most meeting summaries help humans keep record, but agents need something more batteries-included, otherwise they lose track of the context. Margins does one better than raw transcripts, using deep context to better notice why the other person pushed back on your ideas.
 
 **So your agents can leverage the way that your knowledge base already compounds.**
+
+Use a home server as your agents' dev machine? Margins allows you to tunnel into your agent workspace, run local transcription on that machine, and distill your note to it as well.
 
 ---
 
